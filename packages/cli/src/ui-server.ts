@@ -240,6 +240,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         sendSse(res, 'ready', {
           id,
           status: session.status,
+          todos: (sessionTodos.get(id) ?? []).map((item) => ({ ...item })),
           time: now(),
         });
 
@@ -522,6 +523,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         sessionChats.set(id, createSessionChatThread(session));
         sessionTodos.set(id, []);
         uiStatePersistence.schedule();
+        broadcastTodoUpdate(workStreamClients, id, sessionTodos.get(id) ?? []);
 
         const graph = buildSingleTaskGraph(id, prompt);
 
@@ -618,7 +620,6 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
             status: session.status,
             time: now(),
           });
-          closeWorkStream(workStreamClients, session.id);
 
           const thread = sessionChats.get(session.id);
           if (thread && firstOutput?.response) {
@@ -643,7 +644,6 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
               error: session.error,
               time: now(),
             });
-            closeWorkStream(workStreamClients, session.id);
             uiStatePersistence.schedule();
           }
         });
@@ -677,7 +677,6 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
             status: session.status,
             time: now(),
           });
-          closeWorkStream(workStreamClients, session.id);
           uiStatePersistence.schedule();
         }
 
@@ -770,6 +769,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         sessionTodos.set(id, items);
         session.updatedAt = now();
         uiStatePersistence.schedule();
+        broadcastTodoUpdate(workStreamClients, id, items);
 
         sendJson(res, 200, { ok: true, todo: { ...todo }, todos: items.map((item) => ({ ...item })) });
         return;
@@ -804,6 +804,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         target.updatedAt = now();
         session.updatedAt = now();
         uiStatePersistence.schedule();
+        broadcastTodoUpdate(workStreamClients, id, items);
 
         sendJson(res, 200, {
           ok: true,
@@ -839,6 +840,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         sessionTodos.set(id, nextItems);
         session.updatedAt = now();
         uiStatePersistence.schedule();
+        broadcastTodoUpdate(workStreamClients, id, nextItems);
 
         sendJson(res, 200, { ok: true, todos: nextItems.map((item) => ({ ...item })) });
         return;
@@ -1283,6 +1285,18 @@ function closeWorkStream(streams: Map<string, Set<ServerResponse>>, id: string):
     }
   }
   streams.delete(id);
+}
+
+function broadcastTodoUpdate(
+  streams: Map<string, Set<ServerResponse>>,
+  id: string,
+  todos: AgentTodoItem[],
+): void {
+  broadcastWorkStream(streams, id, 'todo-update', {
+    id,
+    todos: todos.map((item) => ({ ...item })),
+    time: now(),
+  });
 }
 
 function estimateTokensFromText(text: string): number {
@@ -2774,7 +2788,7 @@ function renderDashboardHtml(hmrEnabled: boolean): string {
     }
 
     const selectedSession = workSessionsCache.find((item) => item.id === selectedWorkId);
-    if (!selectedSession || selectedSession.status !== 'running') {
+    if (!selectedSession) {
       closeWorkStreamSubscription();
       return;
     }
@@ -2826,6 +2840,40 @@ function renderDashboardHtml(hmrEnabled: boolean): string {
       }
     });
 
+    source.addEventListener('ready', (event) => {
+      try {
+        const payload = JSON.parse(event.data || '{}');
+        const id = payload.id || workStreamSessionId;
+        if (!id || selectedWorkId !== id) {
+          return;
+        }
+
+        if (Array.isArray(payload.todos)) {
+          selectedAgentTodos = payload.todos;
+          renderSelectedTodos();
+        }
+      } catch {
+        // ignore malformed stream payloads
+      }
+    });
+
+    source.addEventListener('todo-update', (event) => {
+      try {
+        const payload = JSON.parse(event.data || '{}');
+        const id = payload.id || workStreamSessionId;
+        if (!id || selectedWorkId !== id) {
+          return;
+        }
+
+        if (Array.isArray(payload.todos)) {
+          selectedAgentTodos = payload.todos;
+          renderSelectedTodos();
+        }
+      } catch {
+        // ignore malformed stream payloads
+      }
+    });
+
     source.addEventListener('end', (event) => {
       try {
         const payload = JSON.parse(event.data || '{}');
@@ -2835,7 +2883,6 @@ function renderDashboardHtml(hmrEnabled: boolean): string {
       } catch {
         // ignore malformed stream payloads
       }
-      closeWorkStreamSubscription();
     });
 
     source.addEventListener('error', () => {
