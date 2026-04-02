@@ -8,6 +8,7 @@ import { PiAiAdapter, ProviderAuthManager } from '@orchestrace/provider';
 import type { ProviderInfo } from '@orchestrace/provider';
 import { createInterface } from 'node:readline/promises';
 import { promisify } from 'node:util';
+import { startUiServer } from './ui-server.js';
 
 const execFileAsync = promisify(execFile);
 loadDotEnv({ quiet: true });
@@ -22,6 +23,7 @@ orchestrace — DAG-based agent orchestration
 Usage:
   orchestrace run <plan.json>   Execute a task graph from a JSON plan file
   orchestrace task <prompt>     Run a single prompt task using the generalized flow
+  orchestrace ui [--port 4310]  Start local dashboard for status, auth, and controls
   orchestrace auth              Interactive provider selection + authentication
   orchestrace auth status       Show auth status for providers
   orchestrace --help            Show this help
@@ -29,6 +31,7 @@ Usage:
 Flags:
   --provider <id>               Provider override (e.g. github-copilot, anthropic)
   --model <id>                  Model override for the selected provider
+  --port <number>               Port for UI server (default 4310)
   --auto-approve                Skip manual plan approval gate
   --push                        Commit and push if execution succeeds
   --commit-message <message>    Commit message when --push is enabled
@@ -81,12 +84,18 @@ Environment variables:
   const autoPush = getBooleanFlag(flagArgs, '--push', process.env.ORCHESTRACE_AUTO_PUSH === 'true');
   const providerOverride = getFlagValue(flagArgs, '--provider');
   const modelOverride = getFlagValue(flagArgs, '--model');
+  const portOverride = parseInt(getFlagValue(flagArgs, '--port') ?? '', 10);
   const commitMessage = getFlagValue(flagArgs, '--commit-message')
     ?? 'chore(orchestrace): apply approved agent implementation';
 
   if (command === 'auth') {
     const code = await runAuthCommand(args.slice(1));
     process.exit(code);
+  }
+
+  if (command === 'ui') {
+    await startUiServer({ port: Number.isNaN(portOverride) ? undefined : portOverride });
+    return;
   }
 
   if (command === 'run') {

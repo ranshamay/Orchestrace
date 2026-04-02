@@ -42,6 +42,9 @@ pnpm --filter @orchestrace/cli dev auth
 # GitHub Copilot uses device/mobile code OAuth flow
 pnpm --filter @orchestrace/cli dev auth github-copilot
 
+# Start local dashboard (status, start/cancel, auth)
+pnpm --filter @orchestrace/cli dev ui --port 4310
+
 # Run a plan
 pnpm --filter @orchestrace/cli dev run examples/feature-plan.json
 
