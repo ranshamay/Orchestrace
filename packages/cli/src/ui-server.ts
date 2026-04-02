@@ -2030,7 +2030,7 @@ function renderDashboardHtml(hmrEnabled: boolean): string {
         const phase = typeof payload.phase === 'string' ? payload.phase : '';
         if (phase && phase !== state.phase) {
           state.phase = phase;
-          state.text += '\n\n[' + phase + ']\n';
+          state.text += '\\n\\n[' + phase + ']\\n';
         }
 
         const delta = typeof payload.delta === 'string' ? payload.delta : '';
@@ -2105,7 +2105,7 @@ function renderDashboardHtml(hmrEnabled: boolean): string {
       }
     }
 
-    chatEl.textContent = lines.length ? lines.join('\n') : '(no messages yet)';
+    chatEl.textContent = lines.length ? lines.join('\\n') : '(no messages yet)';
   }
 
   async function streamChatMessage(sessionId, message) {
