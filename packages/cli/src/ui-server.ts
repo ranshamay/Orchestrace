@@ -1,7 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { existsSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
 import { orchestrate } from '@orchestrace/core';
 import type { DagEvent, PlanApprovalRequest, TaskGraph } from '@orchestrace/core';
+import { getModels } from '@mariozechner/pi-ai';
 import { PiAiAdapter, ProviderAuthManager } from '@orchestrace/provider';
 import type { ProviderInfo } from '@orchestrace/provider';
 
@@ -52,6 +55,7 @@ interface AuthSession {
 
 export async function startUiServer(options: UiServerOptions = {}): Promise<void> {
   const port = options.port ?? 4310;
+  const workspaceRoot = findWorkspaceRoot(process.cwd());
   const authManager = new ProviderAuthManager();
   const llm = new PiAiAdapter();
 
@@ -71,7 +75,30 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       if (req.method === 'GET' && pathname === '/api/providers') {
         const providers = authManager.listProviders();
         const statuses = await authManager.getAllStatus();
-        sendJson(res, 200, { providers, statuses });
+        sendJson(res, 200, {
+          providers,
+          statuses,
+          defaults: {
+            provider: process.env.ORCHESTRACE_DEFAULT_PROVIDER ?? 'anthropic',
+            model: process.env.ORCHESTRACE_DEFAULT_MODEL ?? 'claude-sonnet-4-20250514',
+          },
+        });
+        return;
+      }
+
+      if (req.method === 'GET' && pathname === '/api/models') {
+        const provider = asString(url.searchParams.get('provider'));
+        if (!provider) {
+          sendJson(res, 400, { error: 'Missing provider query parameter' });
+          return;
+        }
+
+        try {
+          const models = getModels(provider as never).map((model) => model.id);
+          sendJson(res, 200, { provider, models });
+        } catch (error) {
+          sendJson(res, 400, { error: toErrorMessage(error) });
+        }
         return;
       }
 
@@ -227,7 +254,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
 
         void orchestrate(graph, {
           llm,
-          cwd: process.cwd(),
+          cwd: workspaceRoot,
+          planOutputDir: join(workspaceRoot, '.orchestrace', 'plans'),
           defaultModel: { provider, model },
           maxParallel: 1,
           requirePlanApproval: !autoApprove,
@@ -483,98 +511,588 @@ function toErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function findWorkspaceRoot(startDir: string): string {
+  let current = resolve(startDir);
+
+  while (true) {
+    if (existsSync(join(current, 'pnpm-workspace.yaml')) || existsSync(join(current, '.git'))) {
+      return current;
+    }
+
+    const parent = dirname(current);
+    if (parent === current) {
+      return resolve(startDir);
+    }
+    current = parent;
+  }
+}
+
 function renderDashboardHtml(): string {
   return `<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Orchestrace UI</title>
+  <title>Orchestrace Graph Console</title>
   <style>
     :root {
-      --bg: #f3f1ea;
-      --card: #fffdf8;
-      --ink: #1f2a2c;
-      --muted: #5c6a6e;
-      --accent: #0f766e;
-      --danger: #b42318;
-      --border: #d8d2c5;
+      --font-ui: "Space Grotesk", "Avenir Next", "Segoe UI", sans-serif;
+      --font-mono: "JetBrains Mono", "SF Mono", Menlo, monospace;
+      --bg: #f2f4f7;
+      --bg-2: #e9eef5;
+      --card: rgba(255, 255, 255, 0.82);
+      --ink: #0f1728;
+      --muted: #5d6b86;
+      --border: rgba(93, 107, 134, 0.22);
+      --accent: #0e7490;
+      --accent-2: #155eef;
+      --danger: #d92d20;
+      --ok: #099250;
+      --warn: #b54708;
+      --shadow: 0 10px 30px rgba(14, 18, 33, 0.12);
+      --graph-grid: rgba(14, 116, 144, 0.12);
+      --running-glow: rgba(21, 94, 239, 0.4);
     }
-    body { margin: 0; font-family: ui-sans-serif, -apple-system, Segoe UI, sans-serif; background: radial-gradient(circle at 10% 10%, #fff6dc, var(--bg)); color: var(--ink); }
-    .wrap { max-width: 1100px; margin: 24px auto; padding: 0 16px; display: grid; gap: 16px; }
-    .card { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 16px; box-shadow: 0 4px 18px rgba(20,20,20,.05); }
-    h1 { margin: 0 0 6px; font-size: 22px; }
-    h2 { margin: 0 0 10px; font-size: 18px; }
-    .row { display: grid; gap: 8px; grid-template-columns: repeat(12, 1fr); align-items: center; }
-    .row > * { grid-column: span 12; }
-    @media (min-width: 820px) {
-      .c4 { grid-column: span 4; }
-      .c6 { grid-column: span 6; }
-      .c8 { grid-column: span 8; }
-      .c12 { grid-column: span 12; }
+
+    body[data-theme="dark"] {
+      --bg: #0a101b;
+      --bg-2: #131d30;
+      --card: rgba(12, 18, 30, 0.78);
+      --ink: #edf2ff;
+      --muted: #8f9fbd;
+      --border: rgba(143, 159, 189, 0.24);
+      --accent: #36bffa;
+      --accent-2: #7aa2ff;
+      --danger: #f97066;
+      --ok: #32d583;
+      --warn: #fdb022;
+      --shadow: 0 16px 40px rgba(0, 0, 0, 0.45);
+      --graph-grid: rgba(54, 191, 250, 0.14);
+      --running-glow: rgba(54, 191, 250, 0.5);
     }
-    input, select, textarea, button { width: 100%; box-sizing: border-box; border-radius: 10px; border: 1px solid var(--border); padding: 10px; font-size: 14px; background: white; color: var(--ink); }
-    textarea { min-height: 90px; resize: vertical; }
-    button { background: var(--accent); color: white; border: none; font-weight: 600; cursor: pointer; }
-    button.secondary { background: #475467; }
-    button.danger { background: var(--danger); }
-    .muted { color: var(--muted); font-size: 13px; }
-    .tag { font-size: 12px; border: 1px solid var(--border); border-radius: 999px; padding: 2px 8px; display: inline-block; margin-right: 6px; }
-    table { width: 100%; border-collapse: collapse; }
-    th, td { text-align: left; border-bottom: 1px solid var(--border); padding: 8px 6px; font-size: 13px; vertical-align: top; }
-    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; }
-    .events { max-height: 220px; overflow: auto; border: 1px solid var(--border); border-radius: 10px; padding: 8px; background: #fff; }
+
+    * { box-sizing: border-box; }
+    html, body { margin: 0; min-height: 100%; }
+
+    body {
+      font-family: var(--font-ui);
+      color: var(--ink);
+      background:
+        radial-gradient(1200px 500px at 15% -20%, rgba(21, 94, 239, 0.2), transparent),
+        radial-gradient(900px 600px at 90% -30%, rgba(14, 116, 144, 0.24), transparent),
+        linear-gradient(160deg, var(--bg), var(--bg-2));
+      transition: background 240ms ease, color 240ms ease;
+    }
+
+    .shell {
+      max-width: 1280px;
+      margin: 20px auto;
+      padding: 0 16px 18px;
+      display: grid;
+      grid-template-columns: minmax(320px, 420px) 1fr;
+      gap: 14px;
+    }
+
+    @media (max-width: 1040px) {
+      .shell {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    .panel {
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      backdrop-filter: blur(14px);
+      background: var(--card);
+      box-shadow: var(--shadow);
+      padding: 14px;
+      transition: transform 220ms ease, border-color 220ms ease, box-shadow 220ms ease;
+    }
+
+    .panel:hover {
+      transform: translateY(-1px);
+      border-color: rgba(21, 94, 239, 0.36);
+    }
+
+    .hero {
+      grid-column: 1 / -1;
+      display: flex;
+      gap: 12px;
+      justify-content: space-between;
+      align-items: center;
+      padding: 14px 16px;
+    }
+
+    .title-wrap h1 {
+      margin: 0;
+      font-size: 22px;
+      letter-spacing: 0.2px;
+    }
+
+    .title-wrap p {
+      margin: 6px 0 0;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .theme-switch {
+      display: inline-flex;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      overflow: hidden;
+      background: rgba(255, 255, 255, 0.35);
+    }
+
+    .theme-switch button {
+      border: none;
+      background: transparent;
+      color: var(--muted);
+      font-size: 12px;
+      padding: 7px 12px;
+      cursor: pointer;
+      transition: color 180ms ease, background 180ms ease;
+    }
+
+    .theme-switch button.active {
+      background: var(--accent-2);
+      color: white;
+    }
+
+    .section-title {
+      margin: 0 0 10px;
+      font-size: 15px;
+      font-weight: 700;
+      letter-spacing: 0.2px;
+    }
+
+    .muted {
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+
+    .grid .full {
+      grid-column: 1 / -1;
+    }
+
+    input, select, textarea {
+      width: 100%;
+      border-radius: 12px;
+      border: 1px solid var(--border);
+      background: rgba(255, 255, 255, 0.72);
+      color: var(--ink);
+      font-family: var(--font-ui);
+      font-size: 13px;
+      padding: 10px 11px;
+      transition: border-color 180ms ease, box-shadow 180ms ease, transform 180ms ease;
+    }
+
+    body[data-theme="dark"] input,
+    body[data-theme="dark"] select,
+    body[data-theme="dark"] textarea {
+      background: rgba(13, 20, 34, 0.78);
+    }
+
+    input:focus, select:focus, textarea:focus {
+      outline: none;
+      border-color: var(--accent-2);
+      box-shadow: 0 0 0 3px rgba(21, 94, 239, 0.18);
+    }
+
+    textarea {
+      min-height: 90px;
+      resize: vertical;
+    }
+
+    label {
+      display: block;
+      margin: 2px 0 5px;
+      font-size: 12px;
+      color: var(--muted);
+      letter-spacing: 0.14px;
+    }
+
+    .actions {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    button {
+      border: 1px solid transparent;
+      border-radius: 12px;
+      font-family: var(--font-ui);
+      font-weight: 700;
+      font-size: 12px;
+      letter-spacing: 0.18px;
+      padding: 10px 12px;
+      cursor: pointer;
+      transition: transform 160ms ease, box-shadow 180ms ease, background 180ms ease, border-color 180ms ease;
+    }
+
+    button:hover {
+      transform: translateY(-1px);
+    }
+
+    button.primary {
+      background: linear-gradient(130deg, var(--accent), var(--accent-2));
+      color: #fff;
+      box-shadow: 0 10px 20px rgba(14, 116, 144, 0.26);
+    }
+
+    button.secondary {
+      background: transparent;
+      border-color: var(--border);
+      color: var(--ink);
+    }
+
+    button.danger {
+      background: transparent;
+      border-color: rgba(217, 45, 32, 0.45);
+      color: var(--danger);
+    }
+
+    .status-note {
+      margin-top: 8px;
+      min-height: 18px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    .auth-console,
+    .events {
+      margin-top: 10px;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: rgba(255, 255, 255, 0.56);
+      padding: 10px;
+      max-height: 180px;
+      overflow: auto;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      white-space: pre-wrap;
+      line-height: 1.48;
+    }
+
+    body[data-theme="dark"] .auth-console,
+    body[data-theme="dark"] .events {
+      background: rgba(8, 12, 21, 0.72);
+    }
+
+    .graph-panel {
+      display: grid;
+      grid-template-rows: auto 1fr auto;
+      gap: 10px;
+      min-height: 580px;
+    }
+
+    .graph-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 10px;
+    }
+
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      font-size: 11px;
+      color: var(--muted);
+    }
+
+    .legend span::before {
+      content: "";
+      display: inline-block;
+      width: 9px;
+      height: 9px;
+      border-radius: 999px;
+      margin-right: 5px;
+      vertical-align: middle;
+    }
+
+    .legend .running::before { background: var(--accent-2); }
+    .legend .completed::before { background: var(--ok); }
+    .legend .failed::before { background: var(--danger); }
+    .legend .cancelled::before { background: var(--warn); }
+
+    .graph-wrap {
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      background:
+        linear-gradient(90deg, var(--graph-grid) 1px, transparent 1px) 0 0/26px 26px,
+        linear-gradient(var(--graph-grid) 1px, transparent 1px) 0 0/26px 26px,
+        rgba(255, 255, 255, 0.36);
+      overflow: auto;
+      min-height: 260px;
+      padding: 12px;
+    }
+
+    body[data-theme="dark"] .graph-wrap {
+      background:
+        linear-gradient(90deg, var(--graph-grid) 1px, transparent 1px) 0 0/26px 26px,
+        linear-gradient(var(--graph-grid) 1px, transparent 1px) 0 0/26px 26px,
+        rgba(7, 11, 20, 0.66);
+    }
+
+    svg {
+      width: 100%;
+      min-width: 620px;
+      height: 280px;
+    }
+
+    .graph-edge {
+      fill: none;
+      stroke: var(--border);
+      stroke-width: 2;
+      opacity: 0.8;
+      transition: stroke 220ms ease;
+    }
+
+    .graph-node {
+      cursor: pointer;
+      transition: transform 180ms ease;
+    }
+
+    .graph-node:hover {
+      transform: translateY(-2px);
+    }
+
+    .node-halo {
+      fill: transparent;
+      stroke: transparent;
+      stroke-width: 8;
+      transition: stroke 180ms ease;
+    }
+
+    .graph-node.selected .node-halo {
+      stroke: var(--accent-2);
+      opacity: 0.46;
+    }
+
+    .node-core {
+      stroke: rgba(255, 255, 255, 0.5);
+      stroke-width: 2;
+      transition: fill 180ms ease;
+    }
+
+    .graph-node.status-running .node-core {
+      fill: var(--accent-2);
+      filter: drop-shadow(0 0 12px var(--running-glow));
+      animation: pulse 1.5s ease-in-out infinite;
+    }
+
+    .graph-node.status-completed .node-core { fill: var(--ok); }
+    .graph-node.status-failed .node-core { fill: var(--danger); }
+    .graph-node.status-cancelled .node-core { fill: var(--warn); }
+
+    .node-label,
+    .node-sub {
+      fill: var(--ink);
+      text-anchor: middle;
+      pointer-events: none;
+      font-family: var(--font-ui);
+    }
+
+    .node-label { font-size: 11px; font-weight: 700; }
+    .node-sub { font-size: 10px; opacity: 0.72; }
+
+    .session-list {
+      display: grid;
+      gap: 8px;
+      max-height: 220px;
+      overflow: auto;
+      padding-right: 2px;
+    }
+
+    .session-item {
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 10px;
+      background: rgba(255, 255, 255, 0.6);
+      transition: transform 160ms ease, border-color 160ms ease, background 180ms ease;
+    }
+
+    body[data-theme="dark"] .session-item {
+      background: rgba(8, 12, 21, 0.62);
+    }
+
+    .session-item.active {
+      border-color: var(--accent-2);
+      background: rgba(21, 94, 239, 0.08);
+    }
+
+    .session-item-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      align-items: center;
+      margin-bottom: 6px;
+    }
+
+    .badge {
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      padding: 2px 8px;
+      font-size: 10px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.16px;
+    }
+
+    .badge.running { color: var(--accent-2); border-color: rgba(21, 94, 239, 0.42); }
+    .badge.completed { color: var(--ok); border-color: rgba(9, 146, 80, 0.42); }
+    .badge.failed { color: var(--danger); border-color: rgba(217, 45, 32, 0.42); }
+    .badge.cancelled { color: var(--warn); border-color: rgba(181, 71, 8, 0.42); }
+
+    .session-item .meta {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--muted);
+      margin-bottom: 6px;
+    }
+
+    .session-item .prompt {
+      font-size: 12px;
+      color: var(--ink);
+      margin-bottom: 8px;
+    }
+
+    .session-actions {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+
+    .session-actions button {
+      padding: 7px 9px;
+      font-size: 11px;
+    }
+
+    .empty {
+      border: 1px dashed var(--border);
+      border-radius: 12px;
+      padding: 22px;
+      text-align: center;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    @keyframes pulse {
+      0% { transform: scale(1); }
+      50% { transform: scale(1.08); }
+      100% { transform: scale(1); }
+    }
   </style>
 </head>
-<body>
-  <div class="wrap">
-    <div class="card">
-      <h1>Orchestrace Dashboard</h1>
-      <div class="muted">Track agent status, start/cancel work, and manage provider authentication.</div>
-    </div>
-
-    <div class="card">
-      <h2>Auth</h2>
-      <div class="row">
-        <div class="c4"><label>Provider</label><select id="authProvider"></select></div>
-        <div class="c4"><label>Method</label><select id="authMethod"><option value="oauth">oauth</option><option value="api-key">api-key</option></select></div>
-        <div class="c4"><label>API key (if api-key)</label><input id="authApiKey" type="password" placeholder="sk-..." /></div>
-        <div class="c4"><button id="authStart">Authenticate</button></div>
+<body data-theme="light">
+  <main class="shell">
+    <section class="panel hero">
+      <div class="title-wrap">
+        <h1>Orchestrace Graph Console</h1>
+        <p>Visual status per agent, auth, start, and cancellation controls in one place.</p>
       </div>
-      <div id="authStatus" class="muted" style="margin-top:8px"></div>
-      <div id="authSession" class="events mono" style="margin-top:10px"></div>
-      <div class="row" style="margin-top:8px">
-        <div class="c8"><input id="authPromptInput" placeholder="Response for OAuth prompt" /></div>
-        <div class="c4"><button id="authPromptSend" class="secondary">Send OAuth Input</button></div>
+      <div class="theme-switch" aria-label="Theme">
+        <button id="themeLight">Light</button>
+        <button id="themeDark">Dark</button>
       </div>
-    </div>
+    </section>
 
-    <div class="card">
-      <h2>Start Work</h2>
-      <div class="row">
-        <div class="c6"><label>Provider</label><input id="workProvider" placeholder="github-copilot" /></div>
-        <div class="c6"><label>Model</label><input id="workModel" placeholder="gpt-4o" /></div>
-        <div class="c12"><label>Prompt</label><textarea id="workPrompt" placeholder="Describe the work to run"></textarea></div>
-        <div class="c4"><label><input id="autoApprove" type="checkbox" checked /> Auto approve plan</label></div>
-        <div class="c4"><button id="workStart">Start</button></div>
+    <section class="panel">
+      <h2 class="section-title">Auth Control</h2>
+      <div class="grid">
+        <div>
+          <label>Provider</label>
+          <select id="authProvider"></select>
+        </div>
+        <div>
+          <label>Method</label>
+          <select id="authMethod">
+            <option value="oauth">oauth</option>
+            <option value="api-key">api-key</option>
+          </select>
+        </div>
+        <div class="full">
+          <label>API key (when method=api-key)</label>
+          <input id="authApiKey" type="password" placeholder="sk-..." />
+        </div>
+        <div class="full actions">
+          <button class="primary" id="authStart">Authenticate</button>
+        </div>
       </div>
-      <div id="workStatus" class="muted" style="margin-top:8px"></div>
-    </div>
+      <div id="authStatus" class="status-note"></div>
+      <div id="authSession" class="auth-console">No auth session started.</div>
+      <div class="grid" style="margin-top:8px;">
+        <div class="full">
+          <label>OAuth prompt response</label>
+          <input id="authPromptInput" placeholder="Paste device code or answer" />
+        </div>
+        <div class="full actions">
+          <button class="secondary" id="authPromptSend">Send OAuth Input</button>
+        </div>
+      </div>
+    </section>
 
-    <div class="card">
-      <h2>Agent Sessions</h2>
-      <table>
-        <thead><tr><th>ID</th><th>Status</th><th>Provider/Model</th><th>Prompt</th><th>Actions</th></tr></thead>
-        <tbody id="workRows"></tbody>
-      </table>
-      <h2 style="margin-top:14px">Selected Session Events</h2>
-      <div id="events" class="events mono"></div>
-    </div>
-  </div>
+    <section class="panel graph-panel">
+      <div class="graph-head">
+        <h2 class="section-title" style="margin:0;">Agent Graph</h2>
+        <div class="legend">
+          <span class="running">running</span>
+          <span class="completed">completed</span>
+          <span class="failed">failed</span>
+          <span class="cancelled">cancelled</span>
+        </div>
+      </div>
+      <div class="graph-wrap">
+        <svg id="sessionGraph" viewBox="0 0 620 280" role="img" aria-label="Agent session graph"></svg>
+      </div>
+      <div id="events" class="events">Select a node to inspect events.</div>
+    </section>
+
+    <section class="panel">
+      <h2 class="section-title">Start Work</h2>
+      <div class="grid">
+        <div>
+          <label>Provider</label>
+          <select id="workProvider"></select>
+        </div>
+        <div>
+          <label>Model</label>
+          <select id="workModel"></select>
+        </div>
+        <div class="full">
+          <label>Prompt</label>
+          <textarea id="workPrompt" placeholder="Describe the work to run"></textarea>
+        </div>
+        <div class="full">
+          <label><input id="autoApprove" type="checkbox" checked /> Auto approve deep plan</label>
+        </div>
+        <div class="full actions">
+          <button class="primary" id="workStart">Start Session</button>
+        </div>
+      </div>
+      <div id="workStatus" class="status-note"></div>
+    </section>
+
+    <section class="panel">
+      <h2 class="section-title">Sessions</h2>
+      <div id="workRows" class="session-list"></div>
+    </section>
+  </main>
 
 <script>
   let selectedWorkId = null;
   let authPollId = null;
+  let activeAuthSessionId = null;
+  let providerCache = [];
+  let statusCache = [];
+  let workSessionsCache = [];
+  let defaults = { provider: 'anthropic', model: 'claude-sonnet-4-20250514' };
 
   async function api(path, method = 'GET', body) {
     const res = await fetch(path, {
@@ -587,70 +1105,261 @@ function renderDashboardHtml(): string {
     return data;
   }
 
+  function applyTheme(theme) {
+    document.body.setAttribute('data-theme', theme);
+    localStorage.setItem('orchestrace.theme', theme);
+    document.getElementById('themeLight').classList.toggle('active', theme === 'light');
+    document.getElementById('themeDark').classList.toggle('active', theme === 'dark');
+  }
+
+  function initTheme() {
+    const saved = localStorage.getItem('orchestrace.theme');
+    if (saved === 'light' || saved === 'dark') {
+      applyTheme(saved);
+      return;
+    }
+    const prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+    applyTheme(prefersDark ? 'dark' : 'light');
+  }
+
   async function refreshProviders() {
     const data = await api('/api/providers');
+    providerCache = data.providers || [];
+    statusCache = data.statuses || [];
+    defaults = data.defaults || defaults;
+
     const select = document.getElementById('authProvider');
+    const previous = select.value;
     select.innerHTML = '';
 
-    for (const provider of data.providers) {
-      const status = data.statuses.find((item) => item.provider === provider.id);
+    const workProvider = document.getElementById('workProvider');
+    const previousWorkProvider = workProvider.value;
+    workProvider.innerHTML = '';
+
+    for (const provider of providerCache) {
+      const status = statusCache.find((item) => item.provider === provider.id);
       const opt = document.createElement('option');
       opt.value = provider.id;
       opt.textContent = provider.id + ' [' + (status ? status.source : 'none') + ']';
       select.appendChild(opt);
+
+      const wopt = document.createElement('option');
+      wopt.value = provider.id;
+      wopt.textContent = provider.id;
+      workProvider.appendChild(wopt);
     }
 
-    const first = data.providers[0];
-    if (first) {
-      document.getElementById('workProvider').value = first.id;
+    if (previous && providerCache.find((item) => item.id === previous)) {
+      select.value = previous;
     }
+
+    if (previousWorkProvider && providerCache.find((item) => item.id === previousWorkProvider)) {
+      workProvider.value = previousWorkProvider;
+    } else if (providerCache.find((item) => item.id === defaults.provider)) {
+      workProvider.value = defaults.provider;
+    } else if (providerCache[0]) {
+      workProvider.value = providerCache[0].id;
+    }
+
+    await refreshWorkModels();
+    syncAuthMethodWithProvider();
+  }
+
+  async function refreshWorkModels() {
+    const providerId = document.getElementById('workProvider').value;
+    const modelSelect = document.getElementById('workModel');
+    const previousModel = modelSelect.value;
+    modelSelect.innerHTML = '';
+
+    if (!providerId) return;
+
+    try {
+      const data = await api('/api/models?provider=' + encodeURIComponent(providerId));
+      const models = data.models || [];
+
+      for (const model of models.slice(0, 120)) {
+        const opt = document.createElement('option');
+        opt.value = model;
+        opt.textContent = model;
+        modelSelect.appendChild(opt);
+      }
+
+      if (previousModel && models.includes(previousModel)) {
+        modelSelect.value = previousModel;
+      } else if (providerId === defaults.provider && models.includes(defaults.model)) {
+        modelSelect.value = defaults.model;
+      } else if (models[0]) {
+        modelSelect.value = models[0];
+      }
+    } catch (error) {
+      modelSelect.innerHTML = '<option value="">no models available</option>';
+      setText('workStatus', String(error));
+    }
+  }
+
+  function syncAuthMethodWithProvider() {
+    const providerId = document.getElementById('authProvider').value;
+    const methodSelect = document.getElementById('authMethod');
+    const keyInput = document.getElementById('authApiKey');
+
+    const provider = providerCache.find((item) => item.id === providerId);
+    if (!provider) return;
+
+    if (provider.authType === 'oauth') {
+      methodSelect.value = 'oauth';
+      methodSelect.disabled = true;
+      keyInput.disabled = true;
+      keyInput.placeholder = 'Disabled: this provider uses OAuth';
+      return;
+    }
+
+    methodSelect.disabled = false;
+    keyInput.disabled = methodSelect.value !== 'api-key';
+    keyInput.placeholder = keyInput.disabled ? 'Enter only when api-key is selected' : 'sk-...';
   }
 
   async function refreshWorkSessions() {
     const data = await api('/api/work');
-    const rows = document.getElementById('workRows');
-    rows.innerHTML = '';
+    workSessionsCache = data.sessions || [];
+    renderSessionList(workSessionsCache);
+    renderSessionGraph(workSessionsCache);
+    await renderSelectedEvents();
+  }
 
-    for (const session of data.sessions) {
-      const tr = document.createElement('tr');
-      tr.innerHTML =
-        '<td class="mono">' + session.id.slice(0, 8) + '</td>' +
-        '<td><span class="tag">' + session.status + '</span></td>' +
-        '<td class="mono">' + session.provider + ' / ' + session.model + '</td>' +
-        '<td>' + escapeHtml(session.prompt).slice(0, 100) + '</td>' +
-        '<td>' +
-          '<button class="secondary" data-view="' + session.id + '">view</button> ' +
-          '<button class="danger" data-cancel="' + session.id + '">cancel</button>' +
-        '</td>';
-      rows.appendChild(tr);
+  function renderSessionList(sessions) {
+    const root = document.getElementById('workRows');
+    root.innerHTML = '';
+
+    if (!sessions.length) {
+      const empty = document.createElement('div');
+      empty.className = 'empty';
+      empty.textContent = 'No sessions yet. Start work to see the graph animate.';
+      root.appendChild(empty);
+      return;
     }
 
-    rows.querySelectorAll('button[data-view]').forEach((button) => {
+    for (const session of sessions) {
+      const card = document.createElement('article');
+      card.className = 'session-item' + (selectedWorkId === session.id ? ' active' : '');
+
+      const escapedPrompt = escapeHtml(session.prompt || '').slice(0, 180);
+      card.innerHTML =
+        '<div class="session-item-head">'
+          + '<strong>' + session.id.slice(0, 8) + '</strong>'
+          + '<span class="badge ' + session.status + '">' + session.status + '</span>'
+        + '</div>'
+        + '<div class="meta">' + escapeHtml(session.provider + ' / ' + session.model) + '</div>'
+        + '<div class="prompt">' + escapedPrompt + '</div>'
+        + '<div class="session-actions">'
+          + '<button class="secondary" data-view="' + session.id + '">View</button>'
+          + '<button class="danger" data-cancel="' + session.id + '">Cancel</button>'
+        + '</div>';
+
+      root.appendChild(card);
+    }
+
+    root.querySelectorAll('button[data-view]').forEach((button) => {
       button.addEventListener('click', async () => {
         selectedWorkId = button.getAttribute('data-view');
+        renderSessionList(workSessionsCache);
+        renderSessionGraph(workSessionsCache);
         await renderSelectedEvents();
       });
     });
 
-    rows.querySelectorAll('button[data-cancel]').forEach((button) => {
+    root.querySelectorAll('button[data-cancel]').forEach((button) => {
       button.addEventListener('click', async () => {
         const id = button.getAttribute('data-cancel');
         await api('/api/work/cancel', 'POST', { id });
         await refreshWorkSessions();
-        await renderSelectedEvents();
       });
     });
+  }
+
+  function renderSessionGraph(sessions) {
+    const svg = document.getElementById('sessionGraph');
+    svg.innerHTML = '';
+
+    if (!sessions.length) {
+      svg.setAttribute('viewBox', '0 0 620 280');
+      const text = createSvgText(310, 140, 'No sessions yet', 'node-label');
+      text.setAttribute('text-anchor', 'middle');
+      svg.appendChild(text);
+      return;
+    }
+
+    const ordered = [...sessions].reverse();
+    const width = Math.max(620, ordered.length * 170);
+    const height = 280;
+    const paddingX = 70;
+    const centerY = height * 0.52;
+    const step = ordered.length > 1 ? (width - paddingX * 2) / (ordered.length - 1) : 0;
+
+    svg.setAttribute('viewBox', '0 0 ' + width + ' ' + height);
+
+    ordered.forEach((session, index) => {
+      const x = paddingX + index * step;
+      const y = centerY + Math.sin(index * 0.7) * 22;
+
+      if (index > 0) {
+        const prevX = paddingX + (index - 1) * step;
+        const prevY = centerY + Math.sin((index - 1) * 0.7) * 22;
+        const cx = (prevX + x) / 2;
+        const cy = (prevY + y) / 2 - 12;
+        const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+        path.setAttribute('d', 'M ' + prevX + ' ' + prevY + ' Q ' + cx + ' ' + cy + ' ' + x + ' ' + y);
+        path.setAttribute('class', 'graph-edge');
+        svg.appendChild(path);
+      }
+
+      const group = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+      group.setAttribute('class', 'graph-node status-' + session.status + (selectedWorkId === session.id ? ' selected' : ''));
+      group.setAttribute('transform', 'translate(' + x + ' ' + y + ')');
+
+      const halo = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+      halo.setAttribute('r', '18');
+      halo.setAttribute('class', 'node-halo');
+      group.appendChild(halo);
+
+      const core = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+      core.setAttribute('r', '12');
+      core.setAttribute('class', 'node-core');
+      group.appendChild(core);
+
+      const label = createSvgText(0, 30, session.id.slice(0, 8), 'node-label');
+      group.appendChild(label);
+
+      const sub = createSvgText(0, 44, session.status, 'node-sub');
+      group.appendChild(sub);
+
+      group.addEventListener('click', async () => {
+        selectedWorkId = session.id;
+        renderSessionList(workSessionsCache);
+        renderSessionGraph(workSessionsCache);
+        await renderSelectedEvents();
+      });
+
+      svg.appendChild(group);
+    });
+  }
+
+  function createSvgText(x, y, text, className) {
+    const node = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+    node.setAttribute('x', String(x));
+    node.setAttribute('y', String(y));
+    node.setAttribute('class', className);
+    node.textContent = text;
+    return node;
   }
 
   async function renderSelectedEvents() {
     const eventsEl = document.getElementById('events');
     if (!selectedWorkId) {
-      eventsEl.textContent = 'Select a session to inspect events.';
+      eventsEl.textContent = 'Select a node or session card to inspect events.';
       return;
     }
 
-    const data = await api('/api/work');
-    const session = data.sessions.find((item) => item.id === selectedWorkId);
+    const session = workSessionsCache.find((item) => item.id === selectedWorkId);
     if (!session) {
       eventsEl.textContent = 'Session not found.';
       return;
@@ -669,7 +1378,7 @@ function renderDashboardHtml(): string {
       lines.push('Plan path: ' + session.output.planPath);
     }
 
-    eventsEl.textContent = lines.length ? lines.join('\n') : '(no events yet)';
+    eventsEl.textContent = lines.length ? lines.join('\\n') : '(no events yet)';
   }
 
   async function startWork() {
@@ -687,7 +1396,6 @@ function renderDashboardHtml(): string {
     selectedWorkId = result.id;
     setText('workStatus', 'Started work session: ' + result.id);
     await refreshWorkSessions();
-    await renderSelectedEvents();
   }
 
   async function startAuth() {
@@ -696,12 +1404,13 @@ function renderDashboardHtml(): string {
     const apiKey = document.getElementById('authApiKey').value;
 
     const result = await api('/api/auth/start', 'POST', { providerId, method, apiKey });
+    activeAuthSessionId = result.sessionId;
     setText('authStatus', 'Auth session started: ' + result.sessionId);
-    if (authPollId) clearInterval(authPollId);
 
+    if (authPollId) clearInterval(authPollId);
     authPollId = setInterval(async () => {
       try {
-        const sessionResult = await api('/api/auth/session?id=' + encodeURIComponent(result.sessionId));
+        const sessionResult = await api('/api/auth/session?id=' + encodeURIComponent(activeAuthSessionId));
         renderAuthSession(sessionResult.session);
         if (sessionResult.session.state === 'completed' || sessionResult.session.state === 'failed') {
           clearInterval(authPollId);
@@ -725,19 +1434,17 @@ function renderDashboardHtml(): string {
     if (session.promptMessage) lines.push('prompt: ' + session.promptMessage);
     if (session.error) lines.push('error: ' + session.error);
 
-    document.getElementById('authSession').textContent = lines.join('\n');
+    document.getElementById('authSession').textContent = lines.join('\\n');
   }
 
   async function sendAuthPromptInput() {
-    const statusText = document.getElementById('authStatus').textContent;
-    const match = /([0-9a-fA-F-]{36})/.exec(statusText || '');
-    if (!match) {
-      setText('authStatus', 'No active auth session id found. Start auth first.');
+    if (!activeAuthSessionId) {
+      setText('authStatus', 'No active auth session. Start authentication first.');
       return;
     }
 
     const value = document.getElementById('authPromptInput').value;
-    await api('/api/auth/respond', 'POST', { sessionId: match[1], value });
+    await api('/api/auth/respond', 'POST', { sessionId: activeAuthSessionId, value });
     document.getElementById('authPromptInput').value = '';
   }
 
@@ -749,13 +1456,19 @@ function renderDashboardHtml(): string {
     return text.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
   }
 
+  document.getElementById('themeLight').addEventListener('click', () => applyTheme('light'));
+  document.getElementById('themeDark').addEventListener('click', () => applyTheme('dark'));
+  document.getElementById('authProvider').addEventListener('change', syncAuthMethodWithProvider);
+  document.getElementById('authMethod').addEventListener('change', syncAuthMethodWithProvider);
+  document.getElementById('workProvider').addEventListener('change', () => refreshWorkModels().catch((e) => setText('workStatus', String(e))));
   document.getElementById('workStart').addEventListener('click', () => startWork().catch((e) => setText('workStatus', String(e))));
   document.getElementById('authStart').addEventListener('click', () => startAuth().catch((e) => setText('authStatus', String(e))));
   document.getElementById('authPromptSend').addEventListener('click', () => sendAuthPromptInput().catch((e) => setText('authStatus', String(e))));
 
-  setInterval(() => refreshWorkSessions().then(renderSelectedEvents).catch(() => {}), 2000);
+  initTheme();
   refreshProviders().catch((e) => setText('authStatus', String(e)));
-  refreshWorkSessions().then(renderSelectedEvents).catch((e) => setText('workStatus', String(e)));
+  refreshWorkSessions().catch((e) => setText('workStatus', String(e)));
+  setInterval(() => refreshWorkSessions().catch(() => {}), 2000);
 </script>
 </body>
 </html>`;
