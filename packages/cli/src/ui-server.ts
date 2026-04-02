@@ -32,9 +32,19 @@ interface WorkSession {
   status: WorkState;
   taskStatus: Record<string, string>;
   events: UiDagEvent[];
+  agentGraph: SessionAgentGraphNode[];
   error?: string;
   output?: { text?: string; planPath?: string };
   controller: AbortController;
+}
+
+interface SessionAgentGraphNode {
+  id: string;
+  prompt: string;
+  dependencies: string[];
+  provider?: string;
+  model?: string;
+  reasoning?: 'minimal' | 'low' | 'medium' | 'high';
 }
 
 interface UiDagEvent {
@@ -114,6 +124,7 @@ interface PersistedWorkSession {
   status: WorkState;
   taskStatus: Record<string, string>;
   events: UiDagEvent[];
+  agentGraph?: SessionAgentGraphNode[];
   error?: string;
   output?: { text?: string; planPath?: string };
 }
@@ -150,6 +161,36 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
   await restoreUiState(uiStatePath, workSessions, sessionChats, sessionTodos);
 
   const uiStatePersistence = createUiStatePersistence(uiStatePath, workSessions, sessionChats, sessionTodos);
+
+  function deleteWorkSession(id: string): boolean {
+    const session = workSessions.get(id);
+    if (!session) {
+      return false;
+    }
+
+    if (session.status === 'running') {
+      session.controller.abort();
+      session.status = 'cancelled';
+      session.updatedAt = now();
+    }
+
+    closeWorkStream(workStreamClients, id);
+    workSessions.delete(id);
+    sessionChats.delete(id);
+    sessionTodos.delete(id);
+
+    for (const [streamId, streamState] of [...chatStreams.entries()]) {
+      if (streamState.sessionId !== id) {
+        continue;
+      }
+
+      closeWorkStream(chatStreamClients, streamId);
+      chatStreams.delete(streamId);
+    }
+
+    uiStatePersistence.schedule();
+    return true;
+  }
 
   let hmrWatcher: FSWatcher | undefined;
   if (hmrEnabled) {
@@ -516,6 +557,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           status: 'running',
           taskStatus: {},
           events: [],
+          agentGraph: [],
           controller,
         };
 
@@ -584,6 +626,19 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
               session.events.push(uiEvent);
               if (session.events.length > 200) {
                 session.events.shift();
+              }
+            }
+
+            if (event.type === 'task:tool-call' && event.status === 'started') {
+              const changed = applyChecklistFromToolEvent(session.id, event, sessionTodos);
+              if (changed) {
+                broadcastTodoUpdate(workStreamClients, session.id, sessionTodos.get(session.id) ?? []);
+                uiStatePersistence.schedule();
+              }
+
+              const graphChanged = applyAgentGraphFromToolEvent(session, event);
+              if (graphChanged) {
+                uiStatePersistence.schedule();
               }
             }
 
@@ -684,6 +739,25 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         return;
       }
 
+      if (req.method === 'POST' && pathname === '/api/work/delete') {
+        const body = await readJsonBody(req);
+        const id = asString(body.id);
+
+        if (!id) {
+          sendJson(res, 400, { error: 'Missing id' });
+          return;
+        }
+
+        const removed = deleteWorkSession(id);
+        if (!removed) {
+          sendJson(res, 404, { error: 'Unknown work session' });
+          return;
+        }
+
+        sendJson(res, 200, { ok: true, id });
+        return;
+      }
+
       if (req.method === 'GET' && pathname === '/api/work') {
         const sessions = [...workSessions.values()]
           .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
@@ -707,6 +781,15 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
 
         const thread = sessionChats.get(id) ?? createSessionChatThread(session);
         sessionChats.set(id, thread);
+
+        if ((sessionTodos.get(id)?.length ?? 0) === 0) {
+          const changed = backfillChecklistFromUiEvents(id, session.events, sessionTodos);
+          if (changed) {
+            uiStatePersistence.schedule();
+            broadcastTodoUpdate(workStreamClients, id, sessionTodos.get(id) ?? []);
+          }
+        }
+
         uiStatePersistence.schedule();
 
         sendJson(res, 200, {
@@ -1422,6 +1505,24 @@ async function restoreUiState(
 
     sessionTodos.set(sessionId, items);
   }
+
+  for (const [sessionId, session] of workSessions.entries()) {
+    const existingItems = sessionTodos.get(sessionId) ?? [];
+    if (existingItems.length > 0) {
+      if ((session.agentGraph?.length ?? 0) === 0) {
+        backfillAgentGraphFromUiEvents(session);
+      }
+      continue;
+    }
+
+    if (backfillChecklistFromUiEvents(sessionId, session.events, sessionTodos)) {
+      // Derived checklist entries from past tool-call events.
+    }
+
+    if ((session.agentGraph?.length ?? 0) === 0) {
+      backfillAgentGraphFromUiEvents(session);
+    }
+  }
 }
 
 async function persistUiState(
@@ -1492,6 +1593,10 @@ function toPersistedSession(session: WorkSession): PersistedWorkSession {
     status: session.status,
     taskStatus: { ...session.taskStatus },
     events: [...session.events],
+    agentGraph: session.agentGraph.map((node) => ({
+      ...node,
+      dependencies: [...node.dependencies],
+    })),
     error: session.error,
     output: session.output,
   };
@@ -1505,6 +1610,7 @@ function hydratePersistedSession(session: PersistedWorkSession): WorkSession {
 
   return {
     ...session,
+    agentGraph: normalizeSessionAgentGraphNodes(session.agentGraph),
     status: resumedStatus,
     error: resumedError,
     controller: new AbortController(),
@@ -1624,6 +1730,330 @@ function previewToolLog(value: string | undefined): string {
   return compact.length > 600 ? `${compact.slice(0, 597)}...` : compact;
 }
 
+function applyChecklistFromToolEvent(
+  sessionId: string,
+  event: Extract<DagEvent, { type: 'task:tool-call' }>,
+  sessionTodos: Map<string, AgentTodoItem[]>,
+): boolean {
+  if (event.status !== 'started' || !event.input) {
+    return false;
+  }
+
+  const toolName = event.toolName;
+  if (toolName !== 'todo_set' && toolName !== 'todo_add' && toolName !== 'todo_update') {
+    return false;
+  }
+
+  const args = parseTodoToolArgs(toolName, event.input);
+  if (!args) {
+    return false;
+  }
+
+  return applyChecklistFromTodoArgs(sessionId, toolName, args, sessionTodos);
+}
+
+function applyChecklistFromTodoArgs(
+  sessionId: string,
+  toolName: 'todo_set' | 'todo_add' | 'todo_update',
+  args: Record<string, unknown>,
+  sessionTodos: Map<string, AgentTodoItem[]>,
+): boolean {
+
+  const existing = sessionTodos.get(sessionId) ?? [];
+  const nowTime = now();
+
+  if (toolName === 'todo_set') {
+    const rawItems = Array.isArray(args.items) ? args.items : [];
+    const nextItems: AgentTodoItem[] = rawItems
+      .filter((item) => item && typeof item === 'object')
+      .map((item) => item as Record<string, unknown>)
+      .map((item) => {
+        const id = asString(item.id) || randomUUID();
+        const title = asString(item.title) || `Todo ${id}`;
+        const status = asString(item.status);
+        const previous = existing.find((entry) => entry.id === id);
+        return {
+          id,
+          text: compactTodoText(title, item.details),
+          done: status === 'done',
+          createdAt: previous?.createdAt ?? nowTime,
+          updatedAt: nowTime,
+        };
+      });
+
+    sessionTodos.set(sessionId, nextItems);
+    return true;
+  }
+
+  if (toolName === 'todo_add') {
+    const id = asString(args.id) || randomUUID();
+    const title = asString(args.title) || `Todo ${id}`;
+    const status = asString(args.status);
+    const next = existing.filter((item) => item.id !== id);
+    next.push({
+      id,
+      text: compactTodoText(title, args.details),
+      done: status === 'done',
+      createdAt: nowTime,
+      updatedAt: nowTime,
+    });
+    sessionTodos.set(sessionId, next);
+    return true;
+  }
+
+  const id = asString(args.id);
+  if (!id) {
+    return false;
+  }
+
+  const index = existing.findIndex((item) => item.id === id);
+  const status = asString(args.status);
+  const title = asString(args.title);
+  const details = asString(args.details);
+  const appendDetails = asString(args.appendDetails);
+
+  if (index < 0) {
+    const fallbackText = compactTodoText(title || `Todo ${id}`, details || appendDetails);
+    const created: AgentTodoItem = {
+      id,
+      text: fallbackText,
+      done: status === 'done',
+      createdAt: nowTime,
+      updatedAt: nowTime,
+    };
+    sessionTodos.set(sessionId, [...existing, created]);
+    return true;
+  }
+
+  const item = existing[index];
+  const nextText = compactTodoText(
+    title || item.text || `Todo ${id}`,
+    details || appendDetails,
+  );
+
+  const updated: AgentTodoItem = {
+    ...item,
+    text: nextText,
+    done: status ? status === 'done' : item.done,
+    updatedAt: nowTime,
+  };
+
+  const next = [...existing];
+  next[index] = updated;
+  sessionTodos.set(sessionId, next);
+  return true;
+}
+
+function parseTodoToolArgs(
+  toolName: 'todo_set' | 'todo_add' | 'todo_update',
+  input: string,
+): Record<string, unknown> | undefined {
+  try {
+    const parsed = JSON.parse(input);
+    if (parsed && typeof parsed === 'object') {
+      return parsed as Record<string, unknown>;
+    }
+  } catch {
+    // Fall through to best-effort parsing for truncated previews.
+  }
+
+  const id = extractQuotedField(input, 'id');
+  const status = extractQuotedField(input, 'status');
+  const title = extractQuotedField(input, 'title');
+  const details = extractQuotedField(input, 'details');
+  const appendDetails = extractQuotedField(input, 'appendDetails');
+
+  if (toolName === 'todo_update') {
+    if (!id) {
+      return undefined;
+    }
+
+    return {
+      id,
+      status,
+      title,
+      details,
+      appendDetails,
+    };
+  }
+
+  if (toolName === 'todo_add') {
+    if (!id) {
+      return undefined;
+    }
+
+    return {
+      id,
+      title: title || `Todo ${id}`,
+      status,
+      details,
+    };
+  }
+
+  // todo_set generally requires full JSON; skip if it cannot be parsed.
+  return undefined;
+}
+
+function extractQuotedField(input: string, key: string): string | undefined {
+  const pattern = new RegExp(`"${key}"\\s*:\\s*"([^"]+)"`);
+  const match = input.match(pattern);
+  return match?.[1];
+}
+
+function backfillChecklistFromUiEvents(
+  sessionId: string,
+  events: UiDagEvent[],
+  sessionTodos: Map<string, AgentTodoItem[]>,
+): boolean {
+  let changed = false;
+
+  for (const entry of events) {
+    const match = entry.message.match(/tool\s+(todo_set|todo_add|todo_update)\s+input\s+(.+)$/);
+    if (!match) {
+      continue;
+    }
+
+    const toolName = match[1] as 'todo_set' | 'todo_add' | 'todo_update';
+    const args = parseTodoToolArgs(toolName, match[2]);
+    if (!args) {
+      continue;
+    }
+
+    const applied = applyChecklistFromTodoArgs(sessionId, toolName, args, sessionTodos);
+    changed = changed || applied;
+  }
+
+  return changed;
+}
+
+function compactTodoText(title: string, details: unknown): string {
+  const base = asString(title) || 'Todo';
+  const suffixRaw = asString(details);
+  const suffix = suffixRaw
+    ? suffixRaw.replace(/\s+/g, ' ').trim()
+    : '';
+
+  const combined = suffix ? `${base} - ${suffix}` : base;
+  return combined.length > 180 ? `${combined.slice(0, 177)}...` : combined;
+}
+
+function applyAgentGraphFromToolEvent(
+  session: WorkSession,
+  event: Extract<DagEvent, { type: 'task:tool-call' }>,
+): boolean {
+  if (event.status !== 'started' || !event.input || event.toolName !== 'agent_graph_set') {
+    return false;
+  }
+
+  const args = parseAgentGraphToolArgs(event.input);
+  if (!args) {
+    return false;
+  }
+
+  const nodes = normalizeSessionAgentGraphNodes(args.nodes);
+  if (nodes.length === 0) {
+    return false;
+  }
+
+  const previous = JSON.stringify(session.agentGraph);
+  const next = JSON.stringify(nodes);
+  if (previous === next) {
+    return false;
+  }
+
+  session.agentGraph = nodes;
+  return true;
+}
+
+function parseAgentGraphToolArgs(input: string): Record<string, unknown> | undefined {
+  try {
+    const parsed = JSON.parse(input);
+    if (parsed && typeof parsed === 'object') {
+      return parsed as Record<string, unknown>;
+    }
+  } catch {
+    return undefined;
+  }
+
+  return undefined;
+}
+
+function normalizeSessionAgentGraphNodes(rawNodes: unknown): SessionAgentGraphNode[] {
+  if (!Array.isArray(rawNodes)) {
+    return [];
+  }
+
+  const nodes: SessionAgentGraphNode[] = [];
+  const seen = new Set<string>();
+  for (const raw of rawNodes) {
+    if (!raw || typeof raw !== 'object') {
+      continue;
+    }
+
+    const node = raw as Record<string, unknown>;
+    const id = asString(node.id);
+    const prompt = asString(node.prompt);
+    if (!id || !prompt || seen.has(id)) {
+      continue;
+    }
+
+    const dependencies = Array.isArray(node.dependencies)
+      ? node.dependencies.map((entry) => asString(entry)).filter((entry) => entry.length > 0 && entry !== id)
+      : [];
+
+    const reasoningRaw = asString(node.reasoning);
+    const reasoning = reasoningRaw === 'minimal'
+      || reasoningRaw === 'low'
+      || reasoningRaw === 'medium'
+      || reasoningRaw === 'high'
+      ? reasoningRaw
+      : undefined;
+
+    nodes.push({
+      id,
+      prompt,
+      dependencies,
+      provider: asString(node.provider) || undefined,
+      model: asString(node.model) || undefined,
+      reasoning,
+    });
+
+    seen.add(id);
+  }
+
+  return nodes;
+}
+
+function backfillAgentGraphFromUiEvents(session: WorkSession): boolean {
+  let latestNodes: SessionAgentGraphNode[] | undefined;
+
+  for (const entry of session.events) {
+    const match = entry.message.match(/tool\s+agent_graph_set\s+input\s+(.+)$/);
+    if (!match) {
+      continue;
+    }
+
+    const args = parseAgentGraphToolArgs(match[1]);
+    if (!args) {
+      continue;
+    }
+
+    const nodes = normalizeSessionAgentGraphNodes(args.nodes);
+    if (nodes.length === 0) {
+      continue;
+    }
+
+    latestNodes = nodes;
+  }
+
+  if (!latestNodes || latestNodes.length === 0) {
+    return false;
+  }
+
+  session.agentGraph = latestNodes;
+  return true;
+}
+
 function serializeWorkSession(session: WorkSession): Record<string, unknown> {
   return {
     id: session.id,
@@ -1639,6 +2069,10 @@ function serializeWorkSession(session: WorkSession): Record<string, unknown> {
     status: session.status,
     taskStatus: session.taskStatus,
     events: session.events,
+    agentGraph: session.agentGraph.map((node) => ({
+      ...node,
+      dependencies: [...node.dependencies],
+    })),
     error: session.error,
     output: session.output,
   };
@@ -1946,6 +2380,13 @@ function renderDashboardHtml(hmrEnabled: boolean): string {
       transform: translateY(-1px);
     }
 
+    button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+      transform: none;
+      box-shadow: none;
+    }
+
     button.primary {
       background: linear-gradient(130deg, var(--accent), var(--accent-2));
       color: #fff;
@@ -2036,6 +2477,14 @@ function renderDashboardHtml(hmrEnabled: boolean): string {
       gap: 10px;
     }
 
+    .graph-tools {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+
     .legend {
       display: flex;
       flex-wrap: wrap;
@@ -2058,6 +2507,8 @@ function renderDashboardHtml(hmrEnabled: boolean): string {
     .legend .completed::before { background: var(--ok); }
     .legend .failed::before { background: var(--danger); }
     .legend .cancelled::before { background: var(--warn); }
+    .legend .planned::before { background: var(--accent); }
+    .legend .subagent::before { background: var(--accent); }
 
     .graph-wrap {
       border: 1px solid var(--border);
@@ -2128,6 +2579,7 @@ function renderDashboardHtml(hmrEnabled: boolean): string {
     .graph-node.status-completed .node-core { fill: var(--ok); }
     .graph-node.status-failed .node-core { fill: var(--danger); }
     .graph-node.status-cancelled .node-core { fill: var(--warn); }
+    .graph-node.status-planned .node-core { fill: var(--accent); }
 
     .node-label,
     .node-sub {
@@ -2636,11 +3088,16 @@ function renderDashboardHtml(hmrEnabled: boolean): string {
       <section class="panel graph-panel">
         <div class="graph-head">
           <h2 class="section-title" style="margin:0;">Agent Graph</h2>
-          <div class="legend">
-            <span class="running">running</span>
-            <span class="completed">completed</span>
-            <span class="failed">failed</span>
-            <span class="cancelled">cancelled</span>
+          <div class="graph-tools">
+            <button class="danger" id="graphDeleteSelected" disabled>Delete Selected</button>
+            <div class="legend">
+              <span class="running">running</span>
+              <span class="completed">completed</span>
+              <span class="failed">failed</span>
+              <span class="cancelled">cancelled</span>
+              <span class="planned">planned</span>
+              <span class="subagent">sub-agent node</span>
+            </div>
           </div>
         </div>
         <div class="graph-wrap">
@@ -3795,6 +4252,47 @@ function renderDashboardHtml(hmrEnabled: boolean): string {
     ensureWorkStreamSubscription();
   }
 
+  function syncGraphDeleteSelectedButton() {
+    const button = document.getElementById('graphDeleteSelected');
+    if (!button) {
+      return;
+    }
+
+    const hasSelection = Boolean(selectedWorkId);
+    button.disabled = !hasSelection;
+    button.textContent = hasSelection
+      ? 'Delete Selected (' + String(selectedWorkId).slice(0, 8) + ')'
+      : 'Delete Selected';
+  }
+
+  async function deleteWorkSessionClient(id) {
+    if (!id) {
+      return;
+    }
+
+    const ok = window.confirm('Delete this agent session? This removes its events, chat, and checklist.');
+    if (!ok) {
+      return;
+    }
+
+    await api('/api/work/delete', 'POST', { id });
+    if (selectedWorkId === id) {
+      selectedWorkId = null;
+    }
+
+    setText('workStatus', 'Deleted session: ' + String(id).slice(0, 8));
+    await refreshWorkSessions();
+  }
+
+  async function deleteSelectedGraphSession() {
+    if (!selectedWorkId) {
+      setText('workStatus', 'Select an agent first.');
+      return;
+    }
+
+    await deleteWorkSessionClient(selectedWorkId);
+  }
+
   async function retryWorkSession(id) {
     if (!id) {
       setText('workStatus', 'Missing session id for retry.');
@@ -3866,6 +4364,7 @@ function renderDashboardHtml(hmrEnabled: boolean): string {
           + '<button class="secondary" data-view="' + session.id + '">View</button>'
           + (showRetry ? '<button class="secondary" data-retry="' + session.id + '">Retry Prompt</button>' : '')
           + '<button class="danger" data-cancel="' + session.id + '">Cancel</button>'
+          + '<button class="danger" data-delete="' + session.id + '">Delete</button>'
         + '</div>';
 
       root.appendChild(card);
@@ -3900,9 +4399,17 @@ function renderDashboardHtml(hmrEnabled: boolean): string {
         await retryWorkSession(id).catch((error) => setText('workStatus', String(error)));
       });
     });
+
+    root.querySelectorAll('button[data-delete]').forEach((button) => {
+      button.addEventListener('click', async () => {
+        const id = button.getAttribute('data-delete');
+        await deleteWorkSessionClient(id);
+      });
+    });
   }
 
   function renderSessionGraph(sessions) {
+    syncGraphDeleteSelectedButton();
     const svg = document.getElementById('sessionGraph');
     svg.innerHTML = '';
 
@@ -3911,6 +4418,21 @@ function renderDashboardHtml(hmrEnabled: boolean): string {
       const text = createSvgText(310, 140, 'No sessions yet', 'node-label');
       text.setAttribute('text-anchor', 'middle');
       svg.appendChild(text);
+      return;
+    }
+
+    const selectedSession = selectedWorkId
+      ? sessions.find((item) => item.id === selectedWorkId)
+      : null;
+    const plannedSubAgents = selectedSession
+      ? getPlannedSubAgentsForSession(selectedSession)
+      : [];
+    const subAgents = selectedSession
+      ? parseSubAgentsFromEvents(selectedSession.events || [])
+      : [];
+
+    if (selectedSession && (plannedSubAgents.length > 0 || subAgents.length > 0)) {
+      renderFocusedAgentGraph(svg, selectedSession, plannedSubAgents, subAgents);
       return;
     }
 
@@ -3965,6 +4487,354 @@ function renderDashboardHtml(hmrEnabled: boolean): string {
 
       svg.appendChild(group);
     });
+  }
+
+  function renderFocusedAgentGraph(svg, session, plannedSubAgents, spawnedSubAgents) {
+    const plannedById = new Map();
+    const graphNodes = [];
+
+    for (const planned of plannedSubAgents) {
+      const node = {
+        id: planned.id,
+        prompt: planned.prompt,
+        status: 'planned',
+        dependencies: Array.isArray(planned.dependencies) ? planned.dependencies : [],
+        kind: 'planned',
+      };
+      plannedById.set(node.id, node);
+      graphNodes.push(node);
+    }
+
+    for (const spawned of spawnedSubAgents) {
+      const existing = plannedById.get(spawned.id);
+      if (existing) {
+        existing.status = normalizeGraphStatus(spawned.status);
+        if (!existing.prompt && spawned.prompt) {
+          existing.prompt = spawned.prompt;
+        }
+        continue;
+      }
+
+      graphNodes.push({
+        id: spawned.id,
+        prompt: spawned.prompt,
+        status: normalizeGraphStatus(spawned.status),
+        dependencies: [],
+        kind: 'spawned',
+      });
+    }
+
+    const count = graphNodes.length;
+    const cols = Math.min(4, Math.max(1, Math.ceil(Math.sqrt(Math.max(1, count)))));
+    const rows = Math.ceil(Math.max(1, count) / cols);
+    const gapX = 170;
+    const gapY = 90;
+    const width = Math.max(760, 320 + cols * gapX);
+    const height = Math.max(280, 120 + rows * gapY);
+    const rootX = 130;
+    const rootY = height / 2;
+    const gridStartX = 300;
+    const gridStartY = (height - (rows - 1) * gapY) / 2;
+
+    svg.setAttribute('viewBox', '0 0 ' + width + ' ' + height);
+
+    const helper = createSvgText(20, 22, 'Focused graph: selected agent + planned/spawned sub-agents', 'node-sub');
+    helper.setAttribute('text-anchor', 'start');
+    helper.setAttribute('opacity', '0.85');
+    svg.appendChild(helper);
+
+    const root = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+    root.setAttribute('class', 'graph-node status-' + normalizeGraphStatus(session.status) + ' selected');
+    root.setAttribute('transform', 'translate(' + rootX + ' ' + rootY + ')');
+    root.style.cursor = 'pointer';
+
+    const rootHalo = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+    rootHalo.setAttribute('r', '22');
+    rootHalo.setAttribute('class', 'node-halo');
+    root.appendChild(rootHalo);
+
+    const rootCore = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+    rootCore.setAttribute('r', '14');
+    rootCore.setAttribute('class', 'node-core');
+    root.appendChild(rootCore);
+
+    root.appendChild(createSvgText(0, 34, session.id.slice(0, 8), 'node-label'));
+    root.appendChild(createSvgText(0, 48, 'root agent', 'node-sub'));
+
+    root.addEventListener('click', async () => {
+      await selectWorkSession(session.id);
+    });
+    svg.appendChild(root);
+
+    const positions = new Map();
+    graphNodes.forEach((agent, index) => {
+      const col = index % cols;
+      const row = Math.floor(index / cols);
+      const x = gridStartX + col * gapX;
+      const y = gridStartY + row * gapY;
+      positions.set(agent.id, { x, y });
+    });
+
+    graphNodes.forEach((agent) => {
+      const target = positions.get(agent.id);
+      if (!target) {
+        return;
+      }
+
+      const deps = Array.isArray(agent.dependencies) ? agent.dependencies : [];
+      const resolvedDeps = deps.filter((depId) => positions.has(depId));
+      if (resolvedDeps.length === 0) {
+        const cx = (rootX + target.x) / 2;
+        const cy = (rootY + target.y) / 2 - 10;
+        const edge = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+        edge.setAttribute('d', 'M ' + rootX + ' ' + rootY + ' Q ' + cx + ' ' + cy + ' ' + target.x + ' ' + target.y);
+        edge.setAttribute('class', 'graph-edge');
+        svg.appendChild(edge);
+        return;
+      }
+
+      resolvedDeps.forEach((depId) => {
+        const source = positions.get(depId);
+        if (!source) {
+          return;
+        }
+        const cx = (source.x + target.x) / 2;
+        const cy = (source.y + target.y) / 2 - 8;
+        const edge = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+        edge.setAttribute('d', 'M ' + source.x + ' ' + source.y + ' Q ' + cx + ' ' + cy + ' ' + target.x + ' ' + target.y);
+        edge.setAttribute('class', 'graph-edge');
+        svg.appendChild(edge);
+      });
+    });
+
+    graphNodes.forEach((agent) => {
+      const position = positions.get(agent.id);
+      if (!position) {
+        return;
+      }
+
+      const group = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+      group.setAttribute('class', 'graph-node subagent status-' + normalizeGraphStatus(agent.status));
+      group.setAttribute('transform', 'translate(' + position.x + ' ' + position.y + ')');
+
+      const halo = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+      halo.setAttribute('r', '16');
+      halo.setAttribute('class', 'node-halo');
+      group.appendChild(halo);
+
+      const core = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+      core.setAttribute('r', '10');
+      core.setAttribute('class', 'node-core');
+      group.appendChild(core);
+
+      const label = createSvgText(0, 28, agent.id, 'node-label');
+      group.appendChild(label);
+
+      const sub = createSvgText(0, 42, summarizeText(agent.prompt || agent.status, 44), 'node-sub');
+      group.appendChild(sub);
+
+      const kindSub = createSvgText(0, 56, agent.kind === 'planned' ? 'planned' : 'spawned', 'node-sub');
+      kindSub.setAttribute('opacity', '0.72');
+      group.appendChild(kindSub);
+
+      if (agent.prompt) {
+        const title = document.createElementNS('http://www.w3.org/2000/svg', 'title');
+        title.textContent = agent.prompt;
+        group.appendChild(title);
+      }
+
+      svg.appendChild(group);
+    });
+  }
+
+  function getPlannedSubAgentsForSession(session) {
+    const direct = normalizePlannedGraphNodes(session && session.agentGraph ? session.agentGraph : []);
+    if (direct.length > 0) {
+      return direct;
+    }
+
+    return parsePlannedSubAgentsFromEvents(session && session.events ? session.events : []);
+  }
+
+  function parsePlannedSubAgentsFromEvents(events) {
+    let latest = [];
+
+    for (const event of events || []) {
+      const message = typeof event.message === 'string' ? event.message : '';
+      if (!message) {
+        continue;
+      }
+
+      const match = message.match(/tool\\s+agent_graph_set\\s+input\\s+(.+)$/);
+      if (!match) {
+        continue;
+      }
+
+      const parsed = parseAgentGraphInputPreview(match[1]);
+      if (!parsed || !Array.isArray(parsed.nodes)) {
+        continue;
+      }
+
+      const normalized = normalizePlannedGraphNodes(parsed.nodes);
+      if (normalized.length > 0) {
+        latest = normalized;
+      }
+    }
+
+    return latest;
+  }
+
+  function parseAgentGraphInputPreview(raw) {
+    if (!raw) {
+      return null;
+    }
+
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object') {
+        return parsed;
+      }
+    } catch {
+      return null;
+    }
+
+    return null;
+  }
+
+  function normalizePlannedGraphNodes(rawNodes) {
+    if (!Array.isArray(rawNodes)) {
+      return [];
+    }
+
+    const seen = new Set();
+    const nodes = [];
+    rawNodes.forEach((rawNode) => {
+      if (!rawNode || typeof rawNode !== 'object') {
+        return;
+      }
+
+      const id = String(rawNode.id || '').trim();
+      const prompt = String(rawNode.prompt || '').trim();
+      if (!id || !prompt || seen.has(id)) {
+        return;
+      }
+
+      const dependencies = Array.isArray(rawNode.dependencies)
+        ? rawNode.dependencies.map((value) => String(value || '').trim()).filter((value) => value && value !== id)
+        : [];
+
+      nodes.push({
+        id,
+        prompt,
+        dependencies,
+      });
+      seen.add(id);
+    });
+
+    return nodes;
+  }
+
+  function parseSubAgentsFromEvents(events) {
+    const entries = [];
+    const byId = new Map();
+    let started = 0;
+
+    for (const event of events || []) {
+      const message = typeof event.message === 'string' ? event.message : '';
+      if (!message) {
+        continue;
+      }
+
+      const inputMatch = message.match(/tool\\s+subagent_spawn\\s+input\\s+(.+)$/);
+      if (inputMatch) {
+        started += 1;
+        const id = 'sub-' + String(started);
+        const prompt = extractSubagentPrompt(inputMatch[1]);
+        const current = byId.get(id) || { id, prompt: '', status: 'running' };
+        if (prompt) {
+          current.prompt = prompt;
+        }
+        if (!byId.has(id)) {
+          byId.set(id, current);
+          entries.push(current);
+        }
+        continue;
+      }
+
+      const outputMatch = message.match(/tool\\s+subagent_spawn\\s+output(?:\\s+\\[error\\])?\\s+(.+)$/);
+      if (!outputMatch) {
+        continue;
+      }
+
+      const body = outputMatch[1];
+      const statusMatch = body.match(/Sub-agent\\s+(sub-\\d+)\\s+(completed|failed)/i);
+      const hasError = message.includes('[error]');
+      let id = '';
+      let status = hasError ? 'failed' : 'completed';
+
+      if (statusMatch) {
+        id = statusMatch[1];
+        status = statusMatch[2].toLowerCase() === 'failed' ? 'failed' : 'completed';
+      } else {
+        const firstRunning = entries.find((entry) => entry.status === 'running');
+        if (!firstRunning) {
+          continue;
+        }
+        id = firstRunning.id;
+      }
+
+      const current = byId.get(id) || { id, prompt: '', status: 'running' };
+      current.status = status;
+      if (!current.prompt) {
+        current.prompt = summarizeText(body, 120);
+      }
+
+      if (!byId.has(id)) {
+        byId.set(id, current);
+        entries.push(current);
+      }
+    }
+
+    entries.sort((a, b) => parseSubAgentIndex(a.id) - parseSubAgentIndex(b.id));
+    return entries;
+  }
+
+  function extractSubagentPrompt(rawInput) {
+    if (!rawInput) {
+      return '';
+    }
+
+    try {
+      const parsed = JSON.parse(rawInput);
+      if (parsed && typeof parsed === 'object' && typeof parsed.prompt === 'string') {
+        return summarizeText(parsed.prompt, 120);
+      }
+    } catch {
+      // fall back to regex extraction from compact preview text
+    }
+
+    const match = rawInput.match(/"prompt"\\s*:\\s*"([^"]+)"/);
+    if (!match) {
+      return '';
+    }
+
+    const cleaned = String(match[1]).replace(/\\\\"/g, '"');
+    return summarizeText(cleaned, 120);
+  }
+
+  function parseSubAgentIndex(id) {
+    const match = String(id || '').match(/^sub-(\\d+)$/i);
+    if (!match) {
+      return Number.MAX_SAFE_INTEGER;
+    }
+    return Number(match[1]);
+  }
+
+  function normalizeGraphStatus(status) {
+    if (status === 'running' || status === 'completed' || status === 'failed' || status === 'cancelled' || status === 'planned') {
+      return status;
+    }
+    return 'running';
   }
 
   function createSvgText(x, y, text, className) {
@@ -4245,6 +5115,7 @@ function renderDashboardHtml(hmrEnabled: boolean): string {
       .catch((e) => setText('workStatus', String(e)));
   });
   document.getElementById('workStart').addEventListener('click', () => startWork().catch((e) => setText('workStatus', String(e))));
+  document.getElementById('graphDeleteSelected').addEventListener('click', () => deleteSelectedGraphSession().catch((e) => setText('workStatus', String(e))));
   document.getElementById('chatSend').addEventListener('click', () => sendChatMessage().catch((e) => setText('chatStatus', String(e))));
   document.getElementById('todoAdd').addEventListener('click', () => addAgentTodo().catch((e) => setText('todoStatus', String(e))));
   document.getElementById('todoInput').addEventListener('keydown', (event) => {
