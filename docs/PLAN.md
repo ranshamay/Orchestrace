@@ -1,0 +1,311 @@
+# Orchestrace — System Plan
+
+## Vision
+
+Orchestrace is a **vendor-agnostic, BYOK (Bring Your Own Key) agent orchestration system** that eliminates the developer bottleneck by decomposing complex coding tasks into a directed acyclic graph (DAG) of sub-tasks, executing them in parallel with configurable validation, retry, and per-task model selection.
+
+The core insight: most feature implementations follow a predictable shape — plan → implement → test → review — with well-defined dependencies between stages. Orchestrace formalizes this into a task graph that a scheduler can execute autonomously, with the developer providing high-level intent rather than step-by-step instructions.
+
+## Core Concepts
+
+### Task Graph (DAG)
+
+A JSON-serializable directed acyclic graph where each node is a task with:
+
+- **Prompt** — the instruction sent to the LLM
+- **Dependencies** — which tasks must finish first (outputs are injected as context)
+- **Model config** — per-task provider/model/reasoning level override
+- **Validation** — shell commands and custom validators to gate completion
+- **Retry policy** — max retries + delay for failed validations
+- **Isolation flag** — whether to run in a separate git worktree
+
+### Execution Model
+
+```
+                    ┌─────────┐
+                    │  Plan   │ ← JSON task graph (manual or LLM-generated)
+                    └────┬────┘
+                         │
+                    ┌────▼────┐
+                    │  Core   │ ← Validates graph, topological sort
+                    │Scheduler│ ← Parallel execution up to maxParallel
+                    └────┬────┘
+                         │
+              ┌──────────┼──────────┐
+              │          │          │
+         ┌────▼───┐ ┌───▼────┐ ┌──▼─────┐
+         │ Task A │ │ Task B │ │ Task C │  ← Independent tasks run concurrently
+         └────┬───┘ └───┬────┘ └──┬─────┘
+              │         │         │
+              ▼         ▼         ▼
+         ┌────────────────────────────┐
+         │    LLM Provider (pi-ai)    │ ← BYOK: Anthropic, OpenAI, Google, etc.
+         └────────────┬───────────────┘
+                      │
+                 ┌────▼────┐
+                 │Validator │ ← Run tsc, vitest, eslint, custom checks
+                 └────┬────┘
+                      │
+                ┌─────▼──────┐
+                │ Pass? Retry │ ← Auto-retry with error context up to maxRetries
+                │ or Fail     │
+                └─────────────┘
+```
+
+### Key Principles
+
+1. **No vendor lock-in** — LLM layer is an interface (`LlmAdapter`). Default impl uses pi-ai which supports 15+ providers. Swap it for anything.
+2. **Validation-driven** — Every task can have shell command gates. If `pnpm tsc --noEmit` fails, the task fails and retries with error context.
+3. **Dependency-aware** — Task B receives Task A's output as context automatically. The scheduler handles ordering.
+4. **Parallel by default** — Independent tasks run concurrently (configurable `maxParallel`). Dependent tasks wait.
+5. **Isolation for safety** — Tasks marked `isolated: true` get their own git worktree branch, merged back on success.
+
+---
+
+## Architecture
+
+### Package Map
+
+```
+orchestrace/
+├── packages/
+│   ├── core/           @orchestrace/core
+│   │   ├── dag/          Graph validation, topo sort, ready-task resolution
+│   │   │   ├── types.ts    All type definitions (TaskNode, TaskGraph, DagEvent, etc.)
+│   │   │   ├── graph.ts    validateGraph(), topologicalSort(), getReadyTasks()
+│   │   │   └── scheduler.ts  runDag() — event-driven parallel executor
+│   │   ├── orchestrator/
+│   │   │   └── orchestrator.ts  orchestrate() — wires scheduler + LLM + validation
+│   │   └── validation/
+│   │       └── validator.ts     validate() — run shell commands, custom validators
+│   │
+│   ├── provider/       @orchestrace/provider
+│   │   ├── adapter.ts    PiAiAdapter — pi-ai wrapper implementing LlmAdapter
+│   │   └── types.ts      LlmAdapter interface, LlmRequest, LlmResult
+│   │
+│   ├── sandbox/        @orchestrace/sandbox
+│   │   ├── worktree.ts   Git worktree create/list/merge/cleanup
+│   │   └── container.ts  Docker container create/exec/copy/cleanup
+│   │
+│   └── cli/            @orchestrace/cli
+│       └── index.ts      CLI entry point: `orchestrace run <plan.json>`
+│
+├── examples/
+│   └── feature-plan.json   Example task graph
+└── docs/
+    └── PLAN.md             This file
+```
+
+### Data Flow
+
+```
+plan.json → CLI parses graph
+  → orchestrate(graph, { llm, cwd, maxParallel, ... })
+    → runDag(graph, executor, config)
+      → validateGraph() — reject cycles, missing deps, duplicates
+      → scheduleReady() — find tasks with all deps satisfied
+        → for each ready task (up to maxParallel slots):
+          → launchTask(node)
+            → build prompt (inject dep outputs as context)
+            → llm.complete({ provider, model, prompt, reasoning })
+            → validate(output, validationConfig, cwd)
+              → exec shell commands (tsc, vitest, etc.)
+            → if validation fails & retries left → retry with error context
+            → if pass → mark completed, scheduleReady() again
+            → if final fail → mark failed, block dependents
+      → when all nodes settled → resolve with Map<taskId, TaskOutput>
+    → CLI prints events + token usage summary
+```
+
+---
+
+## Current State (What's Built)
+
+### Complete ✓
+
+| Component | Status | Details |
+|-----------|--------|---------|
+| **DAG types** | ✓ | TaskNode, TaskGraph, TaskOutput, DagEvent, RunnerConfig, ModelConfig, ValidationConfig |
+| **Graph engine** | ✓ | Cycle detection (Kahn's), topo sort, ready-task resolution. 13 tests passing. |
+| **Scheduler** | ✓ | Event-driven parallel pool with maxParallel, retry with backoff, blocked-dep propagation. 7 tests passing. |
+| **Orchestrator** | ✓ | Wires scheduler → LLM → validation. Injects dep outputs as prompt context. |
+| **Validator** | ✓ | Shell command execution + custom async validators. 120s timeout, 10MB buffer. |
+| **LLM Adapter** | ✓ | PiAiAdapter using `completeSimple()`. Supports reasoning levels. Auto-reads API keys from env. |
+| **LlmAdapter interface** | ✓ | `complete(request) → Promise<LlmResult>` — swappable for any provider. |
+| **Git worktrees** | ✓ | Create/list/merge/cleanup. Branch naming: `orchestrace/<taskId>`. |
+| **Docker containers** | ✓ | Create/exec/copy-to/copy-from/cleanup. Default: `node:22-slim`. |
+| **CLI** | ✓ | `orchestrace run <plan.json>` with event logging and token usage summary. |
+| **Build pipeline** | ✓ | pnpm workspaces + Turbo. All 4 packages compile clean. |
+| **Test suite** | ✓ | 20/20 tests pass (vitest). Graph: 13, Scheduler: 7. |
+
+### Not Built Yet ✗
+
+| Component | Priority | Details |
+|-----------|----------|---------|
+| **Agent tools** | P0 | File read/write, terminal exec, git operations — the actual capabilities the LLM needs |
+| **Tool-use loop** | P0 | Convert LLM adapter from single-shot `completeSimple` to multi-turn tool-use with pi-ai |
+| **Planner agent** | P1 | LLM that decomposes a high-level goal into a TaskGraph JSON |
+| **Worktree integration** | P1 | Wire `isolated: true` tasks to actually use git worktrees in the scheduler |
+| **Error context in retry** | P1 | Feed validation errors back into the retry prompt |
+| **AbortController support** | P2 | Wire `config.signal` to cancel in-flight LLM calls and child processes |
+| **Streaming output** | P2 | Use pi-ai `stream()` instead of `completeSimple()` for real-time output |
+| **Remote execution** | P2 | SSH/EC2 execution for cloud-hosted agents |
+| **Cost tracking** | P3 | Aggregate and display per-task and total cost |
+| **Plan persistence** | P3 | Save/resume interrupted plans |
+| **Web dashboard** | P3 | Visualize task graph execution in real-time |
+
+---
+
+## Implementation Plan
+
+### Phase 1: Agent Tools & Tool-Use Loop (P0)
+
+**Goal**: Make the LLM actually capable of performing coding tasks — reading files, writing code, running commands.
+
+#### 1.1 Define Agent Tools
+
+Create `@orchestrace/tools` package (or add to core) with tool definitions that pi-ai's tool-use API can invoke:
+
+| Tool | Description |
+|------|-------------|
+| `read_file` | Read file contents (with line range) |
+| `write_file` | Write/create a file |
+| `edit_file` | Apply a targeted string replacement in a file |
+| `run_command` | Execute a shell command in the task's working directory |
+| `list_directory` | List files/folders |
+| `search_files` | Grep/glob search across the codebase |
+| `git_diff` | Show current changes |
+| `git_commit` | Stage and commit changes |
+
+Each tool is a pi-ai `Tool` definition with a Zod/Type schema for input validation.
+
+#### 1.2 Multi-Turn Tool-Use Loop
+
+Replace the single-shot `completeSimple()` call with a tool-use loop:
+
+```
+while true:
+  response = llm.complete(context + tools)
+  if response has tool_calls:
+    for each tool_call:
+      result = execute_tool(tool_call)
+      append tool_result to context
+    continue
+  else:
+    return response.text  // LLM is done
+```
+
+This uses pi-ai's `complete()` with `Tool[]` definitions. The LLM decides which tools to call and when to stop.
+
+#### 1.3 Sandboxed Tool Execution
+
+Tools execute in the task's working directory:
+- Normal tasks: `cwd` from config
+- Isolated tasks: worktree path
+- Container tasks: inside the Docker container
+
+### Phase 2: Worktree Integration & Error Context (P1)
+
+#### 2.1 Wire Worktrees to Scheduler
+
+When a task has `isolated: true`:
+1. Before launch: `createWorktree(repoRoot, taskId)`
+2. Set tool execution `cwd` to worktree path
+3. On success: `mergeWorktree(handle, targetBranch)`
+4. On failure: `handle.cleanup()`
+
+#### 2.2 Error-Aware Retry Prompts
+
+When a task fails validation and retries:
+1. Capture validation command stdout/stderr
+2. Prepend to the retry prompt:
+   ```
+   Your previous attempt failed validation:
+   
+   ## tsc --noEmit
+   src/auth.ts(42,5): error TS2345: Argument of type 'string' is not assignable...
+   
+   Fix the issues and try again.
+   ```
+3. Include the LLM's previous response so it has full context
+
+#### 2.3 Planner Agent
+
+An LLM-powered planner that generates TaskGraph JSON from a high-level goal:
+
+```
+Input:  "Add JWT authentication to the Express API"
+Output: TaskGraph JSON with plan → implement → test → review nodes
+```
+
+The planner:
+1. Reads the codebase structure (via agent tools)
+2. Identifies relevant files and patterns
+3. Decomposes into ordered sub-tasks with correct dependencies
+4. Assigns appropriate models (fast for simple, reasoning for complex)
+5. Adds validation commands based on the project's test/build setup
+
+### Phase 3: Streaming & Remote Execution (P2)
+
+#### 3.1 Streaming LLM Output
+
+Switch from `completeSimple()` to `stream()` for real-time output:
+- Emit `task:streaming` events with partial content
+- CLI displays live output per task
+- Dashboard can show real-time progress
+
+#### 3.2 AbortController Integration
+
+Wire `config.signal` through the entire chain:
+- Cancel in-flight LLM API calls
+- Kill running validation child processes
+- Clean up worktrees/containers on abort
+- CLI handles Ctrl+C gracefully
+
+#### 3.3 Remote Execution via SSH/EC2
+
+Extend `@orchestrace/sandbox` with SSH-based execution:
+- Provision EC2 instances on demand (or use pre-warmed pool)
+- Copy repo to remote, execute tools via SSH
+- Stream output back
+- Tear down on completion
+
+### Phase 4: Polish & Observability (P3)
+
+#### 4.1 Cost Tracking Dashboard
+
+- Per-task token usage and cost (already captured in `TaskOutput.usage`)
+- Aggregate cost per plan execution
+- Historical cost trends
+
+#### 4.2 Plan Persistence & Resume
+
+- Serialize plan state to disk after each task completion
+- On restart, skip completed tasks and resume from last checkpoint
+- Useful for long-running plans or crash recovery
+
+#### 4.3 Web Dashboard
+
+- Real-time DAG visualization (nodes light up as they execute)
+- Task output inspection
+- Cost and timing breakdowns
+- History of past executions
+
+---
+
+## Stack
+
+| Layer | Technology |
+|-------|-----------|
+| Runtime | Node.js 22, ESM |
+| Language | TypeScript 5.9, strict mode |
+| LLM | pi-ai (`@mariozechner/pi-ai`) — unified API for 15+ providers |
+| Build | pnpm workspaces, Turborepo |
+| Test | Vitest 2.1.9 |
+| Lint | ESLint flat config |
+| Isolation | Git worktrees (local), Docker (cloud) |
+| Package structure | Monorepo with 4 packages |
+
+## Supported LLM Providers (via pi-ai)
+
+OpenAI, Anthropic, Google (Gemini), Mistral, Groq, xAI (Grok), Cerebras, OpenRouter, AWS Bedrock, and any OpenAI-compatible endpoint. Keys are read from standard environment variables (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, etc.).

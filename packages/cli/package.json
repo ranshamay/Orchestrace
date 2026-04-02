@@ -1,0 +1,24 @@
+{
+  "name": "@orchestrace/cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "orchestrace": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "dev": "tsx src/index.ts",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@orchestrace/core": "workspace:*",
+    "@orchestrace/provider": "workspace:*",
+    "@orchestrace/sandbox": "workspace:*"
+  },
+  "devDependencies": {
+    "tsx": "^4.0.0",
+    "typescript": "^5.6.0"
+  }
+}

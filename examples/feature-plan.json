@@ -1,0 +1,49 @@
+{
+  "id": "example-feature",
+  "name": "Add user profile endpoint",
+  "nodes": [
+    {
+      "id": "plan",
+      "name": "Create implementation plan",
+      "type": "plan",
+      "prompt": "Analyze the codebase and create a detailed plan for adding a GET /api/users/:id/profile endpoint. Include file locations, data model changes, and validation requirements.",
+      "dependencies": [],
+      "model": {
+        "provider": "anthropic",
+        "model": "claude-sonnet-4-20250514",
+        "reasoning": "high"
+      }
+    },
+    {
+      "id": "implement",
+      "name": "Implement profile endpoint",
+      "type": "code",
+      "prompt": "Implement the user profile endpoint based on the plan. Create the route handler, data model, and any necessary middleware.",
+      "dependencies": ["plan"],
+      "validation": {
+        "commands": ["pnpm tsc --noEmit"],
+        "maxRetries": 2,
+        "retryDelayMs": 2000
+      }
+    },
+    {
+      "id": "tests",
+      "name": "Write endpoint tests",
+      "type": "test",
+      "prompt": "Write comprehensive tests for the profile endpoint covering happy path, error cases, auth, and validation.",
+      "dependencies": ["implement"],
+      "validation": {
+        "commands": ["pnpm vitest run"],
+        "maxRetries": 1,
+        "retryDelayMs": 1000
+      }
+    },
+    {
+      "id": "review",
+      "name": "Security review",
+      "type": "review",
+      "prompt": "Review the implementation for security issues: injection, auth bypass, data leaks, rate limiting.",
+      "dependencies": ["implement", "tests"]
+    }
+  ]
+}
