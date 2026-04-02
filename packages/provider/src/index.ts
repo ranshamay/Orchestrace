@@ -1,2 +1,9 @@
 export { PiAiAdapter } from './adapter.js';
-export type { LlmAdapter, LlmRequest, LlmResult } from './types.js';
+export type {
+	AgentModelConfig,
+	LlmAdapter,
+	LlmAgent,
+	LlmRequest,
+	LlmResult,
+	SpawnAgentRequest,
+} from './types.js';

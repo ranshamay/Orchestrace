@@ -1,5 +1,15 @@
 /** Task status through the execution lifecycle. */
-export type TaskStatus = 'pending' | 'ready' | 'running' | 'validating' | 'completed' | 'failed' | 'retrying';
+export type TaskStatus =
+  | 'pending'
+  | 'ready'
+  | 'planning'
+  | 'awaiting_approval'
+  | 'running'
+  | 'implementing'
+  | 'validating'
+  | 'completed'
+  | 'failed'
+  | 'retrying';
 
 /** The kind of work a task performs. */
 export type TaskType = 'code' | 'review' | 'test' | 'plan' | 'refactor' | 'custom';
@@ -46,6 +56,10 @@ export interface TaskNode {
 export interface TaskOutput {
   taskId: string;
   status: 'completed' | 'failed';
+  /** Generated deep plan for this task. */
+  plan?: string;
+  /** File path where the generated plan was persisted. */
+  planPath?: string;
   /** LLM response text. */
   response?: string;
   /** Files created or modified. */
@@ -87,6 +101,12 @@ export interface TaskState {
 
 /** Events emitted by the DAG runner. */
 export type DagEvent =
+  | { type: 'task:planning'; taskId: string }
+  | { type: 'task:plan-persisted'; taskId: string; path: string }
+  | { type: 'task:approval-requested'; taskId: string; path: string }
+  | { type: 'task:approved'; taskId: string }
+  | { type: 'task:implementation-attempt'; taskId: string; attempt: number; maxAttempts: number }
+  | { type: 'task:verification-failed'; taskId: string; attempt: number; error: string }
   | { type: 'task:ready'; taskId: string }
   | { type: 'task:started'; taskId: string }
   | { type: 'task:validating'; taskId: string }

@@ -1,8 +1,13 @@
+import { execFile } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { orchestrate } from '@orchestrace/core';
-import type { TaskGraph, DagEvent } from '@orchestrace/core';
+import type { TaskGraph, DagEvent, PlanApprovalRequest } from '@orchestrace/core';
 import { PiAiAdapter } from '@orchestrace/provider';
+import { createInterface } from 'node:readline/promises';
+import { promisify } from 'node:util';
+
+const execFileAsync = promisify(execFile);
 
 async function main() {
   const args = process.argv.slice(2);
@@ -13,7 +18,13 @@ orchestrace — DAG-based agent orchestration
 
 Usage:
   orchestrace run <plan.json>   Execute a task graph from a JSON plan file
+  orchestrace task <prompt>     Run a single prompt task using the generalized flow
   orchestrace --help            Show this help
+
+Flags:
+  --auto-approve                Skip manual plan approval gate
+  --push                        Commit and push if execution succeeds
+  --commit-message <message>    Commit message when --push is enabled
 
 Plan file format:
   {
@@ -48,11 +59,20 @@ Environment variables:
   ORCHESTRACE_DEFAULT_PROVIDER   Default LLM provider (default: anthropic)
   ORCHESTRACE_DEFAULT_MODEL      Default model ID
   ORCHESTRACE_MAX_PARALLEL       Max concurrent tasks (default: 4)
+  ORCHESTRACE_AUTO_APPROVE       true/false plan auto-approval
+  ORCHESTRACE_AUTO_PUSH          true/false auto git commit + push
+  ORCHESTRACE_VERIFY_COMMANDS    Semicolon-separated validation commands
 `);
     process.exit(0);
   }
 
   const command = args[0];
+
+  const flagArgs = args.slice(1);
+  const autoApprove = getBooleanFlag(flagArgs, '--auto-approve', process.env.ORCHESTRACE_AUTO_APPROVE === 'true');
+  const autoPush = getBooleanFlag(flagArgs, '--push', process.env.ORCHESTRACE_AUTO_PUSH === 'true');
+  const commitMessage = getFlagValue(flagArgs, '--commit-message')
+    ?? 'chore(orchestrace): apply approved agent implementation';
 
   if (command === 'run') {
     const planPath = args[1];
@@ -64,73 +84,227 @@ Environment variables:
     const absolutePath = resolve(planPath);
     const raw = await readFile(absolutePath, 'utf-8');
     const graph: TaskGraph = JSON.parse(raw);
-
-    const maxParallel = parseInt(process.env.ORCHESTRACE_MAX_PARALLEL ?? '4', 10);
-    const provider = process.env.ORCHESTRACE_DEFAULT_PROVIDER ?? 'anthropic';
-    const model = process.env.ORCHESTRACE_DEFAULT_MODEL ?? 'claude-sonnet-4-20250514';
-
-    console.log(`\n▶ Running plan: ${graph.name} (${graph.nodes.length} tasks, max ${maxParallel} parallel)\n`);
-
-    const onEvent = (event: DagEvent) => {
-      const ts = new Date().toISOString().slice(11, 19);
-      switch (event.type) {
-        case 'task:ready':
-          console.log(`  [${ts}] ◇ ready:     ${event.taskId}`);
-          break;
-        case 'task:started':
-          console.log(`  [${ts}] ▶ started:   ${event.taskId}`);
-          break;
-        case 'task:completed':
-          console.log(`  [${ts}] ✓ completed: ${event.taskId} (${event.output.durationMs}ms)`);
-          break;
-        case 'task:failed':
-          console.log(`  [${ts}] ✗ failed:    ${event.taskId} — ${event.error}`);
-          break;
-        case 'task:retrying':
-          console.log(`  [${ts}] ↻ retrying:  ${event.taskId} (attempt ${event.attempt}/${event.maxRetries})`);
-          break;
-        case 'graph:completed':
-          console.log(`\n✓ Plan completed. ${event.outputs.size} task(s) finished.`);
-          break;
-        case 'graph:failed':
-          console.log(`\n✗ Plan failed: ${event.error}`);
-          console.log(`  Completed: ${event.completedTasks.join(', ') || 'none'}`);
-          console.log(`  Failed:    ${event.failedTasks.join(', ')}`);
-          break;
-      }
-    };
-
-    const llm = new PiAiAdapter();
-    const cwd = process.cwd();
-
-    const outputs = await orchestrate(graph, {
-      llm,
-      cwd,
-      maxParallel,
-      defaultModel: { provider, model },
-      onEvent,
-    });
-
-    // Summary
-    let totalTokens = 0;
-    let totalCost = 0;
-    for (const output of outputs.values()) {
-      if (output.usage) {
-        totalTokens += output.usage.input + output.usage.output;
-        totalCost += output.usage.cost;
-      }
+    const code = await runGraph(graph, { autoApprove, autoPush, commitMessage });
+    process.exit(code);
+  } else if (command === 'task') {
+    const firstFlagIndex = args.findIndex((arg, idx) => idx > 0 && arg.startsWith('--'));
+    const promptParts = firstFlagIndex === -1 ? args.slice(1) : args.slice(1, firstFlagIndex);
+    const taskPrompt = promptParts.join(' ').trim();
+    if (!taskPrompt) {
+      console.error('Error: missing task prompt');
+      process.exit(1);
     }
 
-    if (totalTokens > 0) {
-      console.log(`\nTokens: ${totalTokens.toLocaleString()} | Cost: $${totalCost.toFixed(4)}`);
-    }
-
-    const anyFailed = [...outputs.values()].some((o) => o.status === 'failed');
-    process.exit(anyFailed ? 1 : 0);
+    const graph = buildSingleTaskGraph(taskPrompt);
+    const code = await runGraph(graph, { autoApprove, autoPush, commitMessage });
+    process.exit(code);
   } else {
     console.error(`Unknown command: ${command}`);
     process.exit(1);
   }
+}
+
+async function runGraph(
+  graph: TaskGraph,
+  options: { autoApprove: boolean; autoPush: boolean; commitMessage: string },
+): Promise<number> {
+  const maxParallel = parseInt(process.env.ORCHESTRACE_MAX_PARALLEL ?? '4', 10);
+  const provider = process.env.ORCHESTRACE_DEFAULT_PROVIDER ?? 'anthropic';
+  const model = process.env.ORCHESTRACE_DEFAULT_MODEL ?? 'claude-sonnet-4-20250514';
+
+  console.log(`\n▶ Running plan: ${graph.name} (${graph.nodes.length} tasks, max ${maxParallel} parallel)\n`);
+
+  const approvalGate = createApprovalGate(options.autoApprove);
+
+  const onEvent = (event: DagEvent) => {
+    const ts = new Date().toISOString().slice(11, 19);
+    switch (event.type) {
+      case 'task:ready':
+        console.log(`  [${ts}] ◇ ready:                 ${event.taskId}`);
+        break;
+      case 'task:planning':
+        console.log(`  [${ts}] ✎ planning:             ${event.taskId}`);
+        break;
+      case 'task:plan-persisted':
+        console.log(`  [${ts}] 📝 plan persisted:       ${event.taskId} -> ${event.path}`);
+        break;
+      case 'task:approval-requested':
+        console.log(`  [${ts}] ? approval requested:   ${event.taskId}`);
+        break;
+      case 'task:approved':
+        console.log(`  [${ts}] ✓ approved:             ${event.taskId}`);
+        break;
+      case 'task:started':
+        console.log(`  [${ts}] ▶ started:              ${event.taskId}`);
+        break;
+      case 'task:implementation-attempt':
+        console.log(`  [${ts}] ⚙ implement attempt:    ${event.taskId} (${event.attempt}/${event.maxAttempts})`);
+        break;
+      case 'task:validating':
+        console.log(`  [${ts}] ⌁ validating:           ${event.taskId}`);
+        break;
+      case 'task:verification-failed':
+        console.log(`  [${ts}] ✗ verification failed:  ${event.taskId} (attempt ${event.attempt})`);
+        break;
+      case 'task:completed':
+        console.log(`  [${ts}] ✓ completed:            ${event.taskId} (${event.output.durationMs}ms)`);
+        break;
+      case 'task:failed':
+        console.log(`  [${ts}] ✗ failed:               ${event.taskId} — ${event.error}`);
+        break;
+      case 'task:retrying':
+        console.log(`  [${ts}] ↻ retrying:             ${event.taskId} (attempt ${event.attempt}/${event.maxRetries})`);
+        break;
+      case 'graph:completed':
+        console.log(`\n✓ Plan completed. ${event.outputs.size} task(s) finished.`);
+        break;
+      case 'graph:failed':
+        console.log(`\n✗ Plan failed: ${event.error}`);
+        console.log(`  Completed: ${event.completedTasks.join(', ') || 'none'}`);
+        console.log(`  Failed:    ${event.failedTasks.join(', ')}`);
+        break;
+    }
+  };
+
+  const llm = new PiAiAdapter();
+  const cwd = process.cwd();
+
+  const outputs = await orchestrate(graph, {
+    llm,
+    cwd,
+    maxParallel,
+    defaultModel: { provider, model },
+    onEvent,
+    requirePlanApproval: true,
+    onPlanApproval: approvalGate,
+  });
+
+  let totalTokens = 0;
+  let totalCost = 0;
+  for (const output of outputs.values()) {
+    if (output.usage) {
+      totalTokens += output.usage.input + output.usage.output;
+      totalCost += output.usage.cost;
+    }
+  }
+
+  if (totalTokens > 0) {
+    console.log(`\nTokens: ${totalTokens.toLocaleString()} | Cost: $${totalCost.toFixed(4)}`);
+  }
+
+  const anyFailed = [...outputs.values()].some((output) => output.status === 'failed');
+  if (!anyFailed && options.autoPush) {
+    await commitAndPush(cwd, options.commitMessage);
+  }
+
+  return anyFailed ? 1 : 0;
+}
+
+function buildSingleTaskGraph(prompt: string): TaskGraph {
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const verifyCommands = parseVerifyCommands();
+
+  return {
+    id: `task-${timestamp}`,
+    name: 'Single Prompt Task',
+    nodes: [
+      {
+        id: 'task',
+        name: 'Execute prompt task',
+        type: 'code',
+        prompt,
+        dependencies: [],
+        validation: {
+          commands: verifyCommands,
+          maxRetries: 2,
+          retryDelayMs: 0,
+        },
+      },
+    ],
+  };
+}
+
+function parseVerifyCommands(): string[] {
+  const raw = process.env.ORCHESTRACE_VERIFY_COMMANDS;
+  if (!raw) {
+    return ['pnpm typecheck', 'pnpm test'];
+  }
+
+  return raw
+    .split(';')
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0);
+}
+
+function getBooleanFlag(args: string[], flag: string, fallback: boolean): boolean {
+  if (args.includes(flag)) return true;
+  return fallback;
+}
+
+function getFlagValue(args: string[], flag: string): string | undefined {
+  const idx = args.indexOf(flag);
+  if (idx === -1) return undefined;
+  return args[idx + 1];
+}
+
+function createApprovalGate(autoApprove: boolean): (request: PlanApprovalRequest) => Promise<boolean> {
+  if (autoApprove) {
+    return async () => true;
+  }
+
+  let queue = Promise.resolve();
+
+  return async (request: PlanApprovalRequest): Promise<boolean> => {
+    let approved = false;
+    queue = queue.then(async () => {
+      approved = await askForPlanApproval(request);
+    });
+    await queue;
+    return approved;
+  };
+}
+
+async function askForPlanApproval(request: PlanApprovalRequest): Promise<boolean> {
+  if (!process.stdin.isTTY) {
+    console.error(`\nApproval required for ${request.task.id}, but stdin is not interactive.`);
+    return false;
+  }
+
+  console.log(`\nPlan for task \"${request.task.id}\" saved at:\n  ${request.planPath}`);
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  const answer = await rl.question('Approve this plan and proceed with implementation? [y/N]: ');
+  rl.close();
+  return /^y(es)?$/i.test(answer.trim());
+}
+
+async function commitAndPush(cwd: string, commitMessage: string): Promise<void> {
+  const status = await runGit(cwd, ['status', '--porcelain']);
+  if (!status.trim()) {
+    console.log('\nNo git changes detected. Skipping commit/push.');
+    return;
+  }
+
+  console.log('\nPreparing git commit and push...');
+  await runGit(cwd, ['add', '-A']);
+
+  try {
+    await runGit(cwd, ['commit', '-m', commitMessage]);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (message.includes('nothing to commit')) {
+      console.log('Nothing to commit after staging. Skipping push.');
+      return;
+    }
+    throw err;
+  }
+
+  await runGit(cwd, ['push']);
+  console.log('Git push completed.');
+}
+
+async function runGit(cwd: string, args: string[]): Promise<string> {
+  const { stdout, stderr } = await execFileAsync('git', args, { cwd });
+  return `${stdout}${stderr}`;
 }
 
 main().catch((err) => {
