@@ -9,6 +9,8 @@ import type { ProviderInfo } from '@orchestrace/provider';
 import { createInterface } from 'node:readline/promises';
 import { promisify } from 'node:util';
 import { startUiServer } from './ui-server.js';
+import { WorkspaceManager } from './workspace-manager.js';
+import type { WorkspaceEntry } from './workspace-manager.js';
 
 const execFileAsync = promisify(execFile);
 loadDotEnv({ quiet: true });
@@ -23,6 +25,7 @@ orchestrace — DAG-based agent orchestration
 Usage:
   orchestrace run <plan.json>   Execute a task graph from a JSON plan file
   orchestrace task <prompt>     Run a single prompt task using the generalized flow
+  orchestrace workspace         Manage registered workspaces and active workspace
   orchestrace ui [--port 4310]  Start local dashboard for status, auth, and controls
   orchestrace auth              Interactive provider selection + authentication
   orchestrace auth status       Show auth status for providers
@@ -31,6 +34,7 @@ Usage:
 Flags:
   --provider <id>               Provider override (e.g. github-copilot, anthropic)
   --model <id>                  Model override for the selected provider
+  --workspace <id|name|path>    Workspace to run against (and set active)
   --port <number>               Port for UI server (default 4310)
   --auto-approve                Skip manual plan approval gate
   --push                        Commit and push if execution succeeds
@@ -69,6 +73,7 @@ Environment variables:
   auth.json is preferred and managed by 'orchestrace auth'
   ORCHESTRACE_DEFAULT_PROVIDER   Default LLM provider (default: anthropic)
   ORCHESTRACE_DEFAULT_MODEL      Default model ID
+  ORCHESTRACE_WORKSPACE          Active workspace identifier/path override
   ORCHESTRACE_MAX_PARALLEL       Max concurrent tasks (default: 4)
   ORCHESTRACE_AUTO_APPROVE       true/false plan auto-approval
   ORCHESTRACE_AUTO_PUSH          true/false auto git commit + push
@@ -84,6 +89,7 @@ Environment variables:
   const autoPush = getBooleanFlag(flagArgs, '--push', process.env.ORCHESTRACE_AUTO_PUSH === 'true');
   const providerOverride = getFlagValue(flagArgs, '--provider');
   const modelOverride = getFlagValue(flagArgs, '--model');
+  const workspaceOverride = getFlagValue(flagArgs, '--workspace') ?? process.env.ORCHESTRACE_WORKSPACE;
   const portOverride = parseInt(getFlagValue(flagArgs, '--port') ?? '', 10);
   const commitMessage = getFlagValue(flagArgs, '--commit-message')
     ?? 'chore(orchestrace): apply approved agent implementation';
@@ -93,10 +99,28 @@ Environment variables:
     process.exit(code);
   }
 
+  if (command === 'workspace') {
+    const code = await runWorkspaceCommand(args.slice(1));
+    process.exit(code);
+  }
+
   if (command === 'ui') {
-    await startUiServer({ port: Number.isNaN(portOverride) ? undefined : portOverride });
+    if (workspaceOverride) {
+      const manager = new WorkspaceManager(process.cwd());
+      await manager.selectWorkspace(workspaceOverride);
+    }
+
+    await startUiServer({
+      port: Number.isNaN(portOverride) ? undefined : portOverride,
+      workspace: workspaceOverride,
+    });
     return;
   }
+
+  const workspaceManager = new WorkspaceManager(process.cwd());
+  const workspace = workspaceOverride
+    ? await workspaceManager.selectWorkspace(workspaceOverride)
+    : await workspaceManager.getActiveWorkspace();
 
   if (command === 'run') {
     const planPath = args[1];
@@ -105,7 +129,7 @@ Environment variables:
       process.exit(1);
     }
 
-    const absolutePath = resolve(planPath);
+    const absolutePath = resolve(workspace.path, planPath);
     const raw = await readFile(absolutePath, 'utf-8');
     const graph: TaskGraph = JSON.parse(raw);
     const code = await runGraph(graph, {
@@ -114,6 +138,7 @@ Environment variables:
       commitMessage,
       providerOverride,
       modelOverride,
+      workspace,
     });
     process.exit(code);
   } else if (command === 'task') {
@@ -132,6 +157,7 @@ Environment variables:
       commitMessage,
       providerOverride,
       modelOverride,
+      workspace,
     });
     process.exit(code);
   } else {
@@ -146,6 +172,7 @@ async function runGraph(
     autoApprove: boolean;
     autoPush: boolean;
     commitMessage: string;
+    workspace: WorkspaceEntry;
     providerOverride?: string;
     modelOverride?: string;
   },
@@ -154,7 +181,8 @@ async function runGraph(
   const provider = options.providerOverride ?? process.env.ORCHESTRACE_DEFAULT_PROVIDER ?? 'anthropic';
   const model = options.modelOverride ?? process.env.ORCHESTRACE_DEFAULT_MODEL ?? 'claude-sonnet-4-20250514';
 
-  console.log(`\n▶ Running plan: ${graph.name} (${graph.nodes.length} tasks, max ${maxParallel} parallel)\n`);
+  console.log(`\n▶ Running plan: ${graph.name} (${graph.nodes.length} tasks, max ${maxParallel} parallel)`);
+  console.log(`Workspace: ${options.workspace.name} (${options.workspace.path})\n`);
 
   const approvalGate = createApprovalGate(options.autoApprove);
 
@@ -210,11 +238,12 @@ async function runGraph(
 
   const llm = new PiAiAdapter();
   const authManager = new ProviderAuthManager();
-  const cwd = process.cwd();
+  const cwd = options.workspace.path;
 
   const outputs = await orchestrate(graph, {
     llm,
     cwd,
+    planOutputDir: resolve(cwd, '.orchestrace', 'plans'),
     maxParallel,
     defaultModel: { provider, model },
     onEvent,
@@ -418,6 +447,87 @@ async function printAuthStatus(manager: ProviderAuthManager, providers: Provider
   }
 
   console.log('\nUse `orchestrace auth` to authenticate a provider.');
+}
+
+async function runWorkspaceCommand(args: string[]): Promise<number> {
+  const manager = new WorkspaceManager(process.cwd());
+  const subcommand = args[0] ?? 'list';
+
+  if (subcommand === 'list') {
+    await printWorkspaceList(manager);
+    return 0;
+  }
+
+  if (subcommand === 'current') {
+    const active = await manager.getActiveWorkspace();
+    console.log(`\nActive workspace:\n- id: ${active.id}\n- name: ${active.name}\n- path: ${active.path}`);
+    return 0;
+  }
+
+  if (subcommand === 'add') {
+    const workspacePath = args[1];
+    if (!workspacePath) {
+      console.error('Usage: orchestrace workspace add <path> [--name <friendly-name>]');
+      return 1;
+    }
+
+    const name = getFlagValue(args, '--name');
+    const entry = await manager.addWorkspace(workspacePath, name);
+    console.log(`\nAdded workspace and set active: ${entry.name} (${entry.id})\nPath: ${entry.path}`);
+    return 0;
+  }
+
+  if (subcommand === 'select') {
+    const identifier = args[1];
+    if (!identifier) {
+      console.error('Usage: orchestrace workspace select <id|name|path>');
+      return 1;
+    }
+
+    const entry = await manager.selectWorkspace(identifier);
+    console.log(`\nActive workspace set to: ${entry.name} (${entry.id})\nPath: ${entry.path}`);
+    return 0;
+  }
+
+  if (subcommand === 'remove') {
+    const identifier = args[1];
+    if (!identifier) {
+      console.error('Usage: orchestrace workspace remove <id|name|path>');
+      return 1;
+    }
+
+    const result = await manager.removeWorkspace(identifier);
+    console.log(`\nRemoved workspace: ${result.removedId}`);
+    console.log(`Active workspace: ${result.activeWorkspaceId}`);
+    return 0;
+  }
+
+  console.error('Unknown workspace subcommand.');
+  console.error('Usage:');
+  console.error('  orchestrace workspace list');
+  console.error('  orchestrace workspace current');
+  console.error('  orchestrace workspace add <path> [--name <friendly-name>]');
+  console.error('  orchestrace workspace select <id|name|path>');
+  console.error('  orchestrace workspace remove <id|name|path>');
+  return 1;
+}
+
+async function printWorkspaceList(manager: WorkspaceManager): Promise<void> {
+  const state = await manager.list();
+
+  console.log(`\nWorkspace store: ${manager.getStorePath()}`);
+  console.log('Registered workspaces:\n');
+
+  state.workspaces.forEach((workspace, index) => {
+    const marker = workspace.id === state.activeWorkspaceId ? '*' : ' ';
+    console.log(`${index + 1}. [${marker}] ${workspace.name}`);
+    console.log(`   id:   ${workspace.id}`);
+    console.log(`   path: ${workspace.path}`);
+  });
+
+  if (state.workspaces.length === 0) {
+    console.log('(none)');
+  }
 }
 
 async function selectProviderInteractive(providers: ProviderInfo[]): Promise<ProviderInfo | undefined> {

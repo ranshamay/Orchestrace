@@ -6,4 +6,6 @@ dist/
 .env.local
 auth.json
 **/auth.json
+.orchestrace/
+**/.orchestrace/
 coverage/

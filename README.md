@@ -45,6 +45,11 @@ pnpm --filter @orchestrace/cli dev auth github-copilot
 # Start local dashboard (status, start/cancel, auth)
 pnpm --filter @orchestrace/cli dev ui --port 4310
 
+# Register additional repos/workspaces (1..N) and switch active workspace
+pnpm --filter @orchestrace/cli dev workspace add /path/to/another-repo --name another-repo
+pnpm --filter @orchestrace/cli dev workspace list
+pnpm --filter @orchestrace/cli dev workspace select another-repo
+
 # Run a plan
 pnpm --filter @orchestrace/cli dev run examples/feature-plan.json
 
@@ -59,6 +64,9 @@ pnpm --filter @orchestrace/cli dev auth status
 
 # Override provider/model per run
 pnpm --filter @orchestrace/cli dev task "Fix flaky tests" --provider github-copilot --model gpt-4o
+
+# Run against a specific workspace without changing current active selection
+pnpm --filter @orchestrace/cli dev task "Refactor parser" --workspace /path/to/another-repo
 
 # Optional fallback: env vars still work if you prefer them
 export ANTHROPIC_API_KEY=sk-...
@@ -122,6 +130,7 @@ export ANTHROPIC_API_KEY=sk-...
 - **Validation gates** — Run shell commands (tsc, vitest, eslint) after each task; auto-retry on failure
 - **Iterative verification loop** — Validation failures are fed into the next attempt until criteria are met
 - **Per-task model selection** — Use fast models for simple tasks, reasoning models for complex ones
+- **Multi-workspace support** — Register multiple repos, switch active workspace, and run tasks per workspace in CLI and UI
 - **BYOK** — Bring your own keys for OpenAI, Anthropic, Google, Groq, xAI, Mistral, or any OpenAI-compatible API
 - **Approval gate** — Plans are persisted under `.orchestrace/plans/...` and require user approval before implementation
 - **Git finalize** — Optional stage/commit/push after success (`--push`)

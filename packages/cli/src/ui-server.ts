@@ -1,21 +1,24 @@
 import { randomUUID } from 'node:crypto';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { existsSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { join } from 'node:path';
 import { orchestrate } from '@orchestrace/core';
 import type { DagEvent, PlanApprovalRequest, TaskGraph } from '@orchestrace/core';
 import { getModels } from '@mariozechner/pi-ai';
 import { PiAiAdapter, ProviderAuthManager } from '@orchestrace/provider';
-import type { ProviderInfo } from '@orchestrace/provider';
+import { WorkspaceManager } from './workspace-manager.js';
 
 export interface UiServerOptions {
   port?: number;
+  workspace?: string;
 }
 
 type WorkState = 'running' | 'completed' | 'failed' | 'cancelled';
 
 interface WorkSession {
   id: string;
+  workspaceId: string;
+  workspaceName: string;
+  workspacePath: string;
   prompt: string;
   provider: string;
   model: string;
@@ -55,7 +58,11 @@ interface AuthSession {
 
 export async function startUiServer(options: UiServerOptions = {}): Promise<void> {
   const port = options.port ?? 4310;
-  const workspaceRoot = findWorkspaceRoot(process.cwd());
+  const workspaceManager = new WorkspaceManager(process.cwd());
+  if (options.workspace) {
+    await workspaceManager.selectWorkspace(options.workspace);
+  }
+
   const authManager = new ProviderAuthManager();
   const llm = new PiAiAdapter();
 
@@ -69,6 +76,56 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
 
       if (req.method === 'GET' && pathname === '/') {
         sendHtml(res, renderDashboardHtml());
+        return;
+      }
+
+      if (req.method === 'GET' && pathname === '/api/workspaces') {
+        const state = await workspaceManager.list();
+        sendJson(res, 200, {
+          activeWorkspaceId: state.activeWorkspaceId,
+          workspaces: state.workspaces,
+        });
+        return;
+      }
+
+      if (req.method === 'POST' && pathname === '/api/workspaces/add') {
+        const body = await readJsonBody(req);
+        const path = asString(body.path);
+        const name = asString(body.name);
+
+        if (!path) {
+          sendJson(res, 400, { error: 'Missing path' });
+          return;
+        }
+
+        const workspace = await workspaceManager.addWorkspace(path, name || undefined);
+        sendJson(res, 200, { workspace });
+        return;
+      }
+
+      if (req.method === 'POST' && pathname === '/api/workspaces/select') {
+        const body = await readJsonBody(req);
+        const workspace = asString(body.workspace);
+        if (!workspace) {
+          sendJson(res, 400, { error: 'Missing workspace identifier' });
+          return;
+        }
+
+        const selected = await workspaceManager.selectWorkspace(workspace);
+        sendJson(res, 200, { workspace: selected });
+        return;
+      }
+
+      if (req.method === 'POST' && pathname === '/api/workspaces/remove') {
+        const body = await readJsonBody(req);
+        const workspace = asString(body.workspace);
+        if (!workspace) {
+          sendJson(res, 400, { error: 'Missing workspace identifier' });
+          return;
+        }
+
+        const result = await workspaceManager.removeWorkspace(workspace);
+        sendJson(res, 200, result);
         return;
       }
 
@@ -222,10 +279,15 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
 
       if (req.method === 'POST' && pathname === '/api/work/start') {
         const body = await readJsonBody(req);
+        const workspaceId = asString(body.workspaceId);
         const prompt = asString(body.prompt);
         const provider = asString(body.provider) || process.env.ORCHESTRACE_DEFAULT_PROVIDER || 'anthropic';
         const model = asString(body.model) || process.env.ORCHESTRACE_DEFAULT_MODEL || 'claude-sonnet-4-20250514';
         const autoApprove = Boolean(body.autoApprove);
+
+        const workspace = workspaceId
+          ? await workspaceManager.selectWorkspace(workspaceId)
+          : await workspaceManager.getActiveWorkspace();
 
         if (!prompt) {
           sendJson(res, 400, { error: 'Missing prompt' });
@@ -236,6 +298,9 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         const controller = new AbortController();
         const session: WorkSession = {
           id,
+          workspaceId: workspace.id,
+          workspaceName: workspace.name,
+          workspacePath: workspace.path,
           prompt,
           provider,
           model,
@@ -254,8 +319,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
 
         void orchestrate(graph, {
           llm,
-          cwd: workspaceRoot,
-          planOutputDir: join(workspaceRoot, '.orchestrace', 'plans'),
+          cwd: workspace.path,
+          planOutputDir: join(workspace.path, '.orchestrace', 'plans'),
           defaultModel: { provider, model },
           maxParallel: 1,
           requirePlanApproval: !autoApprove,
@@ -439,6 +504,9 @@ function toUiEvent(event: DagEvent): UiDagEvent | undefined {
 function serializeWorkSession(session: WorkSession): Record<string, unknown> {
   return {
     id: session.id,
+    workspaceId: session.workspaceId,
+    workspaceName: session.workspaceName,
+    workspacePath: session.workspacePath,
     prompt: session.prompt,
     provider: session.provider,
     model: session.model,
@@ -509,22 +577,6 @@ async function readJsonBody(req: IncomingMessage): Promise<Record<string, unknow
 
 function toErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
-}
-
-function findWorkspaceRoot(startDir: string): string {
-  let current = resolve(startDir);
-
-  while (true) {
-    if (existsSync(join(current, 'pnpm-workspace.yaml')) || existsSync(join(current, '.git'))) {
-      return current;
-    }
-
-    const parent = dirname(current);
-    if (parent === current) {
-      return resolve(startDir);
-    }
-    current = parent;
-  }
 }
 
 function renderDashboardHtml(): string {
@@ -1038,6 +1090,32 @@ function renderDashboardHtml(): string {
       </div>
     </section>
 
+    <section class="panel">
+      <h2 class="section-title">Workspaces</h2>
+      <div class="grid">
+        <div class="full">
+          <label>Registered workspaces</label>
+          <select id="workspaceSelect"></select>
+        </div>
+        <div class="full actions">
+          <button class="secondary" id="workspaceActivate">Set Active</button>
+          <button class="danger" id="workspaceRemove">Remove</button>
+        </div>
+        <div class="full">
+          <label>Add workspace path</label>
+          <input id="workspacePath" placeholder="/absolute/path/to/repo" />
+        </div>
+        <div class="full">
+          <label>Optional workspace name</label>
+          <input id="workspaceName" placeholder="my-repo" />
+        </div>
+        <div class="full actions">
+          <button class="primary" id="workspaceAdd">Add Workspace</button>
+        </div>
+      </div>
+      <div id="workspaceStatus" class="status-note"></div>
+    </section>
+
     <section class="panel graph-panel">
       <div class="graph-head">
         <h2 class="section-title" style="margin:0;">Agent Graph</h2>
@@ -1057,6 +1135,10 @@ function renderDashboardHtml(): string {
     <section class="panel">
       <h2 class="section-title">Start Work</h2>
       <div class="grid">
+        <div class="full">
+          <label>Workspace</label>
+          <select id="workWorkspace"></select>
+        </div>
         <div>
           <label>Provider</label>
           <select id="workProvider"></select>
@@ -1091,6 +1173,8 @@ function renderDashboardHtml(): string {
   let activeAuthSessionId = null;
   let providerCache = [];
   let statusCache = [];
+  let workspaceCache = [];
+  let activeWorkspaceId = null;
   let workSessionsCache = [];
   let defaults = { provider: 'anthropic', model: 'claude-sonnet-4-20250514' };
 
@@ -1120,6 +1204,96 @@ function renderDashboardHtml(): string {
     }
     const prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
     applyTheme(prefersDark ? 'dark' : 'light');
+  }
+
+  async function refreshWorkspaces() {
+    const data = await api('/api/workspaces');
+    workspaceCache = data.workspaces || [];
+    activeWorkspaceId = data.activeWorkspaceId || null;
+
+    const workspaceSelect = document.getElementById('workspaceSelect');
+    const workWorkspace = document.getElementById('workWorkspace');
+    const previousWorkspace = workspaceSelect.value;
+    const previousWorkWorkspace = workWorkspace.value;
+    workspaceSelect.innerHTML = '';
+    workWorkspace.innerHTML = '';
+
+    for (const workspace of workspaceCache) {
+      const suffix = workspace.id === activeWorkspaceId ? ' [active]' : '';
+
+      const opt = document.createElement('option');
+      opt.value = workspace.id;
+      opt.textContent = workspace.name + suffix + ' - ' + workspace.path;
+      workspaceSelect.appendChild(opt);
+
+      const workOpt = document.createElement('option');
+      workOpt.value = workspace.id;
+      workOpt.textContent = workspace.name;
+      workWorkspace.appendChild(workOpt);
+    }
+
+    if (previousWorkspace && workspaceCache.find((item) => item.id === previousWorkspace)) {
+      workspaceSelect.value = previousWorkspace;
+    } else if (activeWorkspaceId) {
+      workspaceSelect.value = activeWorkspaceId;
+    }
+
+    if (previousWorkWorkspace && workspaceCache.find((item) => item.id === previousWorkWorkspace)) {
+      workWorkspace.value = previousWorkWorkspace;
+    } else if (activeWorkspaceId) {
+      workWorkspace.value = activeWorkspaceId;
+    }
+
+    const active = workspaceCache.find((item) => item.id === activeWorkspaceId);
+    if (active) {
+      setText('workspaceStatus', 'Active workspace: ' + active.name + ' (' + active.path + ')');
+    } else {
+      setText('workspaceStatus', 'No active workspace configured.');
+    }
+  }
+
+  async function addWorkspace() {
+    const path = document.getElementById('workspacePath').value.trim();
+    const name = document.getElementById('workspaceName').value.trim();
+
+    if (!path) {
+      setText('workspaceStatus', 'Workspace path is required.');
+      return;
+    }
+
+    await api('/api/workspaces/add', 'POST', { path, name });
+    document.getElementById('workspacePath').value = '';
+    document.getElementById('workspaceName').value = '';
+    await refreshWorkspaces();
+    setText('workspaceStatus', 'Workspace added and set active.');
+  }
+
+  async function activateWorkspace() {
+    const workspace = document.getElementById('workspaceSelect').value;
+    if (!workspace) {
+      setText('workspaceStatus', 'Select a workspace first.');
+      return;
+    }
+
+    await api('/api/workspaces/select', 'POST', { workspace });
+    await refreshWorkspaces();
+    setText('workspaceStatus', 'Active workspace updated.');
+  }
+
+  async function removeWorkspace() {
+    const workspace = document.getElementById('workspaceSelect').value;
+    if (!workspace) {
+      setText('workspaceStatus', 'Select a workspace first.');
+      return;
+    }
+
+    if (!window.confirm('Remove this workspace from Orchestrace?')) {
+      return;
+    }
+
+    await api('/api/workspaces/remove', 'POST', { workspace });
+    await refreshWorkspaces();
+    setText('workspaceStatus', 'Workspace removed.');
   }
 
   async function refreshProviders() {
@@ -1248,6 +1422,7 @@ function renderDashboardHtml(): string {
           + '<strong>' + session.id.slice(0, 8) + '</strong>'
           + '<span class="badge ' + session.status + '">' + session.status + '</span>'
         + '</div>'
+        + '<div class="meta">' + escapeHtml((session.workspaceName || 'workspace') + ' @ ' + (session.workspacePath || '')) + '</div>'
         + '<div class="meta">' + escapeHtml(session.provider + ' / ' + session.model) + '</div>'
         + '<div class="prompt">' + escapedPrompt + '</div>'
         + '<div class="session-actions">'
@@ -1365,7 +1540,7 @@ function renderDashboardHtml(): string {
       return;
     }
 
-    const lines = [];
+    const lines = ['Workspace: ' + (session.workspacePath || '(unknown)')];
     for (const event of session.events || []) {
       lines.push('[' + event.time + '] ' + event.message);
     }
@@ -1382,6 +1557,7 @@ function renderDashboardHtml(): string {
   }
 
   async function startWork() {
+    const workspaceId = document.getElementById('workWorkspace').value.trim();
     const prompt = document.getElementById('workPrompt').value.trim();
     const provider = document.getElementById('workProvider').value.trim();
     const model = document.getElementById('workModel').value.trim();
@@ -1392,7 +1568,13 @@ function renderDashboardHtml(): string {
       return;
     }
 
-    const result = await api('/api/work/start', 'POST', { prompt, provider, model, autoApprove });
+    const result = await api('/api/work/start', 'POST', {
+      workspaceId,
+      prompt,
+      provider,
+      model,
+      autoApprove,
+    });
     selectedWorkId = result.id;
     setText('workStatus', 'Started work session: ' + result.id);
     await refreshWorkSessions();
@@ -1460,12 +1642,22 @@ function renderDashboardHtml(): string {
   document.getElementById('themeDark').addEventListener('click', () => applyTheme('dark'));
   document.getElementById('authProvider').addEventListener('change', syncAuthMethodWithProvider);
   document.getElementById('authMethod').addEventListener('change', syncAuthMethodWithProvider);
+  document.getElementById('workspaceAdd').addEventListener('click', () => addWorkspace().catch((e) => setText('workspaceStatus', String(e))));
+  document.getElementById('workspaceActivate').addEventListener('click', () => activateWorkspace().catch((e) => setText('workspaceStatus', String(e))));
+  document.getElementById('workspaceRemove').addEventListener('click', () => removeWorkspace().catch((e) => setText('workspaceStatus', String(e))));
+  document.getElementById('workspaceSelect').addEventListener('change', () => {
+    const selected = document.getElementById('workspaceSelect').value;
+    if (selected) {
+      document.getElementById('workWorkspace').value = selected;
+    }
+  });
   document.getElementById('workProvider').addEventListener('change', () => refreshWorkModels().catch((e) => setText('workStatus', String(e))));
   document.getElementById('workStart').addEventListener('click', () => startWork().catch((e) => setText('workStatus', String(e))));
   document.getElementById('authStart').addEventListener('click', () => startAuth().catch((e) => setText('authStatus', String(e))));
   document.getElementById('authPromptSend').addEventListener('click', () => sendAuthPromptInput().catch((e) => setText('authStatus', String(e))));
 
   initTheme();
+  refreshWorkspaces().catch((e) => setText('workspaceStatus', String(e)));
   refreshProviders().catch((e) => setText('authStatus', String(e)));
   refreshWorkSessions().catch((e) => setText('workStatus', String(e)));
   setInterval(() => refreshWorkSessions().catch(() => {}), 2000);
