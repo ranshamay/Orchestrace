@@ -47,6 +47,9 @@ importers:
       '@orchestrace/sandbox':
         specifier: workspace:*
         version: link:../sandbox
+      '@orchestrace/tools':
+        specifier: workspace:*
+        version: link:../tools
       dotenv:
         specifier: ^17.4.0
         version: 17.4.0
@@ -85,6 +88,22 @@ importers:
         version: 2.1.9(@types/node@22.19.15)
 
   packages/sandbox:
+    devDependencies:
+      typescript:
+        specifier: ^5.6.0
+        version: 5.9.3
+      vitest:
+        specifier: ^2.0.0
+        version: 2.1.9(@types/node@22.19.15)
+
+  packages/tools:
+    dependencies:
+      '@mariozechner/pi-ai':
+        specifier: ^0.64.0
+        version: 0.64.0(ws@8.20.0)(zod@4.3.6)
+      '@orchestrace/provider':
+        specifier: workspace:*
+        version: link:../provider
     devDependencies:
       typescript:
         specifier: ^5.6.0

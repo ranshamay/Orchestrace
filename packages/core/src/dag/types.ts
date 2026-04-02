@@ -104,6 +104,7 @@ export interface TaskState {
 /** Events emitted by the DAG runner. */
 export type DagEvent =
   | { type: 'task:planning'; taskId: string }
+  | { type: 'task:stream-delta'; taskId: string; phase: 'planning' | 'implementation'; attempt: number; delta: string }
   | { type: 'task:plan-persisted'; taskId: string; path: string }
   | { type: 'task:approval-requested'; taskId: string; path: string }
   | { type: 'task:approved'; taskId: string }

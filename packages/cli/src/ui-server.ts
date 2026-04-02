@@ -6,6 +6,7 @@ import { orchestrate } from '@orchestrace/core';
 import type { DagEvent, PlanApprovalRequest, TaskGraph } from '@orchestrace/core';
 import { getModels } from '@mariozechner/pi-ai';
 import { PiAiAdapter, ProviderAuthManager } from '@orchestrace/provider';
+import { createAgentToolset } from '@orchestrace/tools';
 import { WorkspaceManager } from './workspace-manager.js';
 
 export interface UiServerOptions {
@@ -58,6 +59,38 @@ interface AuthSession {
   resolveInput?: (value: string) => void;
 }
 
+type ChatRole = 'user' | 'assistant' | 'system';
+
+interface SessionChatMessage {
+  role: ChatRole;
+  content: string;
+  time: string;
+  usage?: { input: number; output: number; cost: number };
+}
+
+interface SessionChatThread {
+  sessionId: string;
+  provider: string;
+  model: string;
+  workspacePath: string;
+  taskPrompt: string;
+  createdAt: string;
+  updatedAt: string;
+  messages: SessionChatMessage[];
+}
+
+interface ChatTokenStream {
+  id: string;
+  sessionId: string;
+  status: 'running' | 'completed' | 'failed';
+  replyText: string;
+  usage?: { input: number; output: number; cost: number };
+  usageEstimated?: boolean;
+  error?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export async function startUiServer(options: UiServerOptions = {}): Promise<void> {
   const port = options.port ?? 4310;
   const hmrEnabled = options.hmr ?? process.env.ORCHESTRACE_UI_HMR !== 'false';
@@ -71,7 +104,11 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
 
   const workSessions = new Map<string, WorkSession>();
   const authSessions = new Map<string, AuthSession>();
+  const sessionChats = new Map<string, SessionChatThread>();
+  const chatStreams = new Map<string, ChatTokenStream>();
   const hmrClients = new Set<ServerResponse>();
+  const workStreamClients = new Map<string, Set<ServerResponse>>();
+  const chatStreamClients = new Map<string, Set<ServerResponse>>();
 
   let hmrWatcher: FSWatcher | undefined;
   if (hmrEnabled) {
@@ -129,6 +166,51 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         sendJson(res, 200, {
           activeWorkspaceId: state.activeWorkspaceId,
           workspaces: state.workspaces,
+        });
+        return;
+      }
+
+      if (req.method === 'GET' && pathname === '/api/work/stream') {
+        const id = asString(url.searchParams.get('id'));
+        if (!id) {
+          sendJson(res, 400, { error: 'Missing id' });
+          return;
+        }
+
+        const session = workSessions.get(id);
+        if (!session) {
+          sendJson(res, 404, { error: 'Unknown work session' });
+          return;
+        }
+
+        res.writeHead(200, {
+          'Content-Type': 'text/event-stream',
+          'Cache-Control': 'no-cache, no-transform',
+          Connection: 'keep-alive',
+        });
+
+        let clients = workStreamClients.get(id);
+        if (!clients) {
+          clients = new Set<ServerResponse>();
+          workStreamClients.set(id, clients);
+        }
+        clients.add(res);
+
+        sendSse(res, 'ready', {
+          id,
+          status: session.status,
+          time: now(),
+        });
+
+        req.on('close', () => {
+          const group = workStreamClients.get(id);
+          if (!group) {
+            return;
+          }
+          group.delete(res);
+          if (group.size === 0) {
+            workStreamClients.delete(id);
+          }
         });
         return;
       }
@@ -396,6 +478,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         };
 
         workSessions.set(id, session);
+        sessionChats.set(id, createSessionChatThread(session));
 
         const graph = buildSingleTaskGraph(id, prompt);
 
@@ -409,8 +492,24 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           onPlanApproval: async (_request: PlanApprovalRequest) => autoApprove,
           signal: controller.signal,
           resolveApiKey: async (providerId) => authManager.resolveApiKey(providerId),
+          createToolset: ({ phase, task }) => createAgentToolset({
+            cwd: workspace.path,
+            phase,
+            taskType: task.type,
+          }),
           onEvent: (event) => {
             session.updatedAt = now();
+            if (event.type === 'task:stream-delta') {
+              broadcastWorkStream(workStreamClients, session.id, 'token', {
+                id: session.id,
+                taskId: event.taskId,
+                phase: event.phase,
+                attempt: event.attempt,
+                delta: event.delta,
+                time: now(),
+              });
+            }
+
             const uiEvent = toUiEvent(event);
             if (uiEvent) {
               session.events.push(uiEvent);
@@ -419,7 +518,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
               }
             }
 
-            if ('taskId' in event) {
+            if ('taskId' in event && event.type !== 'task:stream-delta') {
               session.taskStatus[event.taskId] = event.type;
             }
           },
@@ -438,11 +537,36 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           };
           session.error = failed ? firstOutput?.error ?? 'Execution failed' : undefined;
           session.updatedAt = now();
+
+          broadcastWorkStream(workStreamClients, session.id, 'end', {
+            id: session.id,
+            status: session.status,
+            time: now(),
+          });
+          closeWorkStream(workStreamClients, session.id);
+
+          const thread = sessionChats.get(session.id);
+          if (thread && firstOutput?.response) {
+            thread.messages.push({
+              role: 'assistant',
+              content: firstOutput.response,
+              time: now(),
+            });
+            trimThreadMessages(thread);
+            thread.updatedAt = now();
+          }
         }).catch((error) => {
           if (session.status !== 'cancelled') {
             session.status = 'failed';
             session.error = toErrorMessage(error);
             session.updatedAt = now();
+
+            broadcastWorkStream(workStreamClients, session.id, 'error', {
+              id: session.id,
+              error: session.error,
+              time: now(),
+            });
+            closeWorkStream(workStreamClients, session.id);
           }
         });
 
@@ -469,6 +593,13 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           session.controller.abort();
           session.status = 'cancelled';
           session.updatedAt = now();
+
+          broadcastWorkStream(workStreamClients, session.id, 'end', {
+            id: session.id,
+            status: session.status,
+            time: now(),
+          });
+          closeWorkStream(workStreamClients, session.id);
         }
 
         sendJson(res, 200, { ok: true });
@@ -480,6 +611,367 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
           .map(serializeWorkSession);
         sendJson(res, 200, { sessions });
+        return;
+      }
+
+      if (req.method === 'GET' && pathname === '/api/work/chat') {
+        const id = asString(url.searchParams.get('id'));
+        if (!id) {
+          sendJson(res, 400, { error: 'Missing id' });
+          return;
+        }
+
+        const session = workSessions.get(id);
+        if (!session) {
+          sendJson(res, 404, { error: 'Unknown work session' });
+          return;
+        }
+
+        const thread = sessionChats.get(id) ?? createSessionChatThread(session);
+        sessionChats.set(id, thread);
+
+        sendJson(res, 200, {
+          id,
+          provider: thread.provider,
+          model: thread.model,
+          messages: thread.messages.filter((message) => message.role !== 'system'),
+        });
+        return;
+      }
+
+      if (req.method === 'GET' && pathname === '/api/work/chat/stream') {
+        const streamId = asString(url.searchParams.get('streamId'));
+        if (!streamId) {
+          sendJson(res, 400, { error: 'Missing streamId' });
+          return;
+        }
+
+        const streamState = chatStreams.get(streamId);
+        if (!streamState) {
+          sendJson(res, 404, { error: 'Unknown chat stream' });
+          return;
+        }
+
+        res.writeHead(200, {
+          'Content-Type': 'text/event-stream',
+          'Cache-Control': 'no-cache, no-transform',
+          Connection: 'keep-alive',
+        });
+
+        let clients = chatStreamClients.get(streamId);
+        if (!clients) {
+          clients = new Set<ServerResponse>();
+          chatStreamClients.set(streamId, clients);
+        }
+        clients.add(res);
+
+        sendSse(res, 'ready', {
+          streamId,
+          sessionId: streamState.sessionId,
+          status: streamState.status,
+          usage: streamState.usage,
+          usageEstimated: streamState.usageEstimated ?? false,
+          time: now(),
+        });
+
+        if (streamState.replyText) {
+          sendSse(res, 'snapshot', {
+            streamId,
+            sessionId: streamState.sessionId,
+            text: streamState.replyText,
+            usage: streamState.usage,
+            usageEstimated: streamState.usageEstimated ?? false,
+            time: now(),
+          });
+        }
+
+        if (streamState.status === 'completed') {
+          sendSse(res, 'end', {
+            streamId,
+            sessionId: streamState.sessionId,
+            usage: streamState.usage,
+            time: now(),
+          });
+          res.end();
+          clients.delete(res);
+          if (clients.size === 0) {
+            chatStreamClients.delete(streamId);
+          }
+          return;
+        }
+
+        if (streamState.status === 'failed') {
+          sendSse(res, 'chat-error', {
+            streamId,
+            sessionId: streamState.sessionId,
+            error: streamState.error ?? 'Chat stream failed',
+            time: now(),
+          });
+          res.end();
+          clients.delete(res);
+          if (clients.size === 0) {
+            chatStreamClients.delete(streamId);
+          }
+          return;
+        }
+
+        req.on('close', () => {
+          const group = chatStreamClients.get(streamId);
+          if (!group) {
+            return;
+          }
+
+          group.delete(res);
+          if (group.size === 0) {
+            chatStreamClients.delete(streamId);
+          }
+        });
+
+        return;
+      }
+
+      if (req.method === 'POST' && pathname === '/api/work/chat/send-stream') {
+        const body = await readJsonBody(req);
+        const id = asString(body.id);
+        const message = asString(body.message);
+
+        if (!id) {
+          sendJson(res, 400, { error: 'Missing id' });
+          return;
+        }
+
+        if (!message) {
+          sendJson(res, 400, { error: 'Missing message' });
+          return;
+        }
+
+        const session = workSessions.get(id);
+        if (!session) {
+          sendJson(res, 404, { error: 'Unknown work session' });
+          return;
+        }
+
+        const providerStatuses = await authManager.getAllStatus();
+        const providerStatus = providerStatuses.find((item) => item.provider === session.provider);
+        if (!providerStatus || providerStatus.source === 'none') {
+          sendJson(res, 400, { error: `Provider ${session.provider} is not connected. Connect it in Settings first.` });
+          return;
+        }
+
+        const thread = sessionChats.get(id) ?? createSessionChatThread(session);
+        sessionChats.set(id, thread);
+
+        const userMessage: SessionChatMessage = {
+          role: 'user',
+          content: message,
+          time: now(),
+        };
+        thread.messages.push(userMessage);
+        trimThreadMessages(thread);
+        thread.updatedAt = now();
+
+        const streamId = randomUUID();
+        const streamState: ChatTokenStream = {
+          id: streamId,
+          sessionId: session.id,
+          status: 'running',
+          replyText: '',
+          usage: { input: 0, output: 0, cost: 0 },
+          usageEstimated: true,
+          createdAt: now(),
+          updatedAt: now(),
+        };
+        chatStreams.set(streamId, streamState);
+
+        void (async () => {
+          try {
+            const chatAgent = await llm.spawnAgent({
+              provider: session.provider,
+              model: session.model,
+              systemPrompt: buildChatSystemPrompt(session),
+              toolset: createAgentToolset({ cwd: session.workspacePath, phase: 'chat' }),
+              apiKey: await authManager.resolveApiKey(session.provider),
+            });
+
+            const chatPrompt = buildChatContinuationPrompt(thread);
+            const response = await chatAgent.complete(chatPrompt, undefined, {
+              onTextDelta: (delta) => {
+                if (!delta) {
+                  return;
+                }
+
+                streamState.replyText += delta;
+                streamState.updatedAt = now();
+
+                const estimatedOutput = estimateTokensFromText(streamState.replyText);
+                streamState.usage = {
+                  input: streamState.usage?.input ?? 0,
+                  output: estimatedOutput,
+                  cost: streamState.usage?.cost ?? 0,
+                };
+                streamState.usageEstimated = true;
+
+                broadcastWorkStream(chatStreamClients, streamId, 'token', {
+                  streamId,
+                  sessionId: session.id,
+                  delta,
+                  time: now(),
+                });
+
+                broadcastWorkStream(chatStreamClients, streamId, 'usage', {
+                  streamId,
+                  sessionId: session.id,
+                  usage: streamState.usage,
+                  estimated: true,
+                  time: now(),
+                });
+              },
+              onUsage: (usage) => {
+                const isZeroUsage = usage.input === 0 && usage.output === 0 && usage.cost === 0;
+                if (isZeroUsage && streamState.replyText.length > 0) {
+                  return;
+                }
+
+                const previous = streamState.usage;
+                if (
+                  previous
+                  && previous.input === usage.input
+                  && previous.output === usage.output
+                  && previous.cost === usage.cost
+                ) {
+                  return;
+                }
+
+                streamState.usage = usage;
+                streamState.usageEstimated = false;
+                streamState.updatedAt = now();
+
+                broadcastWorkStream(chatStreamClients, streamId, 'usage', {
+                  streamId,
+                  sessionId: session.id,
+                  usage,
+                  estimated: false,
+                  time: now(),
+                });
+              },
+            });
+
+            const assistantMessage: SessionChatMessage = {
+              role: 'assistant',
+              content: response.text,
+              time: now(),
+              usage: response.usage,
+            };
+
+            thread.messages.push(assistantMessage);
+            trimThreadMessages(thread);
+            thread.updatedAt = now();
+            session.updatedAt = now();
+
+            streamState.status = 'completed';
+            streamState.replyText = response.text;
+            streamState.usage = response.usage;
+            streamState.usageEstimated = false;
+            streamState.updatedAt = now();
+
+            broadcastWorkStream(chatStreamClients, streamId, 'end', {
+              streamId,
+              sessionId: session.id,
+              usage: response.usage,
+              usageEstimated: false,
+              time: now(),
+            });
+            closeWorkStream(chatStreamClients, streamId);
+            scheduleChatStreamCleanup(chatStreams, streamId);
+          } catch (error) {
+            streamState.status = 'failed';
+            streamState.error = toErrorMessage(error);
+            streamState.updatedAt = now();
+
+            broadcastWorkStream(chatStreamClients, streamId, 'chat-error', {
+              streamId,
+              sessionId: session.id,
+              error: streamState.error,
+              time: now(),
+            });
+            closeWorkStream(chatStreamClients, streamId);
+            scheduleChatStreamCleanup(chatStreams, streamId);
+          }
+        })();
+
+        sendJson(res, 200, { ok: true, streamId, sessionId: session.id });
+        return;
+      }
+
+      if (req.method === 'POST' && pathname === '/api/work/chat/send') {
+        const body = await readJsonBody(req);
+        const id = asString(body.id);
+        const message = asString(body.message);
+
+        if (!id) {
+          sendJson(res, 400, { error: 'Missing id' });
+          return;
+        }
+
+        if (!message) {
+          sendJson(res, 400, { error: 'Missing message' });
+          return;
+        }
+
+        const session = workSessions.get(id);
+        if (!session) {
+          sendJson(res, 404, { error: 'Unknown work session' });
+          return;
+        }
+
+        const providerStatuses = await authManager.getAllStatus();
+        const providerStatus = providerStatuses.find((item) => item.provider === session.provider);
+        if (!providerStatus || providerStatus.source === 'none') {
+          sendJson(res, 400, { error: `Provider ${session.provider} is not connected. Connect it in Settings first.` });
+          return;
+        }
+
+        const thread = sessionChats.get(id) ?? createSessionChatThread(session);
+        sessionChats.set(id, thread);
+
+        const userMessage: SessionChatMessage = {
+          role: 'user',
+          content: message,
+          time: now(),
+        };
+        thread.messages.push(userMessage);
+        trimThreadMessages(thread);
+        thread.updatedAt = now();
+
+        const chatAgent = await llm.spawnAgent({
+          provider: session.provider,
+          model: session.model,
+          systemPrompt: buildChatSystemPrompt(session),
+          toolset: createAgentToolset({ cwd: session.workspacePath, phase: 'chat' }),
+          apiKey: await authManager.resolveApiKey(session.provider),
+        });
+
+        const chatPrompt = buildChatContinuationPrompt(thread);
+        const response = await chatAgent.complete(chatPrompt);
+        const text = response.text;
+
+        const assistantMessage: SessionChatMessage = {
+          role: 'assistant',
+          content: text,
+          time: now(),
+          usage: response.usage,
+        };
+
+        thread.messages.push(assistantMessage);
+        trimThreadMessages(thread);
+        thread.updatedAt = now();
+        session.updatedAt = now();
+
+        sendJson(res, 200, {
+          ok: true,
+          reply: assistantMessage,
+          messages: thread.messages.filter((entry) => entry.role !== 'system'),
+        });
         return;
       }
 
@@ -502,7 +994,72 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
   server.on('close', () => {
     hmrWatcher?.close();
     hmrClients.clear();
+    for (const [id] of workStreamClients) {
+      closeWorkStream(workStreamClients, id);
+    }
+    for (const [id] of chatStreamClients) {
+      closeWorkStream(chatStreamClients, id);
+    }
   });
+}
+
+function sendSse(res: ServerResponse, event: string, payload: unknown): void {
+  res.write(`event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`);
+}
+
+function broadcastWorkStream(
+  streams: Map<string, Set<ServerResponse>>,
+  id: string,
+  event: string,
+  payload: unknown,
+): void {
+  const clients = streams.get(id);
+  if (!clients || clients.size === 0) {
+    return;
+  }
+
+  for (const client of [...clients]) {
+    try {
+      sendSse(client, event, payload);
+    } catch {
+      clients.delete(client);
+    }
+  }
+
+  if (clients.size === 0) {
+    streams.delete(id);
+  }
+}
+
+function closeWorkStream(streams: Map<string, Set<ServerResponse>>, id: string): void {
+  const clients = streams.get(id);
+  if (!clients) {
+    return;
+  }
+
+  for (const client of clients) {
+    try {
+      client.end();
+    } catch {
+      // ignore close errors
+    }
+  }
+  streams.delete(id);
+}
+
+function estimateTokensFromText(text: string): number {
+  // Rough heuristic for real-time UI counters until provider returns final usage.
+  if (!text) {
+    return 0;
+  }
+
+  return Math.max(1, Math.ceil(text.length / 4));
+}
+
+function scheduleChatStreamCleanup(streams: Map<string, ChatTokenStream>, streamId: string, ttlMs = 60_000): void {
+  setTimeout(() => {
+    streams.delete(streamId);
+  }, ttlMs);
 }
 
 function now(): string {
@@ -1316,6 +1873,21 @@ function renderDashboardHtml(hmrEnabled: boolean): string {
         <h2 class="section-title">Working: Sessions</h2>
         <div id="workRows" class="session-list"></div>
       </section>
+
+      <section class="panel full-span">
+        <h2 class="section-title">Working: Agent Chat</h2>
+        <div id="chatMessages" class="events">Select an agent session to chat and continue with context.</div>
+        <div class="grid" style="margin-top:8px;">
+          <div class="full">
+            <label>Message</label>
+            <textarea id="chatInput" placeholder="Ask selected agent to continue from here"></textarea>
+          </div>
+          <div class="full actions">
+            <button class="primary" id="chatSend">Send To Agent</button>
+          </div>
+        </div>
+        <div id="chatStatus" class="status-note"></div>
+      </section>
     </section>
   </main>
 
@@ -1331,7 +1903,22 @@ function renderDashboardHtml(hmrEnabled: boolean): string {
   let workspaceCache = [];
   let activeWorkspaceId = null;
   let workSessionsCache = [];
+  let chatBusy = false;
   let activeScreen = 'settings';
+  let workStreamSource = null;
+  let workStreamSessionId = null;
+  let chatStreamSource = null;
+  let chatStreamId = null;
+  let chatMessagesCache = [];
+  const liveStreamState = Object.create(null);
+  const liveChatState = {
+    sessionId: null,
+    text: '',
+    error: '',
+    status: '',
+    usage: null,
+    usageEstimated: false,
+  };
   let defaults = { provider: 'anthropic', model: 'claude-sonnet-4-20250514' };
 
   async function api(path, method = 'GET', body) {
@@ -1390,6 +1977,242 @@ function renderDashboardHtml(hmrEnabled: boolean): string {
     const stream = new EventSource('/__hmr');
     stream.addEventListener('reload', () => {
       window.location.reload();
+    });
+  }
+
+  function closeWorkStreamSubscription() {
+    if (workStreamSource) {
+      workStreamSource.close();
+      workStreamSource = null;
+    }
+    workStreamSessionId = null;
+  }
+
+  function ensureWorkStreamSubscription() {
+    if (!selectedWorkId || typeof EventSource === 'undefined') {
+      closeWorkStreamSubscription();
+      return;
+    }
+
+    const selectedSession = workSessionsCache.find((item) => item.id === selectedWorkId);
+    if (!selectedSession || selectedSession.status !== 'running') {
+      closeWorkStreamSubscription();
+      return;
+    }
+
+    if (workStreamSource && workStreamSessionId === selectedWorkId) {
+      return;
+    }
+
+    closeWorkStreamSubscription();
+    workStreamSessionId = selectedWorkId;
+
+    if (!liveStreamState[selectedWorkId]) {
+      liveStreamState[selectedWorkId] = { phase: '', text: '' };
+    }
+
+    const source = new EventSource('/api/work/stream?id=' + encodeURIComponent(selectedWorkId));
+    workStreamSource = source;
+
+    source.addEventListener('token', (event) => {
+      try {
+        const payload = JSON.parse(event.data || '{}');
+        const id = payload.id || workStreamSessionId;
+        if (!id) {
+          return;
+        }
+
+        if (!liveStreamState[id]) {
+          liveStreamState[id] = { phase: '', text: '' };
+        }
+
+        const state = liveStreamState[id];
+        const phase = typeof payload.phase === 'string' ? payload.phase : '';
+        if (phase && phase !== state.phase) {
+          state.phase = phase;
+          state.text += '\n\n[' + phase + ']\n';
+        }
+
+        const delta = typeof payload.delta === 'string' ? payload.delta : '';
+        state.text += delta;
+        if (state.text.length > 24000) {
+          state.text = state.text.slice(-24000);
+        }
+
+        if (selectedWorkId === id) {
+          renderSelectedEvents().catch(() => {});
+        }
+      } catch {
+        // ignore malformed stream payloads
+      }
+    });
+
+    source.addEventListener('end', (event) => {
+      try {
+        const payload = JSON.parse(event.data || '{}');
+        if (payload && payload.id && selectedWorkId === payload.id) {
+          renderSelectedEvents().catch(() => {});
+        }
+      } catch {
+        // ignore malformed stream payloads
+      }
+      closeWorkStreamSubscription();
+    });
+
+    source.addEventListener('error', () => {
+      if (workStreamSource === source) {
+        closeWorkStreamSubscription();
+      }
+    });
+  }
+
+  function closeChatStreamSubscription() {
+    if (chatStreamSource) {
+      chatStreamSource.close();
+      chatStreamSource = null;
+    }
+    chatStreamId = null;
+  }
+
+  function renderChatMessages(messages) {
+    const chatEl = document.getElementById('chatMessages');
+    const lines = [];
+
+    for (const message of messages || []) {
+      const role = message.role === 'assistant' ? 'Agent' : 'You';
+      lines.push('[' + message.time + '] ' + role + ': ' + message.content);
+      if (message.usage) {
+        lines.push('  tokens in/out: ' + message.usage.input + '/' + message.usage.output + ', cost: $' + Number(message.usage.cost || 0).toFixed(4));
+      }
+    }
+
+    if (liveChatState.sessionId === selectedWorkId) {
+      if (liveChatState.text) {
+        lines.push('');
+        lines.push('[live] Agent: ' + liveChatState.text);
+      }
+      if (liveChatState.usage) {
+        const prefix = liveChatState.usageEstimated ? '[live][est]' : '[live]';
+        lines.push(
+          prefix + ' tokens in/out: '
+            + liveChatState.usage.input + '/' + liveChatState.usage.output
+            + ', cost: $' + Number(liveChatState.usage.cost || 0).toFixed(4),
+        );
+      }
+      if (liveChatState.error) {
+        lines.push('');
+        lines.push('[live] ERROR: ' + liveChatState.error);
+      }
+    }
+
+    chatEl.textContent = lines.length ? lines.join('\n') : '(no messages yet)';
+  }
+
+  async function streamChatMessage(sessionId, message) {
+    const start = await api('/api/work/chat/send-stream', 'POST', { id: sessionId, message });
+    const streamId = start.streamId;
+
+    liveChatState.sessionId = sessionId;
+    liveChatState.text = '';
+    liveChatState.error = '';
+    liveChatState.status = 'streaming';
+    liveChatState.usage = null;
+    liveChatState.usageEstimated = false;
+    renderChatMessages(chatMessagesCache);
+
+    return new Promise((resolve, reject) => {
+      closeChatStreamSubscription();
+
+      const source = new EventSource('/api/work/chat/stream?streamId=' + encodeURIComponent(streamId));
+      chatStreamSource = source;
+      chatStreamId = streamId;
+
+      source.addEventListener('snapshot', (event) => {
+        try {
+          const payload = JSON.parse(event.data || '{}');
+          if (typeof payload.text === 'string') {
+            liveChatState.text = payload.text;
+          }
+          if (payload.usage && typeof payload.usage === 'object') {
+            liveChatState.usage = payload.usage;
+            liveChatState.usageEstimated = Boolean(payload.usageEstimated);
+          }
+          renderChatMessages(chatMessagesCache);
+        } catch {
+          // ignore malformed snapshot payloads
+        }
+      });
+
+      source.addEventListener('token', (event) => {
+        try {
+          const payload = JSON.parse(event.data || '{}');
+          const delta = typeof payload.delta === 'string' ? payload.delta : '';
+          liveChatState.text += delta;
+          if (liveChatState.text.length > 24000) {
+            liveChatState.text = liveChatState.text.slice(-24000);
+          }
+          renderChatMessages(chatMessagesCache);
+        } catch {
+          // ignore malformed token payloads
+        }
+      });
+
+      source.addEventListener('usage', (event) => {
+        try {
+          const payload = JSON.parse(event.data || '{}');
+          if (payload.usage && typeof payload.usage === 'object') {
+            liveChatState.usage = payload.usage;
+            liveChatState.usageEstimated = Boolean(payload.estimated);
+            renderChatMessages(chatMessagesCache);
+          }
+        } catch {
+          // ignore malformed usage payloads
+        }
+      });
+
+      source.addEventListener('chat-error', (event) => {
+        try {
+          const payload = JSON.parse(event.data || '{}');
+          liveChatState.error = payload.error || 'Chat stream failed';
+        } catch {
+          liveChatState.error = 'Chat stream failed';
+        }
+
+        liveChatState.status = 'failed';
+        renderChatMessages(chatMessagesCache);
+        closeChatStreamSubscription();
+        reject(new Error(liveChatState.error));
+      });
+
+      source.addEventListener('end', async () => {
+        closeChatStreamSubscription();
+        liveChatState.status = 'completed';
+        liveChatState.usageEstimated = false;
+        await refreshSelectedChat();
+        liveChatState.sessionId = null;
+        liveChatState.text = '';
+        liveChatState.error = '';
+        liveChatState.status = '';
+        liveChatState.usage = null;
+        liveChatState.usageEstimated = false;
+        resolve(undefined);
+      });
+
+      source.onerror = () => {
+        if (chatStreamSource !== source) {
+          return;
+        }
+
+        closeChatStreamSubscription();
+        if (liveChatState.status !== 'failed' && liveChatState.status !== 'completed') {
+          liveChatState.status = 'failed';
+          if (!liveChatState.error) {
+            liveChatState.error = 'Chat stream connection closed.';
+          }
+          renderChatMessages(chatMessagesCache);
+          reject(new Error(liveChatState.error));
+        }
+      };
     });
   }
 
@@ -1652,9 +2475,16 @@ function renderDashboardHtml(hmrEnabled: boolean): string {
   async function refreshWorkSessions() {
     const data = await api('/api/work');
     workSessionsCache = data.sessions || [];
+
+    if (selectedWorkId && !workSessionsCache.find((item) => item.id === selectedWorkId)) {
+      selectedWorkId = null;
+    }
+
     renderSessionList(workSessionsCache);
     renderSessionGraph(workSessionsCache);
     await renderSelectedEvents();
+    await refreshSelectedChat();
+    ensureWorkStreamSubscription();
   }
 
   function renderSessionList(sessions) {
@@ -1696,6 +2526,8 @@ function renderDashboardHtml(hmrEnabled: boolean): string {
         renderSessionList(workSessionsCache);
         renderSessionGraph(workSessionsCache);
         await renderSelectedEvents();
+        await refreshSelectedChat();
+        ensureWorkStreamSubscription();
       });
     });
 
@@ -1769,6 +2601,8 @@ function renderDashboardHtml(hmrEnabled: boolean): string {
         renderSessionList(workSessionsCache);
         renderSessionGraph(workSessionsCache);
         await renderSelectedEvents();
+        await refreshSelectedChat();
+        ensureWorkStreamSubscription();
       });
 
       svg.appendChild(group);
@@ -1798,6 +2632,15 @@ function renderDashboardHtml(hmrEnabled: boolean): string {
     }
 
     const lines = ['Workspace: ' + (session.workspacePath || '(unknown)')];
+
+    const live = liveStreamState[selectedWorkId];
+    if (live && live.text) {
+      lines.push('');
+      lines.push('Live stream (SSE):');
+      lines.push(live.text);
+      lines.push('');
+    }
+
     for (const event of session.events || []) {
       lines.push('[' + event.time + '] ' + event.message);
     }
@@ -1811,6 +2654,60 @@ function renderDashboardHtml(hmrEnabled: boolean): string {
     }
 
     eventsEl.textContent = lines.length ? lines.join('\\n') : '(no events yet)';
+  }
+
+  async function refreshSelectedChat() {
+    if (!selectedWorkId) {
+      closeChatStreamSubscription();
+      chatMessagesCache = [];
+      document.getElementById('chatMessages').textContent = 'Select an agent session to chat and continue with context.';
+      setText('chatStatus', '');
+      liveChatState.usage = null;
+      liveChatState.usageEstimated = false;
+      return;
+    }
+
+    if (liveChatState.sessionId && liveChatState.sessionId !== selectedWorkId) {
+      closeChatStreamSubscription();
+      liveChatState.sessionId = null;
+      liveChatState.text = '';
+      liveChatState.error = '';
+      liveChatState.status = '';
+      liveChatState.usage = null;
+      liveChatState.usageEstimated = false;
+    }
+
+    const data = await api('/api/work/chat?id=' + encodeURIComponent(selectedWorkId));
+    chatMessagesCache = data.messages || [];
+    renderChatMessages(chatMessagesCache);
+  }
+
+  async function sendChatMessage() {
+    if (chatBusy) {
+      return;
+    }
+
+    if (!selectedWorkId) {
+      setText('chatStatus', 'Select an agent session first.');
+      return;
+    }
+
+    const message = document.getElementById('chatInput').value.trim();
+    if (!message) {
+      setText('chatStatus', 'Message is required.');
+      return;
+    }
+
+    chatBusy = true;
+    setText('chatStatus', 'Streaming reply from selected agent...');
+
+    try {
+      await streamChatMessage(selectedWorkId, message);
+      document.getElementById('chatInput').value = '';
+      setText('chatStatus', 'Reply received via SSE. Context retained for this agent session.');
+    } finally {
+      chatBusy = false;
+    }
   }
 
   async function startWork() {
@@ -1980,6 +2877,7 @@ function renderDashboardHtml(hmrEnabled: boolean): string {
       .catch((e) => setText('workStatus', String(e)));
   });
   document.getElementById('workStart').addEventListener('click', () => startWork().catch((e) => setText('workStatus', String(e))));
+  document.getElementById('chatSend').addEventListener('click', () => sendChatMessage().catch((e) => setText('chatStatus', String(e))));
   document.getElementById('authStart').addEventListener('click', () => startAuth().catch((e) => setText('authStatus', String(e))));
   document.getElementById('authPromptSend').addEventListener('click', () => sendAuthPromptInput().catch((e) => setText('authStatus', String(e))));
 
@@ -2002,4 +2900,57 @@ function resolveUiWatchPath(workspaceRoot: string): string | undefined {
   }
 
   return undefined;
+}
+
+function createSessionChatThread(session: WorkSession): SessionChatThread {
+  const created = now();
+  return {
+    sessionId: session.id,
+    provider: session.provider,
+    model: session.model,
+    workspacePath: session.workspacePath,
+    taskPrompt: session.prompt,
+    createdAt: created,
+    updatedAt: created,
+    messages: [
+      {
+        role: 'user',
+        content: `Initial task prompt:\n${session.prompt}`,
+        time: created,
+      },
+    ],
+  };
+}
+
+function buildChatSystemPrompt(session: WorkSession): string {
+  return [
+    'You are continuing an existing Orchestrace agent session.',
+    'Keep continuity with prior messages and avoid repeating completed work.',
+    `Workspace: ${session.workspacePath}`,
+    `Provider/Model: ${session.provider}/${session.model}`,
+    `Original task prompt: ${session.prompt}`,
+  ].join('\n');
+}
+
+function buildChatContinuationPrompt(thread: SessionChatThread): string {
+  const turns = thread.messages
+    .filter((message) => message.role === 'user' || message.role === 'assistant')
+    .map((message) => `${message.role.toUpperCase()}: ${message.content}`)
+    .join('\n\n');
+
+  return [
+    'Continue this conversation with full continuity.',
+    'Conversation so far:',
+    turns || '(no previous turns)',
+    '',
+    'Reply as ASSISTANT and continue from the latest user message.',
+  ].join('\n');
+}
+
+function trimThreadMessages(thread: SessionChatThread, maxMessages = 80): void {
+  if (thread.messages.length <= maxMessages) {
+    return;
+  }
+
+  thread.messages.splice(0, thread.messages.length - maxMessages);
 }

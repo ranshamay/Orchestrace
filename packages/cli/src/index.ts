@@ -6,6 +6,7 @@ import { orchestrate } from '@orchestrace/core';
 import type { TaskGraph, DagEvent, PlanApprovalRequest } from '@orchestrace/core';
 import { PiAiAdapter, ProviderAuthManager } from '@orchestrace/provider';
 import type { ProviderInfo } from '@orchestrace/provider';
+import { createAgentToolset } from '@orchestrace/tools';
 import { createInterface } from 'node:readline/promises';
 import { promisify } from 'node:util';
 import { startUiServer } from './ui-server.js';
@@ -77,6 +78,7 @@ Environment variables:
   ORCHESTRACE_DEFAULT_MODEL      Default model ID
   ORCHESTRACE_WORKSPACE          Active workspace identifier/path override
   ORCHESTRACE_UI_HMR             true/false UI hot reload
+  ORCHESTRACE_LLM_TIMEOUT_MS     Per-request LLM timeout in milliseconds (default: 120000)
   ORCHESTRACE_MAX_PARALLEL       Max concurrent tasks (default: 4)
   ORCHESTRACE_AUTO_APPROVE       true/false plan auto-approval
   ORCHESTRACE_AUTO_PUSH          true/false auto git commit + push
@@ -200,6 +202,9 @@ async function runGraph(
       case 'task:planning':
         console.log(`  [${ts}] ✎ planning:             ${event.taskId}`);
         break;
+      case 'task:stream-delta':
+        console.log(`  [${ts}] · stream (${event.phase}):      ${previewStreamDelta(event.delta)}`);
+        break;
       case 'task:plan-persisted':
         console.log(`  [${ts}] 📝 plan persisted:       ${event.taskId} -> ${event.path}`);
         break;
@@ -255,6 +260,7 @@ async function runGraph(
     requirePlanApproval: true,
     onPlanApproval: approvalGate,
     resolveApiKey: (providerId) => authManager.resolveApiKey(providerId),
+    createToolset: ({ phase, task }) => createAgentToolset({ cwd, phase, taskType: task.type }),
   });
 
   let totalTokens = 0;
@@ -276,6 +282,15 @@ async function runGraph(
   }
 
   return anyFailed ? 1 : 0;
+}
+
+function previewStreamDelta(delta: string): string {
+  const compact = delta.replace(/\s+/g, ' ').trim();
+  if (!compact) {
+    return '(blank)';
+  }
+
+  return compact.length > 100 ? `${compact.slice(0, 97)}...` : compact;
 }
 
 function buildSingleTaskGraph(prompt: string): TaskGraph {

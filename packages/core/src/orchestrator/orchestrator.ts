@@ -10,7 +10,7 @@ import type {
 import type { TaskExecutionContext } from '../dag/scheduler.js';
 import { runDag } from '../dag/scheduler.js';
 import { validate } from '../validation/validator.js';
-import type { LlmAdapter } from '@orchestrace/provider';
+import type { LlmAdapter, LlmToolset } from '@orchestrace/provider';
 
 export interface PlanApprovalRequest {
   task: TaskNode;
@@ -37,6 +37,14 @@ export interface OrchestratorConfig extends RunnerConfig {
   onPlanApproval?: (request: PlanApprovalRequest) => Promise<boolean>;
   /** Optional provider auth resolver (env, OAuth store, secret manager, etc.). */
   resolveApiKey?: (provider: string) => Promise<string | undefined>;
+  /** Optional factory for phase-specific agent tools. */
+  createToolset?: (params: {
+    phase: 'planning' | 'implementation';
+    task: TaskNode;
+    graphId: string;
+    cwd: string;
+    attempt?: number;
+  }) => LlmToolset | undefined;
   /** Max implementation attempts per task. Defaults to validation.maxRetries + 1. */
   maxImplementationAttempts?: number;
   /** Directory for per-agent token dumps. Defaults to <cwd>/.orchestrace/tokens. */
@@ -64,6 +72,7 @@ export async function orchestrate(
     requirePlanApproval,
     onPlanApproval,
     resolveApiKey,
+    createToolset,
     maxImplementationAttempts,
     onEvent,
   } = config;
@@ -117,13 +126,29 @@ export async function orchestrate(
         ?? systemPrompt
         ?? 'You are a senior planning agent. Produce a deep, concrete implementation plan.',
       signal: context.signal,
+      toolset: createToolset?.({
+        phase: 'planning',
+        task: node,
+        graphId: graph.id,
+        cwd,
+      }),
       apiKey,
     });
 
     emit({ type: 'task:planning', taskId: node.id });
 
     const planningPrompt = buildPlanningPrompt(node, context.depOutputs);
-    const planningResult = await planningAgent.complete(planningPrompt, context.signal);
+    const planningResult = await planningAgent.complete(planningPrompt, context.signal, {
+      onTextDelta: (delta) => {
+        emit({
+          type: 'task:stream-delta',
+          taskId: node.id,
+          phase: 'planning',
+          attempt: 1,
+          delta,
+        });
+      },
+    });
     mergeUsage(usage, planningResult.usage);
     await appendTokenDump(planningTokenDumpPath, {
       graphId: graph.id,
@@ -192,6 +217,12 @@ export async function orchestrate(
         ?? systemPrompt
         ?? 'You are a coding agent. Implement the approved plan exactly and fix validation failures iteratively.',
       signal: context.signal,
+      toolset: createToolset?.({
+        phase: 'implementation',
+        task: node,
+        graphId: graph.id,
+        cwd,
+      }),
       apiKey,
     });
 
@@ -222,7 +253,17 @@ export async function orchestrate(
         previousValidationError: lastValidationError,
       });
 
-      const implResult = await implAgent.complete(implementationPrompt, context.signal);
+      const implResult = await implAgent.complete(implementationPrompt, context.signal, {
+        onTextDelta: (delta) => {
+          emit({
+            type: 'task:stream-delta',
+            taskId: node.id,
+            phase: 'implementation',
+            attempt,
+            delta,
+          });
+        },
+      });
       mergeUsage(usage, implResult.usage);
       await appendTokenDump(implementationTokenDumpPath, {
         graphId: graph.id,
