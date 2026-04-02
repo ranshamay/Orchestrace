@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { orchestrate } from '@orchestrace/core';
 import type { DagEvent, PlanApprovalRequest, TaskGraph } from '@orchestrace/core';
@@ -84,6 +85,44 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         sendJson(res, 200, {
           activeWorkspaceId: state.activeWorkspaceId,
           workspaces: state.workspaces,
+        });
+        return;
+      }
+
+      if (req.method === 'GET' && pathname === '/api/workspaces/readiness') {
+        const provider = asString(url.searchParams.get('provider'))
+          || process.env.ORCHESTRACE_DEFAULT_PROVIDER
+          || 'anthropic';
+
+        const state = await workspaceManager.list();
+        const statuses = await authManager.getAllStatus();
+        const providerStatus = statuses.find((item) => item.provider === provider);
+        const authSource = providerStatus?.source ?? 'none';
+        const authReady = authSource !== 'none';
+
+        const workspaces = state.workspaces.map((workspace) => {
+          const pathExists = existsSync(workspace.path);
+          const hasGit = pathExists && existsSync(join(workspace.path, '.git'));
+          const hasNodeProject = pathExists
+            && (existsSync(join(workspace.path, 'package.json')) || existsSync(join(workspace.path, 'pnpm-workspace.yaml')));
+
+          return {
+            ...workspace,
+            active: workspace.id === state.activeWorkspaceId,
+            checks: {
+              pathExists,
+              hasGit,
+              hasNodeProject,
+              authReady,
+            },
+            ready: pathExists && hasGit && authReady,
+          };
+        });
+
+        sendJson(res, 200, {
+          provider,
+          authSource,
+          workspaces,
         });
         return;
       }
@@ -836,6 +875,37 @@ function renderDashboardHtml(): string {
       background: rgba(8, 12, 21, 0.72);
     }
 
+    .readiness-list {
+      margin-top: 10px;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: rgba(255, 255, 255, 0.56);
+      padding: 10px;
+      max-height: 200px;
+      overflow: auto;
+      font-size: 12px;
+      line-height: 1.45;
+    }
+
+    body[data-theme="dark"] .readiness-list {
+      background: rgba(8, 12, 21, 0.72);
+    }
+
+    .readiness-item {
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 8px;
+      margin-bottom: 8px;
+    }
+
+    .readiness-item:last-child {
+      margin-bottom: 0;
+    }
+
+    .readiness-item.active {
+      border-color: rgba(21, 94, 239, 0.42);
+    }
+
     .graph-panel {
       display: grid;
       grid-template-rows: auto 1fr auto;
@@ -1114,6 +1184,7 @@ function renderDashboardHtml(): string {
         </div>
       </div>
       <div id="workspaceStatus" class="status-note"></div>
+      <div id="workspaceReadiness" class="readiness-list">Loading workspace readiness...</div>
     </section>
 
     <section class="panel graph-panel">
@@ -1250,6 +1321,41 @@ function renderDashboardHtml(): string {
     } else {
       setText('workspaceStatus', 'No active workspace configured.');
     }
+
+    await refreshWorkspaceReadiness();
+  }
+
+  async function refreshWorkspaceReadiness() {
+    const provider = document.getElementById('workProvider').value || defaults.provider;
+    const data = await api('/api/workspaces/readiness?provider=' + encodeURIComponent(provider));
+    const root = document.getElementById('workspaceReadiness');
+    const rows = data.workspaces || [];
+
+    if (!rows.length) {
+      root.textContent = 'No workspaces registered.';
+      return;
+    }
+
+    const summary = '<div class="muted">Provider auth for ' + escapeHtml(data.provider || provider) + ': '
+      + escapeHtml(data.authSource || 'none') + '</div>';
+
+    const cards = rows.map((workspace) => {
+      const checks = workspace.checks || {};
+      const flags = [
+        checks.pathExists ? 'path:ok' : 'path:missing',
+        checks.hasGit ? 'git:ok' : 'git:missing',
+        checks.hasNodeProject ? 'node:ok' : 'node:missing',
+        checks.authReady ? 'auth:ok' : 'auth:missing',
+      ].join(' | ');
+
+      return '<div class="readiness-item' + (workspace.active ? ' active' : '') + '">'
+        + '<div><strong>' + escapeHtml(workspace.name || workspace.id || 'workspace') + '</strong></div>'
+        + '<div class="muted">' + escapeHtml(workspace.path || '') + '</div>'
+        + '<div>' + escapeHtml(flags) + (workspace.ready ? ' | ready' : ' | not-ready') + '</div>'
+        + '</div>';
+    }).join('');
+
+    root.innerHTML = summary + cards;
   }
 
   async function addWorkspace() {
@@ -1337,6 +1443,7 @@ function renderDashboardHtml(): string {
 
     await refreshWorkModels();
     syncAuthMethodWithProvider();
+    await refreshWorkspaceReadiness();
   }
 
   async function refreshWorkModels() {
@@ -1651,7 +1758,11 @@ function renderDashboardHtml(): string {
       document.getElementById('workWorkspace').value = selected;
     }
   });
-  document.getElementById('workProvider').addEventListener('change', () => refreshWorkModels().catch((e) => setText('workStatus', String(e))));
+  document.getElementById('workProvider').addEventListener('change', () => {
+    refreshWorkModels()
+      .then(() => refreshWorkspaceReadiness())
+      .catch((e) => setText('workStatus', String(e)));
+  });
   document.getElementById('workStart').addEventListener('click', () => startWork().catch((e) => setText('workStatus', String(e))));
   document.getElementById('authStart').addEventListener('click', () => startAuth().catch((e) => setText('authStatus', String(e))));
   document.getElementById('authPromptSend').addEventListener('click', () => sendAuthPromptInput().catch((e) => setText('authStatus', String(e))));
