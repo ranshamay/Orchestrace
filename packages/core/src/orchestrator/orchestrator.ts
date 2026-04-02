@@ -1,5 +1,5 @@
-import { mkdir, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { appendFile, mkdir, writeFile } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
 import type {
   TaskGraph,
   TaskNode,
@@ -39,6 +39,8 @@ export interface OrchestratorConfig extends RunnerConfig {
   resolveApiKey?: (provider: string) => Promise<string | undefined>;
   /** Max implementation attempts per task. Defaults to validation.maxRetries + 1. */
   maxImplementationAttempts?: number;
+  /** Directory for per-agent token dumps. Defaults to <cwd>/.orchestrace/tokens. */
+  tokenDumpDir?: string;
 }
 
 /**
@@ -58,6 +60,7 @@ export async function orchestrate(
     planningSystemPrompt,
     implementationSystemPrompt,
     planOutputDir,
+    tokenDumpDir,
     requirePlanApproval,
     onPlanApproval,
     resolveApiKey,
@@ -97,6 +100,13 @@ export async function orchestrate(
     const apiKey = await resolveApiKey?.(model.provider);
 
     const usage = { input: 0, output: 0, cost: 0 };
+    const taskTokenDumpDir = join(
+      tokenDumpDir ?? join(cwd, '.orchestrace', 'tokens'),
+      sanitizeForPath(graph.id),
+      sanitizeForPath(node.id),
+    );
+    const planningTokenDumpPath = join(taskTokenDumpDir, 'planning.jsonl');
+    const implementationTokenDumpPath = join(taskTokenDumpDir, 'implementation.jsonl');
 
     const planningAgent = await llm.spawnAgent({
       provider: model.provider,
@@ -115,6 +125,15 @@ export async function orchestrate(
     const planningPrompt = buildPlanningPrompt(node, context.depOutputs);
     const planningResult = await planningAgent.complete(planningPrompt, context.signal);
     mergeUsage(usage, planningResult.usage);
+    await appendTokenDump(planningTokenDumpPath, {
+      graphId: graph.id,
+      taskId: node.id,
+      agent: 'planning',
+      attempt: 1,
+      provider: model.provider,
+      model: model.model,
+      usage: planningResult.usage,
+    });
 
     const persistedPlanPath = await persistPlan({
       baseDir: planOutputDir ?? join(cwd, '.orchestrace', 'plans'),
@@ -133,6 +152,7 @@ export async function orchestrate(
           status: 'failed',
           plan: planningResult.text,
           planPath: persistedPlanPath,
+          tokenDumpDir: taskTokenDumpDir,
           error: 'Plan approval is required but no approval handler was provided.',
           durationMs: Date.now() - start,
           retries: 0,
@@ -152,6 +172,7 @@ export async function orchestrate(
           status: 'failed',
           plan: planningResult.text,
           planPath: persistedPlanPath,
+          tokenDumpDir: taskTokenDumpDir,
           error: 'Plan was rejected by user approval gate.',
           durationMs: Date.now() - start,
           retries: 0,
@@ -203,6 +224,15 @@ export async function orchestrate(
 
       const implResult = await implAgent.complete(implementationPrompt, context.signal);
       mergeUsage(usage, implResult.usage);
+      await appendTokenDump(implementationTokenDumpPath, {
+        graphId: graph.id,
+        taskId: node.id,
+        agent: 'implementation',
+        attempt,
+        provider: model.provider,
+        model: model.model,
+        usage: implResult.usage,
+      });
       lastResponse = implResult.text;
 
       const output: TaskOutput = {
@@ -210,6 +240,7 @@ export async function orchestrate(
         status: 'completed',
         plan: planningResult.text,
         planPath: persistedPlanPath,
+        tokenDumpDir: taskTokenDumpDir,
         response: implResult.text,
         filesChanged: implResult.filesChanged,
         durationMs: Date.now() - start,
@@ -249,6 +280,7 @@ export async function orchestrate(
       status: 'failed',
       plan: planningResult.text,
       planPath: persistedPlanPath,
+      tokenDumpDir: taskTokenDumpDir,
       response: lastResponse,
       validationResults: lastValidationResults,
       error: lastValidationError || 'Implementation did not satisfy validation criteria.',
@@ -262,6 +294,37 @@ export async function orchestrate(
     ...config,
     onEvent: emit,
   });
+}
+
+async function appendTokenDump(
+  path: string,
+  entry: {
+    graphId: string;
+    taskId: string;
+    agent: 'planning' | 'implementation';
+    attempt: number;
+    provider: string;
+    model: string;
+    usage?: { input: number; output: number; cost: number };
+  },
+): Promise<void> {
+  await mkdir(dirname(path), { recursive: true });
+  const payload = {
+    time: new Date().toISOString(),
+    graphId: entry.graphId,
+    taskId: entry.taskId,
+    agent: entry.agent,
+    attempt: entry.attempt,
+    provider: entry.provider,
+    model: entry.model,
+    tokens: {
+      input: entry.usage?.input ?? 0,
+      output: entry.usage?.output ?? 0,
+      cost: entry.usage?.cost ?? 0,
+    },
+  };
+
+  await appendFile(path, `${JSON.stringify(payload)}\n`, 'utf-8');
 }
 
 function buildPlanningPrompt(node: TaskNode, depOutputs: Map<string, TaskOutput>): string {

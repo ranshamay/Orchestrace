@@ -60,6 +60,8 @@ export interface TaskOutput {
   plan?: string;
   /** File path where the generated plan was persisted. */
   planPath?: string;
+  /** Directory containing per-agent token dump files for this task. */
+  tokenDumpDir?: string;
   /** LLM response text. */
   response?: string;
   /** Files created or modified. */

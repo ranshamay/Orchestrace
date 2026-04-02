@@ -36,6 +36,8 @@ Flags:
   --model <id>                  Model override for the selected provider
   --workspace <id|name|path>    Workspace to run against (and set active)
   --port <number>               Port for UI server (default 4310)
+  --hmr                         Enable UI hot reload (default: enabled)
+  --no-hmr                      Disable UI hot reload
   --auto-approve                Skip manual plan approval gate
   --push                        Commit and push if execution succeeds
   --commit-message <message>    Commit message when --push is enabled
@@ -74,6 +76,7 @@ Environment variables:
   ORCHESTRACE_DEFAULT_PROVIDER   Default LLM provider (default: anthropic)
   ORCHESTRACE_DEFAULT_MODEL      Default model ID
   ORCHESTRACE_WORKSPACE          Active workspace identifier/path override
+  ORCHESTRACE_UI_HMR             true/false UI hot reload
   ORCHESTRACE_MAX_PARALLEL       Max concurrent tasks (default: 4)
   ORCHESTRACE_AUTO_APPROVE       true/false plan auto-approval
   ORCHESTRACE_AUTO_PUSH          true/false auto git commit + push
@@ -91,6 +94,7 @@ Environment variables:
   const modelOverride = getFlagValue(flagArgs, '--model');
   const workspaceOverride = getFlagValue(flagArgs, '--workspace') ?? process.env.ORCHESTRACE_WORKSPACE;
   const portOverride = parseInt(getFlagValue(flagArgs, '--port') ?? '', 10);
+  const uiHmr = getUiHmrFlag(flagArgs);
   const commitMessage = getFlagValue(flagArgs, '--commit-message')
     ?? 'chore(orchestrace): apply approved agent implementation';
 
@@ -113,6 +117,7 @@ Environment variables:
     await startUiServer({
       port: Number.isNaN(portOverride) ? undefined : portOverride,
       workspace: workspaceOverride,
+      hmr: uiHmr,
     });
     return;
   }
@@ -318,6 +323,23 @@ function getFlagValue(args: string[], flag: string): string | undefined {
   const idx = args.indexOf(flag);
   if (idx === -1) return undefined;
   return args[idx + 1];
+}
+
+function getUiHmrFlag(args: string[]): boolean {
+  if (args.includes('--no-hmr')) {
+    return false;
+  }
+
+  if (args.includes('--hmr')) {
+    return true;
+  }
+
+  const envValue = process.env.ORCHESTRACE_UI_HMR;
+  if (envValue) {
+    return envValue !== 'false';
+  }
+
+  return true;
 }
 
 function createApprovalGate(autoApprove: boolean): (request: PlanApprovalRequest) => Promise<boolean> {

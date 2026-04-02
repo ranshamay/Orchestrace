@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { existsSync } from 'node:fs';
+import { existsSync, watch, type FSWatcher } from 'node:fs';
 import { join } from 'node:path';
 import { orchestrate } from '@orchestrace/core';
 import type { DagEvent, PlanApprovalRequest, TaskGraph } from '@orchestrace/core';
@@ -11,6 +11,7 @@ import { WorkspaceManager } from './workspace-manager.js';
 export interface UiServerOptions {
   port?: number;
   workspace?: string;
+  hmr?: boolean;
 }
 
 type WorkState = 'running' | 'completed' | 'failed' | 'cancelled';
@@ -59,6 +60,7 @@ interface AuthSession {
 
 export async function startUiServer(options: UiServerOptions = {}): Promise<void> {
   const port = options.port ?? 4310;
+  const hmrEnabled = options.hmr ?? process.env.ORCHESTRACE_UI_HMR !== 'false';
   const workspaceManager = new WorkspaceManager(process.cwd());
   if (options.workspace) {
     await workspaceManager.selectWorkspace(options.workspace);
@@ -69,6 +71,34 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
 
   const workSessions = new Map<string, WorkSession>();
   const authSessions = new Map<string, AuthSession>();
+  const hmrClients = new Set<ServerResponse>();
+
+  let hmrWatcher: FSWatcher | undefined;
+  if (hmrEnabled) {
+    const watchPath = resolveUiWatchPath(workspaceManager.getRootDir());
+    if (watchPath) {
+      let pendingReload = false;
+      hmrWatcher = watch(watchPath, { recursive: true }, (_eventType, changedPath) => {
+        const changed = typeof changedPath === 'string' ? changedPath : String(changedPath ?? '');
+        if (!changed || changed.includes('node_modules') || changed.includes('.git')) {
+          return;
+        }
+
+        if (pendingReload) {
+          return;
+        }
+
+        pendingReload = true;
+        setTimeout(() => {
+          pendingReload = false;
+          const payload = JSON.stringify({ time: now(), file: changed });
+          for (const client of hmrClients) {
+            client.write(`event: reload\ndata: ${payload}\n\n`);
+          }
+        }, 120);
+      });
+    }
+  }
 
   const server = createServer(async (req, res) => {
     try {
@@ -76,7 +106,21 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       const { pathname } = url;
 
       if (req.method === 'GET' && pathname === '/') {
-        sendHtml(res, renderDashboardHtml());
+        sendHtml(res, renderDashboardHtml(hmrEnabled));
+        return;
+      }
+
+      if (hmrEnabled && req.method === 'GET' && pathname === '/__hmr') {
+        res.writeHead(200, {
+          'Content-Type': 'text/event-stream',
+          'Cache-Control': 'no-cache, no-transform',
+          Connection: 'keep-alive',
+        });
+        res.write(': connected\n\n');
+        hmrClients.add(res);
+        req.on('close', () => {
+          hmrClients.delete(res);
+        });
         return;
       }
 
@@ -186,6 +230,13 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         const provider = asString(url.searchParams.get('provider'));
         if (!provider) {
           sendJson(res, 400, { error: 'Missing provider query parameter' });
+          return;
+        }
+
+        const providerStatuses = await authManager.getAllStatus();
+        const providerStatus = providerStatuses.find((item) => item.provider === provider);
+        if (!providerStatus || providerStatus.source === 'none') {
+          sendJson(res, 403, { error: `Provider ${provider} is not connected. Connect it in Settings first.` });
           return;
         }
 
@@ -308,6 +359,13 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         const provider = asString(body.provider) || process.env.ORCHESTRACE_DEFAULT_PROVIDER || 'anthropic';
         const model = asString(body.model) || process.env.ORCHESTRACE_DEFAULT_MODEL || 'claude-sonnet-4-20250514';
         const autoApprove = Boolean(body.autoApprove);
+
+        const providerStatuses = await authManager.getAllStatus();
+        const providerStatus = providerStatuses.find((item) => item.provider === provider);
+        if (!providerStatus || providerStatus.source === 'none') {
+          sendJson(res, 400, { error: `Provider ${provider} is not connected. Connect it in Settings first.` });
+          return;
+        }
 
         const workspace = workspaceId
           ? await workspaceManager.selectWorkspace(workspaceId)
@@ -434,8 +492,16 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
   await new Promise<void>((resolvePromise) => {
     server.listen(port, '127.0.0.1', () => {
       console.log(`UI server listening on http://127.0.0.1:${port}`);
+      if (hmrEnabled) {
+        console.log('UI HMR enabled (live reload).');
+      }
       resolvePromise();
     });
+  });
+
+  server.on('close', () => {
+    hmrWatcher?.close();
+    hmrClients.clear();
   });
 }
 
@@ -603,7 +669,7 @@ function toErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function renderDashboardHtml(): string {
+function renderDashboardHtml(hmrEnabled: boolean): string {
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -1254,6 +1320,7 @@ function renderDashboardHtml(): string {
   </main>
 
 <script>
+  const HMR_ENABLED = ${hmrEnabled ? 'true' : 'false'};
   let selectedWorkId = null;
   let authPollId = null;
   let authFlowVersion = 0;
@@ -1313,6 +1380,17 @@ function renderDashboardHtml(): string {
     }
 
     applyScreen('settings');
+  }
+
+  function initHmr() {
+    if (!HMR_ENABLED || typeof EventSource === 'undefined') {
+      return;
+    }
+
+    const stream = new EventSource('/__hmr');
+    stream.addEventListener('reload', () => {
+      window.location.reload();
+    });
   }
 
   async function refreshWorkspaces() {
@@ -1463,6 +1541,8 @@ function renderDashboardHtml(): string {
     const previousWorkProvider = workProvider.value;
     workProvider.innerHTML = '';
 
+    const connectedProviders = [];
+
     for (const provider of providerCache) {
       const status = statusCache.find((item) => item.provider === provider.id);
       const opt = document.createElement('option');
@@ -1470,22 +1550,34 @@ function renderDashboardHtml(): string {
       opt.textContent = provider.id + ' (' + (status && status.source !== 'none' ? 'connected' : 'not connected') + ')';
       select.appendChild(opt);
 
-      const wopt = document.createElement('option');
-      wopt.value = provider.id;
-      wopt.textContent = provider.id;
-      workProvider.appendChild(wopt);
+      if (status && status.source !== 'none') {
+        connectedProviders.push(provider);
+        const wopt = document.createElement('option');
+        wopt.value = provider.id;
+        wopt.textContent = provider.id;
+        workProvider.appendChild(wopt);
+      }
     }
 
     if (previous && providerCache.find((item) => item.id === previous)) {
       select.value = previous;
     }
 
-    if (previousWorkProvider && providerCache.find((item) => item.id === previousWorkProvider)) {
+    if (connectedProviders.length === 0) {
+      workProvider.innerHTML = '<option value="">no connected providers</option>';
+      document.getElementById('workModel').innerHTML = '<option value="">connect provider in Settings</option>';
+      setText('workStatus', 'No connected providers. Connect one in Settings.');
+      syncAuthUiForProvider();
+      await refreshWorkspaceReadiness();
+      return;
+    }
+
+    if (previousWorkProvider && connectedProviders.find((item) => item.id === previousWorkProvider)) {
       workProvider.value = previousWorkProvider;
-    } else if (providerCache.find((item) => item.id === defaults.provider)) {
+    } else if (connectedProviders.find((item) => item.id === defaults.provider)) {
       workProvider.value = defaults.provider;
-    } else if (providerCache[0]) {
-      workProvider.value = providerCache[0].id;
+    } else if (connectedProviders[0]) {
+      workProvider.value = connectedProviders[0].id;
     }
 
     await refreshWorkModels();
@@ -1499,7 +1591,17 @@ function renderDashboardHtml(): string {
     const previousModel = modelSelect.value;
     modelSelect.innerHTML = '';
 
-    if (!providerId) return;
+    if (!providerId) {
+      modelSelect.innerHTML = '<option value="">connect provider in Settings</option>';
+      return;
+    }
+
+    const providerStatus = statusCache.find((item) => item.provider === providerId);
+    if (!providerStatus || providerStatus.source === 'none') {
+      modelSelect.innerHTML = '<option value="">provider not connected</option>';
+      setText('workStatus', 'Provider is not connected. Connect it in Settings.');
+      return;
+    }
 
     try {
       const data = await api('/api/models?provider=' + encodeURIComponent(providerId));
@@ -1723,6 +1825,16 @@ function renderDashboardHtml(): string {
       return;
     }
 
+    if (!provider) {
+      setText('workStatus', 'Select a connected provider first.');
+      return;
+    }
+
+    if (!model) {
+      setText('workStatus', 'Select a model for the connected provider.');
+      return;
+    }
+
     const result = await api('/api/work/start', 'POST', {
       workspaceId,
       prompt,
@@ -1873,6 +1985,7 @@ function renderDashboardHtml(): string {
 
   initTheme();
   initScreen();
+  initHmr();
   refreshWorkspaces().catch((e) => setText('workspaceStatus', String(e)));
   refreshProviders().catch((e) => setText('authStatus', String(e)));
   refreshWorkSessions().catch((e) => setText('workStatus', String(e)));
@@ -1880,4 +1993,13 @@ function renderDashboardHtml(): string {
 </script>
 </body>
 </html>`;
+}
+
+function resolveUiWatchPath(workspaceRoot: string): string | undefined {
+  const srcPath = join(workspaceRoot, 'packages', 'cli', 'src');
+  if (existsSync(srcPath)) {
+    return srcPath;
+  }
+
+  return undefined;
 }
