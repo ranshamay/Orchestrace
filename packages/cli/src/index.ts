@@ -462,9 +462,13 @@ async function runOAuthLogin(manager: ProviderAuthManager, provider: ProviderInf
   const rl = createInterface({ input: process.stdin, output: process.stdout });
 
   try {
+    if (provider.id === 'github-copilot') {
+      console.log('\nGitHub Copilot uses device/mobile code authentication.');
+    }
+
     await manager.loginOAuth(provider.id, {
       onAuth: (info) => {
-        console.log(`\nOpen this URL to authenticate:\n${info.url}`);
+        console.log(`\nOpen this URL in your browser:\n${info.url}`);
         if (info.instructions) {
           console.log(info.instructions);
         }

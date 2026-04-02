@@ -1,10 +1,12 @@
-import { readFile, writeFile } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { existsSync } from 'node:fs';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { dirname, join, resolve } from 'node:path';
 import { getEnvApiKey, getProviders } from '@mariozechner/pi-ai';
 import {
   getOAuthApiKey,
   getOAuthProvider,
   getOAuthProviders,
+  loginGitHubCopilot,
   type OAuthCredentials,
   type OAuthLoginCallbacks,
   type OAuthProviderId,
@@ -28,8 +30,6 @@ const ENV_VAR_BY_PROVIDER: Record<string, string> = {
   'kimi-coding': 'KIMI_API_KEY',
   zai: 'ZAI_API_KEY',
 };
-
-const COPILOT_ENV_VARS = ['COPILOT_GITHUB_TOKEN', 'GH_TOKEN', 'GITHUB_TOKEN'];
 
 export interface ProviderInfo {
   id: string;
@@ -58,9 +58,19 @@ export interface PersistedAuthStore {
 
 export class ProviderAuthManager {
   private readonly authFilePath: string;
+  private readonly legacyAuthPaths: string[];
 
   constructor(options: ProviderAuthManagerOptions = {}) {
-    this.authFilePath = resolve(options.authFilePath ?? process.env.ORCHESTRACE_AUTH_FILE ?? 'auth.json');
+    const explicitAuthPath = options.authFilePath ?? process.env.ORCHESTRACE_AUTH_FILE;
+    const workspaceRoot = findWorkspaceRoot(process.cwd());
+    this.authFilePath = explicitAuthPath
+      ? resolve(explicitAuthPath)
+      : join(workspaceRoot, 'auth.json');
+
+    this.legacyAuthPaths = [
+      resolve('auth.json'),
+      join(workspaceRoot, 'packages', 'cli', 'auth.json'),
+    ].filter((path, index, all) => path !== this.authFilePath && all.indexOf(path) === index);
   }
 
   listProviders(): ProviderInfo[] {
@@ -77,8 +87,13 @@ export class ProviderAuthManager {
         const envVars = getEnvVarCandidates(id);
 
         let authType: ProviderInfo['authType'] = 'api-key';
-        if (oauth && envVars.length > 0) authType = 'mixed';
-        else if (oauth) authType = 'oauth';
+        if (id === 'github-copilot') {
+          authType = 'oauth';
+        } else if (oauth && envVars.length > 0) {
+          authType = 'mixed';
+        } else if (oauth) {
+          authType = 'oauth';
+        }
 
         return {
           id,
@@ -90,18 +105,37 @@ export class ProviderAuthManager {
   }
 
   async loginOAuth(providerId: OAuthProviderId, callbacks: OAuthLoginCallbacks): Promise<void> {
-    const provider = getOAuthProvider(providerId);
-    if (!provider) {
-      throw new Error(`Provider "${providerId}" does not support OAuth login.`);
+    let credentials: OAuthCredentials;
+
+    // GitHub Copilot must use device/mobile code OAuth flow.
+    if (providerId === 'github-copilot') {
+      credentials = await loginGitHubCopilot({
+        onAuth: (url, instructions) => callbacks.onAuth({ url, instructions }),
+        onPrompt: callbacks.onPrompt,
+        onProgress: callbacks.onProgress,
+        signal: callbacks.signal,
+      });
+    } else {
+      const provider = getOAuthProvider(providerId);
+      if (!provider) {
+        throw new Error(`Provider "${providerId}" does not support OAuth login.`);
+      }
+      credentials = await provider.login(callbacks);
     }
 
-    const credentials = await provider.login(callbacks);
     const store = await this.loadStore();
     store.oauth[providerId] = credentials;
     await this.saveStore(store);
   }
 
   async configureApiKey(providerId: string, apiKey: string): Promise<{ path: string }> {
+    if (providerId === 'github-copilot') {
+      throw new Error(
+        'GitHub Copilot authentication must use OAuth device/mobile code flow. '
+        + 'Run `orchestrace auth github-copilot`.',
+      );
+    }
+
     const sanitized = apiKey.trim();
     if (!sanitized) {
       throw new Error('API key cannot be empty.');
@@ -139,6 +173,11 @@ export class ProviderAuthManager {
     }
 
     // Optional fallback for users who still prefer environment variables.
+    // GitHub Copilot intentionally does not use this fallback to enforce device OAuth.
+    if (providerId === 'github-copilot') {
+      return undefined;
+    }
+
     const envApiKey = getEnvApiKey(providerId as never);
     if (envApiKey) {
       return envApiKey;
@@ -182,8 +221,26 @@ export class ProviderAuthManager {
   }
 
   private async loadStore(): Promise<PersistedAuthStore> {
+    const primary = await this.readStore(this.authFilePath);
+    if (primary) {
+      return primary;
+    }
+
+    // One-time migration path from older relative storage locations.
+    for (const legacyPath of this.legacyAuthPaths) {
+      const legacy = await this.readStore(legacyPath);
+      if (!legacy) continue;
+
+      await this.saveStore(legacy);
+      return legacy;
+    }
+
+    return { oauth: {}, apiKeys: {} };
+  }
+
+  private async readStore(path: string): Promise<PersistedAuthStore | undefined> {
     try {
-      const raw = await readFile(this.authFilePath, 'utf-8');
+      const raw = await readFile(path, 'utf-8');
       const parsed = JSON.parse(raw);
       if (!parsed || typeof parsed !== 'object') {
         return { oauth: {}, apiKeys: {} };
@@ -207,22 +264,19 @@ export class ProviderAuthManager {
       return { oauth, apiKeys: {} };
     } catch (error) {
       if (isFileMissing(error)) {
-        return { oauth: {}, apiKeys: {} };
+        return undefined;
       }
       throw error;
     }
   }
 
   private async saveStore(store: PersistedAuthStore): Promise<void> {
+    await mkdir(dirname(this.authFilePath), { recursive: true });
     await writeFile(this.authFilePath, `${JSON.stringify(store, null, 2)}\n`, 'utf-8');
   }
 }
 
 function getEnvVarCandidates(providerId: string): string[] {
-  if (providerId === 'github-copilot') {
-    return COPILOT_ENV_VARS;
-  }
-
   const primary = ENV_VAR_BY_PROVIDER[providerId];
   return primary ? [primary] : [];
 }
@@ -245,4 +299,20 @@ function looksLikeOAuthCredentials(value: unknown): value is OAuthCredentials {
   return typeof value.access === 'string'
     && typeof value.refresh === 'string'
     && typeof value.expires === 'number';
+}
+
+function findWorkspaceRoot(startDir: string): string {
+  let current = resolve(startDir);
+
+  while (true) {
+    if (existsSync(join(current, 'pnpm-workspace.yaml')) || existsSync(join(current, '.git'))) {
+      return current;
+    }
+
+    const parent = dirname(current);
+    if (parent === current) {
+      return resolve(startDir);
+    }
+    current = parent;
+  }
 }

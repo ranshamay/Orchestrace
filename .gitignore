@@ -5,4 +5,5 @@ dist/
 .env
 .env.local
 auth.json
+**/auth.json
 coverage/

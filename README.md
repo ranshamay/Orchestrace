@@ -36,6 +36,12 @@ pnpm install
 # Authenticate provider (OAuth or API key, persisted in auth.json)
 pnpm --filter @orchestrace/cli dev auth
 
+# Credentials are saved to repo-root auth.json by default
+# Override with: ORCHESTRACE_AUTH_FILE=/custom/path/auth.json
+
+# GitHub Copilot uses device/mobile code OAuth flow
+pnpm --filter @orchestrace/cli dev auth github-copilot
+
 # Run a plan
 pnpm --filter @orchestrace/cli dev run examples/feature-plan.json
 
