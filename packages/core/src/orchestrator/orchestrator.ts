@@ -35,6 +35,8 @@ export interface OrchestratorConfig extends RunnerConfig {
   requirePlanApproval?: boolean;
   /** Callback used to approve/reject persisted plans. */
   onPlanApproval?: (request: PlanApprovalRequest) => Promise<boolean>;
+  /** Optional provider auth resolver (env, OAuth store, secret manager, etc.). */
+  resolveApiKey?: (provider: string) => Promise<string | undefined>;
   /** Max implementation attempts per task. Defaults to validation.maxRetries + 1. */
   maxImplementationAttempts?: number;
 }
@@ -58,6 +60,7 @@ export async function orchestrate(
     planOutputDir,
     requirePlanApproval,
     onPlanApproval,
+    resolveApiKey,
     maxImplementationAttempts,
     onEvent,
   } = config;
@@ -91,6 +94,7 @@ export async function orchestrate(
       provider: 'anthropic',
       model: 'claude-sonnet-4-20250514',
     };
+    const apiKey = await resolveApiKey?.(model.provider);
 
     const usage = { input: 0, output: 0, cost: 0 };
 
@@ -103,6 +107,7 @@ export async function orchestrate(
         ?? systemPrompt
         ?? 'You are a senior planning agent. Produce a deep, concrete implementation plan.',
       signal: context.signal,
+      apiKey,
     });
 
     emit({ type: 'task:planning', taskId: node.id });
@@ -166,6 +171,7 @@ export async function orchestrate(
         ?? systemPrompt
         ?? 'You are a coding agent. Implement the approved plan exactly and fix validation failures iteratively.',
       signal: context.signal,
+      apiKey,
     });
 
     const taskRetryBudget = Math.max(0, node.validation?.maxRetries ?? 0);

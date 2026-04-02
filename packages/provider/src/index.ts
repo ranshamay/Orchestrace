@@ -1,4 +1,5 @@
 export { PiAiAdapter } from './adapter.js';
+export { ProviderAuthManager } from './auth.js';
 export type {
 	AgentModelConfig,
 	LlmAdapter,
@@ -7,3 +8,8 @@ export type {
 	LlmResult,
 	SpawnAgentRequest,
 } from './types.js';
+export type {
+	ProviderAuthManagerOptions,
+	ProviderAuthStatus,
+	ProviderInfo,
+} from './auth.js';

@@ -20,6 +20,8 @@ export interface LlmRequest {
   prompt: string;
   reasoning?: 'minimal' | 'low' | 'medium' | 'high';
   signal?: AbortSignal;
+  /** Explicit API key (e.g. from OAuth). If omitted, pi-ai reads env vars. */
+  apiKey?: string;
 }
 
 /** Dedicated agent process bound to a specific model selection. */
@@ -31,6 +33,8 @@ export interface LlmAgent {
 export interface SpawnAgentRequest extends AgentModelConfig {
   systemPrompt: string;
   signal?: AbortSignal;
+  /** Explicit API key (e.g. from OAuth). If omitted, pi-ai reads env vars. */
+  apiKey?: string;
 }
 
 /**

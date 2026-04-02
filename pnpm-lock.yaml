@@ -35,6 +35,9 @@ importers:
 
   packages/cli:
     dependencies:
+      '@mariozechner/pi-ai':
+        specifier: ^0.64.0
+        version: 0.64.0(ws@8.20.0)(zod@4.3.6)
       '@orchestrace/core':
         specifier: workspace:*
         version: link:../core
@@ -44,6 +47,9 @@ importers:
       '@orchestrace/sandbox':
         specifier: workspace:*
         version: link:../sandbox
+      dotenv:
+        specifier: ^17.4.0
+        version: 17.4.0
     devDependencies:
       tsx:
         specifier: ^4.0.0
@@ -1224,6 +1230,10 @@ packages:
   degenerator@5.0.1:
     resolution: {integrity: sha512-TllpMR/t0M5sqCXfj85i4XaAzxmS5tVA16dqvdkMwGmzI+dXLXnw3J+3Vdv7VKw+ThlTMboK6i9rnZ6Nntj5CQ==}
     engines: {node: '>= 14'}
+
+  dotenv@17.4.0:
+    resolution: {integrity: sha512-kCKF62fwtzwYm0IGBNjRUjtJgMfGapII+FslMHIjMR5KTnwEmBmWLDRSnc3XSNP8bNy34tekgQyDT0hr7pERRQ==}
+    engines: {node: '>=12'}
 
   ecdsa-sig-formatter@1.0.11:
     resolution: {integrity: sha512-nagl3RYrbNv6kQkeJIpt6NJZy8twLB/2vtz6yN9Z4vRKHN4/QZJIEbqohALSgwKdnksuY3k5Addp5lg8sVoVcQ==}
@@ -3194,6 +3204,8 @@ snapshots:
       ast-types: 0.13.4
       escodegen: 2.1.0
       esprima: 4.0.1
+
+  dotenv@17.4.0: {}
 
   ecdsa-sig-formatter@1.0.11:
     dependencies:

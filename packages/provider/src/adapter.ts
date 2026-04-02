@@ -8,7 +8,7 @@ import type { LlmAdapter, LlmAgent, LlmRequest, LlmResult, SpawnAgentRequest } f
 /**
  * LLM adapter backed by pi-ai.
  * Uses `completeSimple` for straightforward prompt→response flows.
- * API keys are read from environment variables automatically by pi-ai.
+ * API keys can be provided explicitly or read from environment variables by pi-ai.
  */
 export class PiAiAdapter implements LlmAdapter {
   async spawnAgent(request: SpawnAgentRequest): Promise<LlmAgent> {
@@ -27,6 +27,9 @@ export class PiAiAdapter implements LlmAdapter {
         }
         if (signal ?? request.signal) {
           options.signal = signal ?? request.signal;
+        }
+        if (request.apiKey) {
+          options.apiKey = request.apiKey;
         }
 
         const response = await completeSimple(model, context, options);
@@ -59,6 +62,7 @@ export class PiAiAdapter implements LlmAdapter {
       systemPrompt: request.systemPrompt,
       reasoning: request.reasoning,
       signal: request.signal,
+      apiKey: request.apiKey,
     });
     return agent.complete(request.prompt, request.signal);
   }

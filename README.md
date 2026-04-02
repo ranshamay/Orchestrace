@@ -41,6 +41,15 @@ pnpm --filter @orchestrace/cli dev run examples/feature-plan.json
 
 # Run a single prompt task with the generalized flow
 pnpm --filter @orchestrace/cli dev task "Add structured logging to the scheduler"
+
+# Authenticate a provider (interactive)
+pnpm --filter @orchestrace/cli dev auth
+
+# Check provider auth status
+pnpm --filter @orchestrace/cli dev auth status
+
+# Override provider/model per run
+pnpm --filter @orchestrace/cli dev task "Fix flaky tests" --provider github-copilot --model gpt-4o
 ```
 
 ## Task Graph Format
