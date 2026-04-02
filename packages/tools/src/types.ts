@@ -15,9 +15,15 @@ export interface AgentToolsetOptions {
   cwd: string;
   phase?: AgentToolPhase;
   taskType?: string;
+  graphId?: string;
+  taskId?: string;
+  provider?: string;
+  model?: string;
+  reasoning?: 'minimal' | 'low' | 'medium' | 'high';
   commandTimeoutMs?: number;
   maxOutputChars?: number;
   permissions?: Partial<AgentToolPermissions>;
+  runSubAgent?: (request: SubAgentRequest, signal?: AbortSignal) => Promise<SubAgentResult>;
 }
 
 export interface RegisteredAgentTool {
@@ -29,4 +35,34 @@ export interface CommandResult {
   exitCode: number;
   stdout: string;
   stderr: string;
+}
+
+export interface TodoItem {
+  id: string;
+  title: string;
+  status: 'todo' | 'in_progress' | 'done';
+  details?: string;
+  dependsOn?: string[];
+}
+
+export interface AgentGraphNode {
+  id: string;
+  prompt: string;
+  dependencies?: string[];
+  provider?: string;
+  model?: string;
+  reasoning?: 'minimal' | 'low' | 'medium' | 'high';
+}
+
+export interface SubAgentRequest {
+  prompt: string;
+  systemPrompt?: string;
+  provider?: string;
+  model?: string;
+  reasoning?: 'minimal' | 'low' | 'medium' | 'high';
+}
+
+export interface SubAgentResult {
+  text: string;
+  usage?: { input: number; output: number; cost: number };
 }

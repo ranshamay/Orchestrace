@@ -17,17 +17,24 @@ export function resolveAgentToolPermissions(options: AgentToolsetOptions): Agent
 }
 
 function getDefaultPermissions(phase: string, taskType: string): AgentToolPermissions {
-  if (phase === 'planning') {
+  if (phase === 'planning' || phase === 'chat') {
     return {
       allowWriteTools: false,
       allowRunCommand: false,
-    };
-  }
-
-  if (phase === 'chat') {
-    return {
-      allowWriteTools: false,
-      allowRunCommand: false,
+      toolAllowlist: [
+        'list_directory',
+        'read_file',
+        'search_files',
+        'git_diff',
+        'git_status',
+        'todo_get',
+        'todo_set',
+        'todo_add',
+        'todo_update',
+        'agent_graph_get',
+        'agent_graph_set',
+        'subagent_list',
+      ],
     };
   }
 
@@ -35,11 +42,43 @@ function getDefaultPermissions(phase: string, taskType: string): AgentToolPermis
     return {
       allowWriteTools: false,
       allowRunCommand: false,
+      toolAllowlist: [
+        'list_directory',
+        'read_file',
+        'search_files',
+        'git_diff',
+        'git_status',
+        'todo_get',
+        'todo_set',
+        'todo_add',
+        'todo_update',
+        'agent_graph_get',
+        'agent_graph_set',
+        'subagent_list',
+      ],
     };
   }
 
   return {
     allowWriteTools: true,
     allowRunCommand: true,
+    toolAllowlist: [
+      'list_directory',
+      'read_file',
+      'search_files',
+      'git_diff',
+      'git_status',
+      'write_file',
+      'edit_file',
+      'run_command',
+      'todo_get',
+      'todo_set',
+      'todo_add',
+      'todo_update',
+      'agent_graph_get',
+      'agent_graph_set',
+      'subagent_list',
+      'subagent_spawn',
+    ],
   };
 }

@@ -260,7 +260,35 @@ async function runGraph(
     requirePlanApproval: true,
     onPlanApproval: approvalGate,
     resolveApiKey: (providerId) => authManager.resolveApiKey(providerId),
-    createToolset: ({ phase, task }) => createAgentToolset({ cwd, phase, taskType: task.type }),
+    createToolset: ({ phase, task, graphId, provider: activeProvider, model: activeModel, reasoning }) => createAgentToolset({
+      cwd,
+      phase,
+      taskType: task.type,
+      graphId,
+      taskId: task.id,
+      provider: activeProvider,
+      model: activeModel,
+      reasoning,
+      runSubAgent: async (request, signal) => {
+        const subProvider = request.provider ?? activeProvider;
+        const subModel = request.model ?? activeModel;
+        const subAgent = await llm.spawnAgent({
+          provider: subProvider,
+          model: subModel,
+          reasoning: request.reasoning ?? reasoning,
+          systemPrompt: request.systemPrompt
+            ?? 'You are a focused sub-agent. Solve the given sub-task and return concise actionable output.',
+          signal,
+          apiKey: await authManager.resolveApiKey(subProvider),
+        });
+
+        const result = await subAgent.complete(request.prompt, signal);
+        return {
+          text: result.text,
+          usage: result.usage,
+        };
+      },
+    }),
   });
 
   let totalTokens = 0;

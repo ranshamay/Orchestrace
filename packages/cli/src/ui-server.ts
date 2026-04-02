@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { existsSync, watch, type FSWatcher } from 'node:fs';
-import { join } from 'node:path';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
 import { orchestrate } from '@orchestrace/core';
 import type { DagEvent, PlanApprovalRequest, TaskGraph } from '@orchestrace/core';
 import { getModels } from '@mariozechner/pi-ai';
@@ -91,6 +92,31 @@ interface ChatTokenStream {
   updatedAt: string;
 }
 
+interface PersistedWorkSession {
+  id: string;
+  workspaceId: string;
+  workspaceName: string;
+  workspacePath: string;
+  prompt: string;
+  provider: string;
+  model: string;
+  autoApprove: boolean;
+  createdAt: string;
+  updatedAt: string;
+  status: WorkState;
+  taskStatus: Record<string, string>;
+  events: UiDagEvent[];
+  error?: string;
+  output?: { text?: string; planPath?: string };
+}
+
+interface PersistedUiState {
+  version: 1;
+  updatedAt: string;
+  sessions: PersistedWorkSession[];
+  chats: SessionChatThread[];
+}
+
 export async function startUiServer(options: UiServerOptions = {}): Promise<void> {
   const port = options.port ?? 4310;
   const hmrEnabled = options.hmr ?? process.env.ORCHESTRACE_UI_HMR !== 'false';
@@ -109,6 +135,11 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
   const hmrClients = new Set<ServerResponse>();
   const workStreamClients = new Map<string, Set<ServerResponse>>();
   const chatStreamClients = new Map<string, Set<ServerResponse>>();
+  const uiStatePath = join(workspaceManager.getRootDir(), '.orchestrace', 'ui-state.json');
+
+  await restoreUiState(uiStatePath, workSessions, sessionChats);
+
+  const uiStatePersistence = createUiStatePersistence(uiStatePath, workSessions, sessionChats);
 
   let hmrWatcher: FSWatcher | undefined;
   if (hmrEnabled) {
@@ -479,6 +510,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
 
         workSessions.set(id, session);
         sessionChats.set(id, createSessionChatThread(session));
+        uiStatePersistence.schedule();
 
         const graph = buildSingleTaskGraph(id, prompt);
 
@@ -492,10 +524,34 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           onPlanApproval: async (_request: PlanApprovalRequest) => autoApprove,
           signal: controller.signal,
           resolveApiKey: async (providerId) => authManager.resolveApiKey(providerId),
-          createToolset: ({ phase, task }) => createAgentToolset({
+          createToolset: ({ phase, task, graphId, provider: activeProvider, model: activeModel, reasoning }) => createAgentToolset({
             cwd: workspace.path,
             phase,
             taskType: task.type,
+            graphId,
+            taskId: task.id,
+            provider: activeProvider,
+            model: activeModel,
+            reasoning,
+            runSubAgent: async (request, signal) => {
+              const subProvider = request.provider ?? activeProvider;
+              const subModel = request.model ?? activeModel;
+              const subAgent = await llm.spawnAgent({
+                provider: subProvider,
+                model: subModel,
+                reasoning: request.reasoning ?? reasoning,
+                systemPrompt: request.systemPrompt
+                  ?? 'You are a focused sub-agent. Solve the given sub-task and return concise actionable output.',
+                signal,
+                apiKey: await authManager.resolveApiKey(subProvider),
+              });
+
+              const result = await subAgent.complete(request.prompt, signal);
+              return {
+                text: result.text,
+                usage: result.usage,
+              };
+            },
           }),
           onEvent: (event) => {
             session.updatedAt = now();
@@ -520,6 +576,10 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
 
             if ('taskId' in event && event.type !== 'task:stream-delta') {
               session.taskStatus[event.taskId] = event.type;
+            }
+
+            if (event.type !== 'task:stream-delta') {
+              uiStatePersistence.schedule();
             }
           },
         }).then((outputs) => {
@@ -555,6 +615,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
             trimThreadMessages(thread);
             thread.updatedAt = now();
           }
+
+          uiStatePersistence.schedule();
         }).catch((error) => {
           if (session.status !== 'cancelled') {
             session.status = 'failed';
@@ -567,6 +629,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
               time: now(),
             });
             closeWorkStream(workStreamClients, session.id);
+            uiStatePersistence.schedule();
           }
         });
 
@@ -600,6 +663,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
             time: now(),
           });
           closeWorkStream(workStreamClients, session.id);
+          uiStatePersistence.schedule();
         }
 
         sendJson(res, 200, { ok: true });
@@ -611,6 +675,30 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
           .map(serializeWorkSession);
         sendJson(res, 200, { sessions });
+        return;
+      }
+
+      if (req.method === 'GET' && pathname === '/api/work/agent') {
+        const id = asString(url.searchParams.get('id'));
+        if (!id) {
+          sendJson(res, 400, { error: 'Missing id' });
+          return;
+        }
+
+        const session = workSessions.get(id);
+        if (!session) {
+          sendJson(res, 404, { error: 'Unknown work session' });
+          return;
+        }
+
+        const thread = sessionChats.get(id) ?? createSessionChatThread(session);
+        sessionChats.set(id, thread);
+        uiStatePersistence.schedule();
+
+        sendJson(res, 200, {
+          session: serializeWorkSession(session),
+          messages: thread.messages.filter((message) => message.role !== 'system'),
+        });
         return;
       }
 
@@ -629,6 +717,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
 
         const thread = sessionChats.get(id) ?? createSessionChatThread(session);
         sessionChats.set(id, thread);
+        uiStatePersistence.schedule();
 
         sendJson(res, 200, {
           id,
@@ -769,6 +858,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         thread.messages.push(userMessage);
         trimThreadMessages(thread);
         thread.updatedAt = now();
+        uiStatePersistence.schedule();
 
         const streamId = randomUUID();
         const streamState: ChatTokenStream = {
@@ -867,6 +957,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
             trimThreadMessages(thread);
             thread.updatedAt = now();
             session.updatedAt = now();
+            uiStatePersistence.schedule();
 
             streamState.status = 'completed';
             streamState.replyText = response.text;
@@ -887,6 +978,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
             streamState.status = 'failed';
             streamState.error = toErrorMessage(error);
             streamState.updatedAt = now();
+            uiStatePersistence.schedule();
 
             broadcastWorkStream(chatStreamClients, streamId, 'chat-error', {
               streamId,
@@ -933,6 +1025,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
 
         const thread = sessionChats.get(id) ?? createSessionChatThread(session);
         sessionChats.set(id, thread);
+        uiStatePersistence.schedule();
 
         const userMessage: SessionChatMessage = {
           role: 'user',
@@ -942,6 +1035,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         thread.messages.push(userMessage);
         trimThreadMessages(thread);
         thread.updatedAt = now();
+        uiStatePersistence.schedule();
 
         const chatAgent = await llm.spawnAgent({
           provider: session.provider,
@@ -966,6 +1060,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         trimThreadMessages(thread);
         thread.updatedAt = now();
         session.updatedAt = now();
+        uiStatePersistence.schedule();
 
         sendJson(res, 200, {
           ok: true,
@@ -992,6 +1087,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
   });
 
   server.on('close', () => {
+    void uiStatePersistence.flush();
     hmrWatcher?.close();
     hmrClients.clear();
     for (const [id] of workStreamClients) {
@@ -1060,6 +1156,168 @@ function scheduleChatStreamCleanup(streams: Map<string, ChatTokenStream>, stream
   setTimeout(() => {
     streams.delete(streamId);
   }, ttlMs);
+}
+
+function createUiStatePersistence(
+  path: string,
+  workSessions: Map<string, WorkSession>,
+  sessionChats: Map<string, SessionChatThread>,
+): { schedule: () => void; flush: () => Promise<void> } {
+  let dirty = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let writing = false;
+
+  const writeNow = async (): Promise<void> => {
+    if (!dirty) {
+      return;
+    }
+
+    if (writing) {
+      return;
+    }
+
+    writing = true;
+    try {
+      while (dirty) {
+        dirty = false;
+        await persistUiState(path, workSessions, sessionChats);
+      }
+    } finally {
+      writing = false;
+    }
+  };
+
+  return {
+    schedule: () => {
+      dirty = true;
+      if (timer) {
+        return;
+      }
+
+      timer = setTimeout(() => {
+        timer = undefined;
+        void writeNow();
+      }, 220);
+    },
+    flush: async () => {
+      dirty = true;
+      if (timer) {
+        clearTimeout(timer);
+        timer = undefined;
+      }
+      await writeNow();
+    },
+  };
+}
+
+async function restoreUiState(
+  path: string,
+  workSessions: Map<string, WorkSession>,
+  sessionChats: Map<string, SessionChatThread>,
+): Promise<void> {
+  const payload = await readPersistedUiState(path);
+  if (!payload) {
+    return;
+  }
+
+  for (const persisted of payload.sessions) {
+    workSessions.set(persisted.id, hydratePersistedSession(persisted));
+  }
+
+  for (const thread of payload.chats) {
+    const session = workSessions.get(thread.sessionId);
+    if (!session) {
+      continue;
+    }
+
+    sessionChats.set(thread.sessionId, {
+      sessionId: thread.sessionId,
+      provider: thread.provider || session.provider,
+      model: thread.model || session.model,
+      workspacePath: thread.workspacePath || session.workspacePath,
+      taskPrompt: thread.taskPrompt || session.prompt,
+      createdAt: thread.createdAt || session.createdAt,
+      updatedAt: thread.updatedAt || session.updatedAt,
+      messages: Array.isArray(thread.messages) ? thread.messages : [],
+    });
+  }
+}
+
+async function persistUiState(
+  path: string,
+  workSessions: Map<string, WorkSession>,
+  sessionChats: Map<string, SessionChatThread>,
+): Promise<void> {
+  const payload: PersistedUiState = {
+    version: 1,
+    updatedAt: now(),
+    sessions: [...workSessions.values()]
+      .map(toPersistedSession)
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
+    chats: [...sessionChats.values()]
+      .map((thread) => ({
+        ...thread,
+        messages: [...thread.messages],
+      }))
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
+  };
+
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(path, JSON.stringify(payload, null, 2), 'utf-8');
+}
+
+async function readPersistedUiState(path: string): Promise<PersistedUiState | undefined> {
+  try {
+    const raw = await readFile(path, 'utf-8');
+    const parsed = JSON.parse(raw) as Partial<PersistedUiState>;
+
+    if (!parsed || parsed.version !== 1) {
+      return undefined;
+    }
+
+    return {
+      version: 1,
+      updatedAt: typeof parsed.updatedAt === 'string' ? parsed.updatedAt : now(),
+      sessions: Array.isArray(parsed.sessions) ? parsed.sessions as PersistedWorkSession[] : [],
+      chats: Array.isArray(parsed.chats) ? parsed.chats as SessionChatThread[] : [],
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+function toPersistedSession(session: WorkSession): PersistedWorkSession {
+  return {
+    id: session.id,
+    workspaceId: session.workspaceId,
+    workspaceName: session.workspaceName,
+    workspacePath: session.workspacePath,
+    prompt: session.prompt,
+    provider: session.provider,
+    model: session.model,
+    autoApprove: session.autoApprove,
+    createdAt: session.createdAt,
+    updatedAt: session.updatedAt,
+    status: session.status,
+    taskStatus: { ...session.taskStatus },
+    events: [...session.events],
+    error: session.error,
+    output: session.output,
+  };
+}
+
+function hydratePersistedSession(session: PersistedWorkSession): WorkSession {
+  const resumedStatus: WorkState = session.status === 'running' ? 'failed' : session.status;
+  const resumedError = session.status === 'running'
+    ? 'Session interrupted because the UI server restarted.'
+    : session.error;
+
+  return {
+    ...session,
+    status: resumedStatus,
+    error: resumedError,
+    controller: new AbortController(),
+  };
 }
 
 function now(): string {
@@ -1618,11 +1876,11 @@ function renderDashboardHtml(hmrEnabled: boolean): string {
 
     .graph-node {
       cursor: pointer;
-      transition: transform 180ms ease;
     }
 
-    .graph-node:hover {
-      transform: translateY(-2px);
+    .graph-node:hover .node-halo {
+      stroke: var(--accent-2);
+      opacity: 0.3;
     }
 
     .node-halo {
@@ -2487,6 +2745,19 @@ function renderDashboardHtml(hmrEnabled: boolean): string {
     ensureWorkStreamSubscription();
   }
 
+  async function selectWorkSession(id) {
+    if (!id) {
+      return;
+    }
+
+    selectedWorkId = id;
+    renderSessionList(workSessionsCache);
+    renderSessionGraph(workSessionsCache);
+    await renderSelectedEvents();
+    await refreshSelectedChat();
+    ensureWorkStreamSubscription();
+  }
+
   function renderSessionList(sessions) {
     const root = document.getElementById('workRows');
     root.innerHTML = '';
@@ -2518,16 +2789,20 @@ function renderDashboardHtml(hmrEnabled: boolean): string {
         + '</div>';
 
       root.appendChild(card);
+
+      card.addEventListener('click', async (event) => {
+        const target = event.target;
+        if (target instanceof Element && target.closest('button[data-cancel]')) {
+          return;
+        }
+
+        await selectWorkSession(session.id);
+      });
     }
 
     root.querySelectorAll('button[data-view]').forEach((button) => {
       button.addEventListener('click', async () => {
-        selectedWorkId = button.getAttribute('data-view');
-        renderSessionList(workSessionsCache);
-        renderSessionGraph(workSessionsCache);
-        await renderSelectedEvents();
-        await refreshSelectedChat();
-        ensureWorkStreamSubscription();
+        await selectWorkSession(button.getAttribute('data-view'));
       });
     });
 
@@ -2579,6 +2854,7 @@ function renderDashboardHtml(hmrEnabled: boolean): string {
       const group = document.createElementNS('http://www.w3.org/2000/svg', 'g');
       group.setAttribute('class', 'graph-node status-' + session.status + (selectedWorkId === session.id ? ' selected' : ''));
       group.setAttribute('transform', 'translate(' + x + ' ' + y + ')');
+      group.style.cursor = 'pointer';
 
       const halo = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
       halo.setAttribute('r', '18');
@@ -2597,12 +2873,7 @@ function renderDashboardHtml(hmrEnabled: boolean): string {
       group.appendChild(sub);
 
       group.addEventListener('click', async () => {
-        selectedWorkId = session.id;
-        renderSessionList(workSessionsCache);
-        renderSessionGraph(workSessionsCache);
-        await renderSelectedEvents();
-        await refreshSelectedChat();
-        ensureWorkStreamSubscription();
+        await selectWorkSession(session.id);
       });
 
       svg.appendChild(group);
@@ -2631,7 +2902,13 @@ function renderDashboardHtml(hmrEnabled: boolean): string {
       return;
     }
 
-    const lines = ['Workspace: ' + (session.workspacePath || '(unknown)')];
+    const lines = [
+      'Agent: ' + session.id,
+      'Status: ' + (session.status || 'unknown'),
+      'Workspace: ' + (session.workspacePath || '(unknown)'),
+      'Model: ' + (session.provider || '(unknown)') + ' / ' + (session.model || '(unknown)'),
+      'Prompt: ' + (session.prompt || '(none)'),
+    ];
 
     const live = liveStreamState[selectedWorkId];
     if (live && live.text) {
@@ -2677,7 +2954,7 @@ function renderDashboardHtml(hmrEnabled: boolean): string {
       liveChatState.usageEstimated = false;
     }
 
-    const data = await api('/api/work/chat?id=' + encodeURIComponent(selectedWorkId));
+    const data = await api('/api/work/agent?id=' + encodeURIComponent(selectedWorkId));
     chatMessagesCache = data.messages || [];
     renderChatMessages(chatMessagesCache);
   }

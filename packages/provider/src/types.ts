@@ -5,10 +5,14 @@ export interface LlmResult {
   usage?: { input: number; output: number; cost: number };
 }
 
-/** Optional callbacks for streaming completion output. */
-export interface LlmCompletionOptions {
-  onTextDelta?: (delta: string) => void;
-  onUsage?: (usage: { input: number; output: number; cost: number }) => void;
+/** Tool execution telemetry emitted by the provider adapter. */
+export interface LlmToolCallEvent {
+  type: 'started' | 'result';
+  toolCallId: string;
+  toolName: string;
+  arguments?: string;
+  result?: string;
+  isError?: boolean;
 }
 
 /** Tool definition exposed to the model during completion. */
@@ -58,6 +62,12 @@ export interface LlmRequest {
   toolset?: LlmToolset;
   /** Explicit API key (e.g. from OAuth). If omitted, pi-ai reads env vars. */
   apiKey?: string;
+}
+
+/** Stream-time callbacks for incremental completion output and usage. */
+export interface LlmCompletionOptions {
+  onTextDelta?: (delta: string) => void;
+  onUsage?: (usage: { input: number; output: number; cost: number }) => void;
 }
 
 /** Dedicated agent process bound to a specific model selection. */

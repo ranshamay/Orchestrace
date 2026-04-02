@@ -43,6 +43,9 @@ export interface OrchestratorConfig extends RunnerConfig {
     task: TaskNode;
     graphId: string;
     cwd: string;
+    provider: string;
+    model: string;
+    reasoning?: 'minimal' | 'low' | 'medium' | 'high';
     attempt?: number;
   }) => LlmToolset | undefined;
   /** Max implementation attempts per task. Defaults to validation.maxRetries + 1. */
@@ -131,6 +134,9 @@ export async function orchestrate(
         task: node,
         graphId: graph.id,
         cwd,
+        provider: model.provider,
+        model: model.model,
+        reasoning: model.reasoning,
       }),
       apiKey,
     });
@@ -222,6 +228,9 @@ export async function orchestrate(
         task: node,
         graphId: graph.id,
         cwd,
+        provider: model.provider,
+        model: model.model,
+        reasoning: model.reasoning,
       }),
       apiKey,
     });
@@ -372,12 +381,19 @@ function buildPlanningPrompt(node: TaskNode, depOutputs: Map<string, TaskOutput>
   const depContext = buildDependencyContext(depOutputs);
   return [
     'Create a deep implementation plan for the following task.',
+    'Optimize for maximum safe concurrency and explicit multi-stage execution.',
+    'You MUST use coordination tools during planning:',
+    '- todo_set (required) to create a concrete todo list',
+    '- todo_update to track progress changes',
+    '- agent_graph_set (required) to define sub-agent dependency graph',
+    '',
     'Your plan must include:',
     '1) assumptions and constraints',
-    '2) files likely to change',
-    '3) ordered implementation steps',
-    '4) verification strategy with explicit commands',
-    '5) rollback/risk notes',
+    '2) multi-stage execution waves (stage 1..N)',
+    '3) per-stage concurrent tasks and dependency boundaries',
+    '4) files likely to change',
+    '5) verification strategy with explicit commands',
+    '6) rollback/risk notes',
     '',
     `Task ID: ${node.id}`,
     `Task Name: ${node.name}`,
@@ -423,6 +439,11 @@ function buildImplementationPrompt(params: {
   return [
     'Execute the approved plan and implement the requested changes.',
     'You must satisfy validation criteria before considering the task complete.',
+    'Operate in multi-stage waves and maximize safe concurrency.',
+    'Before coding, read todo_get and follow the todo list strictly.',
+    'Update todo states using todo_update as you progress.',
+    'Read agent_graph_get and spawn dependent sub-agents with subagent_spawn when useful.',
+    'Keep sub-agent outputs concise and integrate them into the main implementation.',
     '',
     `Attempt: ${attempt}`,
     `Task ID: ${node.id}`,

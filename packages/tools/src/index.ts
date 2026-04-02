@@ -2,6 +2,7 @@ import type { LlmToolCall, LlmToolset } from '@orchestrace/provider';
 import type { AgentToolsetOptions, RegisteredAgentTool } from './types.js';
 import { createFilesystemTools } from './fs-tools.js';
 import { createCommandTools } from './command-tools.js';
+import { createCoordinationTools } from './coordination-tools.js';
 import { resolveAgentToolPermissions } from './policy.js';
 
 export type { AgentToolPhase, AgentToolPermissions, AgentToolsetOptions } from './types.js';
@@ -18,6 +19,10 @@ export function createAgentToolset(options: AgentToolsetOptions): LlmToolset {
       ...options,
       includeRunCommandTool: permissions.allowRunCommand,
       runCommandAllowPrefixes: permissions.runCommandAllowPrefixes,
+    }),
+    ...createCoordinationTools({
+      ...options,
+      includeSubAgentTool: options.phase !== 'planning',
     }),
   ];
 

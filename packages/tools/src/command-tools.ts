@@ -1,10 +1,13 @@
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import { Type } from '@mariozechner/pi-ai';
-import type { AgentToolsetOptions, CommandResult, RegisteredAgentTool } from './types.js';
+import type { AgentToolsetOptions, RegisteredAgentTool } from './types.js';
 import { resolveWorkspacePath, toWorkspaceRelative } from './path-utils.js';
-
-const execFileAsync = promisify(execFile);
+import { formatCommandOutput, runCommand } from './command-tools/command-runner.js';
+import {
+  asRequiredString,
+  asString,
+  looksDestructive,
+  matchesAllowedPrefix,
+} from './command-tools/guards.js';
 
 interface CommandToolOptions extends AgentToolsetOptions {
   includeRunCommandTool: boolean;
@@ -49,9 +52,7 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
         }
 
         if (result.exitCode === 1 && result.stdout.trim().length === 0) {
-          return {
-            content: '(no matches)',
-          };
+          return { content: '(no matches)' };
         }
 
         const output = formatCommandOutput(result, options.maxOutputChars ?? 16000);
@@ -82,6 +83,26 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
         const output = formatCommandOutput(result, options.maxOutputChars ?? 20000);
         return {
           content: output.length > 0 ? output : '(no diff)',
+          isError: result.exitCode !== 0,
+        };
+      },
+    },
+    {
+      tool: {
+        name: 'git_status',
+        description: 'Show concise git working tree status for the workspace.',
+        parameters: Type.Object({}),
+      },
+      execute: async (_toolArgs, signal) => {
+        const result = await runCommand('git', ['status', '--short', '--branch'], {
+          cwd: options.cwd,
+          timeoutMs: options.commandTimeoutMs ?? 20000,
+          signal,
+        });
+
+        const output = formatCommandOutput(result, options.maxOutputChars ?? 12000);
+        return {
+          content: output.length > 0 ? output : '(clean working tree)',
           isError: result.exitCode !== 0,
         };
       },
@@ -136,113 +157,4 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
   }
 
   return tools;
-}
-
-async function runCommand(
-  command: string,
-  args: string[],
-  options: {
-    cwd: string;
-    timeoutMs: number;
-    signal?: AbortSignal;
-  },
-): Promise<CommandResult> {
-  try {
-    const { stdout, stderr } = await execFileAsync(command, args, {
-      cwd: options.cwd,
-      timeout: options.timeoutMs,
-      maxBuffer: 10 * 1024 * 1024,
-      signal: options.signal,
-    });
-
-    return {
-      exitCode: 0,
-      stdout,
-      stderr,
-    };
-  } catch (error) {
-    if (isErrnoException(error) && error.code === 'ENOENT') {
-      return {
-        exitCode: -1,
-        stdout: '',
-        stderr: `${command} not found`,
-      };
-    }
-
-    const stdout = isRecord(error) && typeof error.stdout === 'string' ? error.stdout : '';
-    const stderr = isRecord(error) && typeof error.stderr === 'string'
-      ? error.stderr
-      : error instanceof Error
-        ? error.message
-        : String(error);
-
-    const exitCode = isRecord(error) && typeof error.code === 'number' ? error.code : 1;
-
-    return {
-      exitCode,
-      stdout,
-      stderr,
-    };
-  }
-}
-
-function formatCommandOutput(result: CommandResult, maxChars: number): string {
-  const parts = [
-    result.stdout.trim(),
-    result.stderr.trim() ? `stderr:\n${result.stderr.trim()}` : '',
-  ].filter((part) => part.length > 0);
-
-  const combined = parts.join('\n\n');
-  if (combined.length <= maxChars) {
-    return combined;
-  }
-
-  return `${combined.slice(0, maxChars)}\n... (truncated)`;
-}
-
-function asString(value: unknown): string | undefined {
-  if (typeof value !== 'string') {
-    return undefined;
-  }
-
-  const trimmed = value.trim();
-  return trimmed.length > 0 ? trimmed : undefined;
-}
-
-function asRequiredString(value: unknown, field: string): string {
-  const parsed = asString(value);
-  if (!parsed) {
-    throw new Error(`Missing ${field}`);
-  }
-
-  return parsed;
-}
-
-function isErrnoException(value: unknown): value is NodeJS.ErrnoException {
-  return typeof value === 'object' && value !== null && 'code' in value;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null;
-}
-
-function matchesAllowedPrefix(command: string, prefixes?: string[]): boolean {
-  if (!prefixes || prefixes.length === 0) {
-    return true;
-  }
-
-  const normalized = command.trim().toLowerCase();
-  return prefixes.some((prefix) => normalized.startsWith(prefix.trim().toLowerCase()));
-}
-
-function looksDestructive(command: string): boolean {
-  const normalized = command.toLowerCase();
-  const blockedPatterns = [
-    /\bgit\s+reset\s+--hard\b/,
-    /\bgit\s+clean\s+-fdx\b/,
-    /\brm\s+-rf\s+\/$/,
-    /\bsudo\b/,
-  ];
-
-  return blockedPatterns.some((pattern) => pattern.test(normalized));
 }
