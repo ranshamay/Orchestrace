@@ -201,7 +201,6 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       if (req.method === 'POST' && pathname === '/api/auth/start') {
         const body = await readJsonBody(req);
         const providerId = asString(body.providerId);
-        const method = asString(body.method);
 
         if (!providerId) {
           sendJson(res, 400, { error: 'Missing providerId' });
@@ -214,24 +213,10 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           return;
         }
 
-        if (method === 'api-key') {
-          const apiKey = asString(body.apiKey);
-          if (!apiKey) {
-            sendJson(res, 400, { error: 'Missing apiKey' });
-            return;
-          }
-
-          try {
-            await authManager.configureApiKey(providerId, apiKey);
-            sendJson(res, 200, { ok: true, message: `Saved API key for ${providerId}` });
-          } catch (error) {
-            sendJson(res, 400, { error: toErrorMessage(error) });
-          }
-          return;
-        }
-
-        if (method !== 'oauth') {
-          sendJson(res, 400, { error: 'method must be oauth or api-key' });
+        if (provider.authType === 'api-key') {
+          sendJson(res, 400, {
+            error: `Provider ${providerId} requires API key setup. Use CLI: pnpm --filter @orchestrace/cli dev auth ${providerId}`,
+          });
           return;
         }
 
@@ -688,6 +673,10 @@ function renderDashboardHtml(): string {
       .shell {
         grid-template-columns: 1fr;
       }
+
+      .screen {
+        grid-template-columns: 1fr;
+      }
     }
 
     .panel {
@@ -703,6 +692,34 @@ function renderDashboardHtml(): string {
     .panel:hover {
       transform: translateY(-1px);
       border-color: rgba(21, 94, 239, 0.36);
+    }
+
+    .screen-nav {
+      grid-column: 1 / -1;
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .screen-nav button.active {
+      background: linear-gradient(130deg, var(--accent), var(--accent-2));
+      color: #fff;
+      border-color: transparent;
+    }
+
+    .screen {
+      grid-column: 1 / -1;
+      display: none;
+      grid-template-columns: minmax(320px, 420px) 1fr;
+      gap: 14px;
+    }
+
+    .screen.active {
+      display: grid;
+    }
+
+    .full-span {
+      grid-column: 1 / -1;
     }
 
     .hero {
@@ -1125,128 +1142,129 @@ function renderDashboardHtml(): string {
       </div>
     </section>
 
-    <section class="panel">
-      <h2 class="section-title">Auth Control</h2>
-      <div class="grid">
-        <div>
-          <label>Provider</label>
-          <select id="authProvider"></select>
-        </div>
-        <div>
-          <label>Method</label>
-          <select id="authMethod">
-            <option value="oauth">oauth</option>
-            <option value="api-key">api-key</option>
-          </select>
-        </div>
-        <div class="full">
-          <label>API key (when method=api-key)</label>
-          <input id="authApiKey" type="password" placeholder="sk-..." />
-        </div>
-        <div class="full actions">
-          <button class="primary" id="authStart">Authenticate</button>
-        </div>
-      </div>
-      <div id="authStatus" class="status-note"></div>
-      <div id="authSession" class="auth-console">No auth session started.</div>
-      <div class="grid" style="margin-top:8px;">
-        <div class="full">
-          <label>OAuth prompt response</label>
-          <input id="authPromptInput" placeholder="Paste device code or answer" />
-        </div>
-        <div class="full actions">
-          <button class="secondary" id="authPromptSend">Send OAuth Input</button>
-        </div>
-      </div>
+    <section class="panel screen-nav">
+      <button class="secondary active" id="screenSettings">Settings</button>
+      <button class="secondary" id="screenWorking">Working</button>
     </section>
 
-    <section class="panel">
-      <h2 class="section-title">Workspaces</h2>
-      <div class="grid">
-        <div class="full">
-          <label>Registered workspaces</label>
-          <select id="workspaceSelect"></select>
+    <section id="settingsScreen" class="screen active">
+      <section class="panel">
+        <h2 class="section-title">Settings: Auth</h2>
+        <div class="grid">
+          <div>
+            <label>Provider</label>
+            <select id="authProvider"></select>
+          </div>
+          <div class="full actions">
+            <button class="primary" id="authStart">Connect Provider</button>
+          </div>
         </div>
-        <div class="full actions">
-          <button class="secondary" id="workspaceActivate">Set Active</button>
-          <button class="danger" id="workspaceRemove">Remove</button>
+        <div id="authStatus" class="status-note"></div>
+        <div id="authSession" class="auth-console">No auth session started.</div>
+        <div id="authPromptRow" class="grid" style="display:none;margin-top:8px;">
+          <div class="full">
+            <label>OAuth prompt response</label>
+            <input id="authPromptInput" placeholder="Paste device code or answer" />
+          </div>
+          <div class="full actions">
+            <button class="secondary" id="authPromptSend">Send OAuth Input</button>
+          </div>
         </div>
-        <div class="full">
-          <label>Add workspace path</label>
-          <input id="workspacePath" placeholder="/absolute/path/to/repo" />
+      </section>
+
+      <section class="panel">
+        <h2 class="section-title">Settings: Workspaces</h2>
+        <div class="grid">
+          <div class="full">
+            <label>Registered workspaces</label>
+            <select id="workspaceSelect"></select>
+          </div>
+          <div class="full actions">
+            <button class="secondary" id="workspaceActivate">Set Active</button>
+            <button class="danger" id="workspaceRemove">Remove</button>
+          </div>
+          <div class="full">
+            <label>Add workspace path</label>
+            <input id="workspacePath" placeholder="/absolute/path/to/repo" />
+          </div>
+          <div class="full">
+            <label>Optional workspace name</label>
+            <input id="workspaceName" placeholder="my-repo" />
+          </div>
+          <div class="full actions">
+            <button class="primary" id="workspaceAdd">Add Workspace</button>
+          </div>
         </div>
-        <div class="full">
-          <label>Optional workspace name</label>
-          <input id="workspaceName" placeholder="my-repo" />
-        </div>
-        <div class="full actions">
-          <button class="primary" id="workspaceAdd">Add Workspace</button>
-        </div>
-      </div>
-      <div id="workspaceStatus" class="status-note"></div>
-      <div id="workspaceReadiness" class="readiness-list">Loading workspace readiness...</div>
+        <div id="workspaceStatus" class="status-note"></div>
+        <div id="workspaceReadiness" class="readiness-list">Loading workspace readiness...</div>
+      </section>
     </section>
 
-    <section class="panel graph-panel">
-      <div class="graph-head">
-        <h2 class="section-title" style="margin:0;">Agent Graph</h2>
-        <div class="legend">
-          <span class="running">running</span>
-          <span class="completed">completed</span>
-          <span class="failed">failed</span>
-          <span class="cancelled">cancelled</span>
+    <section id="workingScreen" class="screen">
+      <section class="panel">
+        <h2 class="section-title">Working: Start Session</h2>
+        <div class="grid">
+          <div class="full">
+            <label>Workspace</label>
+            <select id="workWorkspace"></select>
+          </div>
+          <div>
+            <label>Provider</label>
+            <select id="workProvider"></select>
+          </div>
+          <div>
+            <label>Model</label>
+            <select id="workModel"></select>
+          </div>
+          <div class="full">
+            <label>Prompt</label>
+            <textarea id="workPrompt" placeholder="Describe the work to run"></textarea>
+          </div>
+          <div class="full">
+            <label><input id="autoApprove" type="checkbox" checked /> Auto approve deep plan</label>
+          </div>
+          <div class="full actions">
+            <button class="primary" id="workStart">Start Session</button>
+          </div>
         </div>
-      </div>
-      <div class="graph-wrap">
-        <svg id="sessionGraph" viewBox="0 0 620 280" role="img" aria-label="Agent session graph"></svg>
-      </div>
-      <div id="events" class="events">Select a node to inspect events.</div>
-    </section>
+        <div id="workStatus" class="status-note"></div>
+      </section>
 
-    <section class="panel">
-      <h2 class="section-title">Start Work</h2>
-      <div class="grid">
-        <div class="full">
-          <label>Workspace</label>
-          <select id="workWorkspace"></select>
+      <section class="panel graph-panel">
+        <div class="graph-head">
+          <h2 class="section-title" style="margin:0;">Agent Graph</h2>
+          <div class="legend">
+            <span class="running">running</span>
+            <span class="completed">completed</span>
+            <span class="failed">failed</span>
+            <span class="cancelled">cancelled</span>
+          </div>
         </div>
-        <div>
-          <label>Provider</label>
-          <select id="workProvider"></select>
+        <div class="graph-wrap">
+          <svg id="sessionGraph" viewBox="0 0 620 280" role="img" aria-label="Agent session graph"></svg>
         </div>
-        <div>
-          <label>Model</label>
-          <select id="workModel"></select>
-        </div>
-        <div class="full">
-          <label>Prompt</label>
-          <textarea id="workPrompt" placeholder="Describe the work to run"></textarea>
-        </div>
-        <div class="full">
-          <label><input id="autoApprove" type="checkbox" checked /> Auto approve deep plan</label>
-        </div>
-        <div class="full actions">
-          <button class="primary" id="workStart">Start Session</button>
-        </div>
-      </div>
-      <div id="workStatus" class="status-note"></div>
-    </section>
+        <div id="events" class="events">Select a node to inspect events.</div>
+      </section>
 
-    <section class="panel">
-      <h2 class="section-title">Sessions</h2>
-      <div id="workRows" class="session-list"></div>
+      <section class="panel full-span">
+        <h2 class="section-title">Working: Sessions</h2>
+        <div id="workRows" class="session-list"></div>
+      </section>
     </section>
   </main>
 
 <script>
   let selectedWorkId = null;
   let authPollId = null;
+  let authFlowVersion = 0;
+  let readinessVersion = 0;
   let activeAuthSessionId = null;
   let providerCache = [];
   let statusCache = [];
   let workspaceCache = [];
   let activeWorkspaceId = null;
   let workSessionsCache = [];
+  let activeScreen = 'settings';
   let defaults = { provider: 'anthropic', model: 'claude-sonnet-4-20250514' };
 
   async function api(path, method = 'GET', body) {
@@ -1275,6 +1293,26 @@ function renderDashboardHtml(): string {
     }
     const prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
     applyTheme(prefersDark ? 'dark' : 'light');
+  }
+
+  function applyScreen(screen) {
+    activeScreen = screen === 'working' ? 'working' : 'settings';
+    localStorage.setItem('orchestrace.screen', activeScreen);
+
+    document.getElementById('settingsScreen').classList.toggle('active', activeScreen === 'settings');
+    document.getElementById('workingScreen').classList.toggle('active', activeScreen === 'working');
+    document.getElementById('screenSettings').classList.toggle('active', activeScreen === 'settings');
+    document.getElementById('screenWorking').classList.toggle('active', activeScreen === 'working');
+  }
+
+  function initScreen() {
+    const saved = localStorage.getItem('orchestrace.screen');
+    if (saved === 'settings' || saved === 'working') {
+      applyScreen(saved);
+      return;
+    }
+
+    applyScreen('settings');
   }
 
   async function refreshWorkspaces() {
@@ -1326,8 +1364,17 @@ function renderDashboardHtml(): string {
   }
 
   async function refreshWorkspaceReadiness() {
-    const provider = document.getElementById('workProvider').value || defaults.provider;
+    const requestVersion = ++readinessVersion;
+    const authProvider = document.getElementById('authProvider');
+    const workProvider = document.getElementById('workProvider');
+    const provider = (authProvider && authProvider.value)
+      || (workProvider && workProvider.value)
+      || defaults.provider;
     const data = await api('/api/workspaces/readiness?provider=' + encodeURIComponent(provider));
+    if (requestVersion !== readinessVersion) {
+      return;
+    }
+
     const root = document.getElementById('workspaceReadiness');
     const rows = data.workspaces || [];
 
@@ -1420,7 +1467,7 @@ function renderDashboardHtml(): string {
       const status = statusCache.find((item) => item.provider === provider.id);
       const opt = document.createElement('option');
       opt.value = provider.id;
-      opt.textContent = provider.id + ' [' + (status ? status.source : 'none') + ']';
+      opt.textContent = provider.id + ' (' + (status && status.source !== 'none' ? 'connected' : 'not connected') + ')';
       select.appendChild(opt);
 
       const wopt = document.createElement('option');
@@ -1442,7 +1489,7 @@ function renderDashboardHtml(): string {
     }
 
     await refreshWorkModels();
-    syncAuthMethodWithProvider();
+    syncAuthUiForProvider();
     await refreshWorkspaceReadiness();
   }
 
@@ -1478,25 +1525,26 @@ function renderDashboardHtml(): string {
     }
   }
 
-  function syncAuthMethodWithProvider() {
+  function syncAuthUiForProvider() {
     const providerId = document.getElementById('authProvider').value;
-    const methodSelect = document.getElementById('authMethod');
-    const keyInput = document.getElementById('authApiKey');
+    const connectButton = document.getElementById('authStart');
 
     const provider = providerCache.find((item) => item.id === providerId);
     if (!provider) return;
 
-    if (provider.authType === 'oauth') {
-      methodSelect.value = 'oauth';
-      methodSelect.disabled = true;
-      keyInput.disabled = true;
-      keyInput.placeholder = 'Disabled: this provider uses OAuth';
+    if (provider.authType === 'api-key') {
+      connectButton.disabled = true;
+      setText('authStatus', 'Provider ' + provider.id + ' requires API key setup in CLI.');
+      document.getElementById('authSession').textContent = 'Run: pnpm --filter @orchestrace/cli dev auth ' + provider.id;
+      document.getElementById('authPromptRow').style.display = 'none';
       return;
     }
 
-    methodSelect.disabled = false;
-    keyInput.disabled = methodSelect.value !== 'api-key';
-    keyInput.placeholder = keyInput.disabled ? 'Enter only when api-key is selected' : 'sk-...';
+    connectButton.disabled = false;
+    if (!activeAuthSessionId) {
+      setText('authStatus', '');
+      document.getElementById('authSession').textContent = 'No auth session started.';
+    }
   }
 
   async function refreshWorkSessions() {
@@ -1688,18 +1736,53 @@ function renderDashboardHtml(): string {
   }
 
   async function startAuth() {
+    const flowVersion = ++authFlowVersion;
     const providerId = document.getElementById('authProvider').value;
-    const method = document.getElementById('authMethod').value;
-    const apiKey = document.getElementById('authApiKey').value;
+    const provider = providerCache.find((item) => item.id === providerId);
 
-    const result = await api('/api/auth/start', 'POST', { providerId, method, apiKey });
+    if (!provider) {
+      setText('authStatus', 'Choose a provider first.');
+      return;
+    }
+
+    if (provider.authType === 'api-key') {
+      setText('authStatus', 'Provider ' + provider.id + ' requires API key setup in CLI.');
+      document.getElementById('authSession').textContent = 'Run: pnpm --filter @orchestrace/cli dev auth ' + provider.id;
+      return;
+    }
+
+    const result = await api('/api/auth/start', 'POST', { providerId });
+    if (flowVersion !== authFlowVersion) {
+      return;
+    }
+
+    if (document.getElementById('authProvider').value !== providerId) {
+      return;
+    }
+
     activeAuthSessionId = result.sessionId;
     setText('authStatus', 'Auth session started: ' + result.sessionId);
 
     if (authPollId) clearInterval(authPollId);
     authPollId = setInterval(async () => {
+      if (flowVersion !== authFlowVersion) {
+        if (authPollId) {
+          clearInterval(authPollId);
+          authPollId = null;
+        }
+        return;
+      }
+
       try {
         const sessionResult = await api('/api/auth/session?id=' + encodeURIComponent(activeAuthSessionId));
+        if (flowVersion !== authFlowVersion) {
+          return;
+        }
+
+        if (document.getElementById('authProvider').value !== sessionResult.session.providerId) {
+          return;
+        }
+
         renderAuthSession(sessionResult.session);
         if (sessionResult.session.state === 'completed' || sessionResult.session.state === 'failed') {
           clearInterval(authPollId);
@@ -1713,6 +1796,12 @@ function renderDashboardHtml(): string {
   }
 
   function renderAuthSession(session) {
+    const promptRow = document.getElementById('authPromptRow');
+    if (document.getElementById('authProvider').value !== session.providerId) {
+      promptRow.style.display = 'none';
+      return;
+    }
+
     const lines = [
       'provider: ' + session.providerId,
       'state: ' + session.state,
@@ -1722,6 +1811,8 @@ function renderDashboardHtml(): string {
     if (session.authInstructions) lines.push('instructions: ' + session.authInstructions);
     if (session.promptMessage) lines.push('prompt: ' + session.promptMessage);
     if (session.error) lines.push('error: ' + session.error);
+
+    promptRow.style.display = session.state === 'awaiting-input' ? 'grid' : 'none';
 
     document.getElementById('authSession').textContent = lines.join('\\n');
   }
@@ -1747,8 +1838,21 @@ function renderDashboardHtml(): string {
 
   document.getElementById('themeLight').addEventListener('click', () => applyTheme('light'));
   document.getElementById('themeDark').addEventListener('click', () => applyTheme('dark'));
-  document.getElementById('authProvider').addEventListener('change', syncAuthMethodWithProvider);
-  document.getElementById('authMethod').addEventListener('change', syncAuthMethodWithProvider);
+  document.getElementById('screenSettings').addEventListener('click', () => applyScreen('settings'));
+  document.getElementById('screenWorking').addEventListener('click', () => applyScreen('working'));
+  document.getElementById('authProvider').addEventListener('change', () => {
+    authFlowVersion += 1;
+    if (authPollId) {
+      clearInterval(authPollId);
+      authPollId = null;
+    }
+    activeAuthSessionId = null;
+    document.getElementById('authPromptRow').style.display = 'none';
+    document.getElementById('authSession').textContent = 'No auth session started.';
+    setText('authStatus', '');
+    syncAuthUiForProvider();
+    refreshWorkspaceReadiness().catch((e) => setText('workspaceStatus', String(e)));
+  });
   document.getElementById('workspaceAdd').addEventListener('click', () => addWorkspace().catch((e) => setText('workspaceStatus', String(e))));
   document.getElementById('workspaceActivate').addEventListener('click', () => activateWorkspace().catch((e) => setText('workspaceStatus', String(e))));
   document.getElementById('workspaceRemove').addEventListener('click', () => removeWorkspace().catch((e) => setText('workspaceStatus', String(e))));
@@ -1768,6 +1872,7 @@ function renderDashboardHtml(): string {
   document.getElementById('authPromptSend').addEventListener('click', () => sendAuthPromptInput().catch((e) => setText('authStatus', String(e))));
 
   initTheme();
+  initScreen();
   refreshWorkspaces().catch((e) => setText('workspaceStatus', String(e)));
   refreshProviders().catch((e) => setText('authStatus', String(e)));
   refreshWorkSessions().catch((e) => setText('workStatus', String(e)));
