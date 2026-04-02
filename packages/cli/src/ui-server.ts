@@ -80,6 +80,14 @@ interface SessionChatThread {
   messages: SessionChatMessage[];
 }
 
+interface AgentTodoItem {
+  id: string;
+  text: string;
+  done: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
 interface ChatTokenStream {
   id: string;
   sessionId: string;
@@ -115,6 +123,7 @@ interface PersistedUiState {
   updatedAt: string;
   sessions: PersistedWorkSession[];
   chats: SessionChatThread[];
+  todos: Array<{ sessionId: string; items: AgentTodoItem[] }>;
 }
 
 export async function startUiServer(options: UiServerOptions = {}): Promise<void> {
@@ -131,15 +140,16 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
   const workSessions = new Map<string, WorkSession>();
   const authSessions = new Map<string, AuthSession>();
   const sessionChats = new Map<string, SessionChatThread>();
+  const sessionTodos = new Map<string, AgentTodoItem[]>();
   const chatStreams = new Map<string, ChatTokenStream>();
   const hmrClients = new Set<ServerResponse>();
   const workStreamClients = new Map<string, Set<ServerResponse>>();
   const chatStreamClients = new Map<string, Set<ServerResponse>>();
   const uiStatePath = join(workspaceManager.getRootDir(), '.orchestrace', 'ui-state.json');
 
-  await restoreUiState(uiStatePath, workSessions, sessionChats);
+  await restoreUiState(uiStatePath, workSessions, sessionChats, sessionTodos);
 
-  const uiStatePersistence = createUiStatePersistence(uiStatePath, workSessions, sessionChats);
+  const uiStatePersistence = createUiStatePersistence(uiStatePath, workSessions, sessionChats, sessionTodos);
 
   let hmrWatcher: FSWatcher | undefined;
   if (hmrEnabled) {
@@ -510,6 +520,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
 
         workSessions.set(id, session);
         sessionChats.set(id, createSessionChatThread(session));
+        sessionTodos.set(id, []);
         uiStatePersistence.schedule();
 
         const graph = buildSingleTaskGraph(id, prompt);
@@ -574,7 +585,11 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
               }
             }
 
-            if ('taskId' in event && event.type !== 'task:stream-delta') {
+            if (
+              'taskId' in event
+              && event.type !== 'task:stream-delta'
+              && event.type !== 'task:tool-call'
+            ) {
               session.taskStatus[event.taskId] = event.type;
             }
 
@@ -698,7 +713,134 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         sendJson(res, 200, {
           session: serializeWorkSession(session),
           messages: thread.messages.filter((message) => message.role !== 'system'),
+          todos: (sessionTodos.get(id) ?? []).map((item) => ({ ...item })),
         });
+        return;
+      }
+
+      if (req.method === 'GET' && pathname === '/api/work/todos') {
+        const id = asString(url.searchParams.get('id'));
+        if (!id) {
+          sendJson(res, 400, { error: 'Missing id' });
+          return;
+        }
+
+        const session = workSessions.get(id);
+        if (!session) {
+          sendJson(res, 404, { error: 'Unknown work session' });
+          return;
+        }
+
+        const todos = (sessionTodos.get(id) ?? []).map((item) => ({ ...item }));
+        sendJson(res, 200, { id, todos });
+        return;
+      }
+
+      if (req.method === 'POST' && pathname === '/api/work/todos/add') {
+        const body = await readJsonBody(req);
+        const id = asString(body.id);
+        const text = asString(body.text);
+
+        if (!id) {
+          sendJson(res, 400, { error: 'Missing id' });
+          return;
+        }
+
+        if (!text) {
+          sendJson(res, 400, { error: 'Missing todo text' });
+          return;
+        }
+
+        const session = workSessions.get(id);
+        if (!session) {
+          sendJson(res, 404, { error: 'Unknown work session' });
+          return;
+        }
+
+        const items = sessionTodos.get(id) ?? [];
+        const todo: AgentTodoItem = {
+          id: randomUUID(),
+          text,
+          done: false,
+          createdAt: now(),
+          updatedAt: now(),
+        };
+
+        items.push(todo);
+        sessionTodos.set(id, items);
+        session.updatedAt = now();
+        uiStatePersistence.schedule();
+
+        sendJson(res, 200, { ok: true, todo: { ...todo }, todos: items.map((item) => ({ ...item })) });
+        return;
+      }
+
+      if (req.method === 'POST' && pathname === '/api/work/todos/toggle') {
+        const body = await readJsonBody(req);
+        const id = asString(body.id);
+        const todoId = asString(body.todoId);
+
+        if (!id || !todoId) {
+          sendJson(res, 400, { error: 'Missing id or todoId' });
+          return;
+        }
+
+        const session = workSessions.get(id);
+        if (!session) {
+          sendJson(res, 404, { error: 'Unknown work session' });
+          return;
+        }
+
+        const items = sessionTodos.get(id) ?? [];
+        const target = items.find((item) => item.id === todoId);
+        if (!target) {
+          sendJson(res, 404, { error: 'Unknown todo item' });
+          return;
+        }
+
+        const requested = body.done;
+        const nextDone = typeof requested === 'boolean' ? requested : !target.done;
+        target.done = nextDone;
+        target.updatedAt = now();
+        session.updatedAt = now();
+        uiStatePersistence.schedule();
+
+        sendJson(res, 200, {
+          ok: true,
+          todo: { ...target },
+          todos: items.map((item) => ({ ...item })),
+        });
+        return;
+      }
+
+      if (req.method === 'POST' && pathname === '/api/work/todos/remove') {
+        const body = await readJsonBody(req);
+        const id = asString(body.id);
+        const todoId = asString(body.todoId);
+
+        if (!id || !todoId) {
+          sendJson(res, 400, { error: 'Missing id or todoId' });
+          return;
+        }
+
+        const session = workSessions.get(id);
+        if (!session) {
+          sendJson(res, 404, { error: 'Unknown work session' });
+          return;
+        }
+
+        const items = sessionTodos.get(id) ?? [];
+        const nextItems = items.filter((item) => item.id !== todoId);
+        if (nextItems.length === items.length) {
+          sendJson(res, 404, { error: 'Unknown todo item' });
+          return;
+        }
+
+        sessionTodos.set(id, nextItems);
+        session.updatedAt = now();
+        uiStatePersistence.schedule();
+
+        sendJson(res, 200, { ok: true, todos: nextItems.map((item) => ({ ...item })) });
         return;
       }
 
@@ -1162,6 +1304,7 @@ function createUiStatePersistence(
   path: string,
   workSessions: Map<string, WorkSession>,
   sessionChats: Map<string, SessionChatThread>,
+  sessionTodos: Map<string, AgentTodoItem[]>,
 ): { schedule: () => void; flush: () => Promise<void> } {
   let dirty = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -1180,7 +1323,7 @@ function createUiStatePersistence(
     try {
       while (dirty) {
         dirty = false;
-        await persistUiState(path, workSessions, sessionChats);
+        await persistUiState(path, workSessions, sessionChats, sessionTodos);
       }
     } finally {
       writing = false;
@@ -1214,6 +1357,7 @@ async function restoreUiState(
   path: string,
   workSessions: Map<string, WorkSession>,
   sessionChats: Map<string, SessionChatThread>,
+  sessionTodos: Map<string, AgentTodoItem[]>,
 ): Promise<void> {
   const payload = await readPersistedUiState(path);
   if (!payload) {
@@ -1241,12 +1385,36 @@ async function restoreUiState(
       messages: Array.isArray(thread.messages) ? thread.messages : [],
     });
   }
+
+  const persistedTodos = Array.isArray(payload.todos) ? payload.todos : [];
+  for (const entry of persistedTodos) {
+    const sessionId = asString(entry.sessionId);
+    if (!sessionId || !workSessions.has(sessionId)) {
+      continue;
+    }
+
+    const items = Array.isArray(entry.items)
+      ? entry.items
+        .filter((item) => item && typeof item === 'object')
+        .map((item) => ({
+          id: asString(item.id) || randomUUID(),
+          text: asString(item.text),
+          done: Boolean(item.done),
+          createdAt: asString(item.createdAt) || now(),
+          updatedAt: asString(item.updatedAt) || now(),
+        }))
+        .filter((item) => item.text.length > 0)
+      : [];
+
+    sessionTodos.set(sessionId, items);
+  }
 }
 
 async function persistUiState(
   path: string,
   workSessions: Map<string, WorkSession>,
   sessionChats: Map<string, SessionChatThread>,
+  sessionTodos: Map<string, AgentTodoItem[]>,
 ): Promise<void> {
   const payload: PersistedUiState = {
     version: 1,
@@ -1260,6 +1428,12 @@ async function persistUiState(
         messages: [...thread.messages],
       }))
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
+    todos: [...sessionTodos.entries()]
+      .map(([sessionId, items]) => ({
+        sessionId,
+        items: items.map((item) => ({ ...item })),
+      }))
+      .sort((a, b) => b.sessionId.localeCompare(a.sessionId)),
   };
 
   await mkdir(dirname(path), { recursive: true });
@@ -1280,6 +1454,9 @@ async function readPersistedUiState(path: string): Promise<PersistedUiState | un
       updatedAt: typeof parsed.updatedAt === 'string' ? parsed.updatedAt : now(),
       sessions: Array.isArray(parsed.sessions) ? parsed.sessions as PersistedWorkSession[] : [],
       chats: Array.isArray(parsed.chats) ? parsed.chats as SessionChatThread[] : [],
+      todos: Array.isArray(parsed.todos)
+        ? parsed.todos as Array<{ sessionId: string; items: AgentTodoItem[] }>
+        : [],
     };
   } catch {
     return undefined;
@@ -1383,6 +1560,20 @@ function toUiEvent(event: DagEvent): UiDagEvent | undefined {
       return { ...base, message: `${event.taskId}: approved` };
     case 'task:implementation-attempt':
       return { ...base, message: `${event.taskId}: implementation attempt ${event.attempt}/${event.maxAttempts}` };
+    case 'task:tool-call': {
+      if (event.status === 'started') {
+        return {
+          ...base,
+          message: `${event.taskId}: tool ${event.toolName} input ${previewToolLog(event.input)}`,
+        };
+      }
+
+      const errorSuffix = event.isError ? ' [error]' : '';
+      return {
+        ...base,
+        message: `${event.taskId}: tool ${event.toolName} output${errorSuffix} ${previewToolLog(event.output)}`,
+      };
+    }
     case 'task:verification-failed':
       return { ...base, message: `${event.taskId}: verification failed` };
     case 'task:ready':
@@ -1404,6 +1595,19 @@ function toUiEvent(event: DagEvent): UiDagEvent | undefined {
     default:
       return undefined;
   }
+}
+
+function previewToolLog(value: string | undefined): string {
+  if (!value) {
+    return '(empty)';
+  }
+
+  const compact = value.replace(/\s+/g, ' ').trim();
+  if (!compact) {
+    return '(blank)';
+  }
+
+  return compact.length > 600 ? `${compact.slice(0, 597)}...` : compact;
 }
 
 function serializeWorkSession(session: WorkSession): Record<string, unknown> {
@@ -2003,6 +2207,310 @@ function renderDashboardHtml(hmrEnabled: boolean): string {
       font-size: 12px;
     }
 
+    .chat-thread {
+      margin-top: 10px;
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      background: rgba(255, 255, 255, 0.52);
+      min-height: 260px;
+      max-height: 560px;
+      overflow: auto;
+      padding: 10px;
+      display: grid;
+      gap: 10px;
+      align-content: start;
+    }
+
+    body[data-theme="dark"] .chat-thread {
+      background: rgba(8, 12, 21, 0.72);
+    }
+
+    .chat-context {
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: rgba(21, 94, 239, 0.08);
+      padding: 10px 11px;
+      display: grid;
+      gap: 6px;
+    }
+
+    .chat-context .row {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      align-items: center;
+      font-size: 11px;
+      color: var(--muted);
+    }
+
+    .chat-context .prompt {
+      font-size: 12px;
+      line-height: 1.5;
+      color: var(--ink);
+      margin: 0;
+    }
+
+    .chat-events {
+      border-top: 1px dashed var(--border);
+      padding-top: 7px;
+      display: grid;
+      gap: 4px;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--muted);
+    }
+
+    .chat-events div {
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .chat-message {
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 10px 12px;
+      background: rgba(255, 255, 255, 0.75);
+      display: grid;
+      gap: 8px;
+      animation: chat-enter 180ms ease;
+    }
+
+    body[data-theme="dark"] .chat-message {
+      background: rgba(10, 16, 29, 0.8);
+    }
+
+    .chat-message.role-user {
+      border-color: rgba(14, 116, 144, 0.42);
+      background: rgba(14, 116, 144, 0.09);
+    }
+
+    .chat-message.role-assistant {
+      border-color: rgba(21, 94, 239, 0.3);
+    }
+
+    .chat-message.live {
+      box-shadow: 0 0 0 1px rgba(21, 94, 239, 0.32), 0 8px 24px rgba(21, 94, 239, 0.16);
+    }
+
+    .chat-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      align-items: center;
+      font-size: 11px;
+      color: var(--muted);
+    }
+
+    .chat-role {
+      color: var(--ink);
+      font-weight: 700;
+      letter-spacing: 0.14px;
+    }
+
+    .chat-time {
+      font-family: var(--font-mono);
+    }
+
+    .chat-body {
+      font-size: 13px;
+      line-height: 1.56;
+      color: var(--ink);
+    }
+
+    .chat-body h2,
+    .chat-body h3,
+    .chat-body h4 {
+      margin: 4px 0 6px;
+      line-height: 1.35;
+    }
+
+    .chat-body h2 { font-size: 15px; }
+    .chat-body h3 { font-size: 14px; }
+    .chat-body h4 { font-size: 13px; }
+
+    .chat-body p {
+      margin: 0;
+    }
+
+    .chat-body p + p {
+      margin-top: 6px;
+    }
+
+    .chat-body ul,
+    .chat-body ol {
+      margin: 0;
+      padding-left: 18px;
+    }
+
+    .chat-body blockquote {
+      margin: 0;
+      padding: 6px 10px;
+      border-left: 3px solid var(--accent-2);
+      color: var(--muted);
+      background: rgba(21, 94, 239, 0.08);
+      border-radius: 8px;
+    }
+
+    .chat-body pre {
+      margin: 0;
+      overflow: auto;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      background: rgba(7, 11, 20, 0.93);
+      color: #e8edff;
+      padding: 10px;
+      font-family: var(--font-mono);
+      font-size: 11.5px;
+      line-height: 1.5;
+      white-space: pre;
+    }
+
+    .chat-body .code-lang {
+      color: #98a8c8;
+      text-transform: lowercase;
+      margin-bottom: 5px;
+      font-size: 10px;
+      letter-spacing: 0.22px;
+    }
+
+    .chat-inline-code {
+      font-family: var(--font-mono);
+      font-size: 11.5px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 1px 4px;
+      background: rgba(21, 94, 239, 0.08);
+    }
+
+    .chat-meta {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+
+    .chat-chip {
+      font-size: 10px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 2px 8px;
+      color: var(--muted);
+      background: rgba(255, 255, 255, 0.45);
+    }
+
+    body[data-theme="dark"] .chat-chip {
+      background: rgba(10, 16, 29, 0.85);
+    }
+
+    .chat-chip.strong {
+      color: var(--accent-2);
+      border-color: rgba(21, 94, 239, 0.45);
+    }
+
+    .chat-chip.warn {
+      color: var(--warn);
+      border-color: rgba(181, 71, 8, 0.5);
+    }
+
+    .chat-chip.error {
+      color: var(--danger);
+      border-color: rgba(217, 45, 32, 0.52);
+    }
+
+    .todo-shell {
+      margin-top: 10px;
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 10px;
+      background: rgba(255, 255, 255, 0.56);
+      display: grid;
+      gap: 8px;
+    }
+
+    body[data-theme="dark"] .todo-shell {
+      background: rgba(8, 12, 21, 0.72);
+    }
+
+    .todo-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .todo-count {
+      font-size: 11px;
+      color: var(--muted);
+      font-family: var(--font-mono);
+    }
+
+    .todo-input-row {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 8px;
+    }
+
+    .todo-list {
+      max-height: 210px;
+      overflow: auto;
+      display: grid;
+      gap: 6px;
+      padding-right: 2px;
+    }
+
+    .todo-item {
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 8px;
+      display: grid;
+      grid-template-columns: auto 1fr auto;
+      align-items: center;
+      gap: 8px;
+      background: rgba(255, 255, 255, 0.75);
+    }
+
+    body[data-theme="dark"] .todo-item {
+      background: rgba(10, 16, 29, 0.84);
+    }
+
+    .todo-item.done {
+      opacity: 0.72;
+    }
+
+    .todo-item .text {
+      font-size: 12px;
+      line-height: 1.45;
+      word-break: break-word;
+    }
+
+    .todo-item.done .text {
+      text-decoration: line-through;
+      color: var(--muted);
+    }
+
+    .todo-remove {
+      border: 1px solid rgba(217, 45, 32, 0.45);
+      background: transparent;
+      color: var(--danger);
+      border-radius: 8px;
+      padding: 4px 8px;
+      font-size: 11px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    @keyframes chat-enter {
+      from {
+        opacity: 0;
+        transform: translateY(4px);
+      }
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
+
     @keyframes pulse {
       0% { transform: scale(1); }
       50% { transform: scale(1.08); }
@@ -2134,7 +2642,19 @@ function renderDashboardHtml(hmrEnabled: boolean): string {
 
       <section class="panel full-span">
         <h2 class="section-title">Working: Agent Chat</h2>
-        <div id="chatMessages" class="events">Select an agent session to chat and continue with context.</div>
+        <div id="chatMessages" class="chat-thread"><div class="empty">Select an agent session to chat and continue with context.</div></div>
+        <div class="todo-shell">
+          <div class="todo-head">
+            <strong>Agent Checklist</strong>
+            <span id="todoCount" class="todo-count">0/0 done</span>
+          </div>
+          <div class="todo-input-row">
+            <input id="todoInput" placeholder="Add a todo for this selected agent" />
+            <button class="secondary" id="todoAdd">Add</button>
+          </div>
+          <div id="todoList" class="todo-list"><div class="empty">Select an agent session to manage checklist items.</div></div>
+          <div id="todoStatus" class="status-note"></div>
+        </div>
         <div class="grid" style="margin-top:8px;">
           <div class="full">
             <label>Message</label>
@@ -2168,6 +2688,7 @@ function renderDashboardHtml(hmrEnabled: boolean): string {
   let chatStreamSource = null;
   let chatStreamId = null;
   let chatMessagesCache = [];
+  let selectedAgentTodos = [];
   const liveStreamState = Object.create(null);
   const liveChatState = {
     sessionId: null,
@@ -2332,38 +2853,507 @@ function renderDashboardHtml(hmrEnabled: boolean): string {
     chatStreamId = null;
   }
 
+  function summarizeText(value, maxLen = 240) {
+    const lineBreak = String.fromCharCode(10);
+    const carriage = String.fromCharCode(13);
+    const tab = String.fromCharCode(9);
+    let text = String(value || '')
+      .split(carriage).join(' ')
+      .split(lineBreak).join(' ')
+      .split(tab).join(' ');
+
+    while (text.includes('  ')) {
+      text = text.split('  ').join(' ');
+    }
+
+    text = text.trim();
+    if (!text) {
+      return '(empty)';
+    }
+
+    if (text.length <= maxLen) {
+      return text;
+    }
+
+    return text.slice(0, maxLen - 3) + '...';
+  }
+
+  function formatMessageTime(value) {
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) {
+      return String(value || '');
+    }
+
+    return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  }
+
+  function formatUsageLabel(usage, estimated = false) {
+    if (!usage || typeof usage !== 'object') {
+      return '';
+    }
+
+    const inTokens = Number(usage.input || 0);
+    const outTokens = Number(usage.output || 0);
+    const cost = Number(usage.cost || 0).toFixed(4);
+    const prefix = estimated ? 'usage est' : 'usage';
+    return prefix + ': in ' + inTokens + ' | out ' + outTokens + ' | $' + cost;
+  }
+
+  function createChatChip(text, variant = '') {
+    const chip = document.createElement('span');
+    chip.className = 'chat-chip' + (variant ? ' ' + variant : '');
+    chip.textContent = text;
+    return chip;
+  }
+
+  function applyBoldMarkup(text) {
+    const segments = String(text || '').split('**');
+    if (segments.length === 1) {
+      return String(text || '');
+    }
+
+    let output = segments[0];
+    let isOpening = true;
+    for (let index = 1; index < segments.length; index += 1) {
+      output += (isOpening ? '<strong>' : '</strong>') + segments[index];
+      isOpening = !isOpening;
+    }
+
+    if (!isOpening) {
+      output += '</strong>';
+    }
+
+    return output;
+  }
+
+  function parseOrderedListItem(line) {
+    const markerIndex = line.indexOf('. ');
+    if (markerIndex <= 0) {
+      return '';
+    }
+
+    const maybeIndex = line.slice(0, markerIndex);
+    for (const character of maybeIndex) {
+      if (character < '0' || character > '9') {
+        return '';
+      }
+    }
+
+    return line.slice(markerIndex + 2);
+  }
+
+  function applyInlineMarkup(text) {
+    let safe = escapeHtml(text);
+    safe = applyBoldMarkup(safe);
+    return safe;
+  }
+
+  function renderPlainMarkdownBlocks(text) {
+    const lineBreak = String.fromCharCode(10);
+    const lines = String(text || '').split(lineBreak);
+    const blocks = [];
+    let paragraph = [];
+    let listType = '';
+    let listItems = [];
+
+    function flushParagraph() {
+      if (!paragraph.length) {
+        return;
+      }
+
+      blocks.push('<p>' + paragraph.join('<br />') + '</p>');
+      paragraph = [];
+    }
+
+    function flushList() {
+      if (!listType || !listItems.length) {
+        listType = '';
+        listItems = [];
+        return;
+      }
+
+      blocks.push('<' + listType + '><li>' + listItems.join('</li><li>') + '</li></' + listType + '>');
+      listType = '';
+      listItems = [];
+    }
+
+    for (const rawLine of lines) {
+      const line = rawLine.trim();
+
+      if (!line) {
+        flushParagraph();
+        flushList();
+        continue;
+      }
+
+      if (line.startsWith('### ')) {
+        flushParagraph();
+        flushList();
+        blocks.push('<h4>' + applyInlineMarkup(line.slice(4)) + '</h4>');
+        continue;
+      }
+
+      if (line.startsWith('## ')) {
+        flushParagraph();
+        flushList();
+        blocks.push('<h3>' + applyInlineMarkup(line.slice(3)) + '</h3>');
+        continue;
+      }
+
+      if (line.startsWith('# ')) {
+        flushParagraph();
+        flushList();
+        blocks.push('<h2>' + applyInlineMarkup(line.slice(2)) + '</h2>');
+        continue;
+      }
+
+      if (line.startsWith('> ')) {
+        flushParagraph();
+        flushList();
+        blocks.push('<blockquote>' + applyInlineMarkup(line.slice(2)) + '</blockquote>');
+        continue;
+      }
+
+      if ((line.startsWith('- ') || line.startsWith('* ')) && line.length > 2) {
+        flushParagraph();
+        if (listType && listType !== 'ul') {
+          flushList();
+        }
+        listType = 'ul';
+        listItems.push(applyInlineMarkup(line.slice(2)));
+        continue;
+      }
+
+      const orderedItem = parseOrderedListItem(line);
+      if (orderedItem) {
+        flushParagraph();
+        if (listType && listType !== 'ol') {
+          flushList();
+        }
+        listType = 'ol';
+        listItems.push(applyInlineMarkup(orderedItem));
+        continue;
+      }
+
+      flushList();
+      paragraph.push(applyInlineMarkup(line));
+    }
+
+    flushParagraph();
+    flushList();
+
+    return blocks.join('');
+  }
+
+  function renderRichTextSegment(segment) {
+    const tick = String.fromCharCode(96);
+    const split = String(segment || '').split(tick);
+    if (split.length === 1) {
+      return renderPlainMarkdownBlocks(split[0]);
+    }
+
+    const inlineCode = [];
+    let stitched = '';
+
+    for (let index = 0; index < split.length; index += 1) {
+      if (index % 2 === 0) {
+        stitched += split[index];
+      } else {
+        const token = '[[INLINE_CODE_' + inlineCode.length + ']]';
+        inlineCode.push(escapeHtml(split[index]));
+        stitched += token;
+      }
+    }
+
+    let html = renderPlainMarkdownBlocks(stitched);
+    inlineCode.forEach((code, index) => {
+      const token = '[[INLINE_CODE_' + index + ']]';
+      html = html.replaceAll(token, '<code class="chat-inline-code">' + code + '</code>');
+    });
+
+    return html;
+  }
+
+  function renderMarkdown(content) {
+    const lineBreak = String.fromCharCode(10);
+    const carriage = String.fromCharCode(13);
+    const source = String(content || '')
+      .split(carriage + lineBreak).join(lineBreak)
+      .split(carriage).join(lineBreak);
+    if (!source.trim()) {
+      return '<p class="muted">(empty)</p>';
+    }
+
+    const tick = String.fromCharCode(96);
+    const fence = tick + tick + tick;
+    const parts = source.split(fence);
+    const blocks = [];
+
+    for (let index = 0; index < parts.length; index += 1) {
+      const part = parts[index];
+      if (index % 2 === 0) {
+        const rendered = renderRichTextSegment(part);
+        if (rendered) {
+          blocks.push(rendered);
+        }
+        continue;
+      }
+
+      let cleaned = part;
+      while (cleaned.startsWith(lineBreak)) {
+        cleaned = cleaned.slice(1);
+      }
+
+      const newline = cleaned.indexOf(lineBreak);
+      const language = newline >= 0 ? cleaned.slice(0, newline).trim() : '';
+      const code = newline >= 0 ? cleaned.slice(newline + 1) : cleaned;
+      blocks.push(
+        '<pre><div class="code-lang">'
+          + escapeHtml(language || 'code')
+          + '</div><code>'
+          + escapeHtml(code)
+          + '</code></pre>',
+      );
+    }
+
+    return blocks.join('');
+  }
+
+  function renderChatContextCard(session) {
+    const wrapper = document.createElement('section');
+    wrapper.className = 'chat-context';
+
+    const top = document.createElement('div');
+    top.className = 'row';
+    top.appendChild(createChatChip('session ' + session.id.slice(0, 8), 'strong'));
+    top.appendChild(createChatChip('status ' + (session.status || 'unknown')));
+    top.appendChild(createChatChip((session.provider || 'provider?') + ' / ' + (session.model || 'model?')));
+    wrapper.appendChild(top);
+
+    const prompt = document.createElement('p');
+    prompt.className = 'prompt';
+    prompt.textContent = summarizeText(session.prompt || '', 420);
+    wrapper.appendChild(prompt);
+
+    const toolEvents = (session.events || [])
+      .filter((entry) => entry.type === 'task:tool-call')
+      .slice(-4);
+    const recentEvents = (session.events || [])
+      .filter((entry) => entry.type !== 'task:stream-delta')
+      .slice(-6);
+
+    const events = document.createElement('div');
+    events.className = 'chat-events';
+    const title = document.createElement('div');
+    title.textContent = 'recent activity';
+    events.appendChild(title);
+
+    if (toolEvents.length === 0 && recentEvents.length === 0) {
+      const empty = document.createElement('div');
+      empty.textContent = '(no activity yet)';
+      events.appendChild(empty);
+    } else {
+      const display = toolEvents.length ? toolEvents : recentEvents;
+      for (const event of display) {
+        const row = document.createElement('div');
+        row.textContent = '[' + formatMessageTime(event.time) + '] ' + summarizeText(event.message || '', 180);
+        events.appendChild(row);
+      }
+    }
+
+    wrapper.appendChild(events);
+    return wrapper;
+  }
+
+  function appendChatMessageCard(root, message, options = {}) {
+    const role = message && message.role === 'assistant' ? 'assistant' : 'user';
+    const title = role === 'assistant' ? 'Agent' : 'You';
+    const card = document.createElement('article');
+    card.className = 'chat-message role-' + role + (options.live ? ' live' : '');
+
+    const head = document.createElement('div');
+    head.className = 'chat-head';
+
+    const roleEl = document.createElement('span');
+    roleEl.className = 'chat-role';
+    roleEl.textContent = title;
+    head.appendChild(roleEl);
+
+    const timeEl = document.createElement('span');
+    timeEl.className = 'chat-time';
+    timeEl.textContent = formatMessageTime(message.time || now());
+    head.appendChild(timeEl);
+    card.appendChild(head);
+
+    const body = document.createElement('div');
+    body.className = 'chat-body';
+    body.innerHTML = renderMarkdown(String(message.content || ''));
+    card.appendChild(body);
+
+    const meta = document.createElement('div');
+    meta.className = 'chat-meta';
+
+    const usageLabel = formatUsageLabel(message.usage, Boolean(options.usageEstimated));
+    if (usageLabel) {
+      meta.appendChild(createChatChip(usageLabel, options.usageEstimated ? 'warn' : ''));
+    }
+
+    if (options.live) {
+      meta.appendChild(createChatChip('streaming', 'strong'));
+    }
+
+    if (options.error) {
+      meta.appendChild(createChatChip(options.error, 'error'));
+    }
+
+    if (meta.childNodes.length > 0) {
+      card.appendChild(meta);
+    }
+
+    root.appendChild(card);
+  }
+
   function renderChatMessages(messages) {
     const chatEl = document.getElementById('chatMessages');
-    const lines = [];
+    chatEl.innerHTML = '';
+
+    if (!selectedWorkId) {
+      const empty = document.createElement('div');
+      empty.className = 'empty';
+      empty.textContent = 'Select an agent session to chat and continue with context.';
+      chatEl.appendChild(empty);
+      return;
+    }
+
+    const session = workSessionsCache.find((item) => item.id === selectedWorkId);
+    if (session) {
+      chatEl.appendChild(renderChatContextCard(session));
+    }
 
     for (const message of messages || []) {
-      const role = message.role === 'assistant' ? 'Agent' : 'You';
-      lines.push('[' + message.time + '] ' + role + ': ' + message.content);
-      if (message.usage) {
-        lines.push('  tokens in/out: ' + message.usage.input + '/' + message.usage.output + ', cost: $' + Number(message.usage.cost || 0).toFixed(4));
-      }
+      appendChatMessageCard(chatEl, message);
     }
 
     if (liveChatState.sessionId === selectedWorkId) {
-      if (liveChatState.text) {
-        lines.push('');
-        lines.push('[live] Agent: ' + liveChatState.text);
-      }
-      if (liveChatState.usage) {
-        const prefix = liveChatState.usageEstimated ? '[live][est]' : '[live]';
-        lines.push(
-          prefix + ' tokens in/out: '
-            + liveChatState.usage.input + '/' + liveChatState.usage.output
-            + ', cost: $' + Number(liveChatState.usage.cost || 0).toFixed(4),
-        );
-      }
-      if (liveChatState.error) {
-        lines.push('');
-        lines.push('[live] ERROR: ' + liveChatState.error);
+      if (liveChatState.text || liveChatState.error || liveChatState.status === 'streaming') {
+        appendChatMessageCard(chatEl, {
+          role: 'assistant',
+          content: liveChatState.text || '(waiting for first tokens...)',
+          time: now(),
+          usage: liveChatState.usage,
+        }, {
+          live: liveChatState.status === 'streaming',
+          usageEstimated: Boolean(liveChatState.usageEstimated),
+          error: liveChatState.error || '',
+        });
       }
     }
 
-    chatEl.textContent = lines.length ? lines.join('\\n') : '(no messages yet)';
+    if (!messages?.length && (!liveChatState.text || liveChatState.sessionId !== selectedWorkId)) {
+      const empty = document.createElement('div');
+      empty.className = 'empty';
+      empty.textContent = 'No chat turns yet. Send a follow-up to continue this agent session.';
+      chatEl.appendChild(empty);
+    }
+
+    chatEl.scrollTop = chatEl.scrollHeight;
+  }
+
+  function renderSelectedTodos() {
+    const todoList = document.getElementById('todoList');
+    const todoCount = document.getElementById('todoCount');
+
+    todoList.innerHTML = '';
+
+    if (!selectedWorkId) {
+      const empty = document.createElement('div');
+      empty.className = 'empty';
+      empty.textContent = 'Select an agent session to manage checklist items.';
+      todoList.appendChild(empty);
+      todoCount.textContent = '0/0 done';
+      setText('todoStatus', '');
+      return;
+    }
+
+    const doneCount = selectedAgentTodos.filter((item) => item.done).length;
+    todoCount.textContent = doneCount + '/' + selectedAgentTodos.length + ' done';
+
+    if (!selectedAgentTodos.length) {
+      const empty = document.createElement('div');
+      empty.className = 'empty';
+      empty.textContent = 'No checklist items yet for this agent.';
+      todoList.appendChild(empty);
+      return;
+    }
+
+    for (const item of selectedAgentTodos) {
+      const row = document.createElement('article');
+      row.className = 'todo-item' + (item.done ? ' done' : '');
+
+      const toggle = document.createElement('input');
+      toggle.type = 'checkbox';
+      toggle.checked = Boolean(item.done);
+      toggle.addEventListener('change', () => {
+        toggleAgentTodo(item.id, toggle.checked).catch((error) => setText('todoStatus', String(error)));
+      });
+      row.appendChild(toggle);
+
+      const text = document.createElement('div');
+      text.className = 'text';
+      text.textContent = item.text;
+      row.appendChild(text);
+
+      const remove = document.createElement('button');
+      remove.className = 'todo-remove';
+      remove.textContent = 'Remove';
+      remove.addEventListener('click', () => {
+        removeAgentTodo(item.id).catch((error) => setText('todoStatus', String(error)));
+      });
+      row.appendChild(remove);
+
+      todoList.appendChild(row);
+    }
+  }
+
+  async function addAgentTodo() {
+    if (!selectedWorkId) {
+      setText('todoStatus', 'Select an agent session first.');
+      return;
+    }
+
+    const input = document.getElementById('todoInput');
+    const text = input.value.trim();
+    if (!text) {
+      setText('todoStatus', 'Todo text is required.');
+      return;
+    }
+
+    const data = await api('/api/work/todos/add', 'POST', { id: selectedWorkId, text });
+    selectedAgentTodos = data.todos || [];
+    input.value = '';
+    setText('todoStatus', 'Checklist item added for selected agent.');
+    renderSelectedTodos();
+  }
+
+  async function toggleAgentTodo(todoId, done) {
+    if (!selectedWorkId) {
+      return;
+    }
+
+    const data = await api('/api/work/todos/toggle', 'POST', { id: selectedWorkId, todoId, done });
+    selectedAgentTodos = data.todos || [];
+    renderSelectedTodos();
+  }
+
+  async function removeAgentTodo(todoId) {
+    if (!selectedWorkId) {
+      return;
+    }
+
+    const data = await api('/api/work/todos/remove', 'POST', { id: selectedWorkId, todoId });
+    selectedAgentTodos = data.todos || [];
+    setText('todoStatus', 'Checklist item removed.');
+    renderSelectedTodos();
   }
 
   async function streamChatMessage(sessionId, message) {
@@ -2758,6 +3748,47 @@ function renderDashboardHtml(hmrEnabled: boolean): string {
     ensureWorkStreamSubscription();
   }
 
+  async function retryWorkSession(id) {
+    if (!id) {
+      setText('workStatus', 'Missing session id for retry.');
+      return;
+    }
+
+    const session = workSessionsCache.find((item) => item.id === id);
+    if (!session) {
+      setText('workStatus', 'Session not found for retry.');
+      return;
+    }
+
+    if (session.status !== 'failed') {
+      setText('workStatus', 'Retry is available only for failed sessions.');
+      return;
+    }
+
+    const promptText = window.prompt('Retry failed session. You can edit the prompt before rerun:', session.prompt || '');
+    if (promptText === null) {
+      return;
+    }
+
+    const prompt = promptText.trim();
+    if (!prompt) {
+      setText('workStatus', 'Retry prompt cannot be empty.');
+      return;
+    }
+
+    const result = await api('/api/work/start', 'POST', {
+      workspaceId: session.workspaceId,
+      prompt,
+      provider: session.provider,
+      model: session.model,
+      autoApprove: Boolean(session.autoApprove),
+    });
+
+    selectedWorkId = result.id;
+    setText('workStatus', 'Started retry session: ' + result.id);
+    await refreshWorkSessions();
+  }
+
   function renderSessionList(sessions) {
     const root = document.getElementById('workRows');
     root.innerHTML = '';
@@ -2773,6 +3804,7 @@ function renderDashboardHtml(hmrEnabled: boolean): string {
     for (const session of sessions) {
       const card = document.createElement('article');
       card.className = 'session-item' + (selectedWorkId === session.id ? ' active' : '');
+      const showRetry = session.status === 'failed';
 
       const escapedPrompt = escapeHtml(session.prompt || '').slice(0, 180);
       card.innerHTML =
@@ -2785,6 +3817,7 @@ function renderDashboardHtml(hmrEnabled: boolean): string {
         + '<div class="prompt">' + escapedPrompt + '</div>'
         + '<div class="session-actions">'
           + '<button class="secondary" data-view="' + session.id + '">View</button>'
+          + (showRetry ? '<button class="secondary" data-retry="' + session.id + '">Retry Prompt</button>' : '')
           + '<button class="danger" data-cancel="' + session.id + '">Cancel</button>'
         + '</div>';
 
@@ -2792,7 +3825,7 @@ function renderDashboardHtml(hmrEnabled: boolean): string {
 
       card.addEventListener('click', async (event) => {
         const target = event.target;
-        if (target instanceof Element && target.closest('button[data-cancel]')) {
+        if (target instanceof Element && target.closest('button')) {
           return;
         }
 
@@ -2811,6 +3844,13 @@ function renderDashboardHtml(hmrEnabled: boolean): string {
         const id = button.getAttribute('data-cancel');
         await api('/api/work/cancel', 'POST', { id });
         await refreshWorkSessions();
+      });
+    });
+
+    root.querySelectorAll('button[data-retry]').forEach((button) => {
+      button.addEventListener('click', async () => {
+        const id = button.getAttribute('data-retry');
+        await retryWorkSession(id).catch((error) => setText('workStatus', String(error)));
       });
     });
   }
@@ -2937,7 +3977,9 @@ function renderDashboardHtml(hmrEnabled: boolean): string {
     if (!selectedWorkId) {
       closeChatStreamSubscription();
       chatMessagesCache = [];
-      document.getElementById('chatMessages').textContent = 'Select an agent session to chat and continue with context.';
+      selectedAgentTodos = [];
+      renderChatMessages(chatMessagesCache);
+      renderSelectedTodos();
       setText('chatStatus', '');
       liveChatState.usage = null;
       liveChatState.usageEstimated = false;
@@ -2956,7 +3998,9 @@ function renderDashboardHtml(hmrEnabled: boolean): string {
 
     const data = await api('/api/work/agent?id=' + encodeURIComponent(selectedWorkId));
     chatMessagesCache = data.messages || [];
+    selectedAgentTodos = data.todos || [];
     renderChatMessages(chatMessagesCache);
+    renderSelectedTodos();
   }
 
   async function sendChatMessage() {
@@ -3119,7 +4163,7 @@ function renderDashboardHtml(hmrEnabled: boolean): string {
   }
 
   function escapeHtml(text) {
-    return text.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
+    return String(text ?? '').replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
   }
 
   document.getElementById('themeLight').addEventListener('click', () => applyTheme('light'));
@@ -3155,6 +4199,13 @@ function renderDashboardHtml(hmrEnabled: boolean): string {
   });
   document.getElementById('workStart').addEventListener('click', () => startWork().catch((e) => setText('workStatus', String(e))));
   document.getElementById('chatSend').addEventListener('click', () => sendChatMessage().catch((e) => setText('chatStatus', String(e))));
+  document.getElementById('todoAdd').addEventListener('click', () => addAgentTodo().catch((e) => setText('todoStatus', String(e))));
+  document.getElementById('todoInput').addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      addAgentTodo().catch((e) => setText('todoStatus', String(e)));
+    }
+  });
   document.getElementById('authStart').addEventListener('click', () => startAuth().catch((e) => setText('authStatus', String(e))));
   document.getElementById('authPromptSend').addEventListener('click', () => sendAuthPromptInput().catch((e) => setText('authStatus', String(e))));
 
@@ -3164,6 +4215,7 @@ function renderDashboardHtml(hmrEnabled: boolean): string {
   refreshWorkspaces().catch((e) => setText('workspaceStatus', String(e)));
   refreshProviders().catch((e) => setText('authStatus', String(e)));
   refreshWorkSessions().catch((e) => setText('workStatus', String(e)));
+  renderSelectedTodos();
   setInterval(() => refreshWorkSessions().catch(() => {}), 2000);
 </script>
 </body>

@@ -154,6 +154,20 @@ export async function orchestrate(
           delta,
         });
       },
+      onToolCall: (event) => {
+        emit({
+          type: 'task:tool-call',
+          taskId: node.id,
+          phase: 'planning',
+          attempt: 1,
+          toolCallId: event.toolCallId,
+          toolName: event.toolName,
+          status: event.type,
+          input: event.arguments,
+          output: event.result,
+          isError: event.isError,
+        });
+      },
     });
     mergeUsage(usage, planningResult.usage);
     await appendTokenDump(planningTokenDumpPath, {
@@ -270,6 +284,20 @@ export async function orchestrate(
             phase: 'implementation',
             attempt,
             delta,
+          });
+        },
+        onToolCall: (event) => {
+          emit({
+            type: 'task:tool-call',
+            taskId: node.id,
+            phase: 'implementation',
+            attempt,
+            toolCallId: event.toolCallId,
+            toolName: event.toolName,
+            status: event.type,
+            input: event.arguments,
+            output: event.result,
+            isError: event.isError,
           });
         },
       });

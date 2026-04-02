@@ -105,6 +105,18 @@ export interface TaskState {
 export type DagEvent =
   | { type: 'task:planning'; taskId: string }
   | { type: 'task:stream-delta'; taskId: string; phase: 'planning' | 'implementation'; attempt: number; delta: string }
+  | {
+      type: 'task:tool-call';
+      taskId: string;
+      phase: 'planning' | 'implementation';
+      attempt: number;
+      toolCallId: string;
+      toolName: string;
+      status: 'started' | 'result';
+      input?: string;
+      output?: string;
+      isError?: boolean;
+    }
   | { type: 'task:plan-persisted'; taskId: string; path: string }
   | { type: 'task:approval-requested'; taskId: string; path: string }
   | { type: 'task:approved'; taskId: string }

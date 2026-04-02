@@ -5,6 +5,7 @@ export type {
 	LlmAdapter,
 	LlmAgent,
 	LlmToolCall,
+	LlmToolCallEvent,
 	LlmToolDefinition,
 	LlmToolResult,
 	LlmToolset,

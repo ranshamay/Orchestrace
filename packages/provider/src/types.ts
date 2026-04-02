@@ -59,6 +59,7 @@ export interface LlmRequest {
   signal?: AbortSignal;
   onTextDelta?: (delta: string) => void;
   onUsage?: (usage: { input: number; output: number; cost: number }) => void;
+  onToolCall?: (event: LlmToolCallEvent) => void;
   toolset?: LlmToolset;
   /** Explicit API key (e.g. from OAuth). If omitted, pi-ai reads env vars. */
   apiKey?: string;
@@ -68,6 +69,7 @@ export interface LlmRequest {
 export interface LlmCompletionOptions {
   onTextDelta?: (delta: string) => void;
   onUsage?: (usage: { input: number; output: number; cost: number }) => void;
+  onToolCall?: (event: LlmToolCallEvent) => void;
 }
 
 /** Dedicated agent process bound to a specific model selection. */

@@ -118,6 +118,7 @@ export class PiAiAdapter implements LlmAdapter {
     return agent.complete(request.prompt, request.signal, {
       onTextDelta: request.onTextDelta,
       onUsage: request.onUsage,
+      onToolCall: request.onToolCall,
     });
   }
 }
@@ -180,7 +181,13 @@ async function executeWithOptionalTools(params: {
     }
 
     context.messages.push(response);
-    const toolResults = await executeToolCalls(toolset, context.tools ?? [], toolCalls, signal);
+    const toolResults = await executeToolCalls(
+      toolset,
+      context.tools ?? [],
+      toolCalls,
+      signal,
+      completionOptions,
+    );
     context.messages.push(...toolResults);
   }
 
@@ -192,11 +199,18 @@ async function executeToolCalls(
   tools: Tool[],
   toolCalls: ToolCall[],
   signal?: AbortSignal,
+  completionOptions?: LlmCompletionOptions,
 ): Promise<ToolResultMessage[]> {
   const results: ToolResultMessage[] = [];
 
   for (const toolCall of toolCalls) {
     let payload: { content: string; isError: boolean; details?: unknown };
+    completionOptions?.onToolCall?.({
+      type: 'started',
+      toolCallId: toolCall.id,
+      toolName: toolCall.name,
+      arguments: formatToolPayload(toolCall.arguments),
+    });
 
     try {
       const validatedArgs = validateToolCall(tools, toolCall) as Record<string, unknown>;
@@ -214,11 +228,27 @@ async function executeToolCalls(
         isError: toolResult.isError ?? false,
         details: toolResult.details,
       };
+
+      completionOptions?.onToolCall?.({
+        type: 'result',
+        toolCallId: toolCall.id,
+        toolName: toolCall.name,
+        result: formatToolPayload(toolResult.content),
+        isError: toolResult.isError ?? false,
+      });
     } catch (error) {
       payload = {
         content: `Tool execution failed: ${toErrorMessage(error)}`,
         isError: true,
       };
+
+      completionOptions?.onToolCall?.({
+        type: 'result',
+        toolCallId: toolCall.id,
+        toolName: toolCall.name,
+        result: formatToolPayload(payload.content),
+        isError: true,
+      });
     }
 
     results.push({
@@ -303,6 +333,21 @@ function toErrorMessage(error: unknown): string {
   }
 
   return String(error);
+}
+
+function formatToolPayload(value: unknown, maxChars = 8000): string {
+  let text = '';
+  if (typeof value === 'string') {
+    text = value;
+  } else {
+    try {
+      text = JSON.stringify(value);
+    } catch {
+      text = String(value);
+    }
+  }
+
+  return text.length > maxChars ? `${text.slice(0, maxChars)}\n... (truncated)` : text;
 }
 
 function resolveTimeoutMs(): number {

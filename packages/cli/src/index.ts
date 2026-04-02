@@ -205,6 +205,18 @@ async function runGraph(
       case 'task:stream-delta':
         console.log(`  [${ts}] · stream (${event.phase}):      ${previewStreamDelta(event.delta)}`);
         break;
+      case 'task:tool-call':
+        if (event.status === 'started') {
+          console.log(
+            `  [${ts}] 🛠 tool (${event.phase}):       ${event.toolName} <- ${previewStreamDelta(event.input ?? '')}`,
+          );
+        } else {
+          const suffix = event.isError ? ' [error]' : '';
+          console.log(
+            `  [${ts}] 🧾 tool result:          ${event.toolName}${suffix} -> ${previewStreamDelta(event.output ?? '')}`,
+          );
+        }
+        break;
       case 'task:plan-persisted':
         console.log(`  [${ts}] 📝 plan persisted:       ${event.taskId} -> ${event.path}`);
         break;
