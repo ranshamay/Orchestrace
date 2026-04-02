@@ -43,21 +43,24 @@ export interface ProviderAuthStatus {
   authType: ProviderInfo['authType'];
   envConfigured: boolean;
   oauthConfigured: boolean;
-  source: 'env' | 'oauth' | 'none';
+  storedApiKeyConfigured: boolean;
+  source: 'store' | 'env' | 'oauth' | 'none';
 }
 
 export interface ProviderAuthManagerOptions {
   authFilePath?: string;
-  envFilePath?: string;
+}
+
+export interface PersistedAuthStore {
+  oauth: Record<string, OAuthCredentials>;
+  apiKeys: Record<string, string>;
 }
 
 export class ProviderAuthManager {
   private readonly authFilePath: string;
-  private readonly envFilePath: string;
 
   constructor(options: ProviderAuthManagerOptions = {}) {
-    this.authFilePath = resolve(options.authFilePath ?? 'auth.json');
-    this.envFilePath = resolve(options.envFilePath ?? '.env');
+    this.authFilePath = resolve(options.authFilePath ?? process.env.ORCHESTRACE_AUTH_FILE ?? 'auth.json');
   }
 
   listProviders(): ProviderInfo[] {
@@ -93,44 +96,55 @@ export class ProviderAuthManager {
     }
 
     const credentials = await provider.login(callbacks);
-    const auth = await this.loadAuthFile();
-    auth[providerId] = credentials;
-    await this.saveAuthFile(auth);
+    const store = await this.loadStore();
+    store.oauth[providerId] = credentials;
+    await this.saveStore(store);
   }
 
-  async configureApiKey(providerId: string, apiKey: string): Promise<{ envVar: string }> {
-    const envVar = getPrimaryEnvVar(providerId);
-    if (!envVar) {
-      throw new Error(
-        `No default environment variable mapping for provider "${providerId}". `
-        + 'Use provider docs and set env vars manually.',
-      );
+  async configureApiKey(providerId: string, apiKey: string): Promise<{ path: string }> {
+    const sanitized = apiKey.trim();
+    if (!sanitized) {
+      throw new Error('API key cannot be empty.');
     }
 
-    await this.upsertEnvVar(envVar, apiKey);
-    process.env[envVar] = apiKey;
-    return { envVar };
+    const store = await this.loadStore();
+    store.apiKeys[providerId] = sanitized;
+    await this.saveStore(store);
+
+    const envVar = getPrimaryEnvVar(providerId);
+    if (envVar) {
+      process.env[envVar] = sanitized;
+    }
+
+    return { path: this.authFilePath };
   }
 
   async resolveApiKey(providerId: string): Promise<string | undefined> {
+    const store = await this.loadStore();
+
+    const storedApiKey = store.apiKeys[providerId];
+    if (storedApiKey) {
+      return storedApiKey;
+    }
+
+    if (store.oauth[providerId]) {
+      const result = await getOAuthApiKey(providerId as OAuthProviderId, store.oauth);
+      if (!result) {
+        return undefined;
+      }
+
+      store.oauth[providerId] = result.newCredentials;
+      await this.saveStore(store);
+      return result.apiKey;
+    }
+
+    // Optional fallback for users who still prefer environment variables.
     const envApiKey = getEnvApiKey(providerId as never);
     if (envApiKey) {
       return envApiKey;
     }
 
-    const auth = await this.loadAuthFile();
-    if (!auth[providerId]) {
-      return undefined;
-    }
-
-    const result = await getOAuthApiKey(providerId as OAuthProviderId, auth);
-    if (!result) {
-      return undefined;
-    }
-
-    auth[providerId] = result.newCredentials;
-    await this.saveAuthFile(auth);
-    return result.apiKey;
+    return undefined;
   }
 
   async getStatus(providerId: string): Promise<ProviderAuthStatus> {
@@ -141,8 +155,9 @@ export class ProviderAuthManager {
       envVars: getEnvVarCandidates(providerId),
     };
 
-    const auth = await this.loadAuthFile();
-    const oauthConfigured = Boolean(auth[providerId]);
+    const store = await this.loadStore();
+    const oauthConfigured = Boolean(store.oauth[providerId]);
+    const storedApiKeyConfigured = Boolean(store.apiKeys[providerId]);
     const envConfigured = provider.envVars.some((envVar) => Boolean(process.env[envVar]));
 
     return {
@@ -150,7 +165,8 @@ export class ProviderAuthManager {
       authType: provider.authType,
       envConfigured,
       oauthConfigured,
-      source: envConfigured ? 'env' : oauthConfigured ? 'oauth' : 'none',
+      storedApiKeyConfigured,
+      source: storedApiKeyConfigured ? 'store' : oauthConfigured ? 'oauth' : envConfigured ? 'env' : 'none',
     };
   }
 
@@ -165,47 +181,40 @@ export class ProviderAuthManager {
     return statuses;
   }
 
-  private async loadAuthFile(): Promise<Record<string, OAuthCredentials>> {
+  private async loadStore(): Promise<PersistedAuthStore> {
     try {
       const raw = await readFile(this.authFilePath, 'utf-8');
       const parsed = JSON.parse(raw);
-      if (parsed && typeof parsed === 'object') {
-        return parsed as Record<string, OAuthCredentials>;
+      if (!parsed || typeof parsed !== 'object') {
+        return { oauth: {}, apiKeys: {} };
       }
-      return {};
+
+      // New format
+      if ('oauth' in parsed || 'apiKeys' in parsed) {
+        const oauth = isRecord(parsed.oauth) ? parsed.oauth as Record<string, OAuthCredentials> : {};
+        const apiKeys = isRecord(parsed.apiKeys) ? parsed.apiKeys as Record<string, string> : {};
+        return { oauth, apiKeys };
+      }
+
+      // Backward compatibility: old format stored OAuth credentials at root.
+      const oauth: Record<string, OAuthCredentials> = {};
+      for (const [key, value] of Object.entries(parsed)) {
+        if (looksLikeOAuthCredentials(value)) {
+          oauth[key] = value;
+        }
+      }
+
+      return { oauth, apiKeys: {} };
     } catch (error) {
       if (isFileMissing(error)) {
-        return {};
+        return { oauth: {}, apiKeys: {} };
       }
       throw error;
     }
   }
 
-  private async saveAuthFile(auth: Record<string, OAuthCredentials>): Promise<void> {
-    await writeFile(this.authFilePath, `${JSON.stringify(auth, null, 2)}\n`, 'utf-8');
-  }
-
-  private async upsertEnvVar(name: string, value: string): Promise<void> {
-    const sanitized = value.trim();
-    const line = `${name}=${sanitized}`;
-
-    let current = '';
-    try {
-      current = await readFile(this.envFilePath, 'utf-8');
-    } catch (error) {
-      if (!isFileMissing(error)) {
-        throw error;
-      }
-    }
-
-    const escapedName = escapeRegex(name);
-    const matcher = new RegExp(`^${escapedName}=.*$`, 'm');
-
-    const next = matcher.test(current)
-      ? current.replace(matcher, line)
-      : `${current.trimEnd()}${current.trimEnd() ? '\n' : ''}${line}\n`;
-
-    await writeFile(this.envFilePath, next, 'utf-8');
+  private async saveStore(store: PersistedAuthStore): Promise<void> {
+    await writeFile(this.authFilePath, `${JSON.stringify(store, null, 2)}\n`, 'utf-8');
   }
 }
 
@@ -227,6 +236,13 @@ function isFileMissing(error: unknown): boolean {
   return error instanceof Error && 'code' in error && (error as { code?: string }).code === 'ENOENT';
 }
 
-function escapeRegex(input: string): string {
-  return input.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object';
+}
+
+function looksLikeOAuthCredentials(value: unknown): value is OAuthCredentials {
+  if (!isRecord(value)) return false;
+  return typeof value.access === 'string'
+    && typeof value.refresh === 'string'
+    && typeof value.expires === 'number';
 }

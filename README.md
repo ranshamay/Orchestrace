@@ -33,8 +33,8 @@ Vendor-agnostic agent orchestration system. Define task graphs (or a single prom
 # Install
 pnpm install
 
-# Set your API key
-export ANTHROPIC_API_KEY=sk-...
+# Authenticate provider (OAuth or API key, persisted in auth.json)
+pnpm --filter @orchestrace/cli dev auth
 
 # Run a plan
 pnpm --filter @orchestrace/cli dev run examples/feature-plan.json
@@ -50,6 +50,9 @@ pnpm --filter @orchestrace/cli dev auth status
 
 # Override provider/model per run
 pnpm --filter @orchestrace/cli dev task "Fix flaky tests" --provider github-copilot --model gpt-4o
+
+# Optional fallback: env vars still work if you prefer them
+export ANTHROPIC_API_KEY=sk-...
 ```
 
 ## Task Graph Format

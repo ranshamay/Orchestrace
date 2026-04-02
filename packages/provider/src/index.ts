@@ -9,6 +9,7 @@ export type {
 	SpawnAgentRequest,
 } from './types.js';
 export type {
+	PersistedAuthStore,
 	ProviderAuthManagerOptions,
 	ProviderAuthStatus,
 	ProviderInfo,

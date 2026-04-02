@@ -62,7 +62,8 @@ Plan file format:
   }
 
 Environment variables:
-  OPENAI_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY, etc.
+  OPENAI_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY, etc. (optional fallback)
+  auth.json is preferred and managed by 'orchestrace auth'
   ORCHESTRACE_DEFAULT_PROVIDER   Default LLM provider (default: anthropic)
   ORCHESTRACE_DEFAULT_MODEL      Default model ID
   ORCHESTRACE_MAX_PARALLEL       Max concurrent tasks (default: 4)
@@ -384,8 +385,8 @@ async function runAuthCommand(args: string[]): Promise<number> {
     return 1;
   }
 
-  const { envVar } = await manager.configureApiKey(provider.id, apiKey);
-  console.log(`Saved API key for ${provider.id} to .env (${envVar}).`);
+  const { path } = await manager.configureApiKey(provider.id, apiKey);
+  console.log(`Saved API key for ${provider.id} to ${path}.`);
   return 0;
 }
 
@@ -398,6 +399,7 @@ async function printAuthStatus(manager: ProviderAuthManager, providers: Provider
     const status = byProvider.get(provider.id);
     const source = status?.source ?? 'none';
     const details = [];
+    if (status?.storedApiKeyConfigured) details.push('store');
     if (status?.envConfigured) details.push('env');
     if (status?.oauthConfigured) details.push('oauth');
 
