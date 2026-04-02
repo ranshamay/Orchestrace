@@ -20,7 +20,7 @@ import type {
 } from './types.js';
 
 const DEFAULT_TIMEOUT_MS = 120_000;
-const MAX_TOOL_ROUNDS = 24;
+const MAX_TOOL_ROUNDS = resolveMaxToolRounds();
 
 /**
  * LLM adapter backed by pi-ai.
@@ -167,7 +167,13 @@ async function executeWithOptionalTools(params: {
     onUsage,
   } = params;
 
-  for (let round = 1; round <= MAX_TOOL_ROUNDS; round++) {
+  let round = 0;
+  for (;;) {
+    round += 1;
+    if (MAX_TOOL_ROUNDS !== undefined && round > MAX_TOOL_ROUNDS) {
+      throw new Error(`Model exceeded ${MAX_TOOL_ROUNDS} tool rounds without producing a final response.`);
+    }
+
     const response = await consumeStream(model, context, options, completionOptions);
     onUsage(getUsage(response));
 
@@ -190,8 +196,20 @@ async function executeWithOptionalTools(params: {
     );
     context.messages.push(...toolResults);
   }
+}
 
-  throw new Error(`Model exceeded ${MAX_TOOL_ROUNDS} tool rounds without producing a final response.`);
+function resolveMaxToolRounds(): number | undefined {
+  const raw = process.env.ORCHESTRACE_MAX_TOOL_ROUNDS;
+  if (!raw) {
+    return undefined;
+  }
+
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed < 1) {
+    return undefined;
+  }
+
+  return parsed;
 }
 
 async function executeToolCalls(
