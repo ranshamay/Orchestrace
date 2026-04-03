@@ -57,8 +57,13 @@ export interface AgentTodo {
 export interface ChatMessage {
   role: 'user' | 'assistant' | 'system';
   content: string;
+  contentParts?: ChatContentPart[];
   time: string;
 }
+
+export type ChatContentPart =
+  | { type: 'text'; text: string }
+  | { type: 'image'; data: string; mimeType: string; name?: string };
 
 export interface WorkAgentResponse {
   session: WorkSession;
@@ -100,6 +105,7 @@ export async function startWork(payload: {
   provider: string;
   model: string;
   autoApprove: boolean;
+  promptParts?: ChatContentPart[];
 }): Promise<{ id: string }> {
   const res = await fetch(`${API_BASE}/work/start`, {
     method: 'POST',
@@ -118,11 +124,14 @@ export async function deleteWork(id: string): Promise<{ ok: boolean; id: string 
   return readJson(res);
 }
 
-export async function sendChatMessage(id: string, message: string): Promise<{ ok: boolean; messages: ChatMessage[] }> {
+export async function sendChatMessage(
+  id: string,
+  payload: { message: string; messageParts?: ChatContentPart[] },
+): Promise<{ ok: boolean; messages: ChatMessage[] }> {
   const res = await fetch(`${API_BASE}/work/chat/send`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ id, message }),
+    body: JSON.stringify({ id, message: payload.message, messageParts: payload.messageParts }),
   });
   return readJson(res);
 }

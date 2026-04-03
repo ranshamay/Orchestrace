@@ -5,6 +5,20 @@ export interface LlmResult {
   usage?: { input: number; output: number; cost: number };
 }
 
+export interface LlmTextPart {
+  type: 'text';
+  text: string;
+}
+
+export interface LlmImagePart {
+  type: 'image';
+  data: string;
+  mimeType: string;
+}
+
+export type LlmPromptPart = LlmTextPart | LlmImagePart;
+export type LlmPromptInput = string | LlmPromptPart[];
+
 /** Tool execution telemetry emitted by the provider adapter. */
 export interface LlmToolCallEvent {
   type: 'started' | 'result';
@@ -54,7 +68,7 @@ export interface LlmRequest {
   provider: string;
   model: string;
   systemPrompt: string;
-  prompt: string;
+  prompt: LlmPromptInput;
   reasoning?: 'minimal' | 'low' | 'medium' | 'high';
   signal?: AbortSignal;
   onTextDelta?: (delta: string) => void;
@@ -74,7 +88,7 @@ export interface LlmCompletionOptions {
 
 /** Dedicated agent process bound to a specific model selection. */
 export interface LlmAgent {
-  complete(prompt: string, signal?: AbortSignal, options?: LlmCompletionOptions): Promise<LlmResult>;
+  complete(prompt: LlmPromptInput, signal?: AbortSignal, options?: LlmCompletionOptions): Promise<LlmResult>;
 }
 
 /** Options for spawning a dedicated agent. */

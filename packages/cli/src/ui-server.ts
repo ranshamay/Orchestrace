@@ -6,7 +6,7 @@ import { dirname, join } from 'node:path';
 import { orchestrate } from '@orchestrace/core';
 import type { DagEvent, PlanApprovalRequest, TaskGraph } from '@orchestrace/core';
 import { getModels } from '@mariozechner/pi-ai';
-import { PiAiAdapter, ProviderAuthManager } from '@orchestrace/provider';
+import { PiAiAdapter, ProviderAuthManager, type LlmPromptInput, type LlmPromptPart } from '@orchestrace/provider';
 import { createAgentToolset } from '@orchestrace/tools';
 import { WorkspaceManager } from './workspace-manager.js';
 
@@ -72,9 +72,14 @@ interface AuthSession {
 
 type ChatRole = 'user' | 'assistant' | 'system';
 
+type SessionChatContentPart =
+  | { type: 'text'; text: string }
+  | { type: 'image'; data: string; mimeType: string; name?: string };
+
 interface SessionChatMessage {
   role: ChatRole;
   content: string;
+  contentParts?: SessionChatContentPart[];
   time: string;
   usage?: { input: number; output: number; cost: number };
 }
@@ -521,6 +526,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         const body = await readJsonBody(req);
         const workspaceId = asString(body.workspaceId);
         const prompt = asString(body.prompt);
+        const promptParts = parseChatContentParts(body.promptParts);
         const provider = asString(body.provider) || process.env.ORCHESTRACE_DEFAULT_PROVIDER || 'anthropic';
         const model = asString(body.model) || process.env.ORCHESTRACE_DEFAULT_MODEL || 'claude-sonnet-4-20250514';
         const autoApprove = Boolean(body.autoApprove);
@@ -536,10 +542,12 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           ? await workspaceManager.selectWorkspace(workspaceId)
           : await workspaceManager.getActiveWorkspace();
 
-        if (!prompt) {
+        if (!prompt && promptParts.length === 0) {
           sendJson(res, 400, { error: 'Missing prompt' });
           return;
         }
+
+        const normalizedPrompt = prompt || summarizeChatContentParts(promptParts);
 
         const id = randomUUID();
         const controller = new AbortController();
@@ -548,7 +556,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           workspaceId: workspace.id,
           workspaceName: workspace.name,
           workspacePath: workspace.path,
-          prompt,
+          prompt: normalizedPrompt,
           provider,
           model,
           autoApprove,
@@ -562,12 +570,12 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         };
 
         workSessions.set(id, session);
-        sessionChats.set(id, createSessionChatThread(session));
+  sessionChats.set(id, createSessionChatThread(session, promptParts));
         sessionTodos.set(id, []);
         uiStatePersistence.schedule();
         broadcastTodoUpdate(workStreamClients, id, sessionTodos.get(id) ?? []);
 
-        const graph = buildSingleTaskGraph(id, prompt);
+  const graph = buildSingleTaskGraph(id, normalizedPrompt);
 
         void orchestrate(graph, {
           llm,
@@ -1050,13 +1058,14 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         const body = await readJsonBody(req);
         const id = asString(body.id);
         const message = asString(body.message);
+        const messageParts = parseChatContentParts(body.messageParts);
 
         if (!id) {
           sendJson(res, 400, { error: 'Missing id' });
           return;
         }
 
-        if (!message) {
+        if (!message && messageParts.length === 0) {
           sendJson(res, 400, { error: 'Missing message' });
           return;
         }
@@ -1077,11 +1086,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         const thread = sessionChats.get(id) ?? createSessionChatThread(session);
         sessionChats.set(id, thread);
 
-        const userMessage: SessionChatMessage = {
-          role: 'user',
-          content: message,
-          time: now(),
-        };
+        const userMessage = createSessionChatMessage('user', message, messageParts);
         thread.messages.push(userMessage);
         trimThreadMessages(thread);
         thread.updatedAt = now();
@@ -1110,7 +1115,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
               apiKey: await authManager.resolveApiKey(session.provider),
             });
 
-            const chatPrompt = buildChatContinuationPrompt(thread);
+            const chatPrompt = buildChatContinuationInput(thread);
             const response = await chatAgent.complete(chatPrompt, undefined, {
               onTextDelta: (delta) => {
                 if (!delta) {
@@ -1226,13 +1231,14 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         const body = await readJsonBody(req);
         const id = asString(body.id);
         const message = asString(body.message);
+        const messageParts = parseChatContentParts(body.messageParts);
 
         if (!id) {
           sendJson(res, 400, { error: 'Missing id' });
           return;
         }
 
-        if (!message) {
+        if (!message && messageParts.length === 0) {
           sendJson(res, 400, { error: 'Missing message' });
           return;
         }
@@ -1254,11 +1260,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         sessionChats.set(id, thread);
         uiStatePersistence.schedule();
 
-        const userMessage: SessionChatMessage = {
-          role: 'user',
-          content: message,
-          time: now(),
-        };
+        const userMessage = createSessionChatMessage('user', message, messageParts);
         thread.messages.push(userMessage);
         trimThreadMessages(thread);
         thread.updatedAt = now();
@@ -1272,7 +1274,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           apiKey: await authManager.resolveApiKey(session.provider),
         });
 
-        const chatPrompt = buildChatContinuationPrompt(thread);
+        const chatPrompt = buildChatContinuationInput(thread);
         const response = await chatAgent.complete(chatPrompt);
         const text = response.text;
 

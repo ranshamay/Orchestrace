@@ -12,6 +12,8 @@ import {
 import type {
   LlmAdapter,
   LlmAgent,
+  LlmPromptInput,
+  LlmPromptPart,
   LlmRequest,
   LlmResult,
   SpawnAgentRequest,
@@ -33,7 +35,7 @@ export class PiAiAdapter implements LlmAdapter {
 
     return {
       complete: async (
-        prompt: string,
+        prompt: LlmPromptInput,
         signal?: AbortSignal,
         completionOptions?: LlmCompletionOptions,
       ): Promise<LlmResult> => {
@@ -138,14 +140,37 @@ async function consumeStream(
   return stream.result();
 }
 
-function createContext(request: SpawnAgentRequest, prompt: string): Context {
+function createContext(request: SpawnAgentRequest, prompt: LlmPromptInput): Context {
   const tools = request.toolset?.tools as Tool[] | undefined;
+  const content = toUserContent(prompt);
 
   return {
     systemPrompt: request.systemPrompt,
     tools,
-    messages: [{ role: 'user', content: prompt, timestamp: Date.now() }],
+    messages: [{ role: 'user', content, timestamp: Date.now() }],
   };
+}
+
+function toUserContent(prompt: LlmPromptInput): string | Array<{ type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string }> {
+  if (typeof prompt === 'string') {
+    return prompt;
+  }
+
+  const content: Array<{ type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string }> = [];
+  for (const part of prompt) {
+    if (part.type === 'text') {
+      content.push({ type: 'text', text: part.text });
+      continue;
+    }
+
+    content.push({
+      type: 'image',
+      data: part.data,
+      mimeType: part.mimeType,
+    });
+  }
+
+  return content;
 }
 
 async function executeWithOptionalTools(params: {

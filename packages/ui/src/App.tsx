@@ -4,6 +4,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {
   addTodo,
+  type ChatContentPart,
   deleteWork,
   fetchModels,
   fetchProviders,
@@ -40,6 +41,7 @@ type TimelineItem = {
   role?: string;
   title?: string;
   content: string;
+  contentParts?: ChatContentPart[];
 };
 
 type ComposerImageAttachment = {
@@ -48,6 +50,8 @@ type ComposerImageAttachment = {
   mime: string;
   dataUrl: string;
 };
+
+type SessionStatus = 'running' | 'completed' | 'failed' | 'cancelled' | 'pending' | 'unknown';
 
 function normalizeTaskStatus(raw?: string): string {
   const value = (raw ?? '').toLowerCase();
@@ -73,6 +77,59 @@ function statusColor(status: string): string {
       return '#dc2626';
     default:
       return '#94a3b8';
+  }
+}
+
+function normalizeSessionStatus(raw?: string): SessionStatus {
+  const value = (raw ?? '').toLowerCase();
+  if (!value) {
+    return 'pending';
+  }
+  if (value.includes('fail') || value.includes('error')) {
+    return 'failed';
+  }
+  if (value.includes('cancel') || value.includes('abort')) {
+    return 'cancelled';
+  }
+  if (value.includes('complete') || value.includes('done') || value.includes('success')) {
+    return 'completed';
+  }
+  if (value.includes('run') || value.includes('progress') || value.includes('start') || value.includes('stream')) {
+    return 'running';
+  }
+  if (value.includes('pending') || value.includes('queue') || value.includes('wait')) {
+    return 'pending';
+  }
+  return 'unknown';
+}
+
+function formatSessionStatus(raw?: string): string {
+  const normalized = normalizeSessionStatus(raw);
+  if (normalized === 'unknown') {
+    const fallback = (raw ?? '').trim().toLowerCase();
+    return fallback || 'unknown';
+  }
+  return normalized;
+}
+
+function sessionStatusBadgeClass(raw?: string, selected = false): string {
+  if (selected) {
+    return 'bg-white/20 text-white';
+  }
+
+  switch (normalizeSessionStatus(raw)) {
+    case 'running':
+      return 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300';
+    case 'completed':
+      return 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300';
+    case 'failed':
+      return 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300';
+    case 'cancelled':
+      return 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300';
+    case 'pending':
+      return 'bg-slate-200 text-slate-600 dark:bg-slate-800 dark:text-slate-300';
+    default:
+      return 'bg-slate-200 text-slate-600 dark:bg-slate-800 dark:text-slate-300';
   }
 }
 
@@ -215,11 +272,89 @@ function composePrompt(text: string, attachments: ComposerImageAttachment[]): st
   return `${base}\n\n${images}`;
 }
 
+function dataUrlToImagePart(dataUrl: string): { data: string; mimeType: string } | undefined {
+  const match = dataUrl.match(/^data:([^;]+);base64,(.+)$/);
+  if (!match) {
+    return undefined;
+  }
+
+  return {
+    mimeType: match[1],
+    data: match[2],
+  };
+}
+
+function toComposerContentParts(text: string, attachments: ComposerImageAttachment[]): ChatContentPart[] {
+  const parts: ChatContentPart[] = [];
+  const trimmed = text.trim();
+  if (trimmed) {
+    parts.push({ type: 'text', text: trimmed });
+  }
+
+  for (const attachment of attachments) {
+    const parsed = dataUrlToImagePart(attachment.dataUrl);
+    if (!parsed) {
+      continue;
+    }
+
+    parts.push({
+      type: 'image',
+      data: parsed.data,
+      mimeType: parsed.mimeType,
+      name: attachment.name,
+    });
+  }
+
+  return parts;
+}
+
 function compactPromptDisplay(prompt: string): string {
   return prompt
     .replace(/!\[[^\]]*\]\(data:image\/[a-zA-Z0-9.+-]+;base64,[^)]+\)/g, '[pasted-image]')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+function UserMessageContent({
+  content,
+  contentParts,
+}: {
+  content: string;
+  contentParts?: ChatContentPart[];
+}) {
+  if (!contentParts || contentParts.length === 0) {
+    return <div className="whitespace-pre-wrap break-words">{content}</div>;
+  }
+
+  const textParts = contentParts.filter((part): part is Extract<ChatContentPart, { type: 'text' }> => part.type === 'text');
+  const imageParts = contentParts.filter((part): part is Extract<ChatContentPart, { type: 'image' }> => part.type === 'image');
+
+  return (
+    <div className="space-y-2">
+      {textParts.length > 0 && (
+        <div className="whitespace-pre-wrap break-words">{textParts.map((part) => part.text).join('\n\n')}</div>
+      )}
+      {imageParts.length > 0 && (
+        <div className="flex flex-wrap gap-2">
+          {imageParts.map((part, index) => (
+            <a
+              key={`${part.name ?? 'image'}-${index}`}
+              className="block overflow-hidden rounded border border-blue-200 bg-white dark:border-blue-800 dark:bg-slate-900"
+              href={`data:${part.mimeType};base64,${part.data}`}
+              rel="noreferrer"
+              target="_blank"
+            >
+              <img
+                alt={part.name ?? `image-${index + 1}`}
+                className="h-24 w-24 object-cover"
+                src={`data:${part.mimeType};base64,${part.data}`}
+              />
+            </a>
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }
 
 async function readClipboardImage(item: DataTransferItem): Promise<ComposerImageAttachment | null> {
@@ -283,6 +418,54 @@ export default function App() {
     [sessions, selectedSessionId],
   );
 
+  const sessionStatusSummary = useMemo(() => {
+    const summary = {
+      total: sessions.length,
+      running: 0,
+      completed: 0,
+      failed: 0,
+      cancelled: 0,
+      pending: 0,
+      unknown: 0,
+    };
+
+    for (const session of sessions) {
+      switch (normalizeSessionStatus(session.status)) {
+        case 'running':
+          summary.running += 1;
+          break;
+        case 'completed':
+          summary.completed += 1;
+          break;
+        case 'failed':
+          summary.failed += 1;
+          break;
+        case 'cancelled':
+          summary.cancelled += 1;
+          break;
+        case 'pending':
+          summary.pending += 1;
+          break;
+        default:
+          summary.unknown += 1;
+          break;
+      }
+    }
+
+    const overall = summary.total === 0
+      ? 'empty'
+      : summary.running > 0
+        ? 'running'
+        : summary.failed > 0
+          ? 'attention'
+          : 'idle';
+
+    return {
+      ...summary,
+      overall,
+    };
+  }, [sessions]);
+
   const graphLayout = useMemo(() => buildGraphLayout(selectedSession), [selectedSession]);
 
   const timelineItems = useMemo<TimelineItem[]>(() => {
@@ -299,6 +482,7 @@ export default function App() {
       kind: 'chat',
       role: message.role,
       content: message.content,
+      contentParts: message.contentParts,
     }));
 
     return [...eventItems, ...chatItems].sort((a, b) => a.time.localeCompare(b.time));
@@ -405,7 +589,8 @@ export default function App() {
   }, [selectedSessionId]);
 
   const composerPayload = useMemo(() => composePrompt(composerText, composerImages), [composerImages, composerText]);
-  const hasComposerContent = composerPayload.trim().length > 0;
+  const composerContentParts = useMemo(() => toComposerContentParts(composerText, composerImages), [composerImages, composerText]);
+  const hasComposerContent = composerText.trim().length > 0 || composerImages.length > 0;
 
   const handleStartFromComposer = async () => {
     if (!hasComposerContent || !workProvider || !workModel || !workWorkspaceId) {
@@ -420,6 +605,7 @@ export default function App() {
         provider: workProvider,
         model: workModel,
         autoApprove,
+        promptParts: composerContentParts.length > 0 ? composerContentParts : undefined,
       });
 
       const sessionsState = await fetchSessions();
@@ -454,17 +640,24 @@ export default function App() {
       return;
     }
 
-    const message = composerPayload;
+    const previousText = composerText;
+    const previousImages = composerImages;
+    const message = previousText.trim();
+    const messageParts = composerContentParts;
+
     setComposerText('');
     setComposerImages([]);
     setErrorMessage('');
 
     try {
-      const response = await sendChatMessage(selectedSessionId, message);
+      const response = await sendChatMessage(selectedSessionId, {
+        message,
+        messageParts: messageParts.length > 0 ? messageParts : undefined,
+      });
       setChatMessages(response.messages);
     } catch (error) {
-      setComposerText(composerText);
-      setComposerImages(composerImages);
+      setComposerText(previousText);
+      setComposerImages(previousImages);
       setErrorMessage(error instanceof Error ? error.message : String(error));
     }
   };
@@ -573,15 +766,63 @@ export default function App() {
             Sessions
           </div>
 
+          <div className="mb-2 flex items-center justify-between px-1 text-[11px] text-slate-500 dark:text-slate-400">
+            <span>Overall</span>
+            <span
+              className={`rounded px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${sessionStatusSummary.overall === 'running'
+                ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300'
+                : sessionStatusSummary.overall === 'attention'
+                  ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300'
+                  : sessionStatusSummary.overall === 'idle'
+                    ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300'
+                    : 'bg-slate-200 text-slate-600 dark:bg-slate-800 dark:text-slate-300'}`}
+            >
+              {sessionStatusSummary.overall}
+            </span>
+          </div>
+
+          {sessions.length > 0 && (
+            <div className="mb-2 px-1 text-[11px] text-slate-500 dark:text-slate-400">
+              {sessionStatusSummary.running} running / {sessionStatusSummary.total} total
+            </div>
+          )}
+
+          {sessions.length > 0 && (
+            <div className="mb-2 flex flex-wrap gap-1 px-1">
+              <span className="rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300">
+                completed {sessionStatusSummary.completed}
+              </span>
+              <span className="rounded bg-blue-100 px-1.5 py-0.5 text-[10px] text-blue-700 dark:bg-blue-900/40 dark:text-blue-300">
+                running {sessionStatusSummary.running}
+              </span>
+              <span className="rounded bg-red-100 px-1.5 py-0.5 text-[10px] text-red-700 dark:bg-red-900/40 dark:text-red-300">
+                failed {sessionStatusSummary.failed}
+              </span>
+              <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] text-amber-700 dark:bg-amber-900/40 dark:text-amber-300">
+                cancelled {sessionStatusSummary.cancelled}
+              </span>
+            </div>
+          )}
+
           {sessions.length === 0 && <div className="px-1 text-xs italic text-slate-400 dark:text-slate-500">No sessions</div>}
 
           {sessions.map((session) => (
             <button
               key={session.id}
-              className={`mb-1 w-full truncate rounded px-2 py-1.5 text-left text-xs ${selectedSessionId === session.id ? 'bg-blue-600 text-white' : 'text-slate-700 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800'}`}
+              className={`mb-1 w-full rounded px-2 py-1.5 text-left text-xs ${selectedSessionId === session.id ? 'bg-blue-600 text-white' : 'text-slate-700 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800'}`}
               onClick={() => setSelectedSessionId(session.id)}
             >
-              {compactPromptDisplay(session.prompt)}
+              <div className="flex items-center gap-2">
+                <span className="min-w-0 flex-1 truncate">{compactPromptDisplay(session.prompt)}</span>
+                <span
+                  className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${sessionStatusBadgeClass(
+                    session.status,
+                    selectedSessionId === session.id,
+                  )}`}
+                >
+                  {formatSessionStatus(session.status)}
+                </span>
+              </div>
             </button>
           ))}
         </div>
@@ -607,8 +848,8 @@ export default function App() {
                     <div className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-700 dark:bg-slate-900">
                       <div className="mb-2 flex items-start justify-between gap-2">
                         <h2 className="text-base font-bold text-slate-800 dark:text-slate-100">{compactPromptDisplay(selectedSession.prompt)}</h2>
-                        <span className="rounded bg-slate-100 px-2 py-0.5 text-xs font-mono text-slate-600 dark:bg-slate-800 dark:text-slate-300">
-                          {selectedSession.status}
+                        <span className={`rounded px-2 py-0.5 text-xs font-semibold uppercase tracking-wide ${sessionStatusBadgeClass(selectedSession.status)}`}>
+                          {formatSessionStatus(selectedSession.status)}
                         </span>
                       </div>
                       <div className="grid grid-cols-1 gap-2 text-xs text-slate-500 dark:text-slate-400 md:grid-cols-2">
@@ -724,11 +965,11 @@ export default function App() {
                         <span>{item.kind === 'event' ? `event:${item.title}` : item.role}</span>
                         <span>{new Date(item.time).toLocaleTimeString([], { hour12: false })}</span>
                       </div>
-                      <div className="whitespace-pre-wrap break-words">
-                        {item.kind === 'event' || item.role === 'user'
-                          ? item.content
-                          : <MarkdownMessage content={item.content} dark={isDark} />}
-                      </div>
+                      {item.kind === 'event' && <div className="whitespace-pre-wrap break-words">{item.content}</div>}
+                      {item.kind === 'chat' && item.role === 'assistant' && <MarkdownMessage content={item.content} dark={isDark} />}
+                      {item.kind === 'chat' && item.role === 'user' && (
+                        <UserMessageContent content={item.content} contentParts={item.contentParts} />
+                      )}
                     </div>
                   ))}
                 </div>
