@@ -32,11 +32,22 @@ export interface WorkSession {
   provider: string;
   model: string;
   autoApprove: boolean;
+  useWorktree?: boolean;
+  worktreePath?: string;
+  worktreeBranch?: string;
   createdAt: string;
   updatedAt: string;
   status: string;
+  llmStatus?: {
+    state: string;
+    label: string;
+    detail?: string;
+    taskId?: string;
+    phase?: 'planning' | 'implementation';
+    updatedAt: string;
+  };
   taskStatus: Record<string, string>;
-  events: Array<{ time: string; type: string; taskId?: string; message: string }>;
+  events: Array<{ time: string; type: string; runId?: string; taskId?: string; message: string }>;
   agentGraph?: Array<{ id: string; prompt: string; dependencies: string[] }>;
   output?: { text?: string; planPath?: string };
   error?: string;
@@ -105,6 +116,7 @@ export async function startWork(payload: {
   provider: string;
   model: string;
   autoApprove: boolean;
+  useWorktree?: boolean;
   promptParts?: ChatContentPart[];
 }): Promise<{ id: string }> {
   const res = await fetch(`${API_BASE}/work/start`, {

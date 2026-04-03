@@ -7,6 +7,7 @@ import { orchestrate } from '@orchestrace/core';
 import type { DagEvent, PlanApprovalRequest, TaskGraph } from '@orchestrace/core';
 import { getModels } from '@mariozechner/pi-ai';
 import { PiAiAdapter, ProviderAuthManager, type LlmPromptInput, type LlmPromptPart } from '@orchestrace/provider';
+import { createWorktree, type WorktreeHandle } from '@orchestrace/sandbox';
 import { createAgentToolset } from '@orchestrace/tools';
 import { WorkspaceManager } from './workspace-manager.js';
 
@@ -18,6 +19,29 @@ export interface UiServerOptions {
 
 type WorkState = 'running' | 'completed' | 'failed' | 'cancelled';
 
+type LlmSessionState =
+  | 'queued'
+  | 'analyzing'
+  | 'thinking'
+  | 'planning'
+  | 'awaiting-approval'
+  | 'implementing'
+  | 'using-tools'
+  | 'validating'
+  | 'retrying'
+  | 'completed'
+  | 'failed'
+  | 'cancelled';
+
+interface SessionLlmStatus {
+  state: LlmSessionState;
+  label: string;
+  detail?: string;
+  taskId?: string;
+  phase?: 'planning' | 'implementation';
+  updatedAt: string;
+}
+
 interface WorkSession {
   id: string;
   workspaceId: string;
@@ -27,15 +51,20 @@ interface WorkSession {
   provider: string;
   model: string;
   autoApprove: boolean;
+  useWorktree: boolean;
+  worktreePath?: string;
+  worktreeBranch?: string;
   createdAt: string;
   updatedAt: string;
   status: WorkState;
+  llmStatus: SessionLlmStatus;
   taskStatus: Record<string, string>;
   events: UiDagEvent[];
   agentGraph: SessionAgentGraphNode[];
   error?: string;
   output?: { text?: string; planPath?: string };
   controller: AbortController;
+  cleanupWorktree?: () => Promise<void>;
 }
 
 interface SessionAgentGraphNode {
@@ -49,6 +78,7 @@ interface SessionAgentGraphNode {
 
 interface UiDagEvent {
   time: string;
+  runId?: string;
   type: DagEvent['type'];
   taskId?: string;
   message: string;
@@ -124,9 +154,13 @@ interface PersistedWorkSession {
   provider: string;
   model: string;
   autoApprove: boolean;
+  useWorktree?: boolean;
+  worktreePath?: string;
+  worktreeBranch?: string;
   createdAt: string;
   updatedAt: string;
   status: WorkState;
+  llmStatus?: SessionLlmStatus;
   taskStatus: Record<string, string>;
   events: UiDagEvent[];
   agentGraph?: SessionAgentGraphNode[];
@@ -177,6 +211,14 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       session.controller.abort();
       session.status = 'cancelled';
       session.updatedAt = now();
+      session.llmStatus = createLlmStatus('cancelled', session.updatedAt, {
+        detail: 'Cancelled by user.',
+      });
+    }
+
+    if (session.cleanupWorktree) {
+      void session.cleanupWorktree().catch(() => {});
+      session.cleanupWorktree = undefined;
     }
 
     closeWorkStream(workStreamClients, id);
@@ -286,6 +328,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         sendSse(res, 'ready', {
           id,
           status: session.status,
+          llmStatus: session.llmStatus,
           todos: (sessionTodos.get(id) ?? []).map((item) => ({ ...item })),
           time: now(),
         });
@@ -547,40 +590,67 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           return;
         }
 
-        const normalizedPrompt = prompt || summarizeChatContentParts(promptParts);
+        const normalizedPrompt = promptParts.length > 0
+          ? compactInlineImageMarkdown(prompt || summarizeChatContentParts(promptParts))
+          : (prompt || summarizeChatContentParts(promptParts));
 
         const id = randomUUID();
+        const useWorktree = parseBooleanSetting(body.useWorktree)
+          ?? parseBooleanSetting(body.worktreeEnabled)
+          ?? parseBooleanSetting(body.enableWorktree)
+          ?? resolveUseWorktreeDefault();
+
+        let worktreeHandle: WorktreeHandle | undefined;
+        let executionPath = workspace.path;
+        if (useWorktree) {
+          try {
+            worktreeHandle = await createWorktree(workspace.path, `session-${id}`);
+            executionPath = worktreeHandle.path;
+          } catch (error) {
+            sendJson(res, 500, { error: `Failed to create worktree: ${toErrorMessage(error)}` });
+            return;
+          }
+        }
+
         const controller = new AbortController();
+        const createdAt = now();
         const session: WorkSession = {
           id,
           workspaceId: workspace.id,
           workspaceName: workspace.name,
-          workspacePath: workspace.path,
+          workspacePath: executionPath,
           prompt: normalizedPrompt,
           provider,
           model,
           autoApprove,
-          createdAt: now(),
-          updatedAt: now(),
+          useWorktree,
+          worktreePath: worktreeHandle?.path,
+          worktreeBranch: worktreeHandle?.branch,
+          createdAt,
+          updatedAt: createdAt,
           status: 'running',
+          llmStatus: createLlmStatus('queued', createdAt, {
+            detail: 'Queued for orchestration.',
+          }),
           taskStatus: {},
           events: [],
           agentGraph: [],
           controller,
+          cleanupWorktree: worktreeHandle ? () => worktreeHandle.cleanup() : undefined,
         };
 
         workSessions.set(id, session);
-  sessionChats.set(id, createSessionChatThread(session, promptParts));
+        sessionChats.set(id, createSessionChatThread(session, promptParts));
         sessionTodos.set(id, []);
         uiStatePersistence.schedule();
         broadcastTodoUpdate(workStreamClients, id, sessionTodos.get(id) ?? []);
 
-  const graph = buildSingleTaskGraph(id, normalizedPrompt);
+        const graph = buildSingleTaskGraph(id, normalizedPrompt, useWorktree);
 
         void orchestrate(graph, {
           llm,
-          cwd: workspace.path,
-          planOutputDir: join(workspace.path, '.orchestrace', 'plans'),
+          cwd: session.workspacePath,
+          planOutputDir: join(session.workspacePath, '.orchestrace', 'plans'),
           defaultModel: { provider, model },
           maxParallel: 1,
           requirePlanApproval: !autoApprove,
@@ -588,7 +658,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           signal: controller.signal,
           resolveApiKey: async (providerId) => authManager.resolveApiKey(providerId),
           createToolset: ({ phase, task, graphId, provider: activeProvider, model: activeModel, reasoning }) => createAgentToolset({
-            cwd: workspace.path,
+            cwd: session.workspacePath,
             phase,
             taskType: task.type,
             graphId,
@@ -618,6 +688,11 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           }),
           onEvent: (event) => {
             session.updatedAt = now();
+            const llmStatus = deriveLlmStatusFromDagEvent(event, session.updatedAt);
+            if (llmStatus) {
+              session.llmStatus = llmStatus;
+            }
+
             if (event.type === 'task:stream-delta') {
               broadcastWorkStream(workStreamClients, session.id, 'token', {
                 id: session.id,
@@ -625,11 +700,12 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                 phase: event.phase,
                 attempt: event.attempt,
                 delta: event.delta,
+                llmStatus: session.llmStatus,
                 time: now(),
               });
             }
 
-            const uiEvent = toUiEvent(event);
+            const uiEvent = toUiEvent(session.id, event);
             if (uiEvent) {
               session.events.push(uiEvent);
               if (session.events.length > 200) {
@@ -671,16 +747,24 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           const failed = [...outputs.values()].some((output) => output.status === 'failed');
 
           session.status = failed ? 'failed' : 'completed';
+          session.updatedAt = now();
+          session.llmStatus = failed
+            ? createLlmStatus('failed', session.updatedAt, {
+              detail: firstOutput?.error || 'Execution failed.',
+            })
+            : createLlmStatus('completed', session.updatedAt, {
+              detail: 'Run completed successfully.',
+            });
           session.output = {
             text: firstOutput?.response,
             planPath: firstOutput?.planPath,
           };
           session.error = failed ? firstOutput?.error ?? 'Execution failed' : undefined;
-          session.updatedAt = now();
 
           broadcastWorkStream(workStreamClients, session.id, 'end', {
             id: session.id,
             status: session.status,
+            llmStatus: session.llmStatus,
             time: now(),
           });
 
@@ -701,10 +785,14 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
             session.status = 'failed';
             session.error = toErrorMessage(error);
             session.updatedAt = now();
+            session.llmStatus = createLlmStatus('failed', session.updatedAt, {
+              detail: session.error,
+            });
 
             broadcastWorkStream(workStreamClients, session.id, 'error', {
               id: session.id,
               error: session.error,
+              llmStatus: session.llmStatus,
               time: now(),
             });
             uiStatePersistence.schedule();
@@ -734,10 +822,14 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           session.controller.abort();
           session.status = 'cancelled';
           session.updatedAt = now();
+          session.llmStatus = createLlmStatus('cancelled', session.updatedAt, {
+            detail: 'Cancelled by user.',
+          });
 
           broadcastWorkStream(workStreamClients, session.id, 'end', {
             id: session.id,
             status: session.status,
+            llmStatus: session.llmStatus,
             time: now(),
           });
           uiStatePersistence.schedule();
@@ -1590,9 +1682,13 @@ function toPersistedSession(session: WorkSession): PersistedWorkSession {
     provider: session.provider,
     model: session.model,
     autoApprove: session.autoApprove,
+    useWorktree: session.useWorktree,
+    worktreePath: session.worktreePath,
+    worktreeBranch: session.worktreeBranch,
     createdAt: session.createdAt,
     updatedAt: session.updatedAt,
     status: session.status,
+    llmStatus: session.llmStatus,
     taskStatus: { ...session.taskStatus },
     events: [...session.events],
     agentGraph: session.agentGraph.map((node) => ({
@@ -1609,13 +1705,22 @@ function hydratePersistedSession(session: PersistedWorkSession): WorkSession {
   const resumedError = session.status === 'running'
     ? 'Session interrupted because the UI server restarted.'
     : session.error;
+  const resumedUpdatedAt = asString(session.updatedAt) || now();
+  const resumedLlmStatus = session.llmStatus
+    ? normalizeLlmStatus(session.llmStatus, resumedUpdatedAt)
+    : deriveLlmStatusFromWorkState(resumedStatus, resumedUpdatedAt, resumedError);
 
   return {
     ...session,
+    useWorktree: Boolean(session.useWorktree),
+    worktreePath: asString(session.worktreePath) || undefined,
+    worktreeBranch: asString(session.worktreeBranch) || undefined,
     agentGraph: normalizeSessionAgentGraphNodes(session.agentGraph),
     status: resumedStatus,
+    llmStatus: resumedLlmStatus,
     error: resumedError,
     controller: new AbortController(),
+    cleanupWorktree: undefined,
   };
 }
 
@@ -1633,7 +1738,7 @@ function createAuthSession(providerId: string): AuthSession {
   };
 }
 
-function buildSingleTaskGraph(id: string, prompt: string): TaskGraph {
+function buildSingleTaskGraph(id: string, prompt: string, isolated = false): TaskGraph {
   const verifyCommands = parseVerifyCommands();
 
   return {
@@ -1645,6 +1750,7 @@ function buildSingleTaskGraph(id: string, prompt: string): TaskGraph {
         name: 'Execute UI prompt',
         type: 'code',
         prompt,
+        isolated,
         dependencies: [],
         validation: {
           commands: verifyCommands,
@@ -1668,52 +1774,281 @@ function parseVerifyCommands(): string[] {
     .filter((part) => part.length > 0);
 }
 
-function toUiEvent(event: DagEvent): UiDagEvent | undefined {
-  const base = { time: now(), type: event.type, taskId: 'taskId' in event ? event.taskId : undefined };
+function parseBooleanSetting(value: unknown): boolean | undefined {
+  if (typeof value === 'boolean') {
+    return value;
+  }
+
+  if (typeof value === 'number') {
+    return value !== 0;
+  }
+
+  if (typeof value !== 'string') {
+    return undefined;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  if (!normalized) {
+    return undefined;
+  }
+
+  if (normalized === 'true' || normalized === '1' || normalized === 'yes' || normalized === 'on') {
+    return true;
+  }
+
+  if (normalized === 'false' || normalized === '0' || normalized === 'no' || normalized === 'off') {
+    return false;
+  }
+
+  return undefined;
+}
+
+function resolveUseWorktreeDefault(): boolean {
+  const raw = process.env.ORCHESTRACE_UI_USE_WORKTREE ?? process.env.ORCHESTRACE_USE_WORKTREE;
+  const parsed = parseBooleanSetting(raw);
+  return parsed ?? false;
+}
+
+function normalizeLlmSessionState(raw: unknown): LlmSessionState {
+  const value = asString(raw).toLowerCase();
+  switch (value) {
+    case 'queued':
+      return 'queued';
+    case 'analyzing':
+      return 'analyzing';
+    case 'thinking':
+      return 'thinking';
+    case 'planning':
+      return 'planning';
+    case 'awaiting_approval':
+    case 'awaiting-approval':
+      return 'awaiting-approval';
+    case 'implementing':
+      return 'implementing';
+    case 'using_tools':
+    case 'using-tools':
+      return 'using-tools';
+    case 'validating':
+      return 'validating';
+    case 'retrying':
+      return 'retrying';
+    case 'completed':
+      return 'completed';
+    case 'failed':
+      return 'failed';
+    case 'cancelled':
+      return 'cancelled';
+    default:
+      return 'queued';
+  }
+}
+
+function llmStatusLabel(state: LlmSessionState): string {
+  switch (state) {
+    case 'queued':
+      return 'Queued';
+    case 'analyzing':
+      return 'Analyzing';
+    case 'thinking':
+      return 'Thinking';
+    case 'planning':
+      return 'Planning';
+    case 'awaiting-approval':
+      return 'Awaiting Approval';
+    case 'implementing':
+      return 'Implementing';
+    case 'using-tools':
+      return 'Using Tools';
+    case 'validating':
+      return 'Validating';
+    case 'retrying':
+      return 'Retrying';
+    case 'completed':
+      return 'Completed';
+    case 'failed':
+      return 'Failed';
+    case 'cancelled':
+      return 'Cancelled';
+    default:
+      return 'Queued';
+  }
+}
+
+function createLlmStatus(
+  state: LlmSessionState,
+  updatedAt: string,
+  options: { detail?: string; taskId?: string; phase?: 'planning' | 'implementation' } = {},
+): SessionLlmStatus {
+  return {
+    state,
+    label: llmStatusLabel(state),
+    detail: asString(options.detail) || undefined,
+    taskId: asString(options.taskId) || undefined,
+    phase: options.phase,
+    updatedAt,
+  };
+}
+
+function normalizeLlmStatus(raw: SessionLlmStatus, fallbackUpdatedAt: string): SessionLlmStatus {
+  const state = normalizeLlmSessionState(raw.state);
+  const updatedAt = asString(raw.updatedAt) || fallbackUpdatedAt;
+  const phase = raw.phase === 'planning' || raw.phase === 'implementation' ? raw.phase : undefined;
+
+  return {
+    state,
+    label: llmStatusLabel(state),
+    detail: asString(raw.detail) || undefined,
+    taskId: asString(raw.taskId) || undefined,
+    phase,
+    updatedAt,
+  };
+}
+
+function deriveLlmStatusFromWorkState(status: WorkState, updatedAt: string, error?: string): SessionLlmStatus {
+  if (status === 'completed') {
+    return createLlmStatus('completed', updatedAt, { detail: 'Run completed successfully.' });
+  }
+
+  if (status === 'failed') {
+    return createLlmStatus('failed', updatedAt, { detail: asString(error) || 'Execution failed.' });
+  }
+
+  if (status === 'cancelled') {
+    return createLlmStatus('cancelled', updatedAt, { detail: 'Cancelled by user.' });
+  }
+
+  return createLlmStatus('queued', updatedAt, { detail: 'Queued for orchestration.' });
+}
+
+function deriveLlmStatusFromDagEvent(event: DagEvent, updatedAt: string): SessionLlmStatus | undefined {
+  switch (event.type) {
+    case 'task:ready':
+    case 'task:started':
+    case 'task:planning':
+      return createLlmStatus('analyzing', updatedAt, {
+        detail: 'Reviewing prompt and dependencies.',
+        taskId: event.taskId,
+      });
+    case 'task:stream-delta':
+      return createLlmStatus('thinking', updatedAt, {
+        detail: event.phase === 'planning' ? 'Generating plan...' : 'Generating implementation...',
+        taskId: event.taskId,
+        phase: event.phase,
+      });
+    case 'task:plan-persisted':
+      return createLlmStatus('planning', updatedAt, {
+        detail: 'Plan drafted and saved.',
+        taskId: event.taskId,
+      });
+    case 'task:approval-requested':
+      return createLlmStatus('awaiting-approval', updatedAt, {
+        detail: 'Waiting for plan approval.',
+        taskId: event.taskId,
+      });
+    case 'task:approved':
+      return createLlmStatus('implementing', updatedAt, {
+        detail: 'Plan approved. Starting implementation.',
+        taskId: event.taskId,
+      });
+    case 'task:implementation-attempt':
+      return createLlmStatus('implementing', updatedAt, {
+        detail: `Implementation attempt ${event.attempt}/${event.maxAttempts}.`,
+        taskId: event.taskId,
+      });
+    case 'task:tool-call':
+      if (event.status !== 'started') {
+        return undefined;
+      }
+      return createLlmStatus('using-tools', updatedAt, {
+        detail: `Running tool ${event.toolName}.`,
+        taskId: event.taskId,
+        phase: event.phase,
+      });
+    case 'task:validating':
+      return createLlmStatus('validating', updatedAt, {
+        detail: 'Running verification checks.',
+        taskId: event.taskId,
+      });
+    case 'task:verification-failed':
+      return createLlmStatus('retrying', updatedAt, {
+        detail: `Verification failed on attempt ${event.attempt}.`,
+        taskId: event.taskId,
+      });
+    case 'task:retrying':
+      return createLlmStatus('retrying', updatedAt, {
+        detail: `Retrying (${event.attempt}/${event.maxRetries}).`,
+        taskId: event.taskId,
+      });
+    case 'task:completed':
+    case 'graph:completed':
+      return createLlmStatus('completed', updatedAt, {
+        detail: 'Run completed successfully.',
+        taskId: 'taskId' in event ? event.taskId : undefined,
+      });
+    case 'task:failed':
+    case 'graph:failed':
+      return createLlmStatus('failed', updatedAt, {
+        detail: event.error,
+        taskId: 'taskId' in event ? event.taskId : undefined,
+      });
+    default:
+      return undefined;
+  }
+}
+
+function toUiEvent(runId: string, event: DagEvent): UiDagEvent | undefined {
+  const base = {
+    time: now(),
+    runId,
+    type: event.type,
+    taskId: 'taskId' in event ? event.taskId : undefined,
+  };
+
+  const tagged = (message: string): string => `[run:${runId}] ${message}`;
 
   switch (event.type) {
     case 'task:planning':
-      return { ...base, message: `${event.taskId}: planning` };
+      return { ...base, message: tagged(`${event.taskId}: planning`) };
     case 'task:plan-persisted':
-      return { ...base, message: `${event.taskId}: plan persisted at ${event.path}` };
+      return { ...base, message: tagged(`${event.taskId}: plan persisted at ${event.path}`) };
     case 'task:approval-requested':
-      return { ...base, message: `${event.taskId}: approval requested` };
+      return { ...base, message: tagged(`${event.taskId}: approval requested`) };
     case 'task:approved':
-      return { ...base, message: `${event.taskId}: approved` };
+      return { ...base, message: tagged(`${event.taskId}: approved`) };
     case 'task:implementation-attempt':
-      return { ...base, message: `${event.taskId}: implementation attempt ${event.attempt}/${event.maxAttempts}` };
+      return { ...base, message: tagged(`${event.taskId}: implementation attempt ${event.attempt}/${event.maxAttempts}`) };
     case 'task:tool-call': {
       if (event.status === 'started') {
         return {
           ...base,
-          message: `${event.taskId}: tool ${event.toolName} input ${previewToolLog(event.input)}`,
+          message: tagged(`${event.taskId}: tool ${event.toolName} input ${previewToolLog(event.input)}`),
         };
       }
 
       const errorSuffix = event.isError ? ' [error]' : '';
       return {
         ...base,
-        message: `${event.taskId}: tool ${event.toolName} output${errorSuffix} ${previewToolLog(event.output)}`,
+        message: tagged(`${event.taskId}: tool ${event.toolName} output${errorSuffix} ${previewToolLog(event.output)}`),
       };
     }
     case 'task:verification-failed':
-      return { ...base, message: `${event.taskId}: verification failed` };
+      return { ...base, message: tagged(`${event.taskId}: verification failed`) };
     case 'task:ready':
-      return { ...base, message: `${event.taskId}: ready` };
+      return { ...base, message: tagged(`${event.taskId}: ready`) };
     case 'task:started':
-      return { ...base, message: `${event.taskId}: started` };
+      return { ...base, message: tagged(`${event.taskId}: started`) };
     case 'task:validating':
-      return { ...base, message: `${event.taskId}: validating` };
+      return { ...base, message: tagged(`${event.taskId}: validating`) };
     case 'task:completed':
-      return { ...base, message: `${event.taskId}: completed` };
+      return { ...base, message: tagged(`${event.taskId}: completed`) };
     case 'task:failed':
-      return { ...base, message: `${event.taskId}: failed (${event.error})` };
+      return { ...base, message: tagged(`${event.taskId}: failed (${event.error})`) };
     case 'graph:completed':
-      return { ...base, message: `graph completed (${event.outputs.size} outputs)` };
+      return { ...base, message: tagged(`graph completed (${event.outputs.size} outputs)`) };
     case 'graph:failed':
-      return { ...base, message: `graph failed (${event.error})` };
+      return { ...base, message: tagged(`graph failed (${event.error})`) };
     case 'task:retrying':
-      return { ...base, message: `${event.taskId}: retrying ${event.attempt}/${event.maxRetries}` };
+      return { ...base, message: tagged(`${event.taskId}: retrying ${event.attempt}/${event.maxRetries}`) };
     default:
       return undefined;
   }
@@ -2066,9 +2401,13 @@ function serializeWorkSession(session: WorkSession): Record<string, unknown> {
     provider: session.provider,
     model: session.model,
     autoApprove: session.autoApprove,
+    useWorktree: session.useWorktree,
+    worktreePath: session.worktreePath,
+    worktreeBranch: session.worktreeBranch,
     createdAt: session.createdAt,
     updatedAt: session.updatedAt,
     status: session.status,
+    llmStatus: session.llmStatus,
     taskStatus: session.taskStatus,
     events: session.events,
     agentGraph: session.agentGraph.map((node) => ({
@@ -2171,8 +2510,111 @@ function resolveUiWatchPath(workspaceRoot: string): string | undefined {
   return undefined;
 }
 
-function createSessionChatThread(session: WorkSession): SessionChatThread {
+function parseChatContentParts(value: unknown): SessionChatContentPart[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const parts: SessionChatContentPart[] = [];
+  for (const entry of value) {
+    if (!entry || typeof entry !== 'object') {
+      continue;
+    }
+
+    const type = asString((entry as Record<string, unknown>).type);
+    if (type === 'text') {
+      const text = asString((entry as Record<string, unknown>).text);
+      if (!text) {
+        continue;
+      }
+
+      parts.push({ type: 'text', text });
+      continue;
+    }
+
+    if (type !== 'image') {
+      continue;
+    }
+
+    const name = asString((entry as Record<string, unknown>).name) || undefined;
+    const rawData = asString((entry as Record<string, unknown>).data);
+    const rawMimeType = asString((entry as Record<string, unknown>).mimeType);
+
+    const dataUrlMatch = rawData.match(/^data:([^;]+);base64,(.+)$/);
+    const data = (dataUrlMatch ? dataUrlMatch[2] : rawData).replace(/\s+/g, '');
+    const mimeType = rawMimeType || dataUrlMatch?.[1] || 'image/png';
+
+    if (!data) {
+      continue;
+    }
+
+    parts.push({
+      type: 'image',
+      data,
+      mimeType,
+      name,
+    });
+  }
+
+  return parts;
+}
+
+function summarizeChatContentParts(parts: SessionChatContentPart[]): string {
+  const text = parts
+    .filter((part): part is Extract<SessionChatContentPart, { type: 'text' }> => part.type === 'text')
+    .map((part) => part.text.trim())
+    .filter((part) => part.length > 0)
+    .join('\n\n');
+
+  const images = parts.filter((part): part is Extract<SessionChatContentPart, { type: 'image' }> => part.type === 'image');
+  if (images.length === 0) {
+    return text;
+  }
+
+  const imageSummary = images
+    .map((part, index) => part.name || `image-${index + 1}`)
+    .join(', ');
+
+  if (!text) {
+    return `[attached ${images.length} image${images.length === 1 ? '' : 's'}: ${imageSummary}]`;
+  }
+
+  return `${text}\n\n[attached ${images.length} image${images.length === 1 ? '' : 's'}: ${imageSummary}]`;
+}
+
+function compactInlineImageMarkdown(text: string): string {
+  return text
+    .replace(/!\[[^\]]*\]\(data:image\/[a-zA-Z0-9.+-]+;base64,[^)]+\)/g, '[pasted-image]')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function createSessionChatMessage(
+  role: ChatRole,
+  messageText: string,
+  parts: SessionChatContentPart[] = [],
+): SessionChatMessage {
+  const text = messageText.trim();
+  const content = text || summarizeChatContentParts(parts) || '(empty message)';
+
+  return {
+    role,
+    content,
+    contentParts: parts.length > 0 ? parts : undefined,
+    time: now(),
+  };
+}
+
+function createSessionChatThread(session: WorkSession, initialParts: SessionChatContentPart[] = []): SessionChatThread {
   const created = now();
+  const promptText = compactInlineImageMarkdown(session.prompt);
+  const initialMessage = createSessionChatMessage(
+    'user',
+    `Initial task prompt:\n${promptText}`,
+    initialParts.length > 0 ? [{ type: 'text', text: 'Initial task prompt' }, ...initialParts] : [],
+  );
+  initialMessage.time = created;
+
   return {
     sessionId: session.id,
     provider: session.provider,
@@ -2181,13 +2623,7 @@ function createSessionChatThread(session: WorkSession): SessionChatThread {
     taskPrompt: session.prompt,
     createdAt: created,
     updatedAt: created,
-    messages: [
-      {
-        role: 'user',
-        content: `Initial task prompt:\n${session.prompt}`,
-        time: created,
-      },
-    ],
+    messages: [initialMessage],
   };
 }
 
@@ -2204,7 +2640,13 @@ function buildChatSystemPrompt(session: WorkSession): string {
 function buildChatContinuationPrompt(thread: SessionChatThread): string {
   const turns = thread.messages
     .filter((message) => message.role === 'user' || message.role === 'assistant')
-    .map((message) => `${message.role.toUpperCase()}: ${message.content}`)
+    .map((message) => {
+      const content = message.contentParts && message.contentParts.length > 0
+        ? summarizeChatContentParts(message.contentParts)
+        : message.content;
+
+      return `${message.role.toUpperCase()}: ${content}`;
+    })
     .join('\n\n');
 
   return [
@@ -2214,6 +2656,66 @@ function buildChatContinuationPrompt(thread: SessionChatThread): string {
     '',
     'Reply as ASSISTANT and continue from the latest user message.',
   ].join('\n');
+}
+
+function buildChatContinuationInput(thread: SessionChatThread): LlmPromptInput {
+  const relevant = thread.messages.filter((message) => message.role === 'user' || message.role === 'assistant');
+  let latestMultimodalUser: SessionChatMessage | undefined;
+  for (let index = relevant.length - 1; index >= 0; index -= 1) {
+    const candidate = relevant[index];
+    if (
+      candidate.role === 'user'
+      && candidate.contentParts?.some((part) => part.type === 'image')
+    ) {
+      latestMultimodalUser = candidate;
+      break;
+    }
+  }
+
+  if (!latestMultimodalUser) {
+    return buildChatContinuationPrompt(thread);
+  }
+
+  const history = relevant
+    .filter((message) => message !== latestMultimodalUser)
+    .slice(-40)
+    .map((message) => {
+      const content = message.contentParts && message.contentParts.length > 0
+        ? summarizeChatContentParts(message.contentParts)
+        : message.content;
+      return `${message.role.toUpperCase()}: ${content}`;
+    })
+    .join('\n\n');
+
+  const multimodalParts: LlmPromptPart[] = (latestMultimodalUser.contentParts ?? [{ type: 'text', text: latestMultimodalUser.content }]).map((part) => {
+    if (part.type === 'text') {
+      return {
+        type: 'text',
+        text: part.text,
+      };
+    }
+
+    return {
+      type: 'image',
+      data: part.data,
+      mimeType: part.mimeType,
+    };
+  });
+
+  return [
+    {
+      type: 'text',
+      text: [
+        'Continue this conversation with full continuity.',
+        'Conversation so far (excluding latest multimodal user message):',
+        history || '(no previous turns)',
+        '',
+        'The latest user message follows as multimodal content (text + image attachments).',
+        'Reply as ASSISTANT and continue from that latest user message.',
+      ].join('\n'),
+    },
+    ...multimodalParts,
+  ];
 }
 
 function trimThreadMessages(thread: SessionChatThread, maxMessages = 80): void {

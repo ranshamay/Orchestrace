@@ -13,7 +13,6 @@ import type {
   LlmAdapter,
   LlmAgent,
   LlmPromptInput,
-  LlmPromptPart,
   LlmRequest,
   LlmResult,
   SpawnAgentRequest,
@@ -83,19 +82,31 @@ export class PiAiAdapter implements LlmAdapter {
           }
         }
 
+        const upstreamError = response.errorMessage?.trim();
+        if (response.stopReason === 'error' || response.stopReason === 'aborted') {
+          const reason = upstreamError
+            ? `Provider error: ${upstreamError}`
+            : `Model stopped with reason "${response.stopReason}" before producing a usable response.`;
+          throw new Error(`Model ${request.provider}/${request.model} failed. ${reason}`);
+        }
+
         const totalTokens = response.usage?.totalTokens ?? 0;
         if (response.content.length === 0 && totalTokens === 0) {
+          const details = upstreamError
+            ? `Provider error: ${upstreamError}`
+            : 'This model may be unavailable for your account. Try another model.';
           throw new Error(
             `Model ${request.provider}/${request.model} returned an empty response with zero tokens. `
-            + 'This model may be unavailable for your account. Try another model.',
+            + details,
           );
         }
 
         if (!text.trim()) {
           const blockTypes = response.content.map((block) => block.type).join(', ') || 'none';
+          const details = upstreamError ? ` Provider error: ${upstreamError}` : ' Try another model.';
           throw new Error(
             `Model ${request.provider}/${request.model} returned no text output (blocks: ${blockTypes}). `
-            + 'Try another model.',
+            + details,
           );
         }
 
