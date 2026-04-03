@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Activity, CheckCircle2, MessageSquare, Play, Settings, Trash2 } from 'lucide-react';
+import { Activity, CheckCircle2, MessageSquare, Moon, Play, Settings, Sun, Trash2 } from 'lucide-react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import {
   addTodo,
   deleteWork,
@@ -19,6 +21,7 @@ import {
 } from './lib/api';
 
 type Tab = 'graph' | 'settings';
+type ThemeMode = 'light' | 'dark';
 
 type GraphNodeView = {
   id: string;
@@ -136,8 +139,60 @@ function buildGraphLayout(session?: WorkSession): { nodes: GraphNodeView[]; widt
   return { nodes, width, height };
 }
 
+function MarkdownMessage({ content, dark }: { content: string; dark: boolean }) {
+  return (
+    <ReactMarkdown
+      remarkPlugins={[remarkGfm]}
+      components={{
+        p: ({ children }) => <p className="my-1 leading-relaxed">{children}</p>,
+        ul: ({ children }) => <ul className="my-2 list-disc pl-5">{children}</ul>,
+        ol: ({ children }) => <ol className="my-2 list-decimal pl-5">{children}</ol>,
+        li: ({ children }) => <li className="my-0.5">{children}</li>,
+        a: ({ href, children }) => (
+          <a className="text-blue-600 underline decoration-blue-300 underline-offset-2 dark:text-blue-300" href={href} rel="noreferrer" target="_blank">
+            {children}
+          </a>
+        ),
+        code: ({ children, className }) => {
+          const inline = !String(className ?? '').includes('language-');
+          if (inline) {
+            return (
+              <code className={`rounded px-1 py-0.5 font-mono text-[12px] ${dark ? 'bg-slate-800 text-slate-100' : 'bg-slate-100 text-slate-800'}`}>
+                {children}
+              </code>
+            );
+          }
+          return (
+            <code className="block overflow-x-auto whitespace-pre rounded-lg bg-slate-900 p-3 font-mono text-[12px] leading-relaxed text-slate-100">
+              {children}
+            </code>
+          );
+        },
+        pre: ({ children }) => <pre className="my-2">{children}</pre>,
+        blockquote: ({ children }) => (
+          <blockquote className={`my-2 border-l-2 pl-3 italic ${dark ? 'border-slate-600 text-slate-300' : 'border-slate-300 text-slate-600'}`}>
+            {children}
+          </blockquote>
+        ),
+      }}
+    >
+      {content}
+    </ReactMarkdown>
+  );
+}
+
 export default function App() {
   const [activeTab, setActiveTab] = useState<Tab>('graph');
+  const [theme, setTheme] = useState<ThemeMode>(() => {
+    if (typeof window === 'undefined') {
+      return 'dark';
+    }
+    const stored = window.localStorage.getItem('orchestrace-theme');
+    if (stored === 'light' || stored === 'dark') {
+      return stored;
+    }
+    return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+  });
 
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [providerStatuses, setProviderStatuses] = useState<Array<{ provider: string; source: string }>>([]);
@@ -377,41 +432,55 @@ export default function App() {
   };
 
   const currentModels = providerModels[workProvider] ?? [];
+  const isDark = theme === 'dark';
+
+  useEffect(() => {
+    document.documentElement.classList.toggle('dark', isDark);
+    window.localStorage.setItem('orchestrace-theme', theme);
+  }, [isDark, theme]);
 
   return (
-    <div className="flex h-screen w-screen flex-col overflow-hidden bg-slate-50 text-slate-900 md:flex-row">
-      <aside className="w-full border-b border-slate-200 bg-white md:w-64 md:border-b-0 md:border-r">
-        <div className="border-b border-slate-100 px-4 py-3">
+    <div className="flex h-screen w-screen flex-col overflow-hidden bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-100 md:flex-row">
+      <aside className="w-full border-b border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900 md:w-64 md:border-b-0 md:border-r">
+        <div className="border-b border-slate-100 px-4 py-3 dark:border-slate-800">
           <div className="flex items-center gap-2">
             <Activity className="h-5 w-5 text-blue-600" />
             <h1 className="text-lg font-bold tracking-tight">Orchestrace</h1>
+            <button
+              aria-label="Toggle theme"
+              className="ml-auto inline-flex items-center justify-center rounded border border-slate-200 bg-white p-1.5 text-slate-600 hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700"
+              onClick={() => setTheme((current) => (current === 'dark' ? 'light' : 'dark'))}
+              type="button"
+            >
+              {isDark ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+            </button>
           </div>
         </div>
 
         <div className="max-h-56 overflow-y-auto p-3 md:max-h-none md:h-[calc(100vh-65px)] md:overflow-y-auto">
           <button
-            className={`mb-1 w-full rounded-md px-3 py-2 text-left text-sm font-medium ${activeTab === 'graph' ? 'bg-blue-50 text-blue-700' : 'text-slate-600 hover:bg-slate-100'}`}
+            className={`mb-1 w-full rounded-md px-3 py-2 text-left text-sm font-medium ${activeTab === 'graph' ? 'bg-blue-50 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300' : 'text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800'}`}
             onClick={() => setActiveTab('graph')}
           >
             Graph & Flow
           </button>
           <button
-            className={`mb-4 w-full rounded-md px-3 py-2 text-left text-sm font-medium ${activeTab === 'settings' ? 'bg-blue-50 text-blue-700' : 'text-slate-600 hover:bg-slate-100'}`}
+            className={`mb-4 w-full rounded-md px-3 py-2 text-left text-sm font-medium ${activeTab === 'settings' ? 'bg-blue-50 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300' : 'text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800'}`}
             onClick={() => setActiveTab('settings')}
           >
             Settings
           </button>
 
-          <div className="mb-2 border-t border-slate-100 pt-3 text-xs font-bold uppercase tracking-widest text-slate-400">
+          <div className="mb-2 border-t border-slate-100 pt-3 text-xs font-bold uppercase tracking-widest text-slate-400 dark:border-slate-800 dark:text-slate-500">
             Sessions
           </div>
 
-          {sessions.length === 0 && <div className="px-1 text-xs italic text-slate-400">No sessions</div>}
+          {sessions.length === 0 && <div className="px-1 text-xs italic text-slate-400 dark:text-slate-500">No sessions</div>}
 
           {sessions.map((session) => (
             <button
               key={session.id}
-              className={`mb-1 w-full truncate rounded px-2 py-1.5 text-left text-xs ${selectedSessionId === session.id ? 'bg-blue-600 text-white' : 'text-slate-700 hover:bg-slate-100'}`}
+              className={`mb-1 w-full truncate rounded px-2 py-1.5 text-left text-xs ${selectedSessionId === session.id ? 'bg-blue-600 text-white' : 'text-slate-700 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800'}`}
               onClick={() => setSelectedSessionId(session.id)}
             >
               {session.prompt}
@@ -423,40 +492,40 @@ export default function App() {
       <main className="min-w-0 flex-1">
         {activeTab === 'graph' ? (
           <div className="flex h-full flex-col lg:flex-row">
-            <section className="flex min-w-0 flex-1 flex-col border-b border-slate-200 bg-white lg:border-b-0 lg:border-r">
-              <header className="border-b border-slate-200 p-4">
-                <div className="text-xs text-slate-500">
+            <section className="flex min-w-0 flex-1 flex-col border-b border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900 lg:border-b-0 lg:border-r">
+              <header className="border-b border-slate-200 p-4 dark:border-slate-800">
+                <div className="text-xs text-slate-500 dark:text-slate-400">
                   Center graph is the execution control plane. Use the right panel composer to either start a run or chat with the selected run.
                 </div>
               </header>
 
-              <div className="min-h-0 flex-1 overflow-auto bg-slate-50 p-4">
+              <div className="min-h-0 flex-1 overflow-auto bg-slate-50 p-4 dark:bg-slate-950">
                 {!selectedSession && (
-                  <div className="text-center text-sm italic text-slate-400">Select a session to inspect its flow.</div>
+                  <div className="text-center text-sm italic text-slate-400 dark:text-slate-500">Select a session to inspect its flow.</div>
                 )}
 
                 {selectedSession && (
                   <div className="space-y-4">
-                    <div className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+                    <div className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-700 dark:bg-slate-900">
                       <div className="mb-2 flex items-start justify-between gap-2">
-                        <h2 className="text-base font-bold text-slate-800">{selectedSession.prompt}</h2>
-                        <span className="rounded bg-slate-100 px-2 py-0.5 text-xs font-mono text-slate-600">
+                        <h2 className="text-base font-bold text-slate-800 dark:text-slate-100">{selectedSession.prompt}</h2>
+                        <span className="rounded bg-slate-100 px-2 py-0.5 text-xs font-mono text-slate-600 dark:bg-slate-800 dark:text-slate-300">
                           {selectedSession.status}
                         </span>
                       </div>
-                      <div className="grid grid-cols-1 gap-2 text-xs text-slate-500 md:grid-cols-2">
+                      <div className="grid grid-cols-1 gap-2 text-xs text-slate-500 dark:text-slate-400 md:grid-cols-2">
                         <div>
-                          Provider: <span className="font-mono text-slate-700">{selectedSession.provider}</span>
+                          Provider: <span className="font-mono text-slate-700 dark:text-slate-200">{selectedSession.provider}</span>
                         </div>
                         <div>
-                          Model: <span className="font-mono text-slate-700">{selectedSession.model}</span>
+                          Model: <span className="font-mono text-slate-700 dark:text-slate-200">{selectedSession.model}</span>
                         </div>
                       </div>
                     </div>
 
-                    <div className="rounded-lg border border-slate-200 bg-white p-3 shadow-sm">
-                      <div className="mb-3 text-xs font-bold uppercase tracking-widest text-slate-500">Entity Graph</div>
-                      <div className="overflow-auto rounded border border-slate-100 bg-slate-50">
+                    <div className="rounded-lg border border-slate-200 bg-white p-3 shadow-sm dark:border-slate-700 dark:bg-slate-900">
+                      <div className="mb-3 text-xs font-bold uppercase tracking-widest text-slate-500 dark:text-slate-400">Entity Graph</div>
+                      <div className="overflow-auto rounded border border-slate-100 bg-slate-50 dark:border-slate-800 dark:bg-slate-950">
                         <svg
                           aria-label="Entity graph"
                           className="block"
@@ -472,7 +541,7 @@ export default function App() {
                             return (
                               <line
                                 key={`edge-${dep}-${node.id}`}
-                                stroke="#94a3b8"
+                                stroke={isDark ? '#475569' : '#94a3b8'}
                                 strokeWidth={2}
                                 x1={fromNode.x + 90}
                                 x2={node.x - 90}
@@ -485,7 +554,7 @@ export default function App() {
                           {graphLayout.nodes.map((node) => (
                             <g key={node.id}>
                               <rect
-                                fill="white"
+                                fill={isDark ? '#0f172a' : 'white'}
                                 height={72}
                                 rx={12}
                                 stroke={statusColor(node.status)}
@@ -495,7 +564,7 @@ export default function App() {
                                 y={node.y - 36}
                               />
                               <text
-                                fill="#0f172a"
+                                fill={isDark ? '#e2e8f0' : '#0f172a'}
                                 fontSize={12}
                                 fontWeight={700}
                                 textAnchor="middle"
@@ -505,7 +574,7 @@ export default function App() {
                                 {node.label}
                               </text>
                               <text
-                                fill="#475569"
+                                fill={isDark ? '#94a3b8' : '#475569'}
                                 fontSize={10}
                                 textAnchor="middle"
                                 x={node.x}
@@ -523,16 +592,16 @@ export default function App() {
               </div>
             </section>
 
-            <aside className="flex w-full flex-col bg-white lg:w-[420px]">
-              <section className="flex min-h-0 flex-1 flex-col border-b border-slate-200">
-                <header className="border-b border-slate-200 bg-white px-4 py-3 text-xs font-bold uppercase tracking-widest text-slate-500">
+            <aside className="flex w-full flex-col bg-white dark:bg-slate-900 lg:w-[420px]">
+              <section className="flex min-h-0 flex-1 flex-col border-b border-slate-200 dark:border-slate-800">
+                <header className="border-b border-slate-200 bg-white px-4 py-3 text-xs font-bold uppercase tracking-widest text-slate-500 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-400">
                   <div className="flex items-center justify-between gap-2">
                     <div className="flex items-center gap-1.5">
                       <MessageSquare className="h-4 w-4" />
                       Chat Timeline
                     </div>
                     <button
-                      className="inline-flex items-center gap-1 rounded border border-red-200 bg-red-50 px-2 py-1 text-[10px] text-red-700 disabled:opacity-50"
+                      className="inline-flex items-center gap-1 rounded border border-red-200 bg-red-50 px-2 py-1 text-[10px] text-red-700 disabled:opacity-50 dark:border-red-800 dark:bg-red-950/40 dark:text-red-300"
                       disabled={!selectedSessionId}
                       onClick={() => {
                         void handleDelete();
@@ -544,27 +613,31 @@ export default function App() {
                     </button>
                   </div>
                 </header>
-                <div className="min-h-0 flex-1 space-y-2 overflow-auto bg-slate-50 p-4">
+                <div className="min-h-0 flex-1 space-y-2 overflow-auto bg-slate-50 p-4 dark:bg-slate-950">
                   {timelineItems.length === 0 && (
-                    <div className="text-center text-xs italic text-slate-400">No chat/events yet.</div>
+                    <div className="text-center text-xs italic text-slate-400 dark:text-slate-500">No chat/events yet.</div>
                   )}
                   {timelineItems.map((item) => (
                     <div
                       key={item.key}
-                      className={`rounded border p-2.5 text-sm ${item.kind === 'event' ? 'border-slate-200 bg-white text-slate-700' : item.role === 'user' ? 'border-blue-100 bg-blue-50 text-blue-900' : 'border-slate-200 bg-white text-slate-700'}`}
+                      className={`rounded border p-2.5 text-sm ${item.kind === 'event' ? 'border-slate-200 bg-white text-slate-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200' : item.role === 'user' ? 'border-blue-100 bg-blue-50 text-blue-900 dark:border-blue-800 dark:bg-blue-950/40 dark:text-blue-100' : 'border-slate-200 bg-white text-slate-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200'}`}
                     >
-                      <div className="mb-1 flex items-center justify-between text-[10px] uppercase tracking-widest text-slate-400">
+                      <div className="mb-1 flex items-center justify-between text-[10px] uppercase tracking-widest text-slate-400 dark:text-slate-500">
                         <span>{item.kind === 'event' ? `event:${item.title}` : item.role}</span>
                         <span>{new Date(item.time).toLocaleTimeString([], { hour12: false })}</span>
                       </div>
-                      <div className="whitespace-pre-wrap break-words">{item.content}</div>
+                      <div className="whitespace-pre-wrap break-words">
+                        {item.kind === 'event' || item.role === 'user'
+                          ? item.content
+                          : <MarkdownMessage content={item.content} dark={isDark} />}
+                      </div>
                     </div>
                   ))}
                 </div>
-                <div className="border-t border-slate-200 p-3">
+                <div className="border-t border-slate-200 p-3 dark:border-slate-800">
                   <div className="mb-2 grid grid-cols-1 gap-2 md:grid-cols-2">
                     <select
-                      className="rounded border border-slate-200 px-2 py-1.5 text-sm"
+                      className="rounded border border-slate-200 px-2 py-1.5 text-sm dark:border-slate-700 dark:bg-slate-900"
                       value={workWorkspaceId}
                       onChange={(event) => setWorkWorkspaceId(event.target.value)}
                     >
@@ -574,7 +647,7 @@ export default function App() {
                       ))}
                     </select>
                     <select
-                      className="rounded border border-slate-200 px-2 py-1.5 text-sm"
+                      className="rounded border border-slate-200 px-2 py-1.5 text-sm dark:border-slate-700 dark:bg-slate-900"
                       value={workProvider}
                       onChange={(event) => {
                         setWorkProvider(event.target.value);
@@ -587,7 +660,7 @@ export default function App() {
                       ))}
                     </select>
                     <select
-                      className="rounded border border-slate-200 px-2 py-1.5 text-sm"
+                      className="rounded border border-slate-200 px-2 py-1.5 text-sm dark:border-slate-700 dark:bg-slate-900"
                       value={workModel}
                       onChange={(event) => setWorkModel(event.target.value)}
                     >
@@ -596,7 +669,7 @@ export default function App() {
                         <option key={model} value={model}>{model}</option>
                       ))}
                     </select>
-                    <label className="flex items-center gap-2 rounded border border-slate-200 bg-white px-2 py-1.5 text-sm text-slate-600">
+                    <label className="flex items-center gap-2 rounded border border-slate-200 bg-white px-2 py-1.5 text-sm text-slate-600 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300">
                       <input
                         checked={autoApprove}
                         className="h-4 w-4"
@@ -608,7 +681,7 @@ export default function App() {
                   </div>
                   <div className="flex gap-2">
                     <textarea
-                      className="h-14 flex-1 resize-none rounded border border-slate-200 px-2 py-1.5 text-sm"
+                      className="h-14 flex-1 resize-none rounded border border-slate-200 px-2 py-1.5 text-sm dark:border-slate-700 dark:bg-slate-900"
                       onChange={(event) => setComposerText(event.target.value)}
                       onKeyDown={(event) => {
                         if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
@@ -634,7 +707,7 @@ export default function App() {
                         <Play className="h-3 w-3" /> Run
                       </button>
                       <button
-                        className="rounded bg-slate-800 px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50"
+                        className="rounded bg-slate-800 px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50 dark:bg-slate-700"
                         disabled={!selectedSessionId || !composerText.trim()}
                         onClick={() => {
                           void handleSendChat();
@@ -649,12 +722,12 @@ export default function App() {
               </section>
 
               <section className="flex min-h-0 flex-1 flex-col">
-                <header className="border-b border-slate-200 bg-white px-4 py-3 text-xs font-bold uppercase tracking-widest text-slate-500">
+                <header className="border-b border-slate-200 bg-white px-4 py-3 text-xs font-bold uppercase tracking-widest text-slate-500 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-400">
                   Todo Checklist
                 </header>
-                <div className="flex gap-2 border-b border-slate-100 bg-slate-50 p-3">
+                <div className="flex gap-2 border-b border-slate-100 bg-slate-50 p-3 dark:border-slate-800 dark:bg-slate-950">
                   <input
-                    className="flex-1 rounded border border-slate-200 px-2 py-1.5 text-sm"
+                    className="flex-1 rounded border border-slate-200 px-2 py-1.5 text-sm dark:border-slate-700 dark:bg-slate-900"
                     disabled={!selectedSessionId}
                     onChange={(event) => setTodoInput(event.target.value)}
                     onKeyDown={(event) => {
@@ -666,7 +739,7 @@ export default function App() {
                     value={todoInput}
                   />
                   <button
-                    className="rounded border border-slate-200 bg-white px-3 text-sm disabled:opacity-50"
+                    className="rounded border border-slate-200 bg-white px-3 text-sm disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900"
                     disabled={!selectedSessionId || !todoInput.trim()}
                     onClick={() => {
                       void handleAddTodo();
@@ -676,17 +749,17 @@ export default function App() {
                   </button>
                 </div>
                 <div className="min-h-0 flex-1 space-y-1 overflow-auto p-4">
-                  {todos.length === 0 && <div className="text-center text-xs italic text-slate-400">No todos yet.</div>}
+                  {todos.length === 0 && <div className="text-center text-xs italic text-slate-400 dark:text-slate-500">No todos yet.</div>}
                   {todos.map((todo) => (
                     <button
                       key={todo.id}
-                      className="flex w-full items-center gap-2 rounded border border-slate-100 bg-white p-2 text-left text-sm"
+                      className="flex w-full items-center gap-2 rounded border border-slate-100 bg-white p-2 text-left text-sm dark:border-slate-700 dark:bg-slate-900"
                       onClick={() => {
                         void handleToggleTodo(todo);
                       }}
                     >
                       <CheckCircle2 className={`h-4 w-4 ${todo.done ? 'text-emerald-500' : 'text-slate-300'}`} />
-                      <span className={todo.done ? 'line-through text-slate-400' : 'text-slate-700'}>{todo.text}</span>
+                      <span className={todo.done ? 'line-through text-slate-400 dark:text-slate-500' : 'text-slate-700 dark:text-slate-200'}>{todo.text}</span>
                     </button>
                   ))}
                 </div>
@@ -694,21 +767,21 @@ export default function App() {
             </aside>
           </div>
         ) : (
-          <div className="h-full overflow-auto p-8">
-            <h2 className="mb-5 flex items-center gap-2 text-2xl font-bold text-slate-800">
+          <div className="h-full overflow-auto p-8 dark:bg-slate-950">
+            <h2 className="mb-5 flex items-center gap-2 text-2xl font-bold text-slate-800 dark:text-slate-100">
               <Settings className="h-6 w-6" />
               Environment Settings
             </h2>
 
-            <div className="mb-6 rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
-              <h3 className="mb-3 text-xs font-bold uppercase tracking-widest text-slate-500">Providers</h3>
+            <div className="mb-6 rounded-lg border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-700 dark:bg-slate-900">
+              <h3 className="mb-3 text-xs font-bold uppercase tracking-widest text-slate-500 dark:text-slate-400">Providers</h3>
               <div className="space-y-2">
                 {providers.map((provider) => {
                   const status = providerStatuses.find((entry) => entry.provider === provider.id)?.source ?? 'none';
                   return (
-                    <div key={provider.id} className="flex items-center justify-between rounded border border-slate-100 bg-slate-50 px-3 py-2 text-sm">
-                      <span className="font-mono text-slate-700">{provider.id}</span>
-                      <span className={`rounded px-2 py-0.5 text-xs ${status === 'none' ? 'bg-slate-200 text-slate-600' : 'bg-emerald-100 text-emerald-700'}`}>
+                    <div key={provider.id} className="flex items-center justify-between rounded border border-slate-100 bg-slate-50 px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-950">
+                      <span className="font-mono text-slate-700 dark:text-slate-200">{provider.id}</span>
+                      <span className={`rounded px-2 py-0.5 text-xs ${status === 'none' ? 'bg-slate-200 text-slate-600 dark:bg-slate-800 dark:text-slate-300' : 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300'}`}>
                         {status}
                       </span>
                     </div>
@@ -717,14 +790,14 @@ export default function App() {
               </div>
             </div>
 
-            <div className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
-              <h3 className="mb-3 text-xs font-bold uppercase tracking-widest text-slate-500">Workspaces</h3>
+            <div className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-700 dark:bg-slate-900">
+              <h3 className="mb-3 text-xs font-bold uppercase tracking-widest text-slate-500 dark:text-slate-400">Workspaces</h3>
               <div className="space-y-2">
                 {workspaces.map((workspace) => (
-                  <div key={workspace.id} className="flex items-center justify-between rounded border border-slate-100 bg-slate-50 px-3 py-2 text-sm">
-                    <span className="truncate font-mono text-xs text-slate-600">{workspace.path}</span>
+                  <div key={workspace.id} className="flex items-center justify-between rounded border border-slate-100 bg-slate-50 px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-950">
+                    <span className="truncate font-mono text-xs text-slate-600 dark:text-slate-300">{workspace.path}</span>
                     {workspace.id === activeWorkspaceId && (
-                      <span className="rounded bg-blue-100 px-2 py-0.5 text-xs text-blue-700">active</span>
+                      <span className="rounded bg-blue-100 px-2 py-0.5 text-xs text-blue-700 dark:bg-blue-900/40 dark:text-blue-300">active</span>
                     )}
                   </div>
                 ))}
@@ -735,7 +808,7 @@ export default function App() {
       </main>
 
       {errorMessage && (
-        <div className="fixed bottom-3 right-3 max-w-xl rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700 shadow">
+        <div className="fixed bottom-3 right-3 max-w-xl rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700 shadow dark:border-red-800 dark:bg-red-950/40 dark:text-red-300">
           {errorMessage}
         </div>
       )}
