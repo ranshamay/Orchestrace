@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type ClipboardEvent } from 'react';
 import { Activity, CheckCircle2, MessageSquare, Moon, Play, Settings, Sun, Trash2 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -40,6 +40,13 @@ type TimelineItem = {
   role?: string;
   title?: string;
   content: string;
+};
+
+type ComposerImageAttachment = {
+  id: string;
+  name: string;
+  mime: string;
+  dataUrl: string;
 };
 
 function normalizeTaskStatus(raw?: string): string {
@@ -181,6 +188,62 @@ function MarkdownMessage({ content, dark }: { content: string; dark: boolean }) 
   );
 }
 
+function sanitizeAttachmentName(input: string): string {
+  const trimmed = input.trim();
+  if (!trimmed) {
+    return 'pasted-image.png';
+  }
+  return trimmed.replace(/[^a-zA-Z0-9._-]/g, '-');
+}
+
+function attachmentMarkdown(attachments: ComposerImageAttachment[]): string {
+  return attachments
+    .map((attachment, index) => `![${sanitizeAttachmentName(attachment.name || `pasted-image-${index + 1}.png`)}](${attachment.dataUrl})`)
+    .join('\n\n');
+}
+
+function composePrompt(text: string, attachments: ComposerImageAttachment[]): string {
+  const base = text.trim();
+  if (attachments.length === 0) {
+    return base;
+  }
+
+  const images = attachmentMarkdown(attachments);
+  if (!base) {
+    return images;
+  }
+  return `${base}\n\n${images}`;
+}
+
+function compactPromptDisplay(prompt: string): string {
+  return prompt
+    .replace(/!\[[^\]]*\]\(data:image\/[a-zA-Z0-9.+-]+;base64,[^)]+\)/g, '[pasted-image]')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+async function readClipboardImage(item: DataTransferItem): Promise<ComposerImageAttachment | null> {
+  const file = item.getAsFile();
+  if (!file) {
+    return null;
+  }
+
+  const dataUrl = await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result ?? ''));
+    reader.onerror = () => reject(new Error('Failed to read pasted image'));
+    reader.readAsDataURL(file);
+  });
+
+  const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  return {
+    id,
+    name: file.name || 'pasted-image.png',
+    mime: file.type || 'image/png',
+    dataUrl,
+  };
+}
+
 export default function App() {
   const [activeTab, setActiveTab] = useState<Tab>('graph');
   const [theme, setTheme] = useState<ThemeMode>(() => {
@@ -211,6 +274,7 @@ export default function App() {
   const [autoApprove, setAutoApprove] = useState(true);
 
   const [composerText, setComposerText] = useState('');
+  const [composerImages, setComposerImages] = useState<ComposerImageAttachment[]>([]);
   const [todoInput, setTodoInput] = useState('');
   const [errorMessage, setErrorMessage] = useState('');
 
@@ -340,8 +404,11 @@ export default function App() {
     };
   }, [selectedSessionId]);
 
+  const composerPayload = useMemo(() => composePrompt(composerText, composerImages), [composerImages, composerText]);
+  const hasComposerContent = composerPayload.trim().length > 0;
+
   const handleStartFromComposer = async () => {
-    if (!composerText.trim() || !workProvider || !workModel || !workWorkspaceId) {
+    if (!hasComposerContent || !workProvider || !workModel || !workWorkspaceId) {
       return;
     }
 
@@ -349,7 +416,7 @@ export default function App() {
     try {
       const result = await startWork({
         workspaceId: workWorkspaceId,
-        prompt: composerText,
+        prompt: composerPayload,
         provider: workProvider,
         model: workModel,
         autoApprove,
@@ -359,6 +426,7 @@ export default function App() {
       setSessions(sessionsState.sessions);
       setSelectedSessionId(result.id);
       setComposerText('');
+      setComposerImages([]);
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : String(error));
     }
@@ -382,21 +450,51 @@ export default function App() {
   };
 
   const handleSendChat = async () => {
-    if (!selectedSessionId || !composerText.trim()) {
+    if (!selectedSessionId || !hasComposerContent) {
       return;
     }
 
-    const message = composerText;
+    const message = composerPayload;
     setComposerText('');
+    setComposerImages([]);
     setErrorMessage('');
 
     try {
       const response = await sendChatMessage(selectedSessionId, message);
       setChatMessages(response.messages);
     } catch (error) {
-      setComposerText(message);
+      setComposerText(composerText);
+      setComposerImages(composerImages);
       setErrorMessage(error instanceof Error ? error.message : String(error));
     }
+  };
+
+  const handleComposerPaste = async (event: ClipboardEvent<HTMLTextAreaElement>) => {
+    const items = Array.from(event.clipboardData?.items ?? []).filter((item) => item.type.startsWith('image/'));
+    if (items.length === 0) {
+      return;
+    }
+
+    event.preventDefault();
+    setErrorMessage('');
+
+    try {
+      const nextAttachments = (await Promise.all(items.map((item) => readClipboardImage(item)))).filter(
+        (item): item is ComposerImageAttachment => item !== null,
+      );
+
+      if (nextAttachments.length === 0) {
+        return;
+      }
+
+      setComposerImages((current) => [...current, ...nextAttachments]);
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const removeComposerAttachment = (id: string) => {
+    setComposerImages((current) => current.filter((item) => item.id !== id));
   };
 
   const handleAddTodo = async () => {
@@ -483,7 +581,7 @@ export default function App() {
               className={`mb-1 w-full truncate rounded px-2 py-1.5 text-left text-xs ${selectedSessionId === session.id ? 'bg-blue-600 text-white' : 'text-slate-700 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800'}`}
               onClick={() => setSelectedSessionId(session.id)}
             >
-              {session.prompt}
+              {compactPromptDisplay(session.prompt)}
             </button>
           ))}
         </div>
@@ -508,7 +606,7 @@ export default function App() {
                   <div className="space-y-4">
                     <div className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-700 dark:bg-slate-900">
                       <div className="mb-2 flex items-start justify-between gap-2">
-                        <h2 className="text-base font-bold text-slate-800 dark:text-slate-100">{selectedSession.prompt}</h2>
+                        <h2 className="text-base font-bold text-slate-800 dark:text-slate-100">{compactPromptDisplay(selectedSession.prompt)}</h2>
                         <span className="rounded bg-slate-100 px-2 py-0.5 text-xs font-mono text-slate-600 dark:bg-slate-800 dark:text-slate-300">
                           {selectedSession.status}
                         </span>
@@ -683,6 +781,9 @@ export default function App() {
                     <textarea
                       className="h-14 flex-1 resize-none rounded border border-slate-200 px-2 py-1.5 text-sm dark:border-slate-700 dark:bg-slate-900"
                       onChange={(event) => setComposerText(event.target.value)}
+                      onPaste={(event) => {
+                        void handleComposerPaste(event);
+                      }}
                       onKeyDown={(event) => {
                         if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
                           if (selectedSessionId) {
@@ -698,7 +799,7 @@ export default function App() {
                     <div className="flex flex-col gap-2">
                       <button
                         className="inline-flex items-center gap-1 rounded bg-blue-600 px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50"
-                        disabled={!composerText.trim() || !workWorkspaceId || !workProvider || !workModel}
+                        disabled={!hasComposerContent || !workWorkspaceId || !workProvider || !workModel}
                         onClick={() => {
                           void handleStartFromComposer();
                         }}
@@ -708,7 +809,7 @@ export default function App() {
                       </button>
                       <button
                         className="rounded bg-slate-800 px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50 dark:bg-slate-700"
-                        disabled={!selectedSessionId || !composerText.trim()}
+                        disabled={!selectedSessionId || !hasComposerContent}
                         onClick={() => {
                           void handleSendChat();
                         }}
@@ -718,6 +819,27 @@ export default function App() {
                       </button>
                     </div>
                   </div>
+                  {composerImages.length > 0 && (
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      {composerImages.map((attachment) => (
+                        <div key={attachment.id} className="group relative overflow-hidden rounded border border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-900">
+                          <img
+                            alt={attachment.name}
+                            className="h-16 w-16 object-cover"
+                            src={attachment.dataUrl}
+                          />
+                          <button
+                            aria-label={`Remove ${attachment.name}`}
+                            className="absolute right-1 top-1 rounded bg-slate-900/70 px-1 text-[10px] text-white"
+                            onClick={() => removeComposerAttachment(attachment.id)}
+                            type="button"
+                          >
+                            x
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
               </section>
 
