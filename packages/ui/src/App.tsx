@@ -40,6 +40,8 @@ type TimelineItem = {
   kind: 'chat' | 'event';
   role?: string;
   title?: string;
+  subtitle?: string;
+  tone?: 'neutral' | 'tool' | 'success' | 'error';
   content: string;
   contentParts?: ChatContentPart[];
 };
@@ -129,6 +131,141 @@ function compactRunId(runId: string): string {
   }
 
   return `${id.slice(0, 8)}...${id.slice(-4)}`;
+}
+
+function stripRunTag(input: string): string {
+  return input.replace(/^\[run:[^\]]+\]\s*/, '').trim();
+}
+
+function stripTaskPrefix(input: string): string {
+  return input.replace(/^[^:]+:\s*/, '').trim();
+}
+
+function compactInline(input: string, maxChars = 220): string {
+  const compact = input.replace(/\s+/g, ' ').trim();
+  if (compact.length <= maxChars) {
+    return compact;
+  }
+
+  return `${compact.slice(0, maxChars - 3)}...`;
+}
+
+function parseJsonObject(input: string): Record<string, unknown> | undefined {
+  const value = input.trim();
+  if (!value.startsWith('{') && !value.startsWith('[')) {
+    return undefined;
+  }
+
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' ? parsed as Record<string, unknown> : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function toolInputSummary(toolName: string, payload: string): string {
+  const parsed = parseJsonObject(payload);
+  if (toolName === 'read_file') {
+    const path = parsed && typeof parsed.path === 'string' ? parsed.path : '';
+    return path ? `Reading ${path}` : 'Reading file';
+  }
+
+  if (toolName === 'list_directory') {
+    const path = parsed && typeof parsed.path === 'string' ? parsed.path : '.';
+    return `Listing ${path}`;
+  }
+
+  if (toolName === 'search_files') {
+    const query = parsed && typeof parsed.query === 'string' ? parsed.query : '';
+    return query ? `Searching for: ${query}` : 'Searching files';
+  }
+
+  if (toolName === 'run_command') {
+    const command = parsed && typeof parsed.command === 'string' ? parsed.command : '';
+    return command ? `Running: ${compactInline(command, 160)}` : 'Running command';
+  }
+
+  if (toolName.startsWith('todo_')) {
+    return 'Updating checklist';
+  }
+
+  if (toolName === 'agent_graph_set') {
+    return 'Updating execution graph';
+  }
+
+  if (toolName === 'subagent_spawn') {
+    return 'Spawning sub-agent';
+  }
+
+  return `Calling ${toolName}`;
+}
+
+function toolOutputSummary(payload: string, isError: boolean): string {
+  if (isError) {
+    return compactInline(payload || 'Tool returned an error.', 260);
+  }
+
+  if (!payload.trim()) {
+    return 'Completed with empty output.';
+  }
+
+  return compactInline(payload, 260);
+}
+
+function formatTimelineEvent(event: { type: string; message: string; taskId?: string }): Pick<TimelineItem, 'title' | 'subtitle' | 'content' | 'tone'> {
+  const clean = stripRunTag(event.message);
+
+  if (event.type === 'task:tool-call') {
+    const toolMatch = clean.match(/^([^:]+):\s+tool\s+([a-zA-Z0-9_.-]+)\s+(input|output)(\s+\[error\])?\s*([\s\S]*)$/);
+    if (toolMatch) {
+      const toolName = toolMatch[2];
+      const direction = toolMatch[3];
+      const isError = Boolean(toolMatch[4]);
+      const payload = toolMatch[5] ?? '';
+
+      if (direction === 'input') {
+        return {
+          title: `Using ${toolName}`,
+          subtitle: 'Tool input',
+          tone: 'tool',
+          content: toolInputSummary(toolName, payload),
+        };
+      }
+
+      return {
+        title: `${toolName} result`,
+        subtitle: isError ? 'Tool error' : 'Tool output',
+        tone: isError ? 'error' : 'tool',
+        content: toolOutputSummary(payload, isError),
+      };
+    }
+  }
+
+  const detail = stripTaskPrefix(clean);
+  switch (event.type) {
+    case 'task:planning':
+      return { title: 'Planning', subtitle: event.taskId, tone: 'neutral', content: detail || 'Drafting implementation plan.' };
+    case 'task:approval-requested':
+      return { title: 'Awaiting approval', subtitle: event.taskId, tone: 'neutral', content: detail || 'Waiting for plan approval.' };
+    case 'task:implementation-attempt':
+      return { title: 'Implementing', subtitle: event.taskId, tone: 'neutral', content: detail || 'Starting implementation attempt.' };
+    case 'task:validating':
+      return { title: 'Validating', subtitle: event.taskId, tone: 'neutral', content: detail || 'Running verification checks.' };
+    case 'task:completed':
+    case 'graph:completed':
+      return { title: 'Completed', subtitle: event.taskId, tone: 'success', content: detail || 'Run completed successfully.' };
+    case 'task:failed':
+    case 'graph:failed':
+      return { title: 'Failed', subtitle: event.taskId, tone: 'error', content: detail || 'Execution failed.' };
+    default:
+      return {
+        title: event.type.replace('task:', '').replace('graph:', '').replace(/-/g, ' '),
+        subtitle: event.taskId,
+        tone: 'neutral',
+        content: compactInline(detail || clean, 260),
+      };
+  }
 }
 
 function normalizeTaskStatus(raw?: string): string {
@@ -338,6 +475,123 @@ function llmStatusBadgeClass(status: LlmSessionStatus, selected = false): string
   }
 }
 
+function summarizeChatPartsForTrace(parts?: ChatContentPart[]): string[] {
+  if (!parts || parts.length === 0) {
+    return [];
+  }
+
+  return parts.map((part, index) => {
+    if (part.type === 'text') {
+      return `part ${index + 1}: text ${compactInline(part.text, 280)}`;
+    }
+
+    const name = part.name?.trim() || `image-${index + 1}`;
+    return `part ${index + 1}: image ${name} (${part.mimeType}, base64 length ${part.data.length})`;
+  });
+}
+
+function indentBlock(text: string, prefix = '    '): string {
+  return text
+    .split('\n')
+    .map((line) => `${prefix}${line}`)
+    .join('\n');
+}
+
+function buildSessionTraceExport(
+  session: WorkSession,
+  chatMessages: ChatMessage[],
+  todos: AgentTodo[],
+): string {
+  const llmStatus = resolveLlmStatus(session);
+  const lines: string[] = [];
+
+  lines.push('Orchestrace Chat Trace');
+  lines.push(`Exported at: ${new Date().toISOString()}`);
+  lines.push(`Run ID: ${session.id}`);
+  lines.push(`Workspace: ${session.workspaceName} (${session.workspacePath})`);
+  lines.push(`Provider/Model: ${session.provider}/${session.model}`);
+  lines.push(`Status: ${session.status}`);
+  lines.push(`LLM status: ${llmStatus.label}${llmStatus.detail ? ` - ${llmStatus.detail}` : ''}`);
+  lines.push(`Created: ${session.createdAt}`);
+  lines.push(`Updated: ${session.updatedAt}`);
+  lines.push(`Worktree enabled: ${session.useWorktree ? 'yes' : 'no'}`);
+  if (session.worktreePath) {
+    lines.push(`Worktree path: ${session.worktreePath}`);
+  }
+  if (session.worktreeBranch) {
+    lines.push(`Worktree branch: ${session.worktreeBranch}`);
+  }
+  lines.push('');
+
+  lines.push('Prompt:');
+  lines.push(indentBlock(session.prompt || '(empty prompt)'));
+  lines.push('');
+
+  lines.push(`Todos (${todos.length}):`);
+  if (todos.length === 0) {
+    lines.push('  - (none)');
+  } else {
+    for (const todo of todos) {
+      lines.push(`  - [${todo.done ? 'x' : ' '}] ${todo.text}`);
+    }
+  }
+  lines.push('');
+
+  lines.push(`Events (${session.events.length}):`);
+  if (session.events.length === 0) {
+    lines.push('  - (none)');
+  } else {
+    for (const event of session.events) {
+      lines.push(`  - [${event.time}] ${event.type}${event.taskId ? ` (${event.taskId})` : ''}`);
+      lines.push(indentBlock(stripRunTag(event.message), '      '));
+    }
+  }
+  lines.push('');
+
+  lines.push(`Chat Messages (${chatMessages.length}):`);
+  if (chatMessages.length === 0) {
+    lines.push('  - (none)');
+  } else {
+    for (const message of chatMessages) {
+      lines.push(`  - [${message.time}] ${message.role.toUpperCase()}`);
+      lines.push(indentBlock(message.content || '(empty message)', '      '));
+      const parts = summarizeChatPartsForTrace(message.contentParts);
+      if (parts.length > 0) {
+        lines.push('      Parts:');
+        for (const part of parts) {
+          lines.push(`        - ${part}`);
+        }
+      }
+    }
+  }
+
+  return lines.join('\n');
+}
+
+async function copyTextToClipboard(text: string): Promise<void> {
+  if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+
+  if (typeof document !== 'undefined') {
+    const textarea = document.createElement('textarea');
+    textarea.value = text;
+    textarea.style.position = 'fixed';
+    textarea.style.opacity = '0';
+    document.body.appendChild(textarea);
+    textarea.focus();
+    textarea.select();
+    const copied = document.execCommand('copy');
+    document.body.removeChild(textarea);
+    if (copied) {
+      return;
+    }
+  }
+
+  throw new Error('Clipboard is not available in this browser context.');
+}
+
 function buildGraphLayout(session?: WorkSession): { nodes: GraphNodeView[]; width: number; height: number } {
   if (!session) {
     return { nodes: [], width: 900, height: 520 };
@@ -475,6 +729,21 @@ function composePrompt(text: string, attachments: ComposerImageAttachment[]): st
     return images;
   }
   return `${base}\n\n${images}`;
+}
+
+function composeRunPromptWithContext(originalPrompt: string, followUpPrompt: string): string {
+  const base = originalPrompt.trim();
+  const followUp = followUpPrompt.trim();
+
+  if (!base) {
+    return followUp;
+  }
+
+  if (!followUp) {
+    return base;
+  }
+
+  return `${base}\n\nFollow-up request:\n${followUp}`;
 }
 
 function dataUrlToImagePart(dataUrl: string): { data: string; mimeType: string } | undefined {
@@ -625,6 +894,7 @@ export default function App() {
   const [composerText, setComposerText] = useState('');
   const [composerImages, setComposerImages] = useState<ComposerImageAttachment[]>([]);
   const [isLlmControlsModalOpen, setIsLlmControlsModalOpen] = useState(false);
+  const [copyTraceState, setCopyTraceState] = useState<'idle' | 'copied' | 'failed'>('idle');
   const [todoInput, setTodoInput] = useState('');
   const [errorMessage, setErrorMessage] = useState('');
   const timelineContainerRef = useRef<HTMLDivElement | null>(null);
@@ -728,13 +998,18 @@ export default function App() {
   const graphLayout = useMemo(() => buildGraphLayout(selectedSession), [selectedSession]);
 
   const timelineItems = useMemo<TimelineItem[]>(() => {
-    const eventItems: TimelineItem[] = (selectedSession?.events ?? []).slice(-120).map((event, index) => ({
-      key: `event-${event.time}-${index}`,
-      time: event.time,
-      kind: 'event',
-      title: event.type,
-      content: event.message,
-    }));
+    const eventItems: TimelineItem[] = (selectedSession?.events ?? []).slice(-120).map((event, index) => {
+      const formatted = formatTimelineEvent(event);
+      return {
+        key: `event-${event.time}-${index}`,
+        time: event.time,
+        kind: 'event',
+        title: formatted.title,
+        subtitle: formatted.subtitle,
+        tone: formatted.tone,
+        content: formatted.content,
+      };
+    });
     const chatItems: TimelineItem[] = chatMessages.map((message, index) => ({
       key: `chat-${message.time}-${index}`,
       time: message.time,
@@ -838,16 +1113,32 @@ export default function App() {
 
     const refreshSessionState = async () => {
       try {
-        const [sessionsState, agentState] = await Promise.all([
-          fetchSessions(),
-          fetchWorkAgent(selectedSessionId),
-        ]);
+        const sessionsState = await fetchSessions();
 
         if (cancelled) {
           return;
         }
 
         setSessions(sessionsState.sessions);
+
+        const selectedExists = sessionsState.sessions.some((session) => session.id === selectedSessionId);
+        if (!selectedExists) {
+          const fallbackSessionId = sessionsState.sessions[0]?.id ?? '';
+          if (fallbackSessionId !== selectedSessionId) {
+            setSelectedSessionId(fallbackSessionId);
+          }
+          if (!fallbackSessionId) {
+            setChatMessages([]);
+            setTodos([]);
+          }
+          return;
+        }
+
+        const agentState = await fetchWorkAgent(selectedSessionId);
+        if (cancelled) {
+          return;
+        }
+
         setChatMessages(agentState.messages);
         setTodos(agentState.todos);
       } catch {
@@ -950,6 +1241,24 @@ export default function App() {
   }, [selectedSessionId]);
 
   useEffect(() => {
+    setCopyTraceState('idle');
+  }, [selectedSessionId]);
+
+  useEffect(() => {
+    if (copyTraceState !== 'copied') {
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      setCopyTraceState('idle');
+    }, 2200);
+
+    return () => {
+      clearTimeout(timer);
+    };
+  }, [copyTraceState]);
+
+  useEffect(() => {
     if (!followTimelineTail) {
       return;
     }
@@ -981,11 +1290,15 @@ export default function App() {
       return;
     }
 
+    const runPrompt = selectedSession
+      ? composeRunPromptWithContext(selectedSession.prompt, composerPayload)
+      : composerPayload;
+
     setErrorMessage('');
     try {
       const result = await startWork({
         workspaceId: workWorkspaceId,
-        prompt: composerPayload,
+        prompt: runPrompt,
         provider: workProvider,
         model: workModel,
         autoApprove,
@@ -1020,6 +1333,21 @@ export default function App() {
       const nextId = sessionsState.sessions[0]?.id ?? '';
       setSelectedSessionId(nextId);
     } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const handleCopyTrace = async () => {
+    if (!selectedSession) {
+      return;
+    }
+
+    const payload = buildSessionTraceExport(selectedSession, chatMessages, todos);
+    try {
+      await copyTextToClipboard(payload);
+      setCopyTraceState('copied');
+    } catch (error) {
+      setCopyTraceState('failed');
       setErrorMessage(error instanceof Error ? error.message : String(error));
     }
   };
@@ -1407,17 +1735,29 @@ export default function App() {
                 <header className="border-b border-slate-200 bg-white px-4 py-3 dark:border-slate-800 dark:bg-slate-900">
                   <div className="mb-2 flex items-center justify-between gap-2">
                     <div className="text-xs font-bold uppercase tracking-widest text-slate-500 dark:text-slate-400">LLM Work</div>
-                    <button
-                      className="inline-flex items-center gap-1 rounded border border-red-200 bg-red-50 px-2 py-1 text-[10px] text-red-700 disabled:opacity-50 dark:border-red-800 dark:bg-red-950/40 dark:text-red-300"
-                      disabled={!selectedSessionId}
-                      onClick={() => {
-                        void handleDelete();
-                      }}
-                      type="button"
-                    >
-                      <Trash2 className="h-3 w-3" />
-                      Delete
-                    </button>
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        className={`inline-flex items-center gap-1 rounded border px-2 py-1 text-[10px] disabled:opacity-50 ${copyTraceState === 'copied' ? 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300' : copyTraceState === 'failed' ? 'border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-300' : 'border-slate-200 bg-white text-slate-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200'}`}
+                        disabled={!selectedSessionId}
+                        onClick={() => {
+                          void handleCopyTrace();
+                        }}
+                        type="button"
+                      >
+                        {copyTraceState === 'copied' ? 'Copied' : copyTraceState === 'failed' ? 'Copy failed' : 'Copy Trace'}
+                      </button>
+                      <button
+                        className="inline-flex items-center gap-1 rounded border border-red-200 bg-red-50 px-2 py-1 text-[10px] text-red-700 disabled:opacity-50 dark:border-red-800 dark:bg-red-950/40 dark:text-red-300"
+                        disabled={!selectedSessionId}
+                        onClick={() => {
+                          void handleDelete();
+                        }}
+                        type="button"
+                      >
+                        <Trash2 className="h-3 w-3" />
+                        Delete
+                      </button>
+                    </div>
                   </div>
 
                   {!selectedSession && (
@@ -1498,13 +1838,18 @@ export default function App() {
                   {timelineItems.map((item) => (
                     <div
                       key={item.key}
-                      className={`rounded border p-2.5 text-sm ${item.kind === 'event' ? 'border-slate-200 bg-white text-slate-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200' : item.role === 'user' ? 'border-blue-100 bg-blue-50 text-blue-900 dark:border-blue-800 dark:bg-blue-950/40 dark:text-blue-100' : 'border-slate-200 bg-white text-slate-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200'}`}
+                      className={`rounded border p-2.5 text-sm ${item.kind === 'event' ? item.tone === 'error' ? 'border-red-200 bg-red-50 text-red-900 dark:border-red-800 dark:bg-red-950/40 dark:text-red-100' : item.tone === 'success' ? 'border-emerald-200 bg-emerald-50 text-emerald-900 dark:border-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-100' : item.tone === 'tool' ? 'border-sky-200 bg-sky-50 text-sky-900 dark:border-sky-800 dark:bg-sky-950/40 dark:text-sky-100' : 'border-slate-200 bg-white text-slate-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200' : item.role === 'user' ? 'border-blue-100 bg-blue-50 text-blue-900 dark:border-blue-800 dark:bg-blue-950/40 dark:text-blue-100' : 'border-slate-200 bg-white text-slate-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200'}`}
                     >
                       <div className="mb-1 flex items-center justify-between text-[10px] uppercase tracking-widest text-slate-400 dark:text-slate-500">
-                        <span>{item.kind === 'event' ? `event:${item.title}` : item.role}</span>
+                        <span>{item.kind === 'event' ? item.title : item.role}</span>
                         <span>{new Date(item.time).toLocaleTimeString([], { hour12: false })}</span>
                       </div>
-                      {item.kind === 'event' && <div className="whitespace-pre-wrap break-words">{item.content}</div>}
+                      {item.kind === 'event' && item.subtitle && (
+                        <div className="mb-1 text-[11px] font-medium opacity-80">{item.subtitle}</div>
+                      )}
+                      {item.kind === 'event' && (
+                        <div className={`whitespace-pre-wrap break-words ${item.tone === 'tool' ? 'font-mono text-[12px]' : ''}`}>{item.content}</div>
+                      )}
                       {item.kind === 'chat' && item.role === 'assistant' && <MarkdownMessage content={item.content} dark={isDark} />}
                       {item.kind === 'chat' && item.role === 'user' && (
                         <UserMessageContent content={item.content} contentParts={item.contentParts} />
@@ -1520,6 +1865,12 @@ export default function App() {
                     <div>Auto-approve: <span className="font-mono">{autoApprove ? 'on' : 'off'}</span></div>
                     <div>Worktree: <span className="font-mono">{useWorktree ? 'on' : 'off'}</span></div>
                   </div>
+                  {selectedSession && (
+                    <div className="mb-2 rounded border border-blue-200 bg-blue-50 px-2 py-1.5 text-[11px] text-blue-800 dark:border-blue-900/60 dark:bg-blue-950/40 dark:text-blue-200">
+                      <div className="text-[10px] font-semibold uppercase tracking-wide opacity-80">Original ask kept in context</div>
+                      <div className="mt-1 line-clamp-2">{compactPromptDisplay(selectedSession.prompt)}</div>
+                    </div>
+                  )}
                   <div className="flex gap-2">
                     <textarea
                       className="h-14 flex-1 resize-none rounded border border-slate-200 px-2 py-1.5 text-sm dark:border-slate-700 dark:bg-slate-900"
