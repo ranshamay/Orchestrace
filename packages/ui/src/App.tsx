@@ -11,6 +11,7 @@ import {
   fetchSessions,
   fetchWorkAgent,
   fetchWorkspaces,
+  retryWork,
   sendChatMessage,
   startWork,
   toggleTodo,
@@ -1337,6 +1338,30 @@ export default function App() {
     }
   };
 
+  const handleRetry = async () => {
+    if (!selectedSession || normalizeSessionStatus(selectedSession.status) === 'running') {
+      return;
+    }
+
+    setErrorMessage('');
+    try {
+      const result = await retryWork(selectedSession.id);
+      const sessionsState = await fetchSessions();
+      setSessions(sessionsState.sessions);
+      setSelectedSessionId(result.id);
+
+      try {
+        const agentState = await fetchWorkAgent(result.id);
+        setChatMessages(agentState.messages);
+        setTodos(agentState.todos);
+      } catch {
+        // Polling will synchronize chat and todo state shortly.
+      }
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : String(error));
+    }
+  };
+
   const handleCopyTrace = async () => {
     if (!selectedSession) {
       return;
@@ -1747,6 +1772,18 @@ export default function App() {
                         {copyTraceState === 'copied' ? 'Copied' : copyTraceState === 'failed' ? 'Copy failed' : 'Copy Trace'}
                       </button>
                       <button
+                        className="inline-flex items-center gap-1 rounded border border-blue-200 bg-blue-50 px-2 py-1 text-[10px] text-blue-700 disabled:opacity-50 dark:border-blue-800 dark:bg-blue-950/40 dark:text-blue-300"
+                        disabled={!selectedSession || normalizeSessionStatus(selectedSession.status) === 'running'}
+                        onClick={() => {
+                          void handleRetry();
+                        }}
+                        title="Retry this run with the same prompt and controls"
+                        type="button"
+                      >
+                        <Play className="h-3 w-3" />
+                        Retry
+                      </button>
+                      <button
                         className="inline-flex items-center gap-1 rounded border border-red-200 bg-red-50 px-2 py-1 text-[10px] text-red-700 disabled:opacity-50 dark:border-red-800 dark:bg-red-950/40 dark:text-red-300"
                         disabled={!selectedSessionId}
                         onClick={() => {
@@ -1879,7 +1916,8 @@ export default function App() {
                         void handleComposerPaste(event);
                       }}
                       onKeyDown={(event) => {
-                        if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+                        if (event.key === 'Enter' && !event.shiftKey) {
+                          event.preventDefault();
                           if (selectedSessionId) {
                             void handleSendChat();
                           } else {

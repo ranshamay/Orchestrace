@@ -410,6 +410,7 @@ function buildPlanningPrompt(node: TaskNode, depOutputs: Map<string, TaskOutput>
   return [
     'Create a deep implementation plan for the following task.',
     'Optimize for maximum safe concurrency and explicit multi-stage execution.',
+    'If a tool call fails, use the error details to correct arguments and retry instead of aborting.',
     'You MUST use coordination tools during planning:',
     '- todo_set (required) to create a concrete todo list',
     '- todo_update to track progress changes',
@@ -468,6 +469,7 @@ function buildImplementationPrompt(params: {
     'Execute the approved plan and implement the requested changes.',
     'You must satisfy validation criteria before considering the task complete.',
     'Operate in multi-stage waves and maximize safe concurrency.',
+    'If a tool call fails, read the error details, adjust arguments, and retry the tool call.',
     'Before coding, read todo_get and follow the todo list strictly.',
     'Update todo states using todo_update as you progress.',
     'Read agent_graph_get and spawn dependent sub-agents with subagent_spawn when useful.',

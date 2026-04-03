@@ -48,6 +48,7 @@ interface WorkSession {
   workspaceName: string;
   workspacePath: string;
   prompt: string;
+  promptParts?: SessionChatContentPart[];
   provider: string;
   model: string;
   autoApprove: boolean;
@@ -151,6 +152,7 @@ interface PersistedWorkSession {
   workspaceName: string;
   workspacePath: string;
   prompt: string;
+  promptParts?: SessionChatContentPart[];
   provider: string;
   model: string;
   autoApprove: boolean;
@@ -237,6 +239,262 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
 
     uiStatePersistence.schedule();
     return true;
+  }
+
+  function cloneChatContentParts(parts: SessionChatContentPart[] = []): SessionChatContentPart[] {
+    return parts.map((part) => {
+      if (part.type === 'text') {
+        return { type: 'text', text: part.text };
+      }
+
+      return {
+        type: 'image',
+        data: part.data,
+        mimeType: part.mimeType,
+        name: part.name,
+      };
+    });
+  }
+
+  async function startWorkSession(request: {
+    workspaceId?: string;
+    prompt: string;
+    promptParts?: SessionChatContentPart[];
+    provider: string;
+    model: string;
+    autoApprove: boolean;
+    useWorktree?: boolean;
+  }): Promise<{ id: string } | { error: string; statusCode: number }> {
+    const promptParts = cloneChatContentParts(request.promptParts ?? []);
+    const prompt = asString(request.prompt);
+
+    const providerStatuses = await authManager.getAllStatus();
+    const providerStatus = providerStatuses.find((item) => item.provider === request.provider);
+    if (!providerStatus || providerStatus.source === 'none') {
+      return {
+        error: `Provider ${request.provider} is not connected. Connect it in Settings first.`,
+        statusCode: 400,
+      };
+    }
+
+    const workspace = request.workspaceId
+      ? await workspaceManager.selectWorkspace(request.workspaceId)
+      : await workspaceManager.getActiveWorkspace();
+
+    if (!prompt && promptParts.length === 0) {
+      return { error: 'Missing prompt', statusCode: 400 };
+    }
+
+    const normalizedPrompt = promptParts.length > 0
+      ? compactInlineImageMarkdown(prompt || summarizeChatContentParts(promptParts))
+      : (prompt || summarizeChatContentParts(promptParts));
+
+    const id = randomUUID();
+    const useWorktree = request.useWorktree ?? resolveUseWorktreeDefault();
+
+    let worktreeHandle: WorktreeHandle | undefined;
+    let executionPath = workspace.path;
+    if (useWorktree) {
+      try {
+        worktreeHandle = await createWorktree(workspace.path, `session-${id}`);
+        executionPath = worktreeHandle.path;
+      } catch (error) {
+        return {
+          error: `Failed to create worktree: ${toErrorMessage(error)}`,
+          statusCode: 500,
+        };
+      }
+    }
+
+    const controller = new AbortController();
+    const createdAt = now();
+    const session: WorkSession = {
+      id,
+      workspaceId: workspace.id,
+      workspaceName: workspace.name,
+      workspacePath: executionPath,
+      prompt: normalizedPrompt,
+      promptParts: promptParts.length > 0 ? cloneChatContentParts(promptParts) : undefined,
+      provider: request.provider,
+      model: request.model,
+      autoApprove: request.autoApprove,
+      useWorktree,
+      worktreePath: worktreeHandle?.path,
+      worktreeBranch: worktreeHandle?.branch,
+      createdAt,
+      updatedAt: createdAt,
+      status: 'running',
+      llmStatus: createLlmStatus('queued', createdAt, {
+        detail: 'Queued for orchestration.',
+      }),
+      taskStatus: {},
+      events: [],
+      agentGraph: [],
+      controller,
+      cleanupWorktree: worktreeHandle ? () => worktreeHandle.cleanup() : undefined,
+    };
+
+    workSessions.set(id, session);
+    sessionChats.set(id, createSessionChatThread(session, promptParts));
+    sessionTodos.set(id, []);
+    uiStatePersistence.schedule();
+    broadcastTodoUpdate(workStreamClients, id, sessionTodos.get(id) ?? []);
+
+    const graph = buildSingleTaskGraph(id, normalizedPrompt, useWorktree);
+
+    void orchestrate(graph, {
+      llm,
+      cwd: session.workspacePath,
+      planOutputDir: join(session.workspacePath, '.orchestrace', 'plans'),
+      defaultModel: { provider: request.provider, model: request.model },
+      maxParallel: 1,
+      requirePlanApproval: !request.autoApprove,
+      onPlanApproval: async (_approvalRequest: PlanApprovalRequest) => request.autoApprove,
+      signal: controller.signal,
+      resolveApiKey: async (providerId) => authManager.resolveApiKey(providerId),
+      createToolset: ({ phase, task, graphId, provider: activeProvider, model: activeModel, reasoning }) => createAgentToolset({
+        cwd: session.workspacePath,
+        phase,
+        taskType: task.type,
+        graphId,
+        taskId: task.id,
+        provider: activeProvider,
+        model: activeModel,
+        reasoning,
+        runSubAgent: async (runSubAgentRequest, signal) => {
+          const subProvider = runSubAgentRequest.provider ?? activeProvider;
+          const subModel = runSubAgentRequest.model ?? activeModel;
+          const subAgent = await llm.spawnAgent({
+            provider: subProvider,
+            model: subModel,
+            reasoning: runSubAgentRequest.reasoning ?? reasoning,
+            systemPrompt: runSubAgentRequest.systemPrompt
+              ?? 'You are a focused sub-agent. Solve the given sub-task and return concise actionable output.',
+            signal,
+            apiKey: await authManager.resolveApiKey(subProvider),
+          });
+
+          const result = await subAgent.complete(runSubAgentRequest.prompt, signal);
+          return {
+            text: result.text,
+            usage: result.usage,
+          };
+        },
+      }),
+      onEvent: (event) => {
+        session.updatedAt = now();
+        const llmStatus = deriveLlmStatusFromDagEvent(event, session.updatedAt);
+        if (llmStatus) {
+          session.llmStatus = llmStatus;
+        }
+
+        if (event.type === 'task:stream-delta') {
+          broadcastWorkStream(workStreamClients, session.id, 'token', {
+            id: session.id,
+            taskId: event.taskId,
+            phase: event.phase,
+            attempt: event.attempt,
+            delta: event.delta,
+            llmStatus: session.llmStatus,
+            time: now(),
+          });
+        }
+
+        const uiEvent = toUiEvent(session.id, event);
+        if (uiEvent) {
+          session.events.push(uiEvent);
+          if (session.events.length > 200) {
+            session.events.shift();
+          }
+        }
+
+        if (event.type === 'task:tool-call' && event.status === 'started') {
+          const changed = applyChecklistFromToolEvent(session.id, event, sessionTodos);
+          if (changed) {
+            broadcastTodoUpdate(workStreamClients, session.id, sessionTodos.get(session.id) ?? []);
+            uiStatePersistence.schedule();
+          }
+
+          const graphChanged = applyAgentGraphFromToolEvent(session, event);
+          if (graphChanged) {
+            uiStatePersistence.schedule();
+          }
+        }
+
+        if (
+          'taskId' in event
+          && event.type !== 'task:stream-delta'
+          && event.type !== 'task:tool-call'
+        ) {
+          session.taskStatus[event.taskId] = event.type;
+        }
+
+        if (event.type !== 'task:stream-delta') {
+          uiStatePersistence.schedule();
+        }
+      },
+    }).then((outputs) => {
+      if (session.status === 'cancelled') {
+        return;
+      }
+
+      const firstOutput = outputs.values().next().value as { status?: string; response?: string; planPath?: string; error?: string } | undefined;
+      const failed = [...outputs.values()].some((output) => output.status === 'failed');
+
+      session.status = failed ? 'failed' : 'completed';
+      session.updatedAt = now();
+      session.llmStatus = failed
+        ? createLlmStatus('failed', session.updatedAt, {
+          detail: firstOutput?.error || 'Execution failed.',
+        })
+        : createLlmStatus('completed', session.updatedAt, {
+          detail: 'Run completed successfully.',
+        });
+      session.output = {
+        text: firstOutput?.response,
+        planPath: firstOutput?.planPath,
+      };
+      session.error = failed ? firstOutput?.error ?? 'Execution failed' : undefined;
+
+      broadcastWorkStream(workStreamClients, session.id, 'end', {
+        id: session.id,
+        status: session.status,
+        llmStatus: session.llmStatus,
+        time: now(),
+      });
+
+      const thread = sessionChats.get(session.id);
+      if (thread && firstOutput?.response) {
+        thread.messages.push({
+          role: 'assistant',
+          content: firstOutput.response,
+          time: now(),
+        });
+        trimThreadMessages(thread);
+        thread.updatedAt = now();
+      }
+
+      uiStatePersistence.schedule();
+    }).catch((error) => {
+      if (session.status !== 'cancelled') {
+        session.status = 'failed';
+        session.error = toErrorMessage(error);
+        session.updatedAt = now();
+        session.llmStatus = createLlmStatus('failed', session.updatedAt, {
+          detail: session.error,
+        });
+
+        broadcastWorkStream(workStreamClients, session.id, 'error', {
+          id: session.id,
+          error: session.error,
+          llmStatus: session.llmStatus,
+          time: now(),
+        });
+        uiStatePersistence.schedule();
+      }
+    });
+
+    return { id };
   }
 
   let hmrWatcher: FSWatcher | undefined;
@@ -573,233 +831,64 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         const provider = asString(body.provider) || process.env.ORCHESTRACE_DEFAULT_PROVIDER || 'anthropic';
         const model = asString(body.model) || process.env.ORCHESTRACE_DEFAULT_MODEL || 'claude-sonnet-4-20250514';
         const autoApprove = Boolean(body.autoApprove);
-
-        const providerStatuses = await authManager.getAllStatus();
-        const providerStatus = providerStatuses.find((item) => item.provider === provider);
-        if (!providerStatus || providerStatus.source === 'none') {
-          sendJson(res, 400, { error: `Provider ${provider} is not connected. Connect it in Settings first.` });
-          return;
-        }
-
-        const workspace = workspaceId
-          ? await workspaceManager.selectWorkspace(workspaceId)
-          : await workspaceManager.getActiveWorkspace();
-
-        if (!prompt && promptParts.length === 0) {
-          sendJson(res, 400, { error: 'Missing prompt' });
-          return;
-        }
-
-        const normalizedPrompt = promptParts.length > 0
-          ? compactInlineImageMarkdown(prompt || summarizeChatContentParts(promptParts))
-          : (prompt || summarizeChatContentParts(promptParts));
-
-        const id = randomUUID();
         const useWorktree = parseBooleanSetting(body.useWorktree)
           ?? parseBooleanSetting(body.worktreeEnabled)
           ?? parseBooleanSetting(body.enableWorktree)
-          ?? resolveUseWorktreeDefault();
-
-        let worktreeHandle: WorktreeHandle | undefined;
-        let executionPath = workspace.path;
-        if (useWorktree) {
-          try {
-            worktreeHandle = await createWorktree(workspace.path, `session-${id}`);
-            executionPath = worktreeHandle.path;
-          } catch (error) {
-            sendJson(res, 500, { error: `Failed to create worktree: ${toErrorMessage(error)}` });
-            return;
-          }
-        }
-
-        const controller = new AbortController();
-        const createdAt = now();
-        const session: WorkSession = {
-          id,
-          workspaceId: workspace.id,
-          workspaceName: workspace.name,
-          workspacePath: executionPath,
-          prompt: normalizedPrompt,
+        const result = await startWorkSession({
+          workspaceId,
+          prompt,
+          promptParts,
           provider,
           model,
           autoApprove,
           useWorktree,
-          worktreePath: worktreeHandle?.path,
-          worktreeBranch: worktreeHandle?.branch,
-          createdAt,
-          updatedAt: createdAt,
-          status: 'running',
-          llmStatus: createLlmStatus('queued', createdAt, {
-            detail: 'Queued for orchestration.',
-          }),
-          taskStatus: {},
-          events: [],
-          agentGraph: [],
-          controller,
-          cleanupWorktree: worktreeHandle ? () => worktreeHandle.cleanup() : undefined,
-        };
-
-        workSessions.set(id, session);
-        sessionChats.set(id, createSessionChatThread(session, promptParts));
-        sessionTodos.set(id, []);
-        uiStatePersistence.schedule();
-        broadcastTodoUpdate(workStreamClients, id, sessionTodos.get(id) ?? []);
-
-        const graph = buildSingleTaskGraph(id, normalizedPrompt, useWorktree);
-
-        void orchestrate(graph, {
-          llm,
-          cwd: session.workspacePath,
-          planOutputDir: join(session.workspacePath, '.orchestrace', 'plans'),
-          defaultModel: { provider, model },
-          maxParallel: 1,
-          requirePlanApproval: !autoApprove,
-          onPlanApproval: async (_request: PlanApprovalRequest) => autoApprove,
-          signal: controller.signal,
-          resolveApiKey: async (providerId) => authManager.resolveApiKey(providerId),
-          createToolset: ({ phase, task, graphId, provider: activeProvider, model: activeModel, reasoning }) => createAgentToolset({
-            cwd: session.workspacePath,
-            phase,
-            taskType: task.type,
-            graphId,
-            taskId: task.id,
-            provider: activeProvider,
-            model: activeModel,
-            reasoning,
-            runSubAgent: async (request, signal) => {
-              const subProvider = request.provider ?? activeProvider;
-              const subModel = request.model ?? activeModel;
-              const subAgent = await llm.spawnAgent({
-                provider: subProvider,
-                model: subModel,
-                reasoning: request.reasoning ?? reasoning,
-                systemPrompt: request.systemPrompt
-                  ?? 'You are a focused sub-agent. Solve the given sub-task and return concise actionable output.',
-                signal,
-                apiKey: await authManager.resolveApiKey(subProvider),
-              });
-
-              const result = await subAgent.complete(request.prompt, signal);
-              return {
-                text: result.text,
-                usage: result.usage,
-              };
-            },
-          }),
-          onEvent: (event) => {
-            session.updatedAt = now();
-            const llmStatus = deriveLlmStatusFromDagEvent(event, session.updatedAt);
-            if (llmStatus) {
-              session.llmStatus = llmStatus;
-            }
-
-            if (event.type === 'task:stream-delta') {
-              broadcastWorkStream(workStreamClients, session.id, 'token', {
-                id: session.id,
-                taskId: event.taskId,
-                phase: event.phase,
-                attempt: event.attempt,
-                delta: event.delta,
-                llmStatus: session.llmStatus,
-                time: now(),
-              });
-            }
-
-            const uiEvent = toUiEvent(session.id, event);
-            if (uiEvent) {
-              session.events.push(uiEvent);
-              if (session.events.length > 200) {
-                session.events.shift();
-              }
-            }
-
-            if (event.type === 'task:tool-call' && event.status === 'started') {
-              const changed = applyChecklistFromToolEvent(session.id, event, sessionTodos);
-              if (changed) {
-                broadcastTodoUpdate(workStreamClients, session.id, sessionTodos.get(session.id) ?? []);
-                uiStatePersistence.schedule();
-              }
-
-              const graphChanged = applyAgentGraphFromToolEvent(session, event);
-              if (graphChanged) {
-                uiStatePersistence.schedule();
-              }
-            }
-
-            if (
-              'taskId' in event
-              && event.type !== 'task:stream-delta'
-              && event.type !== 'task:tool-call'
-            ) {
-              session.taskStatus[event.taskId] = event.type;
-            }
-
-            if (event.type !== 'task:stream-delta') {
-              uiStatePersistence.schedule();
-            }
-          },
-        }).then((outputs) => {
-          if (session.status === 'cancelled') {
-            return;
-          }
-
-          const firstOutput = outputs.values().next().value as { status?: string; response?: string; planPath?: string; error?: string } | undefined;
-          const failed = [...outputs.values()].some((output) => output.status === 'failed');
-
-          session.status = failed ? 'failed' : 'completed';
-          session.updatedAt = now();
-          session.llmStatus = failed
-            ? createLlmStatus('failed', session.updatedAt, {
-              detail: firstOutput?.error || 'Execution failed.',
-            })
-            : createLlmStatus('completed', session.updatedAt, {
-              detail: 'Run completed successfully.',
-            });
-          session.output = {
-            text: firstOutput?.response,
-            planPath: firstOutput?.planPath,
-          };
-          session.error = failed ? firstOutput?.error ?? 'Execution failed' : undefined;
-
-          broadcastWorkStream(workStreamClients, session.id, 'end', {
-            id: session.id,
-            status: session.status,
-            llmStatus: session.llmStatus,
-            time: now(),
-          });
-
-          const thread = sessionChats.get(session.id);
-          if (thread && firstOutput?.response) {
-            thread.messages.push({
-              role: 'assistant',
-              content: firstOutput.response,
-              time: now(),
-            });
-            trimThreadMessages(thread);
-            thread.updatedAt = now();
-          }
-
-          uiStatePersistence.schedule();
-        }).catch((error) => {
-          if (session.status !== 'cancelled') {
-            session.status = 'failed';
-            session.error = toErrorMessage(error);
-            session.updatedAt = now();
-            session.llmStatus = createLlmStatus('failed', session.updatedAt, {
-              detail: session.error,
-            });
-
-            broadcastWorkStream(workStreamClients, session.id, 'error', {
-              id: session.id,
-              error: session.error,
-              llmStatus: session.llmStatus,
-              time: now(),
-            });
-            uiStatePersistence.schedule();
-          }
         });
 
-        sendJson(res, 200, { id });
+        if ('error' in result) {
+          sendJson(res, result.statusCode, { error: result.error });
+          return;
+        }
+
+        sendJson(res, 200, { id: result.id });
+        return;
+      }
+
+      if (req.method === 'POST' && pathname === '/api/work/retry') {
+        const body = await readJsonBody(req);
+        const id = asString(body.id);
+
+        if (!id) {
+          sendJson(res, 400, { error: 'Missing id' });
+          return;
+        }
+
+        const sourceSession = workSessions.get(id);
+        if (!sourceSession) {
+          sendJson(res, 404, { error: 'Unknown work session' });
+          return;
+        }
+
+        if (sourceSession.status === 'running') {
+          sendJson(res, 409, { error: 'Cannot retry a running session.' });
+          return;
+        }
+
+        const result = await startWorkSession({
+          workspaceId: sourceSession.workspaceId,
+          prompt: sourceSession.prompt,
+          promptParts: sourceSession.promptParts,
+          provider: sourceSession.provider,
+          model: sourceSession.model,
+          autoApprove: sourceSession.autoApprove,
+          useWorktree: sourceSession.useWorktree,
+        });
+
+        if ('error' in result) {
+          sendJson(res, result.statusCode, { error: result.error });
+          return;
+        }
+
+        sendJson(res, 200, { id: result.id, sourceId: id });
         return;
       }
 
@@ -1679,6 +1768,20 @@ function toPersistedSession(session: WorkSession): PersistedWorkSession {
     workspaceName: session.workspaceName,
     workspacePath: session.workspacePath,
     prompt: session.prompt,
+    promptParts: session.promptParts
+      ? session.promptParts.map((part) => {
+        if (part.type === 'text') {
+          return { type: 'text', text: part.text };
+        }
+
+        return {
+          type: 'image',
+          data: part.data,
+          mimeType: part.mimeType,
+          name: part.name,
+        };
+      })
+      : undefined,
     provider: session.provider,
     model: session.model,
     autoApprove: session.autoApprove,
@@ -1706,12 +1809,14 @@ function hydratePersistedSession(session: PersistedWorkSession): WorkSession {
     ? 'Session interrupted because the UI server restarted.'
     : session.error;
   const resumedUpdatedAt = asString(session.updatedAt) || now();
+  const promptParts = parseChatContentParts(session.promptParts);
   const resumedLlmStatus = session.llmStatus
     ? normalizeLlmStatus(session.llmStatus, resumedUpdatedAt)
     : deriveLlmStatusFromWorkState(resumedStatus, resumedUpdatedAt, resumedError);
 
   return {
     ...session,
+    promptParts: promptParts.length > 0 ? promptParts : undefined,
     useWorktree: Boolean(session.useWorktree),
     worktreePath: asString(session.worktreePath) || undefined,
     worktreeBranch: asString(session.worktreeBranch) || undefined,
@@ -2398,6 +2503,20 @@ function serializeWorkSession(session: WorkSession): Record<string, unknown> {
     workspaceName: session.workspaceName,
     workspacePath: session.workspacePath,
     prompt: session.prompt,
+    promptParts: session.promptParts
+      ? session.promptParts.map((part) => {
+        if (part.type === 'text') {
+          return { type: 'text', text: part.text };
+        }
+
+        return {
+          type: 'image',
+          data: part.data,
+          mimeType: part.mimeType,
+          name: part.name,
+        };
+      })
+      : undefined,
     provider: session.provider,
     model: session.model,
     autoApprove: session.autoApprove,

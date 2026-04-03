@@ -136,6 +136,15 @@ export async function deleteWork(id: string): Promise<{ ok: boolean; id: string 
   return readJson(res);
 }
 
+export async function retryWork(id: string): Promise<{ id: string; sourceId: string }> {
+  const res = await fetch(`${API_BASE}/work/retry`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id }),
+  });
+  return readJson(res);
+}
+
 export async function sendChatMessage(
   id: string,
   payload: { message: string; messageParts?: ChatContentPart[] },

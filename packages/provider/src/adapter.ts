@@ -204,6 +204,8 @@ async function executeWithOptionalTools(params: {
   } = params;
 
   let round = 0;
+  let previousRoundHadToolError = false;
+  let toolErrorRecoveryAttempts = 0;
   for (;;) {
     round += 1;
     if (MAX_TOOL_ROUNDS !== undefined && round > MAX_TOOL_ROUNDS) {
@@ -217,13 +219,44 @@ async function executeWithOptionalTools(params: {
       return response;
     }
 
+    if (
+      previousRoundHadToolError
+      && (response.stopReason === 'error' || response.stopReason === 'aborted')
+      && toolErrorRecoveryAttempts < 2
+    ) {
+      context.messages.push(response);
+
+      const reason = response.errorMessage?.trim()
+        ? response.errorMessage.trim()
+        : `Model stopped with reason "${response.stopReason}" after a tool failure.`;
+
+      context.messages.push({
+        role: 'user',
+        content: [
+          {
+            type: 'text',
+            text:
+              `Tool execution failed in the previous turn. Reason: ${reason}\n`
+              + 'Do not stop. Inspect the failed tool result, correct the arguments, and retry the needed tool call(s).',
+          },
+        ],
+        timestamp: Date.now(),
+      });
+
+      previousRoundHadToolError = false;
+      toolErrorRecoveryAttempts += 1;
+      continue;
+    }
+
+    toolErrorRecoveryAttempts = 0;
+
     const toolCalls = getToolCalls(response);
     if (toolCalls.length === 0) {
       return response;
     }
 
     context.messages.push(response);
-    const toolResults = await executeToolCalls(
+    const { results: toolResults, hadErrors } = await executeToolCalls(
       toolset,
       context.tools ?? [],
       toolCalls,
@@ -231,6 +264,7 @@ async function executeWithOptionalTools(params: {
       completionOptions,
     );
     context.messages.push(...toolResults);
+    previousRoundHadToolError = hadErrors;
   }
 }
 
@@ -254,8 +288,9 @@ async function executeToolCalls(
   toolCalls: ToolCall[],
   signal?: AbortSignal,
   completionOptions?: LlmCompletionOptions,
-): Promise<ToolResultMessage[]> {
+): Promise<{ results: ToolResultMessage[]; hadErrors: boolean }> {
   const results: ToolResultMessage[] = [];
+  let hadErrors = false;
 
   for (const toolCall of toolCalls) {
     let payload: { content: string; isError: boolean; details?: unknown };
@@ -305,6 +340,8 @@ async function executeToolCalls(
       });
     }
 
+    hadErrors = hadErrors || payload.isError;
+
     results.push({
       role: 'toolResult',
       toolCallId: toolCall.id,
@@ -316,7 +353,7 @@ async function executeToolCalls(
     });
   }
 
-  return results;
+  return { results, hadErrors };
 }
 
 function getToolCalls(message: AssistantMessage): ToolCall[] {
