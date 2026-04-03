@@ -1,41 +1,64 @@
 import type { LlmToolCall, LlmToolset } from '@orchestrace/provider';
-import type { AgentToolsetOptions, RegisteredAgentTool } from './types.js';
+import type { AgentToolPermissions, AgentToolPhase, AgentToolsetOptions, RegisteredAgentTool } from './types.js';
 import { createFilesystemTools } from './fs-tools.js';
 import { createCommandTools } from './command-tools.js';
 import { createCoordinationTools } from './coordination-tools.js';
 import { resolveAgentToolPermissions } from './policy.js';
 
-export type { AgentToolPhase, AgentToolPermissions, AgentToolsetOptions } from './types.js';
+export type { AgentModeController, AgentToolPhase, AgentToolPermissions, AgentToolsetOptions } from './types.js';
+
+export interface AgentToolDescriptor {
+  name: string;
+  description: string;
+}
 
 export function createAgentToolset(options: AgentToolsetOptions): LlmToolset {
-  const permissions = resolveAgentToolPermissions(options);
+  const defaultPhase = options.phase ?? 'implementation';
+  const activePhase = options.modeController?.getMode() ?? defaultPhase;
+  const permissions = resolveAgentToolPermissions({
+    ...options,
+    phase: activePhase,
+  });
+  const implementationPermissions = resolveAgentToolPermissions({
+    ...options,
+    phase: 'implementation',
+  });
+  const dynamicModeEnabled = Boolean(options.modeController);
+  const includeWriteTools = dynamicModeEnabled ? true : permissions.allowWriteTools;
+  const includeRunCommandTool = dynamicModeEnabled ? true : permissions.allowRunCommand;
+  const includeSubAgentTool = dynamicModeEnabled ? true : options.phase !== 'planning';
 
   const allTools = [
     ...createFilesystemTools({
       ...options,
-      includeWriteTools: permissions.allowWriteTools,
+      includeWriteTools,
     }),
     ...createCommandTools({
       ...options,
-      includeRunCommandTool: permissions.allowRunCommand,
-      runCommandAllowPrefixes: permissions.runCommandAllowPrefixes,
+      includeRunCommandTool,
+      runCommandAllowPrefixes: options.permissions?.runCommandAllowPrefixes
+        ?? implementationPermissions.runCommandAllowPrefixes
+        ?? permissions.runCommandAllowPrefixes,
     }),
     ...createCoordinationTools({
       ...options,
-      includeSubAgentTool: options.phase !== 'planning',
+      includeSubAgentTool,
     }),
   ];
 
   const registeredTools = allTools.filter((entry) => {
-    if (permissions.toolAllowlist && !permissions.toolAllowlist.includes(entry.tool.name)) {
-      return false;
+    if (dynamicModeEnabled) {
+      const availableModes = options.modeController?.availableModes ?? ['chat', 'planning', 'implementation'];
+      return availableModes.some((mode) => {
+        const modePermissions = resolveAgentToolPermissions({
+          ...options,
+          phase: mode,
+        });
+        return isToolAllowed(entry.tool.name, modePermissions);
+      });
     }
 
-    if (permissions.toolBlocklist && permissions.toolBlocklist.includes(entry.tool.name)) {
-      return false;
-    }
-
-    return true;
+    return isToolAllowed(entry.tool.name, permissions);
   });
 
   const byName = new Map<string, RegisteredAgentTool>();
@@ -49,15 +72,64 @@ export function createAgentToolset(options: AgentToolsetOptions): LlmToolset {
       description: entry.tool.description,
       parameters: entry.tool.parameters,
     })),
-    executeTool: (call, signal) => executeToolCall(byName, call, signal),
+    executeTool: (call, signal) => executeToolCall(byName, call, options, signal),
   };
+}
+
+export function listAgentTools(options: AgentToolsetOptions): AgentToolDescriptor[] {
+  const activeMode = resolveActiveMode(options);
+  const activePermissions = resolveAgentToolPermissions({
+    ...options,
+    phase: activeMode,
+  });
+
+  return createAgentToolset(options).tools
+    .filter((tool) => isToolAllowed(tool.name, activePermissions))
+    .map((tool) => ({ name: tool.name, description: tool.description }));
+}
+
+function isToolAllowed(toolName: string, permissions: AgentToolPermissions): boolean {
+  if (permissions.toolAllowlist && !permissions.toolAllowlist.includes(toolName)) {
+    return false;
+  }
+
+  if (permissions.toolBlocklist && permissions.toolBlocklist.includes(toolName)) {
+    return false;
+  }
+
+  if ((toolName === 'write_file' || toolName === 'edit_file') && !permissions.allowWriteTools) {
+    return false;
+  }
+
+  if (toolName === 'run_command' && !permissions.allowRunCommand) {
+    return false;
+  }
+
+  return true;
+}
+
+function resolveActiveMode(options: AgentToolsetOptions): AgentToolPhase {
+  return options.modeController?.getMode() ?? options.phase ?? 'implementation';
 }
 
 async function executeToolCall(
   byName: Map<string, RegisteredAgentTool>,
   call: LlmToolCall,
+  options: AgentToolsetOptions,
   signal?: AbortSignal,
 ) {
+  const activeMode = resolveActiveMode(options);
+  const activePermissions = resolveAgentToolPermissions({
+    ...options,
+    phase: activeMode,
+  });
+  if (!isToolAllowed(call.name, activePermissions)) {
+    return {
+      content: `Tool ${call.name} is not allowed while mode is ${activeMode}. Use mode_set to switch modes first.`,
+      isError: true,
+    };
+  }
+
   const tool = byName.get(call.name);
   if (!tool) {
     return {

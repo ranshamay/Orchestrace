@@ -37,6 +37,8 @@ describe('createAgentToolset phase policy', () => {
     expect(toolNames(toolset)).toEqual([
       'git_diff',
       'list_directory',
+      'mode_get',
+      'mode_set',
       'read_file',
       'search_files',
     ]);
@@ -49,6 +51,8 @@ describe('createAgentToolset phase policy', () => {
     expect(toolNames(toolset)).toEqual([
       'git_diff',
       'list_directory',
+      'mode_get',
+      'mode_set',
       'read_file',
       'search_files',
     ]);
@@ -63,6 +67,8 @@ describe('createAgentToolset phase policy', () => {
       'git_diff',
       'git_status',
       'list_directory',
+      'mode_get',
+      'mode_set',
       'read_file',
       'run_command',
       'search_files',
@@ -125,5 +131,157 @@ describe('run_command safety', () => {
 
     expect(result.isError).toBe(true);
     expect(result.content).toContain('Blocked command outside allowlist');
+  });
+});
+
+describe('mode tools smoke test', () => {
+  it('mode_get returns the active mode and available modes', async () => {
+    const cwd = await makeWorkspace();
+    let mode: 'planning' | 'implementation' | 'chat' = 'planning';
+    const toolset = createAgentToolset({
+      cwd,
+      phase: 'planning',
+      taskType: 'code',
+      modeController: {
+        getMode: () => mode,
+        setMode: async (nextMode) => {
+          const changed = mode !== nextMode;
+          mode = nextMode;
+          return { mode, changed };
+        },
+      },
+    });
+
+    const result = await toolset.executeTool({ id: '1', name: 'mode_get', arguments: {} });
+
+    expect(result.isError).toBeFalsy();
+    const parsed = JSON.parse(result.content) as { mode: string; availableModes: string[] };
+    expect(parsed.mode).toBe('planning');
+    expect(parsed.availableModes).toEqual(['chat', 'planning', 'implementation']);
+  });
+
+  it('mode_set transitions planning -> implementation and reports changed', async () => {
+    const cwd = await makeWorkspace();
+    let mode: 'planning' | 'implementation' | 'chat' = 'planning';
+    const toolset = createAgentToolset({
+      cwd,
+      phase: 'planning',
+      taskType: 'code',
+      modeController: {
+        getMode: () => mode,
+        setMode: async (nextMode) => {
+          const changed = mode !== nextMode;
+          mode = nextMode;
+          return { mode, changed };
+        },
+      },
+    });
+
+    const result = await toolset.executeTool({
+      id: '1',
+      name: 'mode_set',
+      arguments: { mode: 'implementation' },
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.details).toMatchObject({ mode: 'implementation', changed: true });
+  });
+
+  it('mode_set to the same mode reports unchanged', async () => {
+    const cwd = await makeWorkspace();
+    let mode: 'planning' | 'implementation' | 'chat' = 'planning';
+    const toolset = createAgentToolset({
+      cwd,
+      phase: 'planning',
+      taskType: 'code',
+      modeController: {
+        getMode: () => mode,
+        setMode: async (nextMode) => {
+          const changed = mode !== nextMode;
+          mode = nextMode;
+          return { mode, changed };
+        },
+      },
+    });
+
+    const result = await toolset.executeTool({
+      id: '1',
+      name: 'mode_set',
+      arguments: { mode: 'planning' },
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.details).toMatchObject({ mode: 'planning', changed: false });
+  });
+
+  it('mode_set returns an error for invalid mode input', async () => {
+    const cwd = await makeWorkspace();
+    let mode: 'planning' | 'implementation' | 'chat' = 'planning';
+    const toolset = createAgentToolset({
+      cwd,
+      phase: 'planning',
+      taskType: 'code',
+      modeController: {
+        getMode: () => mode,
+        setMode: async (nextMode) => {
+          const changed = mode !== nextMode;
+          mode = nextMode;
+          return { mode, changed };
+        },
+      },
+    });
+
+    const result = await toolset.executeTool({
+      id: '1',
+      name: 'mode_set',
+      arguments: { mode: 'invalid' },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content).toContain('Missing mode. Expected one of: chat, planning, implementation.');
+  });
+
+  it('run_command is blocked in planning mode, then unblocked by mode_set', async () => {
+    const cwd = await makeWorkspace();
+    let mode: 'planning' | 'implementation' | 'chat' = 'planning';
+    const toolset = createAgentToolset({
+      cwd,
+      phase: 'planning',
+      taskType: 'code',
+      modeController: {
+        getMode: () => mode,
+        setMode: async (nextMode) => {
+          const changed = mode !== nextMode;
+          mode = nextMode;
+          return { mode, changed };
+        },
+      },
+    });
+
+    const blocked = await toolset.executeTool({
+      id: '1',
+      name: 'run_command',
+      arguments: { command: 'echo hello' },
+    });
+
+    expect(blocked.isError).toBe(true);
+    expect(blocked.content).toContain('Tool run_command is not allowed while mode is planning');
+    expect(blocked.content).toContain('Use mode_set to switch modes first');
+
+    const switchResult = await toolset.executeTool({
+      id: '2',
+      name: 'mode_set',
+      arguments: { mode: 'implementation' },
+    });
+    expect(switchResult.isError).toBeFalsy();
+    expect(switchResult.details).toMatchObject({ mode: 'implementation', changed: true });
+
+    const afterSwitch = await toolset.executeTool({
+      id: '3',
+      name: 'run_command',
+      arguments: { command: 'echo hello' },
+    });
+
+    expect(afterSwitch.content).not.toContain('Tool run_command is not allowed while mode is planning');
   });
 });

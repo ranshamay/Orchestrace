@@ -2,6 +2,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { Type } from '@mariozechner/pi-ai';
 import type {
+  AgentToolPhase,
   AgentGraphNode,
   AgentToolsetOptions,
   RegisteredAgentTool,
@@ -14,6 +15,12 @@ const todoStatusSchema = Type.Union([
   Type.Literal('todo'),
   Type.Literal('in_progress'),
   Type.Literal('done'),
+]);
+
+const modeSchema = Type.Union([
+  Type.Literal('chat'),
+  Type.Literal('planning'),
+  Type.Literal('implementation'),
 ]);
 
 interface CoordinationToolsOptions extends AgentToolsetOptions {
@@ -340,7 +347,65 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
     });
   }
 
+  const modeController = options.modeController;
+  if (modeController) {
+    tools.push(
+      {
+        tool: {
+          name: 'mode_get',
+          description: 'Get the currently active execution mode for this session context.',
+          parameters: Type.Object({}),
+        },
+        execute: async () => {
+          const activeMode = modeController.getMode();
+          const available = modeController.availableModes ?? ['chat', 'planning', 'implementation'];
+          return {
+            content: JSON.stringify({ mode: activeMode, availableModes: available }, null, 2),
+          };
+        },
+      },
+      {
+        tool: {
+          name: 'mode_set',
+          description: 'Switch execution mode (chat/planning/implementation) for subsequent actions.',
+          parameters: Type.Object({
+            mode: modeSchema,
+            reason: Type.Optional(Type.String()),
+          }),
+        },
+        execute: async (toolArgs) => {
+          const mode = normalizeAgentToolPhase(toolArgs.mode);
+          if (!mode) {
+            return {
+              content: 'Missing mode. Expected one of: chat, planning, implementation.',
+              isError: true,
+            };
+          }
+
+          const reason = optionalString(toolArgs.reason);
+          const result = await modeController.setMode(mode, reason);
+          return {
+            content: result.detail
+              ?? (result.changed ? `Mode switched to ${result.mode}.` : `Mode remains ${result.mode}.`),
+            details: {
+              mode: result.mode,
+              changed: result.changed,
+            },
+          };
+        },
+      },
+    );
+  }
+
   return tools;
+}
+
+function normalizeAgentToolPhase(value: unknown): AgentToolPhase | undefined {
+  if (value !== 'chat' && value !== 'planning' && value !== 'implementation') {
+    return undefined;
+  }
+
+  return value;
 }
 
 async function readCoordinationState(path: string): Promise<CoordinationState> {

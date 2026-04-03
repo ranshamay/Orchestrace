@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ClipboardEvent } from 'react';
-import { Activity, CheckCircle2, MessageSquare, Moon, Play, Settings, Sun, Trash2 } from 'lucide-react';
+import { Activity, CheckCircle2, MessageSquare, Moon, Play, Settings, Sun, Trash2, Wrench } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {
@@ -11,6 +11,7 @@ import {
   fetchProviders,
   fetchSessions,
   fetchWorkAgent,
+  fetchWorkTools,
   fetchWorkspaces,
   retryWork,
   sendChatMessage,
@@ -64,6 +65,8 @@ type SessionLlmControls = {
 };
 
 type SessionStatus = 'running' | 'completed' | 'failed' | 'cancelled' | 'pending' | 'unknown';
+type LlmSessionPhase = 'planning' | 'implementation';
+type ComposerMode = 'run' | 'chat' | 'planning' | 'implementation';
 type LlmSessionState =
   | 'queued'
   | 'analyzing'
@@ -82,6 +85,7 @@ type LlmSessionStatus = {
   state: LlmSessionState;
   label: string;
   detail?: string;
+  phase?: LlmSessionPhase;
 };
 
 const RUN_QUERY_PARAM = 'run';
@@ -429,21 +433,102 @@ function fallbackLlmState(sessionStatus?: string): LlmSessionState {
   }
 }
 
+function normalizeLlmPhase(raw?: string): LlmSessionPhase | undefined {
+  const value = (raw ?? '').trim().toLowerCase();
+  if (value === 'planning') {
+    return 'planning';
+  }
+  if (value === 'implementation' || value === 'implementing') {
+    return 'implementation';
+  }
+
+  return undefined;
+}
+
+function fallbackLlmPhase(state: LlmSessionState): LlmSessionPhase | undefined {
+  switch (state) {
+    case 'planning':
+    case 'awaiting-approval':
+      return 'planning';
+    case 'implementing':
+    case 'using-tools':
+    case 'validating':
+    case 'retrying':
+      return 'implementation';
+    default:
+      return undefined;
+  }
+}
+
+function llmPhaseLabel(phase?: LlmSessionPhase): string {
+  if (!phase) {
+    return 'Unknown';
+  }
+
+  return phase === 'planning' ? 'Planning' : 'Implementation';
+}
+
+function llmPhaseBadgeClass(phase?: LlmSessionPhase, selected = false): string {
+  if (selected) {
+    return 'bg-white/20 text-white';
+  }
+
+  if (phase === 'planning') {
+    return 'bg-cyan-100 text-cyan-700 dark:bg-cyan-900/40 dark:text-cyan-300';
+  }
+
+  if (phase === 'implementation') {
+    return 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300';
+  }
+
+  return 'bg-slate-200 text-slate-600 dark:bg-slate-800 dark:text-slate-300';
+}
+
+function composerModeBadgeClass(mode: ComposerMode): string {
+  switch (mode) {
+    case 'chat':
+      return 'bg-violet-100 text-violet-700 dark:bg-violet-900/40 dark:text-violet-300';
+    case 'planning':
+      return 'bg-cyan-100 text-cyan-700 dark:bg-cyan-900/40 dark:text-cyan-300';
+    case 'implementation':
+      return 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300';
+    default:
+      return 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300';
+  }
+}
+
+function composerModeDescription(mode: ComposerMode): string {
+  switch (mode) {
+    case 'chat':
+      return 'Conversational mode for clarification and context.';
+    case 'planning':
+      return 'Planning mode for architecture and execution plans.';
+    case 'implementation':
+      return 'Implementation mode with edit-capable tools.';
+    default:
+      return 'Start a new run (plan + implement).';
+  }
+}
+
 function resolveLlmStatus(session?: WorkSession): LlmSessionStatus {
   const raw = session?.llmStatus;
   if (raw) {
     const state = normalizeLlmSessionState(raw.state);
+    const phase = normalizeLlmPhase(raw.phase) ?? fallbackLlmPhase(state);
     return {
       state,
       label: raw.label?.trim() || llmStatusLabel(state),
       detail: raw.detail?.trim() || undefined,
+      phase,
     };
   }
 
   const fallbackState = fallbackLlmState(session?.status);
+  const phase = fallbackLlmPhase(fallbackState);
   return {
     state: fallbackState,
     label: llmStatusLabel(fallbackState),
+    phase,
   };
 }
 
@@ -897,6 +982,11 @@ export default function App() {
   const [composerImages, setComposerImages] = useState<ComposerImageAttachment[]>([]);
   const [isLlmControlsModalOpen, setIsLlmControlsModalOpen] = useState(false);
   const [copyTraceState, setCopyTraceState] = useState<'idle' | 'copied' | 'failed'>('idle');
+  const [showToolsPanel, setShowToolsPanel] = useState(false);
+  const [availableTools, setAvailableTools] = useState<Array<{ name: string; description: string }>>([]);
+  const [toolsMode, setToolsMode] = useState<'chat' | 'planning' | 'implementation' | ''>('');
+  const [isToolsLoading, setIsToolsLoading] = useState(false);
+  const [toolsLoadError, setToolsLoadError] = useState('');
   const [todoInput, setTodoInput] = useState('');
   const [errorMessage, setErrorMessage] = useState('');
   const timelineContainerRef = useRef<HTMLDivElement | null>(null);
@@ -908,6 +998,9 @@ export default function App() {
   );
 
   const selectedLlmStatus = useMemo(() => resolveLlmStatus(selectedSession), [selectedSession]);
+  const composerMode: ComposerMode = selectedSession
+    ? (selectedSession.mode ?? 'chat')
+    : 'run';
 
   const applyWorkingControls = (controls: SessionLlmControls) => {
     if (workProvider !== controls.provider) {
@@ -1245,6 +1338,51 @@ export default function App() {
   useEffect(() => {
     setCopyTraceState('idle');
   }, [selectedSessionId]);
+
+  useEffect(() => {
+    if (!showToolsPanel) {
+      return;
+    }
+
+    if (!selectedSessionId) {
+      setAvailableTools([]);
+      setToolsMode('');
+      setToolsLoadError('Select a run to inspect tools.');
+      return;
+    }
+
+    let cancelled = false;
+    setIsToolsLoading(true);
+    setToolsLoadError('');
+
+    const loadTools = async () => {
+      try {
+        const toolsState = await fetchWorkTools(selectedSessionId);
+        if (cancelled) {
+          return;
+        }
+
+        setToolsMode(toolsState.mode);
+        setAvailableTools(toolsState.tools);
+      } catch (error) {
+        if (cancelled) {
+          return;
+        }
+
+        setToolsLoadError(error instanceof Error ? error.message : String(error));
+      } finally {
+        if (!cancelled) {
+          setIsToolsLoading(false);
+        }
+      }
+    };
+
+    void loadTools();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedSession?.mode, selectedSessionId, showToolsPanel]);
 
   useEffect(() => {
     if (copyTraceState !== 'copied') {
@@ -1604,9 +1742,16 @@ export default function App() {
                 </div>
                 <div className={`mt-1 flex items-center justify-between gap-2 font-mono text-[10px] ${isSelected ? 'text-blue-100' : 'text-slate-500 dark:text-slate-400'}`}>
                   <span>run {compactRunId(session.id)}</span>
-                  <span className={`rounded px-1.5 py-0.5 font-sans font-semibold uppercase tracking-wide ${llmStatusBadgeClass(llmStatus, isSelected)}`}>
-                    {llmStatus.label}
-                  </span>
+                  <div className="flex items-center gap-1">
+                    {llmStatus.phase && (
+                      <span className={`rounded px-1.5 py-0.5 font-sans font-semibold uppercase tracking-wide ${llmPhaseBadgeClass(llmStatus.phase, isSelected)}`}>
+                        {llmPhaseLabel(llmStatus.phase)}
+                      </span>
+                    )}
+                    <span className={`rounded px-1.5 py-0.5 font-sans font-semibold uppercase tracking-wide ${llmStatusBadgeClass(llmStatus, isSelected)}`}>
+                      {llmStatus.label}
+                    </span>
+                  </div>
                 </div>
                 {llmStatus.detail && (
                   <div className={`mt-1 truncate text-[10px] ${isSelected ? 'text-blue-100/90' : 'text-slate-500 dark:text-slate-400'}`}>
@@ -1655,6 +1800,11 @@ export default function App() {
                           <span className={`rounded px-2 py-0.5 text-xs font-semibold uppercase tracking-wide ${sessionStatusBadgeClass(selectedSession.status)}`}>
                             {formatSessionStatus(selectedSession.status)}
                           </span>
+                          {selectedLlmStatus.phase && (
+                            <span className={`rounded px-2 py-0.5 text-xs font-semibold uppercase tracking-wide ${llmPhaseBadgeClass(selectedLlmStatus.phase)}`}>
+                              {llmPhaseLabel(selectedLlmStatus.phase)}
+                            </span>
+                          )}
                           <span className={`rounded px-2 py-0.5 text-xs font-semibold uppercase tracking-wide ${llmStatusBadgeClass(selectedLlmStatus)}`}>
                             {selectedLlmStatus.label}
                           </span>
@@ -1778,6 +1928,19 @@ export default function App() {
                     <div className="text-xs font-bold uppercase tracking-widest text-slate-500 dark:text-slate-400">LLM Work</div>
                     <div className="flex items-center gap-1.5">
                       <button
+                        aria-label="Toggle tool list"
+                        className={`inline-flex items-center gap-1 rounded border px-2 py-1 text-[10px] disabled:opacity-50 ${showToolsPanel ? 'border-indigo-300 bg-indigo-50 text-indigo-700 dark:border-indigo-800 dark:bg-indigo-950/40 dark:text-indigo-300' : 'border-slate-200 bg-white text-slate-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200'}`}
+                        disabled={!selectedSessionId}
+                        onClick={() => {
+                          setShowToolsPanel((current) => !current);
+                        }}
+                        title="Show currently available tools"
+                        type="button"
+                      >
+                        <Wrench className="h-3 w-3" />
+                        Tools
+                      </button>
+                      <button
                         className={`inline-flex items-center gap-1 rounded border px-2 py-1 text-[10px] disabled:opacity-50 ${copyTraceState === 'copied' ? 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300' : copyTraceState === 'failed' ? 'border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-300' : 'border-slate-200 bg-white text-slate-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200'}`}
                         disabled={!selectedSessionId}
                         onClick={() => {
@@ -1813,6 +1976,36 @@ export default function App() {
                     </div>
                   </div>
 
+                  {showToolsPanel && (
+                    <div className="mb-2 rounded border border-slate-200 bg-slate-50 p-2.5 text-xs dark:border-slate-700 dark:bg-slate-950">
+                      <div className="mb-2 flex items-center justify-between gap-2">
+                        <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-600 dark:text-slate-300">Available Tools</div>
+                        <span className="rounded bg-slate-200 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-slate-700 dark:bg-slate-800 dark:text-slate-200">
+                          mode {toolsMode || selectedSession?.mode || 'unknown'}
+                        </span>
+                      </div>
+                      {isToolsLoading && (
+                        <div className="text-[11px] text-slate-500 dark:text-slate-400">Loading tools...</div>
+                      )}
+                      {!isToolsLoading && toolsLoadError && (
+                        <div className="text-[11px] text-red-600 dark:text-red-300">{toolsLoadError}</div>
+                      )}
+                      {!isToolsLoading && !toolsLoadError && availableTools.length === 0 && (
+                        <div className="text-[11px] text-slate-500 dark:text-slate-400">No tools available in this mode.</div>
+                      )}
+                      {!isToolsLoading && !toolsLoadError && availableTools.length > 0 && (
+                        <div className="max-h-48 space-y-1 overflow-auto pr-1">
+                          {availableTools.map((tool) => (
+                            <div key={tool.name} className="rounded border border-slate-200 bg-white p-1.5 dark:border-slate-700 dark:bg-slate-900">
+                              <div className="font-mono text-[11px] font-semibold text-slate-800 dark:text-slate-100">{tool.name}</div>
+                              <div className="mt-0.5 text-[11px] text-slate-600 dark:text-slate-300">{tool.description}</div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
                   {!selectedSession && (
                     <div className="rounded border border-dashed border-slate-200 bg-slate-50 p-3 text-xs text-slate-500 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-400">
                       Select a run to inspect provider, model, and timeline details.
@@ -1827,6 +2020,11 @@ export default function App() {
                           <span className={`rounded px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${sessionStatusBadgeClass(selectedSession.status)}`}>
                             {formatSessionStatus(selectedSession.status)}
                           </span>
+                          {selectedLlmStatus.phase && (
+                            <span className={`rounded px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${llmPhaseBadgeClass(selectedLlmStatus.phase)}`}>
+                              {llmPhaseLabel(selectedLlmStatus.phase)}
+                            </span>
+                          )}
                           <span className={`rounded px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${llmStatusBadgeClass(selectedLlmStatus)}`}>
                             {selectedLlmStatus.label}
                           </span>
@@ -1845,6 +2043,9 @@ export default function App() {
                         <div className="md:col-span-2">
                           LLM status: <span className="font-semibold text-slate-700 dark:text-slate-200">{selectedLlmStatus.label}</span>
                           {selectedLlmStatus.detail ? ` - ${selectedLlmStatus.detail}` : ''}
+                        </div>
+                        <div>
+                          Run phase: <span className="font-semibold text-slate-700 dark:text-slate-200">{llmPhaseLabel(selectedLlmStatus.phase)}</span>
                         </div>
                         <div className="truncate md:col-span-2">
                           Deep link:{' '}
@@ -1924,6 +2125,15 @@ export default function App() {
                       <div className="mt-1 line-clamp-2">{compactPromptDisplay(selectedSession.prompt)}</div>
                     </div>
                   )}
+                  <div className="mb-2 flex items-center justify-between rounded border border-slate-200 bg-white px-2 py-1.5 text-[11px] dark:border-slate-700 dark:bg-slate-900">
+                    <div className="text-slate-600 dark:text-slate-300">
+                      Composer mode:{' '}
+                      <span className={`rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${composerModeBadgeClass(composerMode)}`}>
+                        {composerMode}
+                      </span>
+                    </div>
+                    <div className="text-[10px] text-slate-500 dark:text-slate-400">{composerModeDescription(composerMode)}</div>
+                  </div>
                   <div className="flex gap-2">
                     <textarea
                       className="h-14 flex-1 resize-none rounded border border-slate-200 px-2 py-1.5 text-sm dark:border-slate-700 dark:bg-slate-900"

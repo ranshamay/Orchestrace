@@ -24,6 +24,19 @@ export interface AgentToolsetOptions {
   maxOutputChars?: number;
   permissions?: Partial<AgentToolPermissions>;
   runSubAgent?: (request: SubAgentRequest, signal?: AbortSignal) => Promise<SubAgentResult>;
+  modeController?: AgentModeController;
+}
+
+export interface AgentModeController {
+  getMode: () => AgentToolPhase;
+  setMode: (mode: AgentToolPhase, reason?: string) => Promise<ModeChangeResult>;
+  availableModes?: AgentToolPhase[];
+}
+
+export interface ModeChangeResult {
+  mode: AgentToolPhase;
+  changed: boolean;
+  detail?: string;
 }
 
 export interface RegisteredAgentTool {

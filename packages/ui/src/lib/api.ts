@@ -38,6 +38,7 @@ export interface WorkSession {
   createdAt: string;
   updatedAt: string;
   status: string;
+  mode?: 'chat' | 'planning' | 'implementation';
   llmStatus?: {
     state: string;
     label: string;
@@ -82,6 +83,12 @@ export interface WorkAgentResponse {
   todos: AgentTodo[];
 }
 
+export interface WorkToolsResponse {
+  id: string;
+  mode: 'chat' | 'planning' | 'implementation';
+  tools: Array<{ name: string; description: string }>;
+}
+
 async function readJson<T>(res: Response): Promise<T> {
   if (!res.ok) {
     const body = await res.text();
@@ -108,6 +115,10 @@ export async function fetchSessions(): Promise<WorkSessionsResponse> {
 
 export async function fetchWorkAgent(id: string): Promise<WorkAgentResponse> {
   return readJson(await fetch(`${API_BASE}/work/agent?id=${encodeURIComponent(id)}`));
+}
+
+export async function fetchWorkTools(id: string): Promise<WorkToolsResponse> {
+  return readJson(await fetch(`${API_BASE}/work/tools?id=${encodeURIComponent(id)}`));
 }
 
 export async function startWork(payload: {
