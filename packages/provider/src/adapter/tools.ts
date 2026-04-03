@@ -5,9 +5,9 @@ import {
   type ToolCall,
   type ToolResultMessage,
 } from '@mariozechner/pi-ai';
-import type { LlmToolset } from '../types.js';
+import type { LlmCompletionOptions, LlmToolset } from '../types.js';
 import { consumeStream, getUsage } from './stream.js';
-import { toErrorMessage } from './utils.js';
+import { formatToolPayload, toErrorMessage } from './utils.js';
 
 const MAX_TOOL_ROUNDS = resolveMaxToolRounds();
 
@@ -15,7 +15,7 @@ export async function executeWithOptionalTools(params: {
   model: ReturnType<typeof import('@mariozechner/pi-ai').getModel>;
   context: import('@mariozechner/pi-ai').Context;
   options: Record<string, unknown>;
-  completionOptions?: import('../types.js').LlmCompletionOptions;
+  completionOptions?: LlmCompletionOptions;
   toolset?: LlmToolset;
   signal?: AbortSignal;
   onUsage: (usage: { input: number; output: number; cost: number }) => void;
@@ -78,7 +78,13 @@ export async function executeWithOptionalTools(params: {
     }
 
     context.messages.push(response);
-    const { results: toolResults, hadErrors } = await executeToolCalls(toolset, context.tools ?? [], toolCalls, signal);
+    const { results: toolResults, hadErrors } = await executeToolCalls(
+      toolset,
+      context.tools ?? [],
+      toolCalls,
+      signal,
+      completionOptions,
+    );
     context.messages.push(...toolResults);
     previousRoundHadToolError = hadErrors;
   }
@@ -103,12 +109,20 @@ async function executeToolCalls(
   tools: Tool[],
   toolCalls: ToolCall[],
   signal?: AbortSignal,
+  completionOptions?: LlmCompletionOptions,
 ): Promise<{ results: ToolResultMessage[]; hadErrors: boolean }> {
   const results: ToolResultMessage[] = [];
   let hadErrors = false;
 
   for (const toolCall of toolCalls) {
     let payload: { content: string; isError: boolean; details?: unknown };
+
+    completionOptions?.onToolCall?.({
+      type: 'started',
+      toolCallId: toolCall.id,
+      toolName: toolCall.name,
+      arguments: formatToolPayload(toolCall.arguments),
+    });
 
     try {
       const validatedArgs = validateToolCall(tools, toolCall) as Record<string, unknown>;
@@ -126,11 +140,27 @@ async function executeToolCalls(
         isError: toolResult.isError ?? false,
         details: toolResult.details,
       };
+
+      completionOptions?.onToolCall?.({
+        type: 'result',
+        toolCallId: toolCall.id,
+        toolName: toolCall.name,
+        result: formatToolPayload(toolResult.content),
+        isError: toolResult.isError ?? false,
+      });
     } catch (error) {
       payload = {
         content: `Tool execution failed: ${toErrorMessage(error)}`,
         isError: true,
       };
+
+      completionOptions?.onToolCall?.({
+        type: 'result',
+        toolCallId: toolCall.id,
+        toolName: toolCall.name,
+        result: formatToolPayload(payload.content),
+        isError: true,
+      });
     }
 
     hadErrors = hadErrors || payload.isError;

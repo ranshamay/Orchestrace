@@ -4,6 +4,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {
   addTodo,
+  cancelWork,
   type ChatContentPart,
   deleteWork,
   fetchModels,
@@ -1338,6 +1339,21 @@ export default function App() {
     }
   };
 
+  const handleStop = async () => {
+    if (!selectedSessionId) {
+      return;
+    }
+
+    setErrorMessage('');
+    try {
+      await cancelWork(selectedSessionId);
+      const sessionsState = await fetchSessions();
+      setSessions(sessionsState.sessions);
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : String(error));
+    }
+  };
+
   const handleRetry = async () => {
     if (!selectedSession || normalizeSessionStatus(selectedSession.status) === 'running') {
       return;
@@ -1929,16 +1945,32 @@ export default function App() {
                       value={composerText}
                     />
                     <div className="flex flex-col gap-2">
-                      <button
-                        className="inline-flex items-center gap-1 rounded bg-blue-600 px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50"
-                        disabled={!hasComposerContent || !workWorkspaceId || !workProvider || !workModel}
-                        onClick={() => {
-                          void handleStartFromComposer();
-                        }}
-                        type="button"
-                      >
-                        <Play className="h-3 w-3" /> Run
-                      </button>
+                      <div className="flex gap-2">
+                        <button
+                          className="inline-flex items-center gap-1 rounded bg-blue-600 px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50"
+                          disabled={!hasComposerContent || !workWorkspaceId || !workProvider || !workModel}
+                          onClick={() => {
+                            void handleStartFromComposer();
+                          }}
+                          type="button"
+                        >
+                          <Play className="h-3 w-3" /> Run
+                        </button>
+                        <button
+                          className="rounded bg-red-600 px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50"
+                          disabled={
+                            !selectedSessionId
+                            || !selectedSession
+                            || normalizeSessionStatus(selectedSession.status) !== 'running'
+                          }
+                          onClick={() => {
+                            void handleStop();
+                          }}
+                          type="button"
+                        >
+                          Stop
+                        </button>
+                      </div>
                       <button
                         className="rounded bg-slate-800 px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50 dark:bg-slate-700"
                         disabled={!selectedSessionId || !hasComposerContent}
