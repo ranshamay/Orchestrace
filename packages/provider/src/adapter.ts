@@ -14,6 +14,7 @@ import { resolveTimeoutMs, createTimeoutSignal, mapTimeoutError } from './adapte
 import { resolveEmptyResponseRetries } from './adapter/retry.js';
 import { summarizePromptInput, logFailureDump } from './adapter/failure.js';
 import { mergeUsage } from './adapter/usage.js';
+import { classifyLlmFailure, createLlmFailureError } from './adapter/failure-classifier.js';
 
 /**
  * LLM adapter backed by pi-ai.
@@ -64,7 +65,15 @@ export class PiAiAdapter implements LlmAdapter {
               },
             });
           } catch (error) {
-            throw mapTimeoutError(error, timeoutMs);
+            const mapped = mapTimeoutError(error, timeoutMs);
+            const failureType = classifyLlmFailure({ message: mapped.message });
+            throw createLlmFailureError({
+              provider: request.provider,
+              model: request.model,
+              failureType,
+              message: mapped.message,
+              cause: error,
+            });
           } finally {
             timeoutSignal.cleanup();
           }
@@ -81,11 +90,17 @@ export class PiAiAdapter implements LlmAdapter {
           const blockTypes = response.content.map((block) => block.type).join(', ') || 'none';
 
           if (response.stopReason === 'error' || response.stopReason === 'aborted') {
+            const failureType = classifyLlmFailure({
+              message: upstreamError,
+              stopReason: response.stopReason,
+              kind: 'stop-reason',
+            });
             const reason = upstreamError
               ? `Provider error: ${upstreamError}`
               : `Model stopped with reason "${response.stopReason}" before producing a usable response.`;
             logFailureDump({
               kind: 'stop-reason',
+              failureType,
               provider: request.provider,
               model: request.model,
               baseUrl: model.baseUrl,
@@ -97,12 +112,23 @@ export class PiAiAdapter implements LlmAdapter {
               blockTypes,
               prompt: summarizePromptInput(prompt),
             });
-            throw new Error(`Model ${request.provider}/${request.model} failed. ${reason}`);
+            throw createLlmFailureError({
+              provider: request.provider,
+              model: request.model,
+              failureType,
+              message: `Model ${request.provider}/${request.model} failed. ${reason}`,
+            });
           }
 
           if (response.content.length === 0 && totalTokens === 0) {
+            const failureType = classifyLlmFailure({
+              message: upstreamError,
+              stopReason: response.stopReason,
+              kind: 'empty-zero-token',
+            });
             logFailureDump({
               kind: 'empty-zero-token',
+              failureType,
               provider: request.provider,
               model: request.model,
               baseUrl: model.baseUrl,
@@ -122,15 +148,25 @@ export class PiAiAdapter implements LlmAdapter {
             const details = upstreamError
               ? `Provider error: ${upstreamError}`
               : 'This model may be unavailable for your account. Try another model.';
-            throw new Error(
-              `Model ${request.provider}/${request.model} returned an empty response with zero tokens. `
-              + details,
-            );
+            throw createLlmFailureError({
+              provider: request.provider,
+              model: request.model,
+              failureType,
+              message:
+                `Model ${request.provider}/${request.model} returned an empty response with zero tokens. `
+                + details,
+            });
           }
 
           if (!text.trim()) {
+            const failureType = classifyLlmFailure({
+              message: upstreamError,
+              stopReason: response.stopReason,
+              kind: 'empty-text',
+            });
             logFailureDump({
               kind: 'empty-text',
+              failureType,
               provider: request.provider,
               model: request.model,
               baseUrl: model.baseUrl,
@@ -148,10 +184,14 @@ export class PiAiAdapter implements LlmAdapter {
             }
 
             const details = upstreamError ? ` Provider error: ${upstreamError}` : ' Try another model.';
-            throw new Error(
-              `Model ${request.provider}/${request.model} returned no text output (blocks: ${blockTypes}). `
-              + details,
-            );
+            throw createLlmFailureError({
+              provider: request.provider,
+              model: request.model,
+              failureType,
+              message:
+                `Model ${request.provider}/${request.model} returned no text output (blocks: ${blockTypes}). `
+                + details,
+            });
           }
 
           return {
@@ -164,7 +204,12 @@ export class PiAiAdapter implements LlmAdapter {
           };
         }
 
-        throw new Error(`Model ${request.provider}/${request.model} failed after ${maxAttempts} attempt(s).`);
+        throw createLlmFailureError({
+          provider: request.provider,
+          model: request.model,
+          failureType: 'unknown',
+          message: `Model ${request.provider}/${request.model} failed after ${maxAttempts} attempt(s).`,
+        });
       },
     };
   }

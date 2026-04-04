@@ -7,6 +7,7 @@ import type {
   TaskOutput,
   RunnerConfig,
   ModelConfig,
+  ReplayFailureType,
   ReplayAttemptRecord,
   ReplayToolCallRecord,
   TaskReplayRecord,
@@ -215,6 +216,7 @@ export async function orchestrate(
         },
       });
     } catch (error) {
+      const failureType = resolveReplayFailureType(error);
       const planningError = error instanceof Error ? error.message : String(error);
       const failedPlanningAttempt: ReplayAttemptRecord = {
         phase: 'planning',
@@ -225,6 +227,7 @@ export async function orchestrate(
         model: model.model,
         reasoning: model.reasoning,
         error: planningError,
+        failureType,
         toolCalls: planningToolCalls,
       };
       replay.attempts.push(failedPlanningAttempt);
@@ -240,6 +243,7 @@ export async function orchestrate(
         status: 'failed',
         tokenDumpDir: taskTokenDumpDir,
         error: planningError,
+        failureType,
         durationMs: Date.now() - start,
         retries: 0,
         usage,
@@ -367,6 +371,7 @@ export async function orchestrate(
     );
 
     let lastResponse = '';
+    let lastFailureType: ReplayFailureType | undefined;
     let lastValidationError = '';
     let lastValidationResults = undefined as TaskOutput['validationResults'];
 
@@ -384,6 +389,7 @@ export async function orchestrate(
         approvedPlan: planningResult.text,
         attempt,
         previousResponse: lastResponse,
+        previousFailureType: lastFailureType,
         previousValidationError: lastValidationError,
       });
 
@@ -418,6 +424,7 @@ export async function orchestrate(
           },
         });
       } catch (error) {
+        const failureType = resolveReplayFailureType(error);
         const implementationError = error instanceof Error ? error.message : String(error);
         const failedImplementationAttempt: ReplayAttemptRecord = {
           phase: 'implementation',
@@ -428,6 +435,7 @@ export async function orchestrate(
           model: model.model,
           reasoning: model.reasoning,
           error: implementationError,
+          failureType,
           toolCalls: implementationToolCalls,
         };
         replay.attempts.push(failedImplementationAttempt);
@@ -439,6 +447,21 @@ export async function orchestrate(
           record: failedImplementationAttempt,
         });
 
+        if (attempt < maxAttempts && shouldRetryAfterCompletionFailure(failureType)) {
+          lastFailureType = failureType;
+          lastValidationError = buildCompletionFailureRetryHint({
+            failureType,
+            errorMessage: implementationError,
+          });
+          emit({
+            type: 'task:verification-failed',
+            taskId: node.id,
+            attempt,
+            error: `Retrying after ${failureType} failure: ${implementationError}`,
+          });
+          continue;
+        }
+
         return {
           taskId: node.id,
           status: 'failed',
@@ -447,6 +470,7 @@ export async function orchestrate(
           tokenDumpDir: taskTokenDumpDir,
           response: lastResponse,
           error: implementationError,
+          failureType,
           durationMs: Date.now() - start,
           retries: attempt - 1,
           usage,
@@ -526,6 +550,8 @@ export async function orchestrate(
         return output;
       }
 
+      lastFailureType = 'validation';
+      completedImplementationAttempt.failureType = 'validation';
       lastValidationError = validationResults
         .filter((result) => !result.passed)
         .map((result) => `${result.command}: ${result.output}`)
@@ -548,6 +574,7 @@ export async function orchestrate(
       response: lastResponse,
       validationResults: lastValidationResults,
       error: lastValidationError || 'Implementation did not satisfy validation criteria.',
+      failureType: lastFailureType ?? 'validation',
       durationMs: Date.now() - start,
       retries: maxAttempts - 1,
       usage,
@@ -648,6 +675,7 @@ function buildImplementationPrompt(params: {
   approvedPlan: string;
   attempt: number;
   previousResponse: string;
+  previousFailureType?: ReplayFailureType;
   previousValidationError: string;
 }): string {
   const {
@@ -656,6 +684,7 @@ function buildImplementationPrompt(params: {
     approvedPlan,
     attempt,
     previousResponse,
+    previousFailureType,
     previousValidationError,
   } = params;
 
@@ -663,6 +692,9 @@ function buildImplementationPrompt(params: {
   const retryContext =
     attempt > 1
       ? [
+          '',
+          'Previous attempt failure type:',
+          previousFailureType ?? '(unknown)',
           '',
           'Previous attempt response:',
           previousResponse || '(no response)',
@@ -862,6 +894,95 @@ function createTextPreview(text: string, maxChars = 600): string {
   }
 
   return compact.length > maxChars ? `${compact.slice(0, maxChars - 3)}...` : compact;
+}
+
+function resolveReplayFailureType(error: unknown): ReplayFailureType {
+  if (error && typeof error === 'object' && 'failureType' in error) {
+    const raw = (error as { failureType?: unknown }).failureType;
+    if (isReplayFailureType(raw)) {
+      return raw;
+    }
+  }
+
+  const message = error instanceof Error ? error.message : String(error);
+  const normalized = message.toLowerCase();
+  if (/(timed?\s*out|timeout|etimedout|abort)/.test(normalized)) {
+    return 'timeout';
+  }
+
+  if (/(rate\s*limit|too many requests|quota|\b429\b)/.test(normalized)) {
+    return 'rate_limit';
+  }
+
+  if (/(unauthorized|forbidden|invalid api key|auth|\b401\b|\b403\b)/.test(normalized)) {
+    return 'auth';
+  }
+
+  if (/(invalid tool call|schema|validatetoolcall|invalid arguments|tool arguments)/.test(normalized)) {
+    return 'tool_schema';
+  }
+
+  if (/(tool execution failed|unknown tool|blocked command|not allowed while mode|tool failed)/.test(normalized)) {
+    return 'tool_runtime';
+  }
+
+  if (/(empty response|no text output|zero tokens)/.test(normalized)) {
+    return 'empty_response';
+  }
+
+  return 'unknown';
+}
+
+function isReplayFailureType(value: unknown): value is ReplayFailureType {
+  return value === 'timeout'
+    || value === 'auth'
+    || value === 'rate_limit'
+    || value === 'tool_schema'
+    || value === 'tool_runtime'
+    || value === 'validation'
+    || value === 'empty_response'
+    || value === 'unknown';
+}
+
+function shouldRetryAfterCompletionFailure(failureType: ReplayFailureType): boolean {
+  return failureType === 'timeout'
+    || failureType === 'rate_limit'
+    || failureType === 'tool_runtime'
+    || failureType === 'empty_response';
+}
+
+function buildCompletionFailureRetryHint(params: {
+  failureType: ReplayFailureType;
+  errorMessage: string;
+}): string {
+  switch (params.failureType) {
+    case 'timeout':
+      return [
+        'Previous attempt failed due to timeout.',
+        'Reduce scope per step, keep tool outputs concise, and continue from current state.',
+        `Failure detail: ${params.errorMessage}`,
+      ].join('\n');
+    case 'rate_limit':
+      return [
+        'Previous attempt hit rate limits.',
+        'Retry with fewer consecutive tool calls and prioritize essential steps first.',
+        `Failure detail: ${params.errorMessage}`,
+      ].join('\n');
+    case 'tool_runtime':
+      return [
+        'Previous attempt failed during tool execution.',
+        'Inspect prior tool-call errors, fix arguments/paths, and retry only needed tools.',
+        `Failure detail: ${params.errorMessage}`,
+      ].join('\n');
+    case 'empty_response':
+      return [
+        'Previous attempt returned empty model output.',
+        'Retry with concise reasoning and continue implementation from known plan context.',
+        `Failure detail: ${params.errorMessage}`,
+      ].join('\n');
+    default:
+      return `Previous attempt failed: ${params.errorMessage}`;
+  }
 }
 
 function resolvePromptVersion(params: {

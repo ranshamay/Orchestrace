@@ -42,6 +42,7 @@ interface ReplayTaskAttempt {
   usage?: { input: number; output: number; cost: number };
   textPreview?: string;
   error?: string;
+  failureType?: string;
   toolCalls?: Array<{
     time: string;
     toolCallId: string;
@@ -74,6 +75,7 @@ interface ReplayTaskArtifact {
   status: 'completed' | 'failed';
   durationMs: number;
   retries: number;
+  failureType?: string;
   usage?: { input: number; output: number; cost: number };
   error?: string;
   responsePreview?: string;
@@ -475,6 +477,7 @@ async function persistRunArtifacts(params: {
       status: output.status,
       durationMs: output.durationMs,
       retries: output.retries,
+      failureType: output.failureType,
       usage: output.usage,
       error: output.error,
       planPath: output.planPath,
@@ -844,6 +847,9 @@ async function runReplayCommand(args: string[], workspacePath: string): Promise<
   console.log(`Task: ${taskArtifact.taskId} (${taskArtifact.taskName ?? 'unnamed'})`);
   console.log(`Type: ${taskArtifact.taskType ?? 'unknown'} | Status: ${taskArtifact.status}`);
   console.log(`Duration: ${taskArtifact.durationMs}ms | Retries: ${taskArtifact.retries}`);
+  if (taskArtifact.failureType) {
+    console.log(`Failure type: ${taskArtifact.failureType}`);
+  }
   console.log(`Usage: ${formatUsage(taskArtifact.usage)}`);
   if (taskArtifact.error) {
     console.log(`Error: ${taskArtifact.error}`);
@@ -868,8 +874,9 @@ async function runReplayCommand(args: string[], workspacePath: string): Promise<
       : '';
     const stop = attempt.stopReason ? ` stop=${attempt.stopReason}` : '';
     const error = attempt.error ? ` error=${attempt.error}` : '';
+    const failureType = attempt.failureType ? ` failureType=${attempt.failureType}` : '';
     console.log(
-      `  - ${attempt.phase}#${attempt.attempt} ${attempt.provider}/${attempt.model}${stop}${validation} tools=${toolCalls}${error}`,
+      `  - ${attempt.phase}#${attempt.attempt} ${attempt.provider}/${attempt.model}${stop}${validation}${failureType} tools=${toolCalls}${error}`,
     );
     if (attempt.usage) {
       console.log(`    usage: ${formatUsage(attempt.usage)}`);

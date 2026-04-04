@@ -1,6 +1,17 @@
+export type LlmFailureType =
+  | 'timeout'
+  | 'auth'
+  | 'rate_limit'
+  | 'tool_schema'
+  | 'tool_runtime'
+  | 'validation'
+  | 'empty_response'
+  | 'unknown';
+
 export interface LlmResultMetadata {
   stopReason?: string;
   endpoint?: string;
+  failureType?: LlmFailureType;
 }
 
 /** Result from an LLM completion call. */

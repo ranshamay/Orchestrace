@@ -14,6 +14,16 @@ export type TaskStatus =
 /** The kind of work a task performs. */
 export type TaskType = 'code' | 'review' | 'test' | 'plan' | 'refactor' | 'custom';
 
+export type ReplayFailureType =
+  | 'timeout'
+  | 'auth'
+  | 'rate_limit'
+  | 'tool_schema'
+  | 'tool_runtime'
+  | 'validation'
+  | 'empty_response'
+  | 'unknown';
+
 /** Per-task model override. */
 export interface ModelConfig {
   provider: string;
@@ -87,6 +97,7 @@ export interface ReplayAttemptRecord {
   usage?: { input: number; output: number; cost: number };
   textPreview?: string;
   error?: string;
+  failureType?: ReplayFailureType;
   toolCalls: ReplayToolCallRecord[];
   validation?: ReplayValidationRecord;
 }
@@ -125,6 +136,8 @@ export interface TaskOutput {
   usage?: { input: number; output: number; cost: number };
   /** Structured replay metadata for deterministic diagnostics. */
   replay?: TaskReplayRecord;
+  /** Optional failure bucket for failed outputs. */
+  failureType?: ReplayFailureType;
   /** Error message if failed. */
   error?: string;
   /** Number of retry attempts. */

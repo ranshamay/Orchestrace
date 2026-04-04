@@ -24,7 +24,10 @@ function makeSingleNodeGraph(): TaskGraph {
 
 function createAdapter(params: {
   planningThrows?: boolean;
+  failImplementationOnceWithType?: 'timeout' | 'rate_limit' | 'tool_runtime' | 'empty_response';
 }): LlmAdapter {
+  let implementationCalls = 0;
+
   async function spawnAgent(request: SpawnAgentRequest): Promise<LlmAgent> {
     const phase = request.systemPrompt === 'planning' ? 'planning' : 'implementation';
 
@@ -58,6 +61,13 @@ function createAdapter(params: {
             usage: { input: 10, output: 5, cost: 0 },
             metadata: { stopReason: 'end_turn', endpoint: 'https://example.test' },
           };
+        }
+
+        implementationCalls += 1;
+        if (params.failImplementationOnceWithType && implementationCalls === 1) {
+          const error = new Error('LLM request timed out after 120000ms') as Error & { failureType?: string };
+          error.failureType = params.failImplementationOnceWithType;
+          throw error;
         }
 
         options?.onToolCall?.({
@@ -162,6 +172,33 @@ describe('orchestrate replay capture', () => {
       expect(output?.replay?.attempts[0]?.error).toContain('planning exploded');
       expect(output?.replay?.attempts[0]?.toolCalls.length).toBe(2);
       expect(output?.replay?.promptVersion.startsWith('custom-system-prompts-')).toBe(true);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('retries transient implementation failures using failure type guidance', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'orchestrace-replay-transient-'));
+
+    try {
+      const outputs = await orchestrate(makeSingleNodeGraph(), {
+        llm: createAdapter({ failImplementationOnceWithType: 'timeout' }),
+        cwd,
+        requirePlanApproval: false,
+        planningSystemPrompt: 'planning',
+        implementationSystemPrompt: 'implementation',
+        maxImplementationAttempts: 2,
+      });
+
+      const output = outputs.get('task-1');
+      expect(output).toBeDefined();
+      expect(output?.status).toBe('completed');
+      expect(output?.retries).toBe(1);
+      expect(output?.replay?.attempts.length).toBe(3);
+      expect(output?.replay?.attempts[1]?.phase).toBe('implementation');
+      expect(output?.replay?.attempts[1]?.failureType).toBe('timeout');
+      expect(output?.replay?.attempts[2]?.phase).toBe('implementation');
+      expect(output?.replay?.attempts[2]?.error).toBeUndefined();
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }

@@ -10,6 +10,7 @@ export { validate } from './validation/validator.js';
 export type {
   TaskStatus,
   TaskType,
+  ReplayFailureType,
   ModelConfig,
   ValidationConfig,
   ReplayToolCallRecord,
