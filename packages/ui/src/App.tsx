@@ -14,7 +14,6 @@ import {
   fetchWorkTools,
   fetchWorkspaces,
   retryWork,
-  sendChatMessage,
   startWork,
   toggleTodo,
   type AgentTodo,
@@ -1709,30 +1708,7 @@ export default function App() {
   };
 
   const handleSendChat = async () => {
-    if (!selectedSessionId || !hasComposerContent) {
-      return;
-    }
-
-    const previousText = composerText;
-    const previousImages = composerImages;
-    const message = previousText.trim();
-    const messageParts = previousImages.length > 0 ? composerContentParts : undefined;
-
-    setComposerText('');
-    setComposerImages([]);
-    setErrorMessage('');
-
-    try {
-      const response = await sendChatMessage(selectedSessionId, {
-        message,
-        messageParts,
-      });
-      setChatMessages(response.messages);
-    } catch (error) {
-      setComposerText(previousText);
-      setComposerImages(previousImages);
-      setErrorMessage(error instanceof Error ? error.message : String(error));
-    }
+    await handleStartFromComposer();
   };
 
   const handleComposerPaste = async (event: ClipboardEvent<HTMLTextAreaElement>) => {
@@ -2363,14 +2339,10 @@ export default function App() {
                       onKeyDown={(event) => {
                         if (event.key === 'Enter' && !event.shiftKey) {
                           event.preventDefault();
-                          if (selectedSessionId) {
-                            void handleSendChat();
-                          } else {
-                            void handleStartFromComposer();
-                          }
+                          void handleStartFromComposer();
                         }
                       }}
-                      placeholder={selectedSessionId ? 'Chat with selected run, or use Run to start a new run from this text...' : 'Describe task and click Run...'}
+                      placeholder={selectedSessionId ? 'Continue autonomously from this run context and start a new execution...' : 'Describe task and start autonomous execution...'}
                       value={composerText}
                     />
                     <div className="flex flex-col gap-2">
@@ -2402,13 +2374,13 @@ export default function App() {
                       </div>
                       <button
                         className="rounded bg-slate-800 px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50 dark:bg-slate-700"
-                        disabled={!selectedSessionId || !hasComposerContent}
+                        disabled={!hasComposerContent || !workWorkspaceId || !workProvider || !workModel}
                         onClick={() => {
                           void handleSendChat();
                         }}
                         type="button"
                       >
-                        Send
+                        Autonomous Run
                       </button>
                     </div>
                   </div>
