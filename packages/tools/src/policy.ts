@@ -1,5 +1,7 @@
 import type { AgentToolPermissions, AgentToolsetOptions } from './types.js';
 
+export const DEFAULT_AGENT_TOOL_POLICY_VERSION = 'agent-tool-policy-v1';
+
 export function resolveAgentToolPermissions(options: AgentToolsetOptions): AgentToolPermissions {
   const phase = options.phase ?? 'implementation';
   const taskType = options.taskType ?? 'custom';

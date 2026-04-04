@@ -3,12 +3,12 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { existsSync, watch, type FSWatcher } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-import { orchestrate } from '@orchestrace/core';
-import type { DagEvent, PlanApprovalRequest, TaskGraph } from '@orchestrace/core';
+import { orchestrate, PromptSectionName, renderPromptSections } from '@orchestrace/core';
+import type { DagEvent, PlanApprovalRequest, PromptSection, TaskGraph } from '@orchestrace/core';
 import { getModels } from '@mariozechner/pi-ai';
 import { PiAiAdapter, ProviderAuthManager, type LlmPromptInput, type LlmPromptPart } from '@orchestrace/provider';
 import { createWorktree, type WorktreeHandle } from '@orchestrace/sandbox';
-import { createAgentToolset, listAgentTools, type AgentToolPhase } from '@orchestrace/tools';
+import { DEFAULT_AGENT_TOOL_POLICY_VERSION, createAgentToolset } from '@orchestrace/tools';
 import { WorkspaceManager } from './workspace-manager.js';
 
 export interface UiServerOptions {
@@ -58,7 +58,6 @@ interface WorkSession {
   createdAt: string;
   updatedAt: string;
   status: WorkState;
-  mode: AgentToolPhase;
   llmStatus: SessionLlmStatus;
   taskStatus: Record<string, string>;
   events: UiDagEvent[];
@@ -163,7 +162,6 @@ interface PersistedWorkSession {
   createdAt: string;
   updatedAt: string;
   status: WorkState;
-  mode?: AgentToolPhase;
   llmStatus?: SessionLlmStatus;
   taskStatus: Record<string, string>;
   events: UiDagEvent[];
@@ -258,74 +256,6 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     });
   }
 
-  function normalizeSessionMode(value: unknown, fallback: AgentToolPhase = 'chat'): AgentToolPhase {
-    const mode = asString(value);
-    if (mode === 'chat' || mode === 'planning' || mode === 'implementation') {
-      return mode;
-    }
-
-    return fallback;
-  }
-
-  function modeToLlmState(mode: AgentToolPhase): LlmSessionState {
-    if (mode === 'planning') {
-      return 'planning';
-    }
-
-    if (mode === 'implementation') {
-      return 'implementing';
-    }
-
-    return 'thinking';
-  }
-
-  function modeToLlmPhase(mode: AgentToolPhase): 'planning' | 'implementation' | undefined {
-    if (mode === 'planning' || mode === 'implementation') {
-      return mode;
-    }
-
-    return undefined;
-  }
-
-  function updateSessionStatus(session: WorkSession, detail: string): void {
-    session.status = 'running';
-    session.error = undefined;
-    session.updatedAt = now();
-    session.llmStatus = createLlmStatus(modeToLlmState(session.mode), session.updatedAt, {
-      detail,
-      phase: modeToLlmPhase(session.mode),
-    });
-    uiStatePersistence.schedule();
-
-    broadcastWorkStream(workStreamClients, session.id, 'status', {
-      id: session.id,
-      status: session.status,
-      mode: session.mode,
-      llmStatus: session.llmStatus,
-      time: now(),
-    });
-  }
-
-  async function setSessionMode(
-    session: WorkSession,
-    mode: AgentToolPhase,
-    reason?: string,
-  ): Promise<{ mode: AgentToolPhase; changed: boolean; detail: string }> {
-    const nextMode = normalizeSessionMode(mode, session.mode);
-    const changed = nextMode !== session.mode;
-    session.mode = nextMode;
-
-    const reasonText = asString(reason);
-    const detail = changed
-      ? reasonText
-        ? `Mode switched to ${nextMode}: ${reasonText}`
-        : `Mode switched to ${nextMode}.`
-      : `Mode remains ${nextMode}.`;
-
-    updateSessionStatus(session, detail);
-    return { mode: nextMode, changed, detail };
-  }
-
   async function startWorkSession(request: {
     workspaceId?: string;
     prompt: string;
@@ -394,7 +324,6 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       createdAt,
       updatedAt: createdAt,
       status: 'running',
-      mode: 'planning',
       llmStatus: createLlmStatus('queued', createdAt, {
         detail: 'Queued for orchestration.',
       }),
@@ -417,7 +346,11 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       llm,
       cwd: session.workspacePath,
       planOutputDir: join(session.workspacePath, '.orchestrace', 'plans'),
+      promptVersion: process.env.ORCHESTRACE_PROMPT_VERSION,
+      policyVersion: process.env.ORCHESTRACE_POLICY_VERSION ?? DEFAULT_AGENT_TOOL_POLICY_VERSION,
       defaultModel: { provider: request.provider, model: request.model },
+      planningSystemPrompt: buildPlanningSystemPrompt(session),
+      implementationSystemPrompt: buildImplementationSystemPrompt(session),
       maxParallel: 1,
       requirePlanApproval: !request.autoApprove,
       onPlanApproval: async (_approvalRequest: PlanApprovalRequest) => request.autoApprove,
@@ -432,11 +365,6 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         provider: activeProvider,
         model: activeModel,
         reasoning,
-        modeController: {
-          getMode: () => session.mode,
-          setMode: (mode, reason) => setSessionMode(session, mode, reason),
-          availableModes: ['chat', 'planning', 'implementation'],
-        },
         runSubAgent: async (runSubAgentRequest, signal) => {
           const subProvider = runSubAgentRequest.provider ?? activeProvider;
           const subModel = runSubAgentRequest.model ?? activeModel;
@@ -462,9 +390,6 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         const llmStatus = deriveLlmStatusFromDagEvent(event, session.updatedAt);
         if (llmStatus) {
           session.llmStatus = llmStatus;
-          if (llmStatus.phase) {
-            session.mode = llmStatus.phase;
-          }
         }
 
         if (event.type === 'task:stream-delta') {
@@ -1068,37 +993,6 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         return;
       }
 
-      if (req.method === 'GET' && pathname === '/api/work/tools') {
-        const id = asString(url.searchParams.get('id'));
-        if (!id) {
-          sendJson(res, 400, { error: 'Missing id' });
-          return;
-        }
-
-        const session = workSessions.get(id);
-        if (!session) {
-          sendJson(res, 404, { error: 'Unknown work session' });
-          return;
-        }
-
-        const toolOptions = {
-          cwd: session.workspacePath,
-          phase: session.mode,
-          modeController: {
-            getMode: () => session.mode,
-            setMode: (mode: AgentToolPhase, reason?: string) => setSessionMode(session, mode, reason),
-            availableModes: ['chat', 'planning', 'implementation'] as AgentToolPhase[],
-          },
-        };
-
-        sendJson(res, 200, {
-          id,
-          mode: session.mode,
-          tools: listAgentTools(toolOptions),
-        });
-        return;
-      }
-
       if (req.method === 'GET' && pathname === '/api/work/todos') {
         const id = asString(url.searchParams.get('id'));
         if (!id) {
@@ -1374,8 +1268,6 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           return;
         }
 
-        updateSessionStatus(session, 'Follow-up received. Resuming in interactive mode.');
-
         const thread = sessionChats.get(id) ?? createSessionChatThread(session);
         sessionChats.set(id, thread);
 
@@ -1404,15 +1296,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
               provider: session.provider,
               model: session.model,
               systemPrompt: buildChatSystemPrompt(session),
-              toolset: createAgentToolset({
-                cwd: session.workspacePath,
-                phase: session.mode,
-                modeController: {
-                  getMode: () => session.mode,
-                  setMode: (mode, reason) => setSessionMode(session, mode, reason),
-                  availableModes: ['chat', 'planning', 'implementation'],
-                },
-              }),
+              toolset: createAgentToolset({ cwd: session.workspacePath, phase: 'chat' }),
               apiKey: await authManager.resolveApiKey(session.provider),
             });
 
@@ -1490,21 +1374,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
             trimThreadMessages(thread);
             thread.updatedAt = now();
             session.updatedAt = now();
-            session.status = 'completed';
-            session.error = undefined;
-            session.llmStatus = createLlmStatus('completed', session.updatedAt, {
-              detail: 'Follow-up completed successfully.',
-              phase: modeToLlmPhase(session.mode),
-            });
             uiStatePersistence.schedule();
-
-            broadcastWorkStream(workStreamClients, session.id, 'status', {
-              id: session.id,
-              status: session.status,
-              mode: session.mode,
-              llmStatus: session.llmStatus,
-              time: now(),
-            });
 
             streamState.status = 'completed';
             streamState.replyText = response.text;
@@ -1525,22 +1395,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
             streamState.status = 'failed';
             streamState.error = toErrorMessage(error);
             streamState.updatedAt = now();
-            session.status = 'failed';
-            session.error = streamState.error;
-            session.updatedAt = streamState.updatedAt;
-            session.llmStatus = createLlmStatus('failed', session.updatedAt, {
-              detail: streamState.error,
-              phase: modeToLlmPhase(session.mode),
-            });
             uiStatePersistence.schedule();
-
-            broadcastWorkStream(workStreamClients, session.id, 'status', {
-              id: session.id,
-              status: session.status,
-              mode: session.mode,
-              llmStatus: session.llmStatus,
-              time: now(),
-            });
 
             broadcastWorkStream(chatStreamClients, streamId, 'chat-error', {
               streamId,
@@ -1586,8 +1441,6 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           return;
         }
 
-        updateSessionStatus(session, 'Follow-up received. Resuming in interactive mode.');
-
         const thread = sessionChats.get(id) ?? createSessionChatThread(session);
         sessionChats.set(id, thread);
         uiStatePersistence.schedule();
@@ -1598,82 +1451,37 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         thread.updatedAt = now();
         uiStatePersistence.schedule();
 
-        try {
-          const chatAgent = await llm.spawnAgent({
-            provider: session.provider,
-            model: session.model,
-            systemPrompt: buildChatSystemPrompt(session),
-            toolset: createAgentToolset({
-              cwd: session.workspacePath,
-              phase: session.mode,
-              modeController: {
-                getMode: () => session.mode,
-                setMode: (mode, reason) => setSessionMode(session, mode, reason),
-                availableModes: ['chat', 'planning', 'implementation'],
-              },
-            }),
-            apiKey: await authManager.resolveApiKey(session.provider),
-          });
+        const chatAgent = await llm.spawnAgent({
+          provider: session.provider,
+          model: session.model,
+          systemPrompt: buildChatSystemPrompt(session),
+          toolset: createAgentToolset({ cwd: session.workspacePath, phase: 'chat' }),
+          apiKey: await authManager.resolveApiKey(session.provider),
+        });
 
-          const chatPrompt = buildChatContinuationInput(thread);
-          const response = await chatAgent.complete(chatPrompt);
-          const text = response.text;
+        const chatPrompt = buildChatContinuationInput(thread);
+        const response = await chatAgent.complete(chatPrompt);
+        const text = response.text;
 
-          const assistantMessage: SessionChatMessage = {
-            role: 'assistant',
-            content: text,
-            time: now(),
-            usage: response.usage,
-          };
+        const assistantMessage: SessionChatMessage = {
+          role: 'assistant',
+          content: text,
+          time: now(),
+          usage: response.usage,
+        };
 
-          thread.messages.push(assistantMessage);
-          trimThreadMessages(thread);
-          thread.updatedAt = now();
-          session.updatedAt = now();
-          session.status = 'completed';
-          session.error = undefined;
-          session.llmStatus = createLlmStatus('completed', session.updatedAt, {
-            detail: 'Follow-up completed successfully.',
-            phase: modeToLlmPhase(session.mode),
-          });
-          uiStatePersistence.schedule();
+        thread.messages.push(assistantMessage);
+        trimThreadMessages(thread);
+        thread.updatedAt = now();
+        session.updatedAt = now();
+        uiStatePersistence.schedule();
 
-          broadcastWorkStream(workStreamClients, session.id, 'status', {
-            id: session.id,
-            status: session.status,
-            mode: session.mode,
-            llmStatus: session.llmStatus,
-            time: now(),
-          });
-
-          sendJson(res, 200, {
-            ok: true,
-            reply: assistantMessage,
-            messages: thread.messages.filter((entry) => entry.role !== 'system'),
-          });
-          return;
-        } catch (error) {
-          const messageText = toErrorMessage(error);
-          session.status = 'failed';
-          session.error = messageText;
-          session.updatedAt = now();
-          session.llmStatus = createLlmStatus('failed', session.updatedAt, {
-            detail: messageText,
-            phase: modeToLlmPhase(session.mode),
-          });
-          uiStatePersistence.schedule();
-
-          broadcastWorkStream(workStreamClients, session.id, 'status', {
-            id: session.id,
-            status: session.status,
-            mode: session.mode,
-            llmStatus: session.llmStatus,
-            time: now(),
-          });
-
-          sendJson(res, 500, { error: messageText });
-          return;
-        }
+        sendJson(res, 200, {
+          ok: true,
+          reply: assistantMessage,
+          messages: thread.messages.filter((entry) => entry.role !== 'system'),
+        });
+        return;
       }
 
       sendJson(res, 404, { error: 'Not found' });
@@ -1987,7 +1795,6 @@ function toPersistedSession(session: WorkSession): PersistedWorkSession {
     createdAt: session.createdAt,
     updatedAt: session.updatedAt,
     status: session.status,
-    mode: session.mode,
     llmStatus: session.llmStatus,
     taskStatus: { ...session.taskStatus },
     events: [...session.events],
@@ -2010,9 +1817,6 @@ function hydratePersistedSession(session: PersistedWorkSession): WorkSession {
   const resumedLlmStatus = session.llmStatus
     ? normalizeLlmStatus(session.llmStatus, resumedUpdatedAt)
     : deriveLlmStatusFromWorkState(resumedStatus, resumedUpdatedAt, resumedError);
-  const resumedMode = session.mode === 'chat' || session.mode === 'planning' || session.mode === 'implementation'
-    ? session.mode
-    : (resumedLlmStatus.phase ?? 'chat');
 
   return {
     ...session,
@@ -2022,7 +1826,6 @@ function hydratePersistedSession(session: PersistedWorkSession): WorkSession {
     worktreeBranch: asString(session.worktreeBranch) || undefined,
     agentGraph: normalizeSessionAgentGraphNodes(session.agentGraph),
     status: resumedStatus,
-    mode: resumedMode,
     llmStatus: resumedLlmStatus,
     error: resumedError,
     controller: new AbortController(),
@@ -2234,7 +2037,6 @@ function deriveLlmStatusFromDagEvent(event: DagEvent, updatedAt: string): Sessio
       return createLlmStatus('analyzing', updatedAt, {
         detail: 'Reviewing prompt and dependencies.',
         taskId: event.taskId,
-        phase: 'planning',
       });
     case 'task:stream-delta':
       return createLlmStatus('thinking', updatedAt, {
@@ -2246,25 +2048,21 @@ function deriveLlmStatusFromDagEvent(event: DagEvent, updatedAt: string): Sessio
       return createLlmStatus('planning', updatedAt, {
         detail: 'Plan drafted and saved.',
         taskId: event.taskId,
-        phase: 'planning',
       });
     case 'task:approval-requested':
       return createLlmStatus('awaiting-approval', updatedAt, {
         detail: 'Waiting for plan approval.',
         taskId: event.taskId,
-        phase: 'planning',
       });
     case 'task:approved':
       return createLlmStatus('implementing', updatedAt, {
         detail: 'Plan approved. Starting implementation.',
         taskId: event.taskId,
-        phase: 'implementation',
       });
     case 'task:implementation-attempt':
       return createLlmStatus('implementing', updatedAt, {
         detail: `Implementation attempt ${event.attempt}/${event.maxAttempts}.`,
         taskId: event.taskId,
-        phase: 'implementation',
       });
     case 'task:tool-call':
       if (event.status !== 'started') {
@@ -2279,19 +2077,16 @@ function deriveLlmStatusFromDagEvent(event: DagEvent, updatedAt: string): Sessio
       return createLlmStatus('validating', updatedAt, {
         detail: 'Running verification checks.',
         taskId: event.taskId,
-        phase: 'implementation',
       });
     case 'task:verification-failed':
       return createLlmStatus('retrying', updatedAt, {
         detail: `Verification failed on attempt ${event.attempt}.`,
         taskId: event.taskId,
-        phase: 'implementation',
       });
     case 'task:retrying':
       return createLlmStatus('retrying', updatedAt, {
         detail: `Retrying (${event.attempt}/${event.maxRetries}).`,
         taskId: event.taskId,
-        phase: 'implementation',
       });
     case 'task:completed':
     case 'graph:completed':
@@ -2735,7 +2530,6 @@ function serializeWorkSession(session: WorkSession): Record<string, unknown> {
     createdAt: session.createdAt,
     updatedAt: session.updatedAt,
     status: session.status,
-    mode: session.mode,
     llmStatus: session.llmStatus,
     taskStatus: session.taskStatus,
     events: session.events,
@@ -2956,19 +2750,71 @@ function createSessionChatThread(session: WorkSession, initialParts: SessionChat
   };
 }
 
+type SessionPromptPhase = 'chat' | 'planning' | 'implementation';
+
+function buildSessionSystemPrompt(session: WorkSession, phase: SessionPromptPhase): string {
+  const phaseRules =
+    phase === 'chat'
+      ? [
+          'Keep continuity with prior messages and avoid repeating completed work.',
+          'Use chat responses to clarify intent, summarize progress, and gather missing context.',
+          'When direct implementation is requested, proceed with concrete action-oriented steps.',
+        ]
+      : phase === 'planning'
+        ? [
+            'Produce a concrete implementation plan with explicit staged execution and validation steps.',
+            'Do not perform direct code edits in planning mode.',
+            'Keep todo and dependency graph state synchronized.',
+          ]
+        : [
+            'Execute approved work with minimal, scoped edits and verify outcomes.',
+            'Read before editing, and use tool output to adapt after failures.',
+            'Iterate until validation passes or a true blocker is reached.',
+          ];
+
+  const sections: PromptSection[] = [
+    {
+      name: PromptSectionName.Identity,
+      lines: [
+        `You are continuing an existing Orchestrace ${phase} session.`,
+        'Operate as an autonomous engineering agent with reliable, verifiable execution.',
+      ],
+    },
+    {
+      name: PromptSectionName.AutonomyContract,
+      lines: [
+        'Never claim actions completed unless confirmed by tool output.',
+        'If context is missing, gather it with available tools before deciding.',
+        'Prefer deterministic steps and explicit validation over speculation.',
+      ],
+    },
+    {
+      name: PromptSectionName.PhaseRules,
+      lines: phaseRules,
+    },
+    {
+      name: PromptSectionName.SessionContext,
+      lines: [
+        `Workspace: ${session.workspacePath}`,
+        `Provider/Model: ${session.provider}/${session.model}`,
+        `Original task prompt: ${session.prompt}`,
+      ],
+    },
+  ];
+
+  return renderPromptSections(sections);
+}
+
+function buildPlanningSystemPrompt(session: WorkSession): string {
+  return buildSessionSystemPrompt(session, 'planning');
+}
+
+function buildImplementationSystemPrompt(session: WorkSession): string {
+  return buildSessionSystemPrompt(session, 'implementation');
+}
+
 function buildChatSystemPrompt(session: WorkSession): string {
-  return [
-    'You are continuing an existing Orchestrace agent session.',
-    'Keep continuity with prior messages and avoid repeating completed work.',
-    'Use mode_get to inspect the current mode and mode_set to switch modes when user intent changes.',
-    'Switch to implementation mode before making code changes or running edit-capable tools.',
-    'Use planning mode when asked for architecture/plans without direct edits.',
-    'Use chat mode for conversational clarification and context gathering.',
-    `Workspace: ${session.workspacePath}`,
-    `Provider/Model: ${session.provider}/${session.model}`,
-    `Current mode: ${session.mode}`,
-    `Original task prompt: ${session.prompt}`,
-  ].join('\n');
+  return buildSessionSystemPrompt(session, 'chat');
 }
 
 function buildChatContinuationPrompt(thread: SessionChatThread): string {

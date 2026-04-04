@@ -52,6 +52,57 @@ export interface TaskNode {
   meta?: Record<string, unknown>;
 }
 
+export interface ReplayToolCallRecord {
+  time: string;
+  toolCallId: string;
+  toolName: string;
+  status: 'started' | 'result';
+  input?: string;
+  output?: string;
+  isError?: boolean;
+}
+
+export interface ReplayValidationCommandRecord {
+  command: string;
+  passed: boolean;
+  output: string;
+  durationMs: number;
+}
+
+export interface ReplayValidationRecord {
+  passed: boolean;
+  commandResults: ReplayValidationCommandRecord[];
+}
+
+export interface ReplayAttemptRecord {
+  phase: 'planning' | 'implementation';
+  attempt: number;
+  startedAt: string;
+  completedAt: string;
+  provider: string;
+  model: string;
+  reasoning?: 'minimal' | 'low' | 'medium' | 'high';
+  stopReason?: string;
+  endpoint?: string;
+  usage?: { input: number; output: number; cost: number };
+  textPreview?: string;
+  error?: string;
+  toolCalls: ReplayToolCallRecord[];
+  validation?: ReplayValidationRecord;
+}
+
+export interface TaskReplayRecord {
+  version: 1;
+  graphId: string;
+  taskId: string;
+  promptVersion: string;
+  policyVersion: string;
+  provider: string;
+  model: string;
+  reasoning?: 'minimal' | 'low' | 'medium' | 'high';
+  attempts: ReplayAttemptRecord[];
+}
+
 /** Result produced by a completed task. */
 export interface TaskOutput {
   taskId: string;
@@ -72,6 +123,8 @@ export interface TaskOutput {
   durationMs: number;
   /** Token usage from the LLM call. */
   usage?: { input: number; output: number; cost: number };
+  /** Structured replay metadata for deterministic diagnostics. */
+  replay?: TaskReplayRecord;
   /** Error message if failed. */
   error?: string;
   /** Number of retry attempts. */
@@ -105,6 +158,13 @@ export interface TaskState {
 export type DagEvent =
   | { type: 'task:planning'; taskId: string }
   | { type: 'task:stream-delta'; taskId: string; phase: 'planning' | 'implementation'; attempt: number; delta: string }
+  | {
+      type: 'task:replay-attempt';
+      taskId: string;
+      phase: 'planning' | 'implementation';
+      attempt: number;
+      record: ReplayAttemptRecord;
+    }
   | {
       type: 'task:tool-call';
       taskId: string;

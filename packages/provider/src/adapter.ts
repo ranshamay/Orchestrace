@@ -157,6 +157,10 @@ export class PiAiAdapter implements LlmAdapter {
           return {
             text,
             usage: hasUsage ? usage : undefined,
+            metadata: {
+              stopReason: response.stopReason,
+              endpoint: model.baseUrl,
+            },
           };
         }
 

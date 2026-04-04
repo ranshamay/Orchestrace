@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { appendFile, mkdir, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import type {
@@ -6,11 +7,15 @@ import type {
   TaskOutput,
   RunnerConfig,
   ModelConfig,
+  ReplayAttemptRecord,
+  ReplayToolCallRecord,
+  TaskReplayRecord,
 } from '../dag/types.js';
 import type { TaskExecutionContext } from '../dag/scheduler.js';
 import { runDag } from '../dag/scheduler.js';
 import { validate } from '../validation/validator.js';
-import type { LlmAdapter, LlmToolset } from '@orchestrace/provider';
+import { PromptSectionName, renderPromptSections, type PromptSection } from '../prompt/sections.js';
+import type { LlmAdapter, LlmToolCallEvent, LlmToolset } from '@orchestrace/provider';
 
 export interface PlanApprovalRequest {
   task: TaskNode;
@@ -52,7 +57,15 @@ export interface OrchestratorConfig extends RunnerConfig {
   maxImplementationAttempts?: number;
   /** Directory for per-agent token dumps. Defaults to <cwd>/.orchestrace/tokens. */
   tokenDumpDir?: string;
+  /** Replay prompt version tag persisted into task outputs. */
+  promptVersion?: string;
+  /** Replay policy version tag persisted into task outputs. */
+  policyVersion?: string;
 }
+
+type OrchestratorPhase = 'planning' | 'implementation';
+
+const DEFAULT_ORCHESTRATOR_PROMPT_VERSION = 'orchestrator-prompts-v2';
 
 /**
  * High-level orchestrator that wires the DAG scheduler to the LLM provider
@@ -78,10 +91,18 @@ export async function orchestrate(
     createToolset,
     maxImplementationAttempts,
     onEvent,
+    promptVersion,
+    policyVersion,
   } = config;
 
   const emit = onEvent ?? (() => {});
   const originalNodesById = new Map(graph.nodes.map((node) => [node.id, node]));
+  const resolvedPromptVersion = resolvePromptVersion({
+    explicitVersion: promptVersion,
+    systemPrompt,
+    planningSystemPrompt,
+    implementationSystemPrompt,
+  });
 
   // Scheduler retries are disabled because retries are managed inside the
   // plan -> approve -> implement -> verify loop for each task.
@@ -112,6 +133,17 @@ export async function orchestrate(
     const apiKey = await resolveApiKey?.(model.provider);
 
     const usage = { input: 0, output: 0, cost: 0 };
+    const replay: TaskReplayRecord = {
+      version: 1,
+      graphId: graph.id,
+      taskId: node.id,
+      promptVersion: resolvedPromptVersion,
+      policyVersion: policyVersion ?? 'default-v1',
+      provider: model.provider,
+      model: model.model,
+      reasoning: model.reasoning,
+      attempts: [],
+    };
     const taskTokenDumpDir = join(
       tokenDumpDir ?? join(cwd, '.orchestrace', 'tokens'),
       sanitizeForPath(graph.id),
@@ -127,7 +159,15 @@ export async function orchestrate(
       systemPrompt:
         planningSystemPrompt
         ?? systemPrompt
-        ?? 'You are a senior planning agent. Produce a deep, concrete implementation plan.',
+        ?? buildPhaseSystemPrompt({
+          phase: 'planning',
+          task: node,
+          graphId: graph.id,
+          cwd,
+          provider: model.provider,
+          model: model.model,
+          reasoning: model.reasoning,
+        }),
       signal: context.signal,
       toolset: createToolset?.({
         phase: 'planning',
@@ -144,31 +184,92 @@ export async function orchestrate(
     emit({ type: 'task:planning', taskId: node.id });
 
     const planningPrompt = buildPlanningPrompt(node, context.depOutputs);
-    const planningResult = await planningAgent.complete(planningPrompt, context.signal, {
-      onTextDelta: (delta) => {
-        emit({
-          type: 'task:stream-delta',
-          taskId: node.id,
-          phase: 'planning',
-          attempt: 1,
-          delta,
-        });
-      },
-      onToolCall: (event) => {
-        emit({
-          type: 'task:tool-call',
-          taskId: node.id,
-          phase: 'planning',
-          attempt: 1,
-          toolCallId: event.toolCallId,
-          toolName: event.toolName,
-          status: event.type,
-          input: event.arguments,
-          output: event.result,
-          isError: event.isError,
-        });
-      },
+    const planningToolCalls: ReplayToolCallRecord[] = [];
+    const planningAttemptStart = new Date().toISOString();
+    let planningResult;
+    try {
+      planningResult = await planningAgent.complete(planningPrompt, context.signal, {
+        onTextDelta: (delta) => {
+          emit({
+            type: 'task:stream-delta',
+            taskId: node.id,
+            phase: 'planning',
+            attempt: 1,
+            delta,
+          });
+        },
+        onToolCall: (event) => {
+          planningToolCalls.push(toReplayToolCallRecord(event));
+          emit({
+            type: 'task:tool-call',
+            taskId: node.id,
+            phase: 'planning',
+            attempt: 1,
+            toolCallId: event.toolCallId,
+            toolName: event.toolName,
+            status: event.type,
+            input: event.arguments,
+            output: event.result,
+            isError: event.isError,
+          });
+        },
+      });
+    } catch (error) {
+      const planningError = error instanceof Error ? error.message : String(error);
+      const failedPlanningAttempt: ReplayAttemptRecord = {
+        phase: 'planning',
+        attempt: 1,
+        startedAt: planningAttemptStart,
+        completedAt: new Date().toISOString(),
+        provider: model.provider,
+        model: model.model,
+        reasoning: model.reasoning,
+        error: planningError,
+        toolCalls: planningToolCalls,
+      };
+      replay.attempts.push(failedPlanningAttempt);
+      emit({
+        type: 'task:replay-attempt',
+        taskId: node.id,
+        phase: 'planning',
+        attempt: 1,
+        record: failedPlanningAttempt,
+      });
+      return {
+        taskId: node.id,
+        status: 'failed',
+        tokenDumpDir: taskTokenDumpDir,
+        error: planningError,
+        durationMs: Date.now() - start,
+        retries: 0,
+        usage,
+        replay,
+      };
+    }
+
+    const completedPlanningAttempt: ReplayAttemptRecord = {
+      phase: 'planning',
+      attempt: 1,
+      startedAt: planningAttemptStart,
+      completedAt: new Date().toISOString(),
+      provider: model.provider,
+      model: model.model,
+      reasoning: model.reasoning,
+      stopReason: planningResult.metadata?.stopReason,
+      endpoint: planningResult.metadata?.endpoint,
+      usage: planningResult.usage,
+      textPreview: createTextPreview(planningResult.text),
+      toolCalls: planningToolCalls,
+    };
+    replay.attempts.push(completedPlanningAttempt);
+    emit({
+      type: 'task:replay-attempt',
+      taskId: node.id,
+      phase: 'planning',
+      attempt: 1,
+      record: completedPlanningAttempt,
     });
+
     mergeUsage(usage, planningResult.usage);
     await appendTokenDump(planningTokenDumpPath, {
       graphId: graph.id,
@@ -202,6 +303,7 @@ export async function orchestrate(
           durationMs: Date.now() - start,
           retries: 0,
           usage,
+          replay,
         };
       }
 
@@ -222,6 +324,7 @@ export async function orchestrate(
           durationMs: Date.now() - start,
           retries: 0,
           usage,
+          replay,
         };
       }
 
@@ -235,7 +338,15 @@ export async function orchestrate(
       systemPrompt:
         implementationSystemPrompt
         ?? systemPrompt
-        ?? 'You are a coding agent. Implement the approved plan exactly and fix validation failures iteratively.',
+        ?? buildPhaseSystemPrompt({
+          phase: 'implementation',
+          task: node,
+          graphId: graph.id,
+          cwd,
+          provider: model.provider,
+          model: model.model,
+          reasoning: model.reasoning,
+        }),
       signal: context.signal,
       toolset: createToolset?.({
         phase: 'implementation',
@@ -276,31 +387,96 @@ export async function orchestrate(
         previousValidationError: lastValidationError,
       });
 
-      const implResult = await implAgent.complete(implementationPrompt, context.signal, {
-        onTextDelta: (delta) => {
-          emit({
-            type: 'task:stream-delta',
-            taskId: node.id,
-            phase: 'implementation',
-            attempt,
-            delta,
-          });
-        },
-        onToolCall: (event) => {
-          emit({
-            type: 'task:tool-call',
-            taskId: node.id,
-            phase: 'implementation',
-            attempt,
-            toolCallId: event.toolCallId,
-            toolName: event.toolName,
-            status: event.type,
-            input: event.arguments,
-            output: event.result,
-            isError: event.isError,
-          });
-        },
+      const implementationToolCalls: ReplayToolCallRecord[] = [];
+      const implementationAttemptStart = new Date().toISOString();
+      let implResult;
+      try {
+        implResult = await implAgent.complete(implementationPrompt, context.signal, {
+          onTextDelta: (delta) => {
+            emit({
+              type: 'task:stream-delta',
+              taskId: node.id,
+              phase: 'implementation',
+              attempt,
+              delta,
+            });
+          },
+          onToolCall: (event) => {
+            implementationToolCalls.push(toReplayToolCallRecord(event));
+            emit({
+              type: 'task:tool-call',
+              taskId: node.id,
+              phase: 'implementation',
+              attempt,
+              toolCallId: event.toolCallId,
+              toolName: event.toolName,
+              status: event.type,
+              input: event.arguments,
+              output: event.result,
+              isError: event.isError,
+            });
+          },
+        });
+      } catch (error) {
+        const implementationError = error instanceof Error ? error.message : String(error);
+        const failedImplementationAttempt: ReplayAttemptRecord = {
+          phase: 'implementation',
+          attempt,
+          startedAt: implementationAttemptStart,
+          completedAt: new Date().toISOString(),
+          provider: model.provider,
+          model: model.model,
+          reasoning: model.reasoning,
+          error: implementationError,
+          toolCalls: implementationToolCalls,
+        };
+        replay.attempts.push(failedImplementationAttempt);
+        emit({
+          type: 'task:replay-attempt',
+          taskId: node.id,
+          phase: 'implementation',
+          attempt,
+          record: failedImplementationAttempt,
+        });
+
+        return {
+          taskId: node.id,
+          status: 'failed',
+          plan: planningResult.text,
+          planPath: persistedPlanPath,
+          tokenDumpDir: taskTokenDumpDir,
+          response: lastResponse,
+          error: implementationError,
+          durationMs: Date.now() - start,
+          retries: attempt - 1,
+          usage,
+          replay,
+        };
+      }
+
+      const completedImplementationAttempt: ReplayAttemptRecord = {
+        phase: 'implementation',
+        attempt,
+        startedAt: implementationAttemptStart,
+        completedAt: new Date().toISOString(),
+        provider: model.provider,
+        model: model.model,
+        reasoning: model.reasoning,
+        stopReason: implResult.metadata?.stopReason,
+        endpoint: implResult.metadata?.endpoint,
+        usage: implResult.usage,
+        textPreview: createTextPreview(implResult.text),
+        toolCalls: implementationToolCalls,
+      };
+      replay.attempts.push(completedImplementationAttempt);
+      emit({
+        type: 'task:replay-attempt',
+        taskId: node.id,
+        phase: 'implementation',
+        attempt,
+        record: completedImplementationAttempt,
       });
+
       mergeUsage(usage, implResult.usage);
       await appendTokenDump(implementationTokenDumpPath, {
         graphId: graph.id,
@@ -324,6 +500,7 @@ export async function orchestrate(
         durationMs: Date.now() - start,
         retries: attempt - 1,
         usage,
+        replay,
       };
 
       if (!node.validation) {
@@ -335,6 +512,15 @@ export async function orchestrate(
       output.validationResults = validationResults;
       lastValidationResults = validationResults;
       const allPassed = validationResults.every((result) => result.passed);
+      completedImplementationAttempt.validation = {
+        passed: allPassed,
+        commandResults: validationResults.map((result) => ({
+          command: result.command,
+          passed: result.passed,
+          output: result.output,
+          durationMs: result.durationMs,
+        })),
+      };
 
       if (allPassed) {
         return output;
@@ -365,6 +551,7 @@ export async function orchestrate(
       durationMs: Date.now() - start,
       retries: maxAttempts - 1,
       usage,
+      replay,
     };
   };
 
@@ -407,32 +594,52 @@ async function appendTokenDump(
 
 function buildPlanningPrompt(node: TaskNode, depOutputs: Map<string, TaskOutput>): string {
   const depContext = buildDependencyContext(depOutputs);
-  return [
-    'Create a deep implementation plan for the following task.',
-    'Optimize for maximum safe concurrency and explicit multi-stage execution.',
-    'If a tool call fails, use the error details to correct arguments and retry instead of aborting.',
-    'You MUST use coordination tools during planning:',
-    '- todo_set (required) to create a concrete todo list',
-    '- todo_update to track progress changes',
-    '- agent_graph_set (required) to define sub-agent dependency graph',
-    '',
-    'Your plan must include:',
-    '1) assumptions and constraints',
-    '2) multi-stage execution waves (stage 1..N)',
-    '3) per-stage concurrent tasks and dependency boundaries',
-    '4) files likely to change',
-    '5) verification strategy with explicit commands',
-    '6) rollback/risk notes',
-    '',
-    `Task ID: ${node.id}`,
-    `Task Name: ${node.name}`,
-    `Task Type: ${node.type}`,
-    '',
-    'Task Prompt:',
-    node.prompt,
-    '',
-    depContext,
-  ].join('\n');
+  return renderPromptSections([
+    {
+      name: PromptSectionName.Goal,
+      lines: [
+        'Create a deep implementation plan for the following task.',
+        'Optimize for maximum safe concurrency and explicit multi-stage execution.',
+      ],
+    },
+    {
+      name: PromptSectionName.Autonomy,
+      lines: [
+        'If a tool call fails, use the error details to correct arguments and retry instead of aborting.',
+        'You MUST use coordination tools during planning:',
+        '- todo_set (required) to create a concrete todo list',
+        '- todo_update to track progress changes',
+        '- agent_graph_set (required) to define sub-agent dependency graph',
+      ],
+    },
+    {
+      name: PromptSectionName.OutputContract,
+      lines: [
+        'Your plan must include:',
+        '1) assumptions and constraints',
+        '2) multi-stage execution waves (stage 1..N)',
+        '3) per-stage concurrent tasks and dependency boundaries',
+        '4) files likely to change',
+        '5) verification strategy with explicit commands',
+        '6) rollback/risk notes',
+      ],
+    },
+    {
+      name: PromptSectionName.TaskContext,
+      lines: [
+        `Task ID: ${node.id}`,
+        `Task Name: ${node.name}`,
+        `Task Type: ${node.type}`,
+        '',
+        'Task Prompt:',
+        node.prompt,
+      ],
+    },
+    {
+      name: PromptSectionName.DependencyContext,
+      lines: [depContext],
+    },
+  ]);
 }
 
 function buildImplementationPrompt(params: {
@@ -465,29 +672,115 @@ function buildImplementationPrompt(params: {
         ].join('\n')
       : '';
 
-  return [
-    'Execute the approved plan and implement the requested changes.',
-    'You must satisfy validation criteria before considering the task complete.',
-    'Operate in multi-stage waves and maximize safe concurrency.',
-    'If a tool call fails, read the error details, adjust arguments, and retry the tool call.',
-    'Before coding, read todo_get and follow the todo list strictly.',
-    'Update todo states using todo_update as you progress.',
-    'Read agent_graph_get and spawn dependent sub-agents with subagent_spawn when useful.',
-    'Keep sub-agent outputs concise and integrate them into the main implementation.',
-    '',
-    `Attempt: ${attempt}`,
-    `Task ID: ${node.id}`,
-    `Task Name: ${node.name}`,
-    '',
-    'Original task prompt:',
-    node.prompt,
-    '',
-    'Approved plan:',
-    approvedPlan,
-    '',
-    depContext,
-    retryContext,
-  ].join('\n');
+  const sections: PromptSection[] = [
+    {
+      name: PromptSectionName.Goal,
+      lines: [
+        'Execute the approved plan and implement the requested changes.',
+        'You must satisfy validation criteria before considering the task complete.',
+      ],
+    },
+    {
+      name: PromptSectionName.Autonomy,
+      lines: [
+        'Operate in multi-stage waves and maximize safe concurrency.',
+        'If a tool call fails, read the error details, adjust arguments, and retry the tool call.',
+        'Before coding, read todo_get and follow the todo list strictly.',
+        'Update todo states using todo_update as you progress.',
+        'Read agent_graph_get and spawn dependent sub-agents with subagent_spawn when useful.',
+        'Keep sub-agent outputs concise and integrate them into the main implementation.',
+      ],
+    },
+    {
+      name: PromptSectionName.TaskContext,
+      lines: [
+        `Attempt: ${attempt}`,
+        `Task ID: ${node.id}`,
+        `Task Name: ${node.name}`,
+        '',
+        'Original task prompt:',
+        node.prompt,
+      ],
+    },
+    {
+      name: PromptSectionName.ApprovedPlan,
+      lines: [approvedPlan],
+    },
+    {
+      name: PromptSectionName.DependencyContext,
+      lines: [depContext],
+    },
+  ];
+
+  if (retryContext) {
+    sections.push({
+      name: PromptSectionName.RetryContext,
+      lines: [retryContext],
+    });
+  }
+
+  return renderPromptSections(sections);
+}
+
+function buildPhaseSystemPrompt(params: {
+  phase: OrchestratorPhase;
+  task: TaskNode;
+  graphId: string;
+  cwd: string;
+  provider: string;
+  model: string;
+  reasoning?: 'minimal' | 'low' | 'medium' | 'high';
+}): string {
+  const { phase, task, graphId, cwd, provider, model, reasoning } = params;
+
+  const phaseRules =
+    phase === 'planning'
+      ? [
+          'Produce a concrete, execution-ready plan before implementation.',
+          'Do not edit files in planning mode.',
+          'Keep todo and dependency graph state synchronized as you reason.',
+          'Return a plan that another agent could execute deterministically.',
+        ]
+      : [
+          'Execute the approved plan and deliver validated code changes.',
+          'Read relevant files before editing and keep edits minimal in scope.',
+          'Run verification and iterate until checks pass or a true blocker is reached.',
+          'When blocked, report the blocker clearly and propose the best next step.',
+        ];
+
+  return renderPromptSections([
+    {
+      name: PromptSectionName.Identity,
+      lines: [
+        `You are an autonomous Orchestrace ${phase} agent for software tasks.`,
+        'Operate safely, truthfully, and with high execution reliability.',
+      ],
+    },
+    {
+      name: PromptSectionName.AutonomyContract,
+      lines: [
+        'Never claim an action completed unless tool output confirms it.',
+        'If context is missing, gather it with available tools before deciding.',
+        'Prefer deterministic steps over speculative changes.',
+      ],
+    },
+    {
+      name: PromptSectionName.PhaseRules,
+      lines: phaseRules,
+    },
+    {
+      name: PromptSectionName.ExecutionContext,
+      lines: [
+        `Graph ID: ${graphId}`,
+        `Task ID: ${task.id}`,
+        `Task Name: ${task.name}`,
+        `Task Type: ${task.type}`,
+        `Workspace: ${cwd}`,
+        `Model: ${provider}/${model}`,
+        `Reasoning: ${reasoning ?? 'default'}`,
+      ],
+    },
+  ]);
 }
 
 function buildDependencyContext(depOutputs: Map<string, TaskOutput>): string {
@@ -548,4 +841,51 @@ function mergeUsage(
   target.input += incoming.input;
   target.output += incoming.output;
   target.cost += incoming.cost;
+}
+
+function toReplayToolCallRecord(event: LlmToolCallEvent): ReplayToolCallRecord {
+  return {
+    time: new Date().toISOString(),
+    toolCallId: event.toolCallId,
+    toolName: event.toolName,
+    status: event.type,
+    input: event.arguments,
+    output: event.result,
+    isError: event.isError,
+  };
+}
+
+function createTextPreview(text: string, maxChars = 600): string {
+  const compact = text.replace(/\s+/g, ' ').trim();
+  if (!compact) {
+    return '';
+  }
+
+  return compact.length > maxChars ? `${compact.slice(0, maxChars - 3)}...` : compact;
+}
+
+function resolvePromptVersion(params: {
+  explicitVersion?: string;
+  systemPrompt?: string;
+  planningSystemPrompt?: string;
+  implementationSystemPrompt?: string;
+}): string {
+  if (params.explicitVersion && params.explicitVersion.trim().length > 0) {
+    return params.explicitVersion.trim();
+  }
+
+  const customPromptSource = [
+    params.systemPrompt,
+    params.planningSystemPrompt,
+    params.implementationSystemPrompt,
+  ]
+    .filter((value): value is string => Boolean(value && value.trim().length > 0))
+    .join('\n\n---\n\n');
+
+  if (!customPromptSource) {
+    return DEFAULT_ORCHESTRATOR_PROMPT_VERSION;
+  }
+
+  const fingerprint = createHash('sha256').update(customPromptSource).digest('hex').slice(0, 12);
+  return `custom-system-prompts-${fingerprint}`;
 }

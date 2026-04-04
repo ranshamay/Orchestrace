@@ -3,9 +3,10 @@ import type { AgentToolPermissions, AgentToolPhase, AgentToolsetOptions, Registe
 import { createFilesystemTools } from './fs-tools.js';
 import { createCommandTools } from './command-tools.js';
 import { createCoordinationTools } from './coordination-tools.js';
-import { resolveAgentToolPermissions } from './policy.js';
+import { DEFAULT_AGENT_TOOL_POLICY_VERSION, resolveAgentToolPermissions } from './policy.js';
 
 export type { AgentModeController, AgentToolPhase, AgentToolPermissions, AgentToolsetOptions } from './types.js';
+export { DEFAULT_AGENT_TOOL_POLICY_VERSION } from './policy.js';
 
 export interface AgentToolDescriptor {
   name: string;

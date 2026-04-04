@@ -219,6 +219,39 @@ function toolOutputSummary(payload: string, isError: boolean): string {
   return compactInline(payload, 260);
 }
 
+function formatToolPayloadForDisplay(payload: string, maxChars = 6000): string {
+  const raw = payload.trim();
+  if (!raw) {
+    return '(empty)';
+  }
+
+  let formatted = raw;
+  if (raw.startsWith('{') || raw.startsWith('[')) {
+    try {
+      formatted = JSON.stringify(JSON.parse(raw), null, 2);
+    } catch {
+      formatted = raw;
+    }
+  }
+
+  return formatted.length > maxChars ? `${formatted.slice(0, maxChars)}\n... (truncated)` : formatted;
+}
+
+function renderToolEventContent(params: {
+  direction: 'input' | 'output';
+  toolName: string;
+  payload: string;
+  isError: boolean;
+}): string {
+  const summary = params.direction === 'input'
+    ? toolInputSummary(params.toolName, params.payload)
+    : toolOutputSummary(params.payload, params.isError);
+  const displayPayload = formatToolPayloadForDisplay(params.payload);
+  const codeLanguage = displayPayload.startsWith('{') || displayPayload.startsWith('[') ? 'json' : 'text';
+
+  return `${summary}\n\n\`\`\`${codeLanguage}\n${displayPayload}\n\`\`\``;
+}
+
 function formatTimelineEvent(event: { type: string; message: string; taskId?: string }): Pick<TimelineItem, 'title' | 'subtitle' | 'content' | 'tone'> {
   const clean = stripRunTag(event.message);
 
@@ -235,7 +268,12 @@ function formatTimelineEvent(event: { type: string; message: string; taskId?: st
           title: `Using ${toolName}`,
           subtitle: 'Tool input',
           tone: 'tool',
-          content: toolInputSummary(toolName, payload),
+          content: renderToolEventContent({
+            direction: 'input',
+            toolName,
+            payload,
+            isError,
+          }),
         };
       }
 
@@ -243,7 +281,12 @@ function formatTimelineEvent(event: { type: string; message: string; taskId?: st
         title: `${toolName} result`,
         subtitle: isError ? 'Tool error' : 'Tool output',
         tone: isError ? 'error' : 'tool',
-        content: toolOutputSummary(payload, isError),
+        content: renderToolEventContent({
+          direction: 'output',
+          toolName,
+          payload,
+          isError,
+        }),
       };
     }
   }
@@ -2101,8 +2144,9 @@ export default function App() {
                       {item.kind === 'event' && item.subtitle && (
                         <div className="mb-1 text-[11px] font-medium opacity-80">{item.subtitle}</div>
                       )}
-                      {item.kind === 'event' && (
-                        <div className={`whitespace-pre-wrap break-words ${item.tone === 'tool' ? 'font-mono text-[12px]' : ''}`}>{item.content}</div>
+                      {item.kind === 'event' && item.tone === 'tool' && <MarkdownMessage content={item.content} dark={isDark} />}
+                      {item.kind === 'event' && item.tone !== 'tool' && (
+                        <div className="whitespace-pre-wrap break-words">{item.content}</div>
                       )}
                       {item.kind === 'chat' && item.role === 'assistant' && <MarkdownMessage content={item.content} dark={isDark} />}
                       {item.kind === 'chat' && item.role === 'user' && (

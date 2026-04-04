@@ -1,8 +1,14 @@
+export interface LlmResultMetadata {
+  stopReason?: string;
+  endpoint?: string;
+}
+
 /** Result from an LLM completion call. */
 export interface LlmResult {
   text: string;
   filesChanged?: string[];
   usage?: { input: number; output: number; cost: number };
+  metadata?: LlmResultMetadata;
 }
 
 export interface LlmTextPart {

@@ -15,6 +15,7 @@ export type {
 	LlmToolset,
 	LlmRequest,
 	LlmResult,
+	LlmResultMetadata,
 	SpawnAgentRequest,
 } from './types.js';
 export type {

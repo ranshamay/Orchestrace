@@ -1,17 +1,92 @@
 import { execFile } from 'node:child_process';
-import { readFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { config as loadDotEnv } from 'dotenv';
 import { orchestrate } from '@orchestrace/core';
-import type { TaskGraph, DagEvent, PlanApprovalRequest } from '@orchestrace/core';
+import type { TaskGraph, DagEvent, PlanApprovalRequest, TaskOutput } from '@orchestrace/core';
 import { PiAiAdapter, ProviderAuthManager } from '@orchestrace/provider';
 import type { ProviderInfo } from '@orchestrace/provider';
-import { createAgentToolset } from '@orchestrace/tools';
+import { DEFAULT_AGENT_TOOL_POLICY_VERSION, createAgentToolset } from '@orchestrace/tools';
 import { createInterface } from 'node:readline/promises';
 import { promisify } from 'node:util';
 import { startUiServer } from './ui-server.js';
 import { WorkspaceManager } from './workspace-manager.js';
 import type { WorkspaceEntry } from './workspace-manager.js';
+
+interface ReplayRunTaskSummary {
+  taskId: string;
+  status: string;
+  file: string;
+}
+
+interface ReplayRunIndex {
+  version: number;
+  createdAt?: string;
+  runId: string;
+  graphId?: string;
+  graphName?: string;
+  taskCount?: number;
+  tasks: ReplayRunTaskSummary[];
+}
+
+interface ReplayTaskAttempt {
+  phase: 'planning' | 'implementation';
+  attempt: number;
+  startedAt: string;
+  completedAt: string;
+  provider: string;
+  model: string;
+  reasoning?: 'minimal' | 'low' | 'medium' | 'high';
+  stopReason?: string;
+  endpoint?: string;
+  usage?: { input: number; output: number; cost: number };
+  textPreview?: string;
+  error?: string;
+  toolCalls?: Array<{
+    time: string;
+    toolCallId: string;
+    toolName: string;
+    status: 'started' | 'result';
+    input?: string;
+    output?: string;
+    isError?: boolean;
+  }>;
+  validation?: {
+    passed: boolean;
+    commandResults: Array<{
+      command: string;
+      passed: boolean;
+      output: string;
+      durationMs: number;
+    }>;
+  };
+}
+
+interface ReplayTaskArtifact {
+  version: number;
+  createdAt?: string;
+  runId: string;
+  graphId: string;
+  graphName?: string;
+  taskId: string;
+  taskName?: string;
+  taskType?: string;
+  status: 'completed' | 'failed';
+  durationMs: number;
+  retries: number;
+  usage?: { input: number; output: number; cost: number };
+  error?: string;
+  responsePreview?: string;
+  replay?: {
+    version: number;
+    promptVersion: string;
+    policyVersion: string;
+    provider: string;
+    model: string;
+    reasoning?: 'minimal' | 'low' | 'medium' | 'high';
+    attempts: ReplayTaskAttempt[];
+  };
+}
 
 const execFileAsync = promisify(execFile);
 loadDotEnv({ quiet: true });
@@ -26,6 +101,8 @@ orchestrace — DAG-based agent orchestration
 Usage:
   orchestrace run <plan.json>   Execute a task graph from a JSON plan file
   orchestrace task <prompt>     Run a single prompt task using the generalized flow
+  orchestrace replay list [--limit 20]   List persisted replay runs
+  orchestrace replay show <runId> [--task <taskId>]  Show persisted replay artifacts
   orchestrace workspace         Manage registered workspaces and active workspace
   orchestrace ui [--port 4310]  Start local dashboard for status, auth, and controls
   orchestrace auth              Interactive provider selection + authentication
@@ -82,6 +159,8 @@ Environment variables:
   ORCHESTRACE_MAX_PARALLEL       Max concurrent tasks (default: 4)
   ORCHESTRACE_AUTO_APPROVE       true/false plan auto-approval
   ORCHESTRACE_AUTO_PUSH          true/false auto git commit + push
+  ORCHESTRACE_PROMPT_VERSION     Replay prompt-version override
+  ORCHESTRACE_POLICY_VERSION     Replay policy-version override
   ORCHESTRACE_VERIFY_COMMANDS    Semicolon-separated validation commands
 `);
     process.exit(0);
@@ -107,6 +186,15 @@ Environment variables:
 
   if (command === 'workspace') {
     const code = await runWorkspaceCommand(args.slice(1));
+    process.exit(code);
+  }
+
+  if (command === 'replay') {
+    const manager = new WorkspaceManager(process.cwd());
+    const workspace = workspaceOverride
+      ? await manager.selectWorkspace(workspaceOverride)
+      : await manager.getActiveWorkspace();
+    const code = await runReplayCommand(args.slice(1), workspace.path);
     process.exit(code);
   }
 
@@ -266,6 +354,8 @@ async function runGraph(
     llm,
     cwd,
     planOutputDir: resolve(cwd, '.orchestrace', 'plans'),
+    promptVersion: process.env.ORCHESTRACE_PROMPT_VERSION,
+    policyVersion: process.env.ORCHESTRACE_POLICY_VERSION ?? DEFAULT_AGENT_TOOL_POLICY_VERSION,
     maxParallel,
     defaultModel: { provider, model },
     onEvent,
@@ -303,6 +393,15 @@ async function runGraph(
     }),
   });
 
+  const runId = createRunId(graph.id);
+  const replayDir = await persistRunArtifacts({
+    cwd,
+    graph,
+    outputs,
+    runId,
+  });
+  console.log(`Replay artifacts: ${replayDir}`);
+
   let totalTokens = 0;
   let totalCost = 0;
   for (const output of outputs.values()) {
@@ -331,6 +430,94 @@ function previewStreamDelta(delta: string): string {
   }
 
   return compact.length > 100 ? `${compact.slice(0, 97)}...` : compact;
+}
+
+function createRunId(graphId: string): string {
+  const ts = new Date().toISOString().replace(/[:.]/g, '-');
+  const suffix = Math.random().toString(36).slice(2, 8);
+  return `${sanitizeForPath(graphId)}_${ts}_${suffix}`;
+}
+
+async function persistRunArtifacts(params: {
+  cwd: string;
+  graph: TaskGraph;
+  outputs: Map<string, TaskOutput>;
+  runId: string;
+}): Promise<string> {
+  const outDir = resolve(params.cwd, '.orchestrace', 'runs', params.runId);
+  await mkdir(outDir, { recursive: true });
+
+  const nodesById = new Map(params.graph.nodes.map((node) => [node.id, node]));
+  const taskSummaries: Array<{ taskId: string; status: string; file: string }> = [];
+
+  for (const output of params.outputs.values()) {
+    const node = nodesById.get(output.taskId);
+    const replay = output.replay ?? {
+      version: 1 as const,
+      graphId: params.graph.id,
+      taskId: output.taskId,
+      promptVersion: 'unknown',
+      policyVersion: 'unknown',
+      provider: 'unknown',
+      model: 'unknown',
+      attempts: [],
+    };
+
+    const payload = {
+      version: 1,
+      createdAt: new Date().toISOString(),
+      runId: params.runId,
+      graphId: params.graph.id,
+      graphName: params.graph.name,
+      taskId: output.taskId,
+      taskName: node?.name,
+      taskType: node?.type,
+      status: output.status,
+      durationMs: output.durationMs,
+      retries: output.retries,
+      usage: output.usage,
+      error: output.error,
+      planPath: output.planPath,
+      tokenDumpDir: output.tokenDumpDir,
+      responsePreview: previewText(output.response),
+      validationResults: output.validationResults,
+      replay,
+    };
+
+    const filename = `${sanitizeForPath(output.taskId)}.json`;
+    const filePath = resolve(outDir, filename);
+    await writeFile(filePath, `${JSON.stringify(payload, null, 2)}\n`, 'utf-8');
+    taskSummaries.push({ taskId: output.taskId, status: output.status, file: filename });
+  }
+
+  const summary = {
+    version: 1,
+    createdAt: new Date().toISOString(),
+    runId: params.runId,
+    graphId: params.graph.id,
+    graphName: params.graph.name,
+    taskCount: taskSummaries.length,
+    tasks: taskSummaries,
+  };
+  await writeFile(resolve(outDir, 'index.json'), `${JSON.stringify(summary, null, 2)}\n`, 'utf-8');
+  return outDir;
+}
+
+function sanitizeForPath(input: string): string {
+  return input.replace(/[^a-zA-Z0-9_-]/g, '_');
+}
+
+function previewText(text: string | undefined, maxChars = 1500): string | undefined {
+  if (!text) {
+    return undefined;
+  }
+
+  const compact = text.replace(/\s+/g, ' ').trim();
+  if (!compact) {
+    return undefined;
+  }
+
+  return compact.length > maxChars ? `${compact.slice(0, maxChars - 3)}...` : compact;
 }
 
 function buildSingleTaskGraph(prompt: string): TaskGraph {
@@ -587,6 +774,203 @@ async function runWorkspaceCommand(args: string[]): Promise<number> {
   console.error('  orchestrace workspace select <id|name|path>');
   console.error('  orchestrace workspace remove <id|name|path>');
   return 1;
+}
+
+async function runReplayCommand(args: string[], workspacePath: string): Promise<number> {
+  const firstArg = args[0];
+  const subcommand = firstArg === 'show' || firstArg === 'list' ? firstArg : undefined;
+  if (subcommand === 'list') {
+    const limit = parsePositiveInt(getFlagValue(args, '--limit')) ?? 20;
+    return listReplayRuns(workspacePath, limit);
+  }
+
+  const runId = subcommand ? args[1] : firstArg;
+  const taskId = getFlagValue(args, '--task');
+
+  if (!runId) {
+    console.error('Usage: orchestrace replay show <runId> [--task <taskId>]');
+    return 1;
+  }
+
+  if (!isSafePathSegment(runId)) {
+    console.error(`Invalid runId: ${runId}`);
+    return 1;
+  }
+
+  const runDir = resolve(workspacePath, '.orchestrace', 'runs', runId);
+  const indexPath = resolve(runDir, 'index.json');
+
+  let index: ReplayRunIndex;
+  try {
+    const raw = await readFile(indexPath, 'utf-8');
+    index = JSON.parse(raw) as ReplayRunIndex;
+  } catch {
+    console.error(`Run artifact not found: ${runId}`);
+    console.error(`Expected file: ${indexPath}`);
+    return 1;
+  }
+
+  if (!taskId) {
+    console.log(`\nRun: ${index.runId}`);
+    console.log(`Graph: ${index.graphName ?? '(unknown)'} (${index.graphId ?? '(unknown)'})`);
+    console.log(`Created: ${index.createdAt ?? '(unknown)'}`);
+    console.log(`Tasks: ${(index.tasks ?? []).length}`);
+    for (const task of index.tasks ?? []) {
+      console.log(`- ${task.taskId.padEnd(24)} status=${task.status.padEnd(9)} file=${task.file}`);
+    }
+    console.log('\nUse --task <taskId> to inspect per-attempt replay details.');
+    return 0;
+  }
+
+  const taskSummary = (index.tasks ?? []).find((entry) => entry.taskId === taskId);
+  if (!taskSummary) {
+    const available = (index.tasks ?? []).map((entry) => entry.taskId).join(', ') || '(none)';
+    console.error(`Task not found in run ${runId}: ${taskId}`);
+    console.error(`Available tasks: ${available}`);
+    return 1;
+  }
+
+  const taskPath = resolve(runDir, taskSummary.file);
+  let taskArtifact: ReplayTaskArtifact;
+  try {
+    const raw = await readFile(taskPath, 'utf-8');
+    taskArtifact = JSON.parse(raw) as ReplayTaskArtifact;
+  } catch {
+    console.error(`Task artifact file is missing or invalid: ${taskPath}`);
+    return 1;
+  }
+
+  console.log(`\nRun: ${taskArtifact.runId}`);
+  console.log(`Task: ${taskArtifact.taskId} (${taskArtifact.taskName ?? 'unnamed'})`);
+  console.log(`Type: ${taskArtifact.taskType ?? 'unknown'} | Status: ${taskArtifact.status}`);
+  console.log(`Duration: ${taskArtifact.durationMs}ms | Retries: ${taskArtifact.retries}`);
+  console.log(`Usage: ${formatUsage(taskArtifact.usage)}`);
+  if (taskArtifact.error) {
+    console.log(`Error: ${taskArtifact.error}`);
+  }
+
+  const replay = taskArtifact.replay;
+  if (!replay) {
+    console.log('\nNo replay payload is available for this task artifact.');
+    return 0;
+  }
+
+  console.log(`\nReplay:`);
+  console.log(`- promptVersion: ${replay.promptVersion}`);
+  console.log(`- policyVersion: ${replay.policyVersion}`);
+  console.log(`- model: ${replay.provider}/${replay.model}${replay.reasoning ? ` (${replay.reasoning})` : ''}`);
+  console.log(`- attempts: ${replay.attempts.length}`);
+
+  for (const attempt of replay.attempts) {
+    const toolCalls = attempt.toolCalls?.length ?? 0;
+    const validation = attempt.validation
+      ? ` validation=${attempt.validation.passed ? 'pass' : 'fail'}`
+      : '';
+    const stop = attempt.stopReason ? ` stop=${attempt.stopReason}` : '';
+    const error = attempt.error ? ` error=${attempt.error}` : '';
+    console.log(
+      `  - ${attempt.phase}#${attempt.attempt} ${attempt.provider}/${attempt.model}${stop}${validation} tools=${toolCalls}${error}`,
+    );
+    if (attempt.usage) {
+      console.log(`    usage: ${formatUsage(attempt.usage)}`);
+    }
+    if (attempt.textPreview) {
+      console.log(`    preview: ${attempt.textPreview}`);
+    }
+    if (attempt.endpoint) {
+      console.log(`    endpoint: ${attempt.endpoint}`);
+    }
+  }
+
+  return 0;
+}
+
+async function listReplayRuns(workspacePath: string, limit: number): Promise<number> {
+  const runsRoot = resolve(workspacePath, '.orchestrace', 'runs');
+
+  let entries;
+  try {
+    entries = await readdir(runsRoot, { withFileTypes: true });
+  } catch {
+    console.log('No replay runs found.');
+    console.log(`Expected directory: ${runsRoot}`);
+    return 0;
+  }
+
+  const runs: Array<{ runId: string; createdAt: string; graphName: string; taskCount: number }> = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory()) {
+      continue;
+    }
+
+    const runId = entry.name;
+    if (!isSafePathSegment(runId)) {
+      continue;
+    }
+
+    const indexPath = resolve(runsRoot, runId, 'index.json');
+    try {
+      const raw = await readFile(indexPath, 'utf-8');
+      const index = JSON.parse(raw) as ReplayRunIndex;
+      runs.push({
+        runId,
+        createdAt: index.createdAt ?? '',
+        graphName: index.graphName ?? index.graphId ?? '(unknown)',
+        taskCount: index.taskCount ?? index.tasks?.length ?? 0,
+      });
+    } catch {
+      continue;
+    }
+  }
+
+  const sorted = runs
+    .sort((a, b) => {
+      const byTime = b.createdAt.localeCompare(a.createdAt);
+      if (byTime !== 0) {
+        return byTime;
+      }
+      return b.runId.localeCompare(a.runId);
+    })
+    .slice(0, limit);
+
+  if (sorted.length === 0) {
+    console.log('No replay runs found.');
+    console.log(`Expected directory: ${runsRoot}`);
+    return 0;
+  }
+
+  console.log(`\nReplay runs (${sorted.length}/${runs.length}):`);
+  for (const run of sorted) {
+    const created = run.createdAt || '(unknown time)';
+    console.log(`- ${run.runId} | ${created} | graph=${run.graphName} | tasks=${run.taskCount}`);
+  }
+  console.log('\nUse: orchestrace replay show <runId> [--task <taskId>]');
+  return 0;
+}
+
+function isSafePathSegment(value: string): boolean {
+  return /^[a-zA-Z0-9._-]+$/.test(value);
+}
+
+function formatUsage(usage: { input: number; output: number; cost: number } | undefined): string {
+  if (!usage) {
+    return 'n/a';
+  }
+
+  return `in=${usage.input}, out=${usage.output}, cost=$${usage.cost.toFixed(4)}`;
+}
+
+function parsePositiveInt(raw: string | undefined): number | undefined {
+  if (!raw) {
+    return undefined;
+  }
+
+  const value = Number.parseInt(raw, 10);
+  if (Number.isNaN(value) || value <= 0) {
+    return undefined;
+  }
+
+  return value;
 }
 
 async function printWorkspaceList(manager: WorkspaceManager): Promise<void> {
