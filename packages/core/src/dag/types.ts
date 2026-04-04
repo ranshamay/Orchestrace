@@ -199,7 +199,7 @@ export type DagEvent =
   | { type: 'task:started'; taskId: string }
   | { type: 'task:validating'; taskId: string }
   | { type: 'task:completed'; taskId: string; output: TaskOutput }
-  | { type: 'task:failed'; taskId: string; error: string; retries: number }
+  | { type: 'task:failed'; taskId: string; error: string; retries: number; failureType?: ReplayFailureType }
   | { type: 'task:retrying'; taskId: string; attempt: number; maxRetries: number }
   | { type: 'graph:completed'; outputs: Map<string, TaskOutput> }
   | { type: 'graph:failed'; error: string; completedTasks: string[]; failedTasks: string[] };

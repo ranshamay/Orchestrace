@@ -43,14 +43,15 @@ export interface WorkSession {
     state: string;
     label: string;
     detail?: string;
+    failureType?: string;
     taskId?: string;
     phase?: 'planning' | 'implementation';
     updatedAt: string;
   };
   taskStatus: Record<string, string>;
-  events: Array<{ time: string; type: string; runId?: string; taskId?: string; message: string }>;
+  events: Array<{ time: string; type: string; runId?: string; taskId?: string; failureType?: string; message: string }>;
   agentGraph?: Array<{ id: string; prompt: string; dependencies: string[] }>;
-  output?: { text?: string; planPath?: string };
+  output?: { text?: string; planPath?: string; failureType?: string };
   error?: string;
 }
 

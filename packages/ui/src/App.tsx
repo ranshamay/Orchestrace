@@ -44,6 +44,7 @@ type TimelineItem = {
   role?: string;
   title?: string;
   subtitle?: string;
+  failureType?: string;
   tone?: 'neutral' | 'tool' | 'success' | 'error';
   content: string;
   contentParts?: ChatContentPart[];
@@ -85,8 +86,19 @@ type LlmSessionStatus = {
   state: LlmSessionState;
   label: string;
   detail?: string;
+  failureType?: string;
   phase?: LlmSessionPhase;
 };
+
+type FailureType =
+  | 'timeout'
+  | 'auth'
+  | 'rate_limit'
+  | 'tool_schema'
+  | 'tool_runtime'
+  | 'validation'
+  | 'empty_response'
+  | 'unknown';
 
 const RUN_QUERY_PARAM = 'run';
 
@@ -252,7 +264,7 @@ function renderToolEventContent(params: {
   return `${summary}\n\n\`\`\`${codeLanguage}\n${displayPayload}\n\`\`\``;
 }
 
-function formatTimelineEvent(event: { type: string; message: string; taskId?: string }): Pick<TimelineItem, 'title' | 'subtitle' | 'content' | 'tone'> {
+function formatTimelineEvent(event: { type: string; message: string; taskId?: string; failureType?: string }): Pick<TimelineItem, 'title' | 'subtitle' | 'content' | 'tone' | 'failureType'> {
   const clean = stripRunTag(event.message);
 
   if (event.type === 'task:tool-call') {
@@ -306,7 +318,13 @@ function formatTimelineEvent(event: { type: string; message: string; taskId?: st
       return { title: 'Completed', subtitle: event.taskId, tone: 'success', content: detail || 'Run completed successfully.' };
     case 'task:failed':
     case 'graph:failed':
-      return { title: 'Failed', subtitle: event.taskId, tone: 'error', content: detail || 'Execution failed.' };
+      return {
+        title: 'Failed',
+        subtitle: event.taskId,
+        tone: 'error',
+        failureType: normalizeFailureType(event.failureType),
+        content: detail || 'Execution failed.',
+      };
     default:
       return {
         title: event.type.replace('task:', '').replace('graph:', '').replace(/-/g, ' '),
@@ -315,6 +333,84 @@ function formatTimelineEvent(event: { type: string; message: string; taskId?: st
         content: compactInline(detail || clean, 260),
       };
   }
+}
+
+function normalizeFailureType(raw?: string): FailureType | undefined {
+  const value = (raw ?? '').trim().toLowerCase();
+  if (!value) {
+    return undefined;
+  }
+
+  if (value === 'timeout'
+    || value === 'auth'
+    || value === 'rate_limit'
+    || value === 'tool_schema'
+    || value === 'tool_runtime'
+    || value === 'validation'
+    || value === 'empty_response'
+    || value === 'unknown') {
+    return value;
+  }
+
+  return undefined;
+}
+
+function formatFailureTypeLabel(failureType?: string): string {
+  const normalized = normalizeFailureType(failureType);
+  if (!normalized) {
+    return '';
+  }
+
+  return normalized.replace(/_/g, ' ');
+}
+
+function failureTypeBadgeClass(failureType?: string, selected = false): string {
+  if (selected) {
+    return 'bg-white/20 text-white';
+  }
+
+  const normalized = normalizeFailureType(failureType);
+  switch (normalized) {
+    case 'timeout':
+      return 'bg-orange-100 text-orange-700 dark:bg-orange-900/40 dark:text-orange-300';
+    case 'auth':
+      return 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300';
+    case 'rate_limit':
+      return 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300';
+    case 'tool_schema':
+    case 'tool_runtime':
+      return 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/40 dark:text-yellow-300';
+    case 'validation':
+      return 'bg-sky-100 text-sky-700 dark:bg-sky-900/40 dark:text-sky-300';
+    case 'empty_response':
+      return 'bg-slate-200 text-slate-700 dark:bg-slate-800 dark:text-slate-300';
+    case 'unknown':
+      return 'bg-slate-200 text-slate-600 dark:bg-slate-800 dark:text-slate-300';
+    default:
+      return 'bg-slate-200 text-slate-600 dark:bg-slate-800 dark:text-slate-300';
+  }
+}
+
+function resolveSessionFailureType(session?: WorkSession): FailureType | undefined {
+  if (!session) {
+    return undefined;
+  }
+
+  const fromStatus = normalizeFailureType(session.llmStatus?.failureType);
+  if (fromStatus) {
+    return fromStatus;
+  }
+
+  const fromOutput = normalizeFailureType(session.output?.failureType);
+  if (fromOutput) {
+    return fromOutput;
+  }
+
+  const lastFailedEvent = [...session.events]
+    .reverse()
+    .find((event) => event.type === 'task:failed' && normalizeFailureType(event.failureType));
+
+  return normalizeFailureType(lastFailedEvent?.failureType);
 }
 
 function normalizeTaskStatus(raw?: string): string {
@@ -555,6 +651,7 @@ function composerModeDescription(mode: ComposerMode): string {
 
 function resolveLlmStatus(session?: WorkSession): LlmSessionStatus {
   const raw = session?.llmStatus;
+  const sessionFailureType = resolveSessionFailureType(session);
   if (raw) {
     const state = normalizeLlmSessionState(raw.state);
     const phase = normalizeLlmPhase(raw.phase) ?? fallbackLlmPhase(state);
@@ -562,6 +659,7 @@ function resolveLlmStatus(session?: WorkSession): LlmSessionStatus {
       state,
       label: raw.label?.trim() || llmStatusLabel(state),
       detail: raw.detail?.trim() || undefined,
+      failureType: normalizeFailureType(raw.failureType) ?? sessionFailureType,
       phase,
     };
   }
@@ -571,6 +669,7 @@ function resolveLlmStatus(session?: WorkSession): LlmSessionStatus {
   return {
     state: fallbackState,
     label: llmStatusLabel(fallbackState),
+    failureType: sessionFailureType,
     phase,
   };
 }
@@ -633,6 +732,7 @@ function buildSessionTraceExport(
   todos: AgentTodo[],
 ): string {
   const llmStatus = resolveLlmStatus(session);
+  const sessionFailureType = resolveSessionFailureType(session);
   const lines: string[] = [];
 
   lines.push('Orchestrace Chat Trace');
@@ -641,6 +741,9 @@ function buildSessionTraceExport(
   lines.push(`Workspace: ${session.workspaceName} (${session.workspacePath})`);
   lines.push(`Provider/Model: ${session.provider}/${session.model}`);
   lines.push(`Status: ${session.status}`);
+  if (sessionFailureType) {
+    lines.push(`Failure type: ${sessionFailureType}`);
+  }
   lines.push(`LLM status: ${llmStatus.label}${llmStatus.detail ? ` - ${llmStatus.detail}` : ''}`);
   lines.push(`Created: ${session.createdAt}`);
   lines.push(`Updated: ${session.updatedAt}`);
@@ -672,7 +775,7 @@ function buildSessionTraceExport(
     lines.push('  - (none)');
   } else {
     for (const event of session.events) {
-      lines.push(`  - [${event.time}] ${event.type}${event.taskId ? ` (${event.taskId})` : ''}`);
+      lines.push(`  - [${event.time}] ${event.type}${event.taskId ? ` (${event.taskId})` : ''}${event.failureType ? ` [${event.failureType}]` : ''}`);
       lines.push(indentBlock(stripRunTag(event.message), '      '));
     }
   }
@@ -1041,6 +1144,7 @@ export default function App() {
   );
 
   const selectedLlmStatus = useMemo(() => resolveLlmStatus(selectedSession), [selectedSession]);
+  const selectedFailureType = useMemo(() => resolveSessionFailureType(selectedSession), [selectedSession]);
   const composerMode: ComposerMode = selectedSession
     ? (selectedSession.mode ?? 'chat')
     : 'run';
@@ -1144,6 +1248,7 @@ export default function App() {
         kind: 'event',
         title: formatted.title,
         subtitle: formatted.subtitle,
+        failureType: formatted.failureType,
         tone: formatted.tone,
         content: formatted.content,
       };
@@ -1765,6 +1870,7 @@ export default function App() {
           {sessions.map((session) => {
             const isSelected = selectedSessionId === session.id;
             const llmStatus = resolveLlmStatus(session);
+            const sessionFailureType = resolveSessionFailureType(session);
 
             return (
               <button
@@ -1786,6 +1892,11 @@ export default function App() {
                 <div className={`mt-1 flex items-center justify-between gap-2 font-mono text-[10px] ${isSelected ? 'text-blue-100' : 'text-slate-500 dark:text-slate-400'}`}>
                   <span>run {compactRunId(session.id)}</span>
                   <div className="flex items-center gap-1">
+                    {sessionFailureType && (
+                      <span className={`rounded px-1.5 py-0.5 font-sans font-semibold uppercase tracking-wide ${failureTypeBadgeClass(sessionFailureType, isSelected)}`}>
+                        {formatFailureTypeLabel(sessionFailureType)}
+                      </span>
+                    )}
                     {llmStatus.phase && (
                       <span className={`rounded px-1.5 py-0.5 font-sans font-semibold uppercase tracking-wide ${llmPhaseBadgeClass(llmStatus.phase, isSelected)}`}>
                         {llmPhaseLabel(llmStatus.phase)}
@@ -1843,6 +1954,11 @@ export default function App() {
                           <span className={`rounded px-2 py-0.5 text-xs font-semibold uppercase tracking-wide ${sessionStatusBadgeClass(selectedSession.status)}`}>
                             {formatSessionStatus(selectedSession.status)}
                           </span>
+                          {selectedFailureType && (
+                            <span className={`rounded px-2 py-0.5 text-xs font-semibold uppercase tracking-wide ${failureTypeBadgeClass(selectedFailureType)}`}>
+                              {formatFailureTypeLabel(selectedFailureType)}
+                            </span>
+                          )}
                           {selectedLlmStatus.phase && (
                             <span className={`rounded px-2 py-0.5 text-xs font-semibold uppercase tracking-wide ${llmPhaseBadgeClass(selectedLlmStatus.phase)}`}>
                               {llmPhaseLabel(selectedLlmStatus.phase)}
@@ -2063,6 +2179,11 @@ export default function App() {
                           <span className={`rounded px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${sessionStatusBadgeClass(selectedSession.status)}`}>
                             {formatSessionStatus(selectedSession.status)}
                           </span>
+                          {selectedFailureType && (
+                            <span className={`rounded px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${failureTypeBadgeClass(selectedFailureType)}`}>
+                              {formatFailureTypeLabel(selectedFailureType)}
+                            </span>
+                          )}
                           {selectedLlmStatus.phase && (
                             <span className={`rounded px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${llmPhaseBadgeClass(selectedLlmStatus.phase)}`}>
                               {llmPhaseLabel(selectedLlmStatus.phase)}
@@ -2142,7 +2263,14 @@ export default function App() {
                         <span>{new Date(item.time).toLocaleTimeString([], { hour12: false })}</span>
                       </div>
                       {item.kind === 'event' && item.subtitle && (
-                        <div className="mb-1 text-[11px] font-medium opacity-80">{item.subtitle}</div>
+                        <div className="mb-1 flex items-center gap-1.5 text-[11px] font-medium opacity-80">
+                          <span>{item.subtitle}</span>
+                          {item.failureType && (
+                            <span className={`rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${failureTypeBadgeClass(item.failureType)}`}>
+                              {formatFailureTypeLabel(item.failureType)}
+                            </span>
+                          )}
+                        </div>
                       )}
                       {item.kind === 'event' && item.tone === 'tool' && <MarkdownMessage content={item.content} dark={isDark} />}
                       {item.kind === 'event' && item.tone !== 'tool' && (

@@ -292,23 +292,30 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         return;
       }
 
-      const firstOutput = outputs.values().next().value as { status?: string; response?: string; planPath?: string; error?: string } | undefined;
-      const failed = [...outputs.values()].some((output) => output.status === 'failed');
+      const allOutputs = [...outputs.values()];
+      const failedOutput = allOutputs.find((output) => output.status === 'failed');
+      const primaryOutput = failedOutput ?? allOutputs[0];
+      const failed = Boolean(failedOutput);
+      const failureType = failedOutput?.failureType;
 
       session.status = failed ? 'failed' : 'completed';
       session.updatedAt = now();
       session.llmStatus = failed
         ? createLlmStatus('failed', session.updatedAt, {
-          detail: firstOutput?.error || 'Execution failed.',
+          detail: failureType
+            ? `${failureType}: ${failedOutput?.error || 'Execution failed.'}`
+            : (failedOutput?.error || 'Execution failed.'),
+          failureType,
         })
         : createLlmStatus('completed', session.updatedAt, {
           detail: 'Run completed successfully.',
         });
       session.output = {
-        text: firstOutput?.response,
-        planPath: firstOutput?.planPath,
+        text: primaryOutput?.response,
+        planPath: primaryOutput?.planPath,
+        failureType,
       };
-      session.error = failed ? firstOutput?.error ?? 'Execution failed' : undefined;
+      session.error = failed ? failedOutput?.error ?? 'Execution failed' : undefined;
 
       broadcastWorkStream(workStreamClients, session.id, 'end', {
         id: session.id,
@@ -318,10 +325,10 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       });
 
       const thread = sessionChats.get(session.id);
-      if (thread && firstOutput?.response) {
+      if (thread && primaryOutput?.response) {
         thread.messages.push({
           role: 'assistant',
-          content: firstOutput.response,
+          content: primaryOutput.response,
           time: now(),
         });
         trimThreadMessages(thread);
@@ -1761,12 +1768,13 @@ function llmStatusLabel(state: LlmSessionState): string {
 function createLlmStatus(
   state: LlmSessionState,
   updatedAt: string,
-  options: { detail?: string; taskId?: string; phase?: 'planning' | 'implementation' } = {},
+  options: { detail?: string; failureType?: string; taskId?: string; phase?: 'planning' | 'implementation' } = {},
 ): SessionLlmStatus {
   return {
     state,
     label: llmStatusLabel(state),
     detail: asString(options.detail) || undefined,
+    failureType: asString(options.failureType) || undefined,
     taskId: asString(options.taskId) || undefined,
     phase: options.phase,
     updatedAt,
@@ -1782,6 +1790,7 @@ function normalizeLlmStatus(raw: SessionLlmStatus, fallbackUpdatedAt: string): S
     state,
     label: llmStatusLabel(state),
     detail: asString(raw.detail) || undefined,
+    failureType: asString(raw.failureType) || undefined,
     taskId: asString(raw.taskId) || undefined,
     phase,
     updatedAt,
@@ -1872,7 +1881,10 @@ function deriveLlmStatusFromDagEvent(event: DagEvent, updatedAt: string): Sessio
     case 'task:failed':
     case 'graph:failed':
       return createLlmStatus('failed', updatedAt, {
-        detail: event.error,
+        detail: event.type === 'task:failed' && event.failureType
+          ? `${event.failureType}: ${event.error}`
+          : event.error,
+        failureType: event.type === 'task:failed' ? event.failureType : undefined,
         taskId: 'taskId' in event ? event.taskId : undefined,
       });
     default:
@@ -1886,6 +1898,7 @@ function toUiEvent(runId: string, event: DagEvent): UiDagEvent | undefined {
     runId,
     type: event.type,
     taskId: 'taskId' in event ? event.taskId : undefined,
+    failureType: event.type === 'task:failed' ? event.failureType : undefined,
   };
 
   const tagged = (message: string): string => `[run:${runId}] ${message}`;
@@ -1926,7 +1939,12 @@ function toUiEvent(runId: string, event: DagEvent): UiDagEvent | undefined {
     case 'task:completed':
       return { ...base, message: tagged(`${event.taskId}: completed`) };
     case 'task:failed':
-      return { ...base, message: tagged(`${event.taskId}: failed (${event.error})`) };
+      return {
+        ...base,
+        message: tagged(
+          `${event.taskId}: failed${event.failureType ? ` [${event.failureType}]` : ''} (${event.error})`,
+        ),
+      };
     case 'graph:completed':
       return { ...base, message: tagged(`graph completed (${event.outputs.size} outputs)`) };
     case 'graph:failed':

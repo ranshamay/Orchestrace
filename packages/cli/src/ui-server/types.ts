@@ -26,6 +26,7 @@ export interface SessionLlmStatus {
   state: LlmSessionState;
   label: string;
   detail?: string;
+  failureType?: string;
   taskId?: string;
   phase?: 'planning' | 'implementation';
   updatedAt: string;
@@ -45,6 +46,7 @@ export interface UiDagEvent {
   runId?: string;
   type: DagEvent['type'];
   taskId?: string;
+  failureType?: string;
   message: string;
 }
 
@@ -130,7 +132,7 @@ export interface WorkSession {
   events: UiDagEvent[];
   agentGraph: SessionAgentGraphNode[];
   error?: string;
-  output?: { text?: string; planPath?: string };
+  output?: { text?: string; planPath?: string; failureType?: string };
   controller: AbortController;
   cleanupWorktree?: () => Promise<void>;
 }
@@ -156,7 +158,7 @@ export interface PersistedWorkSession {
   events: UiDagEvent[];
   agentGraph?: SessionAgentGraphNode[];
   error?: string;
-  output?: { text?: string; planPath?: string };
+  output?: { text?: string; planPath?: string; failureType?: string };
 }
 
 export interface PersistedUiState {

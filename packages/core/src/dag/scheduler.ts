@@ -136,6 +136,7 @@ export async function runDag(
       taskId: nodeId,
       error: output.error ?? 'Unknown error',
       retries: state.retryCount,
+      failureType: output.failureType,
     });
     scheduleReady();
   }
