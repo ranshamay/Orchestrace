@@ -3,6 +3,24 @@ import { validateToolCall } from '@mariozechner/pi-ai';
 import { consumeStream } from '../../src/adapter/stream.js';
 import { executeWithOptionalTools } from '../../src/adapter/tools.js';
 
+type TestMessage = {
+  role: string;
+  content?: Array<{ text?: string }>;
+  isError?: boolean;
+};
+
+type TestContext = {
+  messages: TestMessage[];
+  tools: Array<{ name: string; description: string; parameters: { type: string } }>;
+};
+
+type ToolEvent = {
+  type: 'started' | 'result';
+  toolCallId: string;
+  toolName: string;
+  isError?: boolean;
+};
+
 vi.mock('../../src/adapter/stream.js', () => ({
   consumeStream: vi.fn(),
   getUsage: vi.fn(() => ({ input: 0, output: 0, cost: 0 })),
@@ -42,12 +60,12 @@ describe('executeWithOptionalTools', () => {
     consumeStreamMock.mockResolvedValueOnce(firstResponse as never);
     consumeStreamMock.mockResolvedValueOnce(finalResponse as never);
 
-    const context: any = {
+    const context: TestContext = {
       messages: [],
       tools: [{ name: 'run_command', description: 'Run shell command', parameters: { type: 'object' } }],
     };
 
-    const toolEvents: any[] = [];
+    const toolEvents: ToolEvent[] = [];
 
     const result = await executeWithOptionalTools({
       model: {} as never,
@@ -68,7 +86,7 @@ describe('executeWithOptionalTools', () => {
     expect(result).toBe(finalResponse);
     expect(validateToolCallMock).toHaveBeenCalledTimes(2);
 
-    const toolResultMessages = context.messages.filter((message: any) => message.role === 'toolResult');
+    const toolResultMessages = context.messages.filter((message) => message.role === 'toolResult');
     expect(toolResultMessages).toHaveLength(2);
     expect(toolResultMessages[0].isError).toBe(true);
     expect(toolResultMessages[1].isError).toBe(true);
@@ -76,7 +94,7 @@ describe('executeWithOptionalTools', () => {
     expect(toolResultMessages[1].content[0].text).toContain('command not found: python');
 
     const retryPrompts = context.messages.filter(
-      (message: any) => message.role === 'user' && String(message.content?.[0]?.text ?? '').includes('retry this tool call'),
+      (message) => message.role === 'user' && String(message.content?.[0]?.text ?? '').includes('retry this tool call'),
     );
     expect(retryPrompts).toHaveLength(2);
     expect(retryPrompts[0].content[0].text).toContain('run_command (call-1)');
@@ -102,7 +120,7 @@ describe('executeWithOptionalTools', () => {
     consumeStreamMock.mockResolvedValueOnce(firstResponse as never);
     consumeStreamMock.mockResolvedValueOnce(finalResponse as never);
 
-    const context: any = {
+    const context: TestContext = {
       messages: [],
       tools: [{ name: 'run_command', description: 'Run shell command', parameters: { type: 'object' } }],
     };
@@ -121,7 +139,7 @@ describe('executeWithOptionalTools', () => {
     });
 
     const retryPrompt = context.messages.find(
-      (message: any) => message.role === 'user' && String(message.content?.[0]?.text ?? '').includes('retry'),
+      (message) => message.role === 'user' && String(message.content?.[0]?.text ?? '').includes('retry'),
     );
 
     expect(retryPrompt).toBeUndefined();

@@ -133,6 +133,9 @@ export async function orchestrate(
       model: 'claude-sonnet-4-20250514',
     };
     const apiKey = await resolveApiKey?.(model.provider);
+    const refreshApiKey = resolveApiKey
+      ? async () => resolveApiKey(model.provider)
+      : undefined;
 
     const usage = { input: 0, output: 0, cost: 0 };
     const replay: TaskReplayRecord = {
@@ -182,6 +185,7 @@ export async function orchestrate(
         reasoning: model.reasoning,
       }),
       apiKey,
+      refreshApiKey,
     });
 
     emit({ type: 'task:planning', taskId: node.id });
@@ -390,6 +394,7 @@ export async function orchestrate(
         reasoning: model.reasoning,
       }),
       apiKey,
+      refreshApiKey,
     });
 
     const taskRetryBudget = Math.max(0, node.validation?.maxRetries ?? 0);

@@ -410,6 +410,7 @@ async function runGraph(
             ?? 'You are a focused sub-agent. Solve the given sub-task and return concise actionable output.',
           toolset: subAgentToolset,
           apiKey: await authManager.resolveApiKey(subProvider),
+          refreshApiKey: () => authManager.resolveApiKey(subProvider),
         });
 
         const result = await subAgent.complete(request.prompt);

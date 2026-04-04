@@ -257,6 +257,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
             signal: subAgentSignal,
             toolset: subAgentToolset,
             apiKey: await authManager.resolveApiKey(subProvider),
+                      refreshApiKey: () => authManager.resolveApiKey(subProvider),
           });
 
           const result = await subAgent.complete(runSubAgentRequest.prompt, subAgentSignal);
@@ -1239,6 +1240,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                     signal: subAgentSignal,
                     toolset: subAgentToolset,
                     apiKey: await authManager.resolveApiKey(subProvider),
+                      refreshApiKey: () => authManager.resolveApiKey(subProvider),
                   });
 
                   const result = await subAgent.complete(runSubAgentRequest.prompt, subAgentSignal);
@@ -1249,6 +1251,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                 },
               }),
               apiKey: await authManager.resolveApiKey(session.provider),
+                refreshApiKey: () => authManager.resolveApiKey(session.provider),
             });
 
             const chatPrompt = buildChatContinuationInput(thread);
@@ -1437,6 +1440,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                 signal: subAgentSignal,
                 toolset: subAgentToolset,
                 apiKey: await authManager.resolveApiKey(subProvider),
+                refreshApiKey: () => authManager.resolveApiKey(subProvider),
               });
 
               const result = await subAgent.complete(runSubAgentRequest.prompt, subAgentSignal);
@@ -1447,6 +1451,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
             },
           }),
           apiKey: await authManager.resolveApiKey(session.provider),
+          refreshApiKey: () => authManager.resolveApiKey(session.provider),
         });
 
         const chatPrompt = buildChatContinuationInput(thread);

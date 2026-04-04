@@ -34,6 +34,8 @@ export class PiAiAdapter implements LlmAdapter {
         let response: AssistantMessage;
         const usage = { input: 0, output: 0, cost: 0 };
         let hasUsage = false;
+        let activeApiKey = request.apiKey;
+        let authRetryUsed = false;
         const maxRetries = resolveEmptyResponseRetries();
         const maxAttempts = maxRetries + 1;
         for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
@@ -47,8 +49,8 @@ export class PiAiAdapter implements LlmAdapter {
           if (timeoutSignal.signal) {
             options.signal = timeoutSignal.signal;
           }
-          if (request.apiKey) {
-            options.apiKey = request.apiKey;
+          if (activeApiKey) {
+            options.apiKey = activeApiKey;
           }
 
           try {
@@ -67,6 +69,18 @@ export class PiAiAdapter implements LlmAdapter {
           } catch (error) {
             const mapped = mapTimeoutError(error, timeoutMs);
             const failureType = classifyLlmFailure({ message: mapped.message });
+
+            if (failureType === 'auth' && request.refreshApiKey && !authRetryUsed) {
+              authRetryUsed = true;
+              try {
+                activeApiKey = await request.refreshApiKey();
+              } catch {
+                // Ignore refresh errors and retry once with the current key path.
+              }
+              attempt -= 1;
+              continue;
+            }
+
             throw createLlmFailureError({
               provider: request.provider,
               model: request.model,
@@ -224,6 +238,7 @@ export class PiAiAdapter implements LlmAdapter {
       signal: request.signal,
       toolset: request.toolset,
       apiKey: request.apiKey,
+      refreshApiKey: request.refreshApiKey,
     });
     return agent.complete(request.prompt, request.signal, {
       onTextDelta: request.onTextDelta,
