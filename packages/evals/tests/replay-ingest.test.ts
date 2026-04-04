@@ -52,4 +52,44 @@ describe('eval replay ingestion helpers', () => {
     expect(record?.validationPassed).toBe(true);
     expect(record?.filesChanged).toContain('packages/core/src/index.ts');
   });
+
+  it('infers docs-update case from changed files when no explicit mapping exists', () => {
+    const record = toEvalRunRecord(
+      {
+        taskId: 'task',
+        status: 'completed',
+        retries: 0,
+        usage: { input: 80, output: 25, cost: 0 },
+        replay: {
+          attempts: [
+            {
+              phase: 'implementation',
+              validation: { passed: true },
+              toolCalls: [
+                {
+                  toolName: 'write_file',
+                  status: 'started',
+                  input: '{"path":"docs/PLAN.md"}',
+                },
+              ],
+            },
+          ],
+        },
+      },
+      {
+        selectedCases: defaultEvalCases,
+        selectedCaseIds: new Set(['docs-update', 'fix-failing-test']),
+        caseMap: {
+          taskIds: {},
+          graphIds: {},
+          runIds: {},
+          defaultCaseId: undefined,
+        },
+        defaultCaseId: undefined,
+      },
+    );
+
+    expect(record).toBeDefined();
+    expect(record?.caseId).toBe('docs-update');
+  });
 });

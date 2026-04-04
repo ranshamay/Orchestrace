@@ -91,7 +91,7 @@ async function main(): Promise<void> {
   }
 
   const selectedCaseIds = new Set(selectedCases.map((evalCase) => evalCase.id));
-  const loadedRecords = await loadRecords(options, selectedCaseIds);
+  const loadedRecords = await loadRecords(options, selectedCases, selectedCaseIds);
   const summary = evaluateSuite(selectedCases, loadedRecords.records);
 
   printSummary(summary, {
@@ -114,6 +114,7 @@ async function main(): Promise<void> {
 
 async function loadRecords(
   options: CliOptions,
+  selectedCases: EvalCase[],
   selectedCaseIds: Set<string>,
 ): Promise<{ source: string; records: EvalRunRecord[] }> {
   if (options.replayDir) {
@@ -123,6 +124,7 @@ async function loadRecords(
         ? await loadCaseMap(await resolveInputPath(options.caseMapPath))
         : emptyCaseMap();
       const replayRecords = await loadReplayRecords(resolvedReplayDir, {
+        selectedCases,
         selectedCaseIds,
         caseMap,
         defaultCaseId: options.defaultCaseId,
@@ -174,6 +176,7 @@ async function loadRunRecords(path: string): Promise<EvalRunRecord[]> {
 async function loadReplayRecords(
   replayDir: string,
   options: {
+    selectedCases: EvalCase[];
     selectedCaseIds: Set<string>;
     caseMap: CaseMap;
     defaultCaseId?: string;
@@ -187,6 +190,7 @@ async function loadReplayRecords(
     const artifacts = await loadReplayTaskArtifacts(runDir);
     for (const artifact of artifacts) {
       const record = toEvalRunRecord(artifact, {
+        selectedCases: options.selectedCases,
         selectedCaseIds: options.selectedCaseIds,
         caseMap: options.caseMap,
         defaultCaseId: options.defaultCaseId,
@@ -258,11 +262,13 @@ async function loadReplayTaskArtifacts(runDir: string): Promise<ReplayTaskArtifa
 function toEvalRunRecord(
   artifact: ReplayTaskArtifact,
   options: {
+    selectedCases: EvalCase[];
     selectedCaseIds: Set<string>;
     caseMap: CaseMap;
     defaultCaseId?: string;
   },
 ): EvalRunRecord | undefined {
+  const filesChanged = extractFilesChanged(artifact);
   const caseId = resolveCaseId(artifact, options);
   if (!caseId) {
     return undefined;
@@ -271,7 +277,6 @@ function toEvalRunRecord(
   const status = artifact.status === 'completed' ? 'completed' : 'failed';
   const retries = asNonNegativeInteger(artifact.retries);
   const usage = normalizeUsage(artifact.usage);
-  const filesChanged = extractFilesChanged(artifact);
 
   return {
     caseId,
@@ -286,6 +291,7 @@ function toEvalRunRecord(
 function resolveCaseId(
   artifact: ReplayTaskArtifact,
   options: {
+    selectedCases: EvalCase[];
     selectedCaseIds: Set<string>;
     caseMap: CaseMap;
     defaultCaseId?: string;
@@ -317,8 +323,35 @@ function resolveCaseId(
     return mapped;
   }
 
+  const inferred = inferCaseIdFromArtifactFiles(artifact, options.selectedCases);
+  if (inferred && options.selectedCaseIds.has(inferred)) {
+    return inferred;
+  }
+
   if (options.selectedCaseIds.size === 1) {
     return [...options.selectedCaseIds][0];
+  }
+
+  return undefined;
+}
+
+function inferCaseIdFromArtifactFiles(artifact: ReplayTaskArtifact, selectedCases: EvalCase[]): string | undefined {
+  const filesChanged = extractFilesChanged(artifact);
+  if (filesChanged.length === 0) {
+    return undefined;
+  }
+
+  const candidates = selectedCases.filter((evalCase) => {
+    const allowed = evalCase.expectation.allowFileGlobs;
+    if (!Array.isArray(allowed) || allowed.length === 0) {
+      return false;
+    }
+
+    return filesChanged.every((filePath) => allowed.some((pattern) => globMatches(filePath, pattern)));
+  });
+
+  if (candidates.length === 1) {
+    return candidates[0].id;
   }
 
   return undefined;
