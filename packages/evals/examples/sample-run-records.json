@@ -1,0 +1,26 @@
+[
+  {
+    "caseId": "fix-failing-test",
+    "status": "completed",
+    "retries": 1,
+    "filesChanged": ["packages/core/src/orchestrator/orchestrator.ts"],
+    "usage": { "input": 820, "output": 260, "cost": 0 },
+    "validationPassed": true
+  },
+  {
+    "caseId": "safe-refactor",
+    "status": "completed",
+    "retries": 0,
+    "filesChanged": ["packages/tools/src/index.ts"],
+    "usage": { "input": 700, "output": 220, "cost": 0 },
+    "validationPassed": true
+  },
+  {
+    "caseId": "docs-update",
+    "status": "completed",
+    "retries": 0,
+    "filesChanged": ["docs/PLAN.md", "README.md"],
+    "usage": { "input": 320, "output": 90, "cost": 0 },
+    "validationPassed": true
+  }
+]

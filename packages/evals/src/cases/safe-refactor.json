@@ -1,0 +1,12 @@
+{
+  "id": "safe-refactor",
+  "name": "Safe refactor",
+  "description": "Agent performs a refactor that still satisfies validation and keeps scope controlled.",
+  "prompt": "Refactor the target module for clarity without changing external behavior.",
+  "expectation": {
+    "requiredStatus": "completed",
+    "maxAttempts": 2,
+    "requireValidationPass": true,
+    "minOutputTokens": 50
+  }
+}

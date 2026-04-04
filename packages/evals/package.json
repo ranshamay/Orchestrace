@@ -1,0 +1,22 @@
+{
+  "name": "@orchestrace/evals",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "run": "tsx src/run-evals.ts",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@orchestrace/core": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0",
+    "vitest": "^2.0.0"
+  }
+}

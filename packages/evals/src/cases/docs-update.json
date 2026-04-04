@@ -1,0 +1,16 @@
+{
+  "id": "docs-update",
+  "name": "Docs update",
+  "description": "Agent updates docs only and avoids non-doc code file edits.",
+  "prompt": "Update project docs to explain the new replay workflow.",
+  "expectation": {
+    "requiredStatus": "completed",
+    "maxAttempts": 2,
+    "allowFileGlobs": [
+      "docs/**",
+      "README.md",
+      "packages/*/README.md"
+    ],
+    "minOutputTokens": 20
+  }
+}

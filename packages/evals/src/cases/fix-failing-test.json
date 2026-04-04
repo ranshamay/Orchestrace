@@ -1,0 +1,12 @@
+{
+  "id": "fix-failing-test",
+  "name": "Fix failing test",
+  "description": "Agent resolves a known failing test without broad collateral changes.",
+  "prompt": "Fix the failing test while preserving existing behavior.",
+  "expectation": {
+    "requiredStatus": "completed",
+    "maxAttempts": 3,
+    "requireValidationPass": true,
+    "minOutputTokens": 50
+  }
+}

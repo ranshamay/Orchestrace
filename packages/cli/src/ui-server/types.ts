@@ -1,0 +1,168 @@
+import type { DagEvent } from '@orchestrace/core';
+
+export interface UiServerOptions {
+  port?: number;
+  workspace?: string;
+  hmr?: boolean;
+}
+
+export type WorkState = 'running' | 'completed' | 'failed' | 'cancelled';
+
+export type LlmSessionState =
+  | 'queued'
+  | 'analyzing'
+  | 'thinking'
+  | 'planning'
+  | 'awaiting-approval'
+  | 'implementing'
+  | 'using-tools'
+  | 'validating'
+  | 'retrying'
+  | 'completed'
+  | 'failed'
+  | 'cancelled';
+
+export interface SessionLlmStatus {
+  state: LlmSessionState;
+  label: string;
+  detail?: string;
+  taskId?: string;
+  phase?: 'planning' | 'implementation';
+  updatedAt: string;
+}
+
+export interface SessionAgentGraphNode {
+  id: string;
+  prompt: string;
+  dependencies: string[];
+  provider?: string;
+  model?: string;
+  reasoning?: 'minimal' | 'low' | 'medium' | 'high';
+}
+
+export interface UiDagEvent {
+  time: string;
+  runId?: string;
+  type: DagEvent['type'];
+  taskId?: string;
+  message: string;
+}
+
+export type AuthSessionState = 'running' | 'awaiting-auth' | 'awaiting-input' | 'completed' | 'failed';
+
+export interface AuthSession {
+  id: string;
+  providerId: string;
+  state: AuthSessionState;
+  createdAt: string;
+  updatedAt: string;
+  authUrl?: string;
+  authInstructions?: string;
+  promptMessage?: string;
+  promptPlaceholder?: string;
+  error?: string;
+  resolveInput?: (value: string) => void;
+}
+
+export type ChatRole = 'user' | 'assistant' | 'system';
+
+export type SessionChatContentPart =
+  | { type: 'text'; text: string }
+  | { type: 'image'; data: string; mimeType: string; name?: string };
+
+export interface SessionChatMessage {
+  role: ChatRole;
+  content: string;
+  contentParts?: SessionChatContentPart[];
+  time: string;
+  usage?: { input: number; output: number; cost: number };
+}
+
+export interface SessionChatThread {
+  sessionId: string;
+  provider: string;
+  model: string;
+  workspacePath: string;
+  taskPrompt: string;
+  createdAt: string;
+  updatedAt: string;
+  messages: SessionChatMessage[];
+}
+
+export interface AgentTodoItem {
+  id: string;
+  text: string;
+  done: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ChatTokenStream {
+  id: string;
+  sessionId: string;
+  status: 'running' | 'completed' | 'failed';
+  replyText: string;
+  usage?: { input: number; output: number; cost: number };
+  usageEstimated?: boolean;
+  error?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface WorkSession {
+  id: string;
+  workspaceId: string;
+  workspaceName: string;
+  workspacePath: string;
+  prompt: string;
+  promptParts?: SessionChatContentPart[];
+  provider: string;
+  model: string;
+  autoApprove: boolean;
+  useWorktree: boolean;
+  worktreePath?: string;
+  worktreeBranch?: string;
+  createdAt: string;
+  updatedAt: string;
+  status: WorkState;
+  llmStatus: SessionLlmStatus;
+  taskStatus: Record<string, string>;
+  events: UiDagEvent[];
+  agentGraph: SessionAgentGraphNode[];
+  error?: string;
+  output?: { text?: string; planPath?: string };
+  controller: AbortController;
+  cleanupWorktree?: () => Promise<void>;
+}
+
+export interface PersistedWorkSession {
+  id: string;
+  workspaceId: string;
+  workspaceName: string;
+  workspacePath: string;
+  prompt: string;
+  promptParts?: SessionChatContentPart[];
+  provider: string;
+  model: string;
+  autoApprove: boolean;
+  useWorktree?: boolean;
+  worktreePath?: string;
+  worktreeBranch?: string;
+  createdAt: string;
+  updatedAt: string;
+  status: WorkState;
+  llmStatus?: SessionLlmStatus;
+  taskStatus: Record<string, string>;
+  events: UiDagEvent[];
+  agentGraph?: SessionAgentGraphNode[];
+  error?: string;
+  output?: { text?: string; planPath?: string };
+}
+
+export interface PersistedUiState {
+  version: 1;
+  updatedAt: string;
+  sessions: PersistedWorkSession[];
+  chats: SessionChatThread[];
+  todos: Array<{ sessionId: string; items: AgentTodoItem[] }>;
+}
