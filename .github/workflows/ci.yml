@@ -37,5 +37,19 @@ jobs:
       - name: Test
         run: pnpm test
 
+      - name: Collect changed files
+        run: |
+          mkdir -p .orchestrace
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            git fetch --no-tags --depth=1 origin "${{ github.base_ref }}"
+            git diff --name-only "origin/${{ github.base_ref }}...HEAD" > .orchestrace/changed-files.txt
+          else
+            if git rev-parse --verify HEAD^ >/dev/null 2>&1; then
+              git diff --name-only HEAD^ HEAD > .orchestrace/changed-files.txt
+            else
+              git ls-files > .orchestrace/changed-files.txt
+            fi
+          fi
+
       - name: Eval gate
-        run: pnpm evals:sample
+        run: pnpm evals:ci

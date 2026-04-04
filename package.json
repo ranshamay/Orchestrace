@@ -9,6 +9,7 @@
     "test": "turbo run test",
     "evals": "pnpm --filter @orchestrace/evals run run",
     "evals:sample": "pnpm evals -- --results packages/evals/examples/sample-run-records.json --min-pass-rate 0.8",
+    "evals:ci": "pnpm evals -- --replay-dir .orchestrace/runs --results packages/evals/examples/sample-run-records.json --changed-files .orchestrace/changed-files.txt --min-pass-rate 0.8",
     "lint": "eslint .",
     "typecheck": "turbo typecheck",
     "format": "prettier --write \"packages/*/src/**/*.ts\"",
