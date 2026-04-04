@@ -52,6 +52,7 @@ export interface WorkSession {
   events: Array<{ time: string; type: string; runId?: string; taskId?: string; failureType?: string; message: string }>;
   agentGraph?: Array<{
     id: string;
+    name?: string;
     prompt: string;
     dependencies: string[];
     status?: 'pending' | 'running' | 'completed' | 'failed';

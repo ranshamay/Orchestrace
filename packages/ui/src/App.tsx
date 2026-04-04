@@ -1,11 +1,10 @@
 import { useEffect, useMemo, useRef, useState, type ClipboardEvent } from 'react';
-import { Activity, CheckCircle2, MessageSquare, Moon, Play, Settings, Sun, Trash2, Wrench } from 'lucide-react';
+import { Activity, CheckCircle2, Loader2, MessageSquare, Moon, Play, Settings, Sun, Trash2, Wrench } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {
   addTodo,
   cancelWork,
-  type ChatContentPart,
   deleteWork,
   fetchModels,
   fetchProviders,
@@ -17,886 +16,23 @@ import {
   startWork,
   toggleTodo,
   type AgentTodo,
+  type ChatContentPart,
   type ChatMessage,
   type ProviderInfo,
   type WorkSession,
   type Workspace,
 } from './lib/api';
-
-type Tab = 'graph' | 'settings';
-type ThemeMode = 'light' | 'dark';
-
-type GraphNodeView = {
-  id: string;
-  label: string;
-  prompt: string;
-  x: number;
-  y: number;
-  status: string;
-  dependencies: string[];
-};
-
-type TimelineItem = {
-  key: string;
-  time: string;
-  kind: 'chat' | 'event';
-  role?: string;
-  title?: string;
-  subtitle?: string;
-  failureType?: string;
-  tone?: 'neutral' | 'tool' | 'success' | 'error';
-  content: string;
-  contentParts?: ChatContentPart[];
-};
-
-type ComposerImageAttachment = {
-  id: string;
-  name: string;
-  mime: string;
-  dataUrl: string;
-};
-
-type SessionLlmControls = {
-  provider: string;
-  model: string;
-  workspaceId: string;
-  autoApprove: boolean;
-  useWorktree: boolean;
-};
-
-type SessionStatus = 'running' | 'completed' | 'failed' | 'cancelled' | 'pending' | 'unknown';
-type LlmSessionPhase = 'planning' | 'implementation';
-type ComposerMode = 'run' | 'chat' | 'planning' | 'implementation';
-type LlmSessionState =
-  | 'queued'
-  | 'analyzing'
-  | 'thinking'
-  | 'planning'
-  | 'awaiting-approval'
-  | 'implementing'
-  | 'using-tools'
-  | 'validating'
-  | 'retrying'
-  | 'completed'
-  | 'failed'
-  | 'cancelled';
-
-type LlmSessionStatus = {
-  state: LlmSessionState;
-  label: string;
-  detail?: string;
-  failureType?: string;
-  phase?: LlmSessionPhase;
-};
-
-type FailureType =
-  | 'timeout'
-  | 'auth'
-  | 'rate_limit'
-  | 'tool_schema'
-  | 'tool_runtime'
-  | 'validation'
-  | 'empty_response'
-  | 'unknown';
-
-const RUN_QUERY_PARAM = 'run';
-
-function readRunIdFromUrl(): string {
-  if (typeof window === 'undefined') {
-    return '';
-  }
-
-  return new URL(window.location.href).searchParams.get(RUN_QUERY_PARAM)?.trim() ?? '';
-}
-
-function updateRunIdInUrl(runId: string): void {
-  if (typeof window === 'undefined') {
-    return;
-  }
-
-  const url = new URL(window.location.href);
-  const current = url.searchParams.get(RUN_QUERY_PARAM)?.trim() ?? '';
-  const next = runId.trim();
-
-  if (current === next) {
-    return;
-  }
-
-  if (next) {
-    url.searchParams.set(RUN_QUERY_PARAM, next);
-  } else {
-    url.searchParams.delete(RUN_QUERY_PARAM);
-  }
-
-  window.history.replaceState({}, '', url);
-}
-
-function buildRunDeepLink(runId: string): string {
-  if (typeof window === 'undefined') {
-    return `?${RUN_QUERY_PARAM}=${encodeURIComponent(runId)}`;
-  }
-
-  const url = new URL(window.location.href);
-  url.searchParams.set(RUN_QUERY_PARAM, runId);
-  return url.toString();
-}
-
-function compactRunId(runId: string): string {
-  const id = runId.trim();
-  if (id.length <= 12) {
-    return id;
-  }
-
-  return `${id.slice(0, 8)}...${id.slice(-4)}`;
-}
-
-function stripRunTag(input: string): string {
-  return input.replace(/^\[run:[^\]]+\]\s*/, '').trim();
-}
-
-function stripTaskPrefix(input: string): string {
-  return input.replace(/^[^:]+:\s*/, '').trim();
-}
-
-function compactInline(input: string, maxChars = 220): string {
-  const compact = input.replace(/\s+/g, ' ').trim();
-  if (compact.length <= maxChars) {
-    return compact;
-  }
-
-  return `${compact.slice(0, maxChars - 3)}...`;
-}
-
-function parseJsonObject(input: string): Record<string, unknown> | undefined {
-  const value = input.trim();
-  if (!value.startsWith('{') && !value.startsWith('[')) {
-    return undefined;
-  }
-
-  try {
-    const parsed = JSON.parse(value);
-    return parsed && typeof parsed === 'object' ? parsed as Record<string, unknown> : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-function toolInputSummary(toolName: string, payload: string): string {
-  const parsed = parseJsonObject(payload);
-  if (toolName === 'read_file') {
-    const path = parsed && typeof parsed.path === 'string' ? parsed.path : '';
-    return path ? `Reading ${path}` : 'Reading file';
-  }
-
-  if (toolName === 'list_directory') {
-    const path = parsed && typeof parsed.path === 'string' ? parsed.path : '.';
-    return `Listing ${path}`;
-  }
-
-  if (toolName === 'search_files') {
-    const query = parsed && typeof parsed.query === 'string' ? parsed.query : '';
-    return query ? `Searching for: ${query}` : 'Searching files';
-  }
-
-  if (toolName === 'run_command') {
-    const command = parsed && typeof parsed.command === 'string' ? parsed.command : '';
-    return command ? `Running: ${compactInline(command, 160)}` : 'Running command';
-  }
-
-  if (toolName.startsWith('todo_')) {
-    return 'Updating checklist';
-  }
-
-  if (toolName === 'agent_graph_set') {
-    return 'Updating execution graph';
-  }
-
-  if (toolName === 'subagent_spawn') {
-    return 'Spawning sub-agent';
-  }
-
-  if (toolName === 'subagent_spawn_batch') {
-    return 'Spawning sub-agents in parallel';
-  }
-
-  return `Calling ${toolName}`;
-}
-
-function toolOutputSummary(payload: string, isError: boolean): string {
-  if (isError) {
-    return compactInline(payload || 'Tool returned an error.', 260);
-  }
-
-  if (!payload.trim()) {
-    return 'Completed with empty output.';
-  }
-
-  return compactInline(payload, 260);
-}
-
-function formatToolPayloadForDisplay(payload: string, maxChars = 6000): string {
-  const raw = payload.trim();
-  if (!raw) {
-    return '(empty)';
-  }
-
-  let formatted = raw;
-  if (raw.startsWith('{') || raw.startsWith('[')) {
-    try {
-      formatted = JSON.stringify(JSON.parse(raw), null, 2);
-    } catch {
-      formatted = raw;
-    }
-  }
-
-  return formatted.length > maxChars ? `${formatted.slice(0, maxChars)}\n... (truncated)` : formatted;
-}
-
-function renderToolEventContent(params: {
-  direction: 'input' | 'output';
-  toolName: string;
-  payload: string;
-  isError: boolean;
-}): string {
-  const summary = params.direction === 'input'
-    ? toolInputSummary(params.toolName, params.payload)
-    : toolOutputSummary(params.payload, params.isError);
-  const displayPayload = formatToolPayloadForDisplay(params.payload);
-  const codeLanguage = displayPayload.startsWith('{') || displayPayload.startsWith('[') ? 'json' : 'text';
-
-  return `${summary}\n\n\`\`\`${codeLanguage}\n${displayPayload}\n\`\`\``;
-}
-
-function formatTimelineEvent(event: { type: string; message: string; taskId?: string; failureType?: string }): Pick<TimelineItem, 'title' | 'subtitle' | 'content' | 'tone' | 'failureType'> {
-  const clean = stripRunTag(event.message);
-
-  if (event.type === 'task:tool-call') {
-    const toolMatch = clean.match(/^([^:]+):\s+tool\s+([a-zA-Z0-9_.-]+)\s+(input|output)(\s+\[error\])?\s*([\s\S]*)$/);
-    if (toolMatch) {
-      const toolName = toolMatch[2];
-      const direction = toolMatch[3];
-      const isError = Boolean(toolMatch[4]);
-      const payload = toolMatch[5] ?? '';
-
-      if (direction === 'input') {
-        return {
-          title: `Using ${toolName}`,
-          subtitle: 'Tool input',
-          tone: 'tool',
-          content: renderToolEventContent({
-            direction: 'input',
-            toolName,
-            payload,
-            isError,
-          }),
-        };
-      }
-
-      return {
-        title: `${toolName} result`,
-        subtitle: isError ? 'Tool error' : 'Tool output',
-        tone: isError ? 'error' : 'tool',
-        content: renderToolEventContent({
-          direction: 'output',
-          toolName,
-          payload,
-          isError,
-        }),
-      };
-    }
-  }
-
-  const detail = stripTaskPrefix(clean);
-  switch (event.type) {
-    case 'task:planning':
-      return { title: 'Planning', subtitle: event.taskId, tone: 'neutral', content: detail || 'Drafting implementation plan.' };
-    case 'task:approval-requested':
-      return { title: 'Awaiting approval', subtitle: event.taskId, tone: 'neutral', content: detail || 'Waiting for plan approval.' };
-    case 'task:implementation-attempt':
-      return { title: 'Implementing', subtitle: event.taskId, tone: 'neutral', content: detail || 'Starting implementation attempt.' };
-    case 'task:validating':
-      return { title: 'Validating', subtitle: event.taskId, tone: 'neutral', content: detail || 'Running verification checks.' };
-    case 'task:completed':
-    case 'graph:completed':
-      return { title: 'Completed', subtitle: event.taskId, tone: 'success', content: detail || 'Run completed successfully.' };
-    case 'task:failed':
-    case 'graph:failed':
-      return {
-        title: 'Failed',
-        subtitle: event.taskId,
-        tone: 'error',
-        failureType: normalizeFailureType(event.failureType),
-        content: detail || 'Execution failed.',
-      };
-    default:
-      return {
-        title: event.type.replace('task:', '').replace('graph:', '').replace(/-/g, ' '),
-        subtitle: event.taskId,
-        tone: 'neutral',
-        content: compactInline(detail || clean, 260),
-      };
-  }
-}
-
-function normalizeFailureType(raw?: string): FailureType | undefined {
-  const value = (raw ?? '').trim().toLowerCase();
-  if (!value) {
-    return undefined;
-  }
-
-  if (value === 'timeout'
-    || value === 'auth'
-    || value === 'rate_limit'
-    || value === 'tool_schema'
-    || value === 'tool_runtime'
-    || value === 'validation'
-    || value === 'empty_response'
-    || value === 'unknown') {
-    return value;
-  }
-
-  return undefined;
-}
-
-function formatFailureTypeLabel(failureType?: string): string {
-  const normalized = normalizeFailureType(failureType);
-  if (!normalized) {
-    return '';
-  }
-
-  return normalized.replace(/_/g, ' ');
-}
-
-function failureTypeBadgeClass(failureType?: string, selected = false): string {
-  if (selected) {
-    return 'bg-white/20 text-white';
-  }
-
-  const normalized = normalizeFailureType(failureType);
-  switch (normalized) {
-    case 'timeout':
-      return 'bg-orange-100 text-orange-700 dark:bg-orange-900/40 dark:text-orange-300';
-    case 'auth':
-      return 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300';
-    case 'rate_limit':
-      return 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300';
-    case 'tool_schema':
-    case 'tool_runtime':
-      return 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/40 dark:text-yellow-300';
-    case 'validation':
-      return 'bg-sky-100 text-sky-700 dark:bg-sky-900/40 dark:text-sky-300';
-    case 'empty_response':
-      return 'bg-slate-200 text-slate-700 dark:bg-slate-800 dark:text-slate-300';
-    case 'unknown':
-      return 'bg-slate-200 text-slate-600 dark:bg-slate-800 dark:text-slate-300';
-    default:
-      return 'bg-slate-200 text-slate-600 dark:bg-slate-800 dark:text-slate-300';
-  }
-}
-
-function resolveSessionFailureType(session?: WorkSession): FailureType | undefined {
-  if (!session) {
-    return undefined;
-  }
-
-  const fromStatus = normalizeFailureType(session.llmStatus?.failureType);
-  if (fromStatus) {
-    return fromStatus;
-  }
-
-  const fromOutput = normalizeFailureType(session.output?.failureType);
-  if (fromOutput) {
-    return fromOutput;
-  }
-
-  const lastFailedEvent = [...session.events]
-    .reverse()
-    .find((event) => event.type === 'task:failed' && normalizeFailureType(event.failureType));
-
-  return normalizeFailureType(lastFailedEvent?.failureType);
-}
-
-function normalizeTaskStatus(raw?: string): string {
-  const value = (raw ?? '').toLowerCase();
-  if (value.includes('failed') || value.includes('error')) {
-    return 'failed';
-  }
-  if (value.includes('completed') || value.includes('output') || value.includes('done')) {
-    return 'completed';
-  }
-  if (value.includes('started') || value.includes('stream') || value.includes('tool-call')) {
-    return 'running';
-  }
-  return 'pending';
-}
-
-function statusColor(status: string): string {
-  switch (status) {
-    case 'running':
-      return '#2563eb';
-    case 'completed':
-      return '#059669';
-    case 'failed':
-      return '#dc2626';
-    default:
-      return '#94a3b8';
-  }
-}
-
-function normalizeSessionStatus(raw?: string): SessionStatus {
-  const value = (raw ?? '').toLowerCase();
-  if (!value) {
-    return 'pending';
-  }
-  if (value.includes('fail') || value.includes('error')) {
-    return 'failed';
-  }
-  if (value.includes('cancel') || value.includes('abort')) {
-    return 'cancelled';
-  }
-  if (value.includes('complete') || value.includes('done') || value.includes('success')) {
-    return 'completed';
-  }
-  if (value.includes('run') || value.includes('progress') || value.includes('start') || value.includes('stream')) {
-    return 'running';
-  }
-  if (value.includes('pending') || value.includes('queue') || value.includes('wait')) {
-    return 'pending';
-  }
-  return 'unknown';
-}
-
-function formatSessionStatus(raw?: string): string {
-  const normalized = normalizeSessionStatus(raw);
-  if (normalized === 'unknown') {
-    const fallback = (raw ?? '').trim().toLowerCase();
-    return fallback || 'unknown';
-  }
-  return normalized;
-}
-
-function sessionStatusBadgeClass(raw?: string, selected = false): string {
-  if (selected) {
-    return 'bg-white/20 text-white';
-  }
-  switch (normalizeSessionStatus(raw)) {
-    case 'running':
-      return 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300';
-    case 'completed':
-      return 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300';
-    case 'failed':
-      return 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300';
-    case 'cancelled':
-      return 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300';
-    case 'pending':
-      return 'bg-slate-200 text-slate-600 dark:bg-slate-800 dark:text-slate-300';
-    default:
-      return 'bg-slate-200 text-slate-600 dark:bg-slate-800 dark:text-slate-300';
-  }
-}
-
-function normalizeLlmSessionState(raw?: string): LlmSessionState {
-  const value = (raw ?? '').trim().toLowerCase();
-  switch (value) {
-    case 'queued':
-      return 'queued';
-    case 'analyzing':
-      return 'analyzing';
-    case 'thinking':
-      return 'thinking';
-    case 'planning':
-      return 'planning';
-    case 'awaiting_approval':
-    case 'awaiting-approval':
-      return 'awaiting-approval';
-    case 'implementing':
-      return 'implementing';
-    case 'using_tools':
-    case 'using-tools':
-      return 'using-tools';
-    case 'validating':
-      return 'validating';
-    case 'retrying':
-      return 'retrying';
-    case 'completed':
-      return 'completed';
-    case 'failed':
-      return 'failed';
-    case 'cancelled':
-      return 'cancelled';
-    default:
-      return 'queued';
-  }
-}
-
-function llmStatusLabel(state: LlmSessionState): string {
-  switch (state) {
-    case 'queued':
-      return 'Queued';
-    case 'analyzing':
-      return 'Analyzing';
-    case 'thinking':
-      return 'Thinking';
-    case 'planning':
-      return 'Planning';
-    case 'awaiting-approval':
-      return 'Awaiting Approval';
-    case 'implementing':
-      return 'Implementing';
-    case 'using-tools':
-      return 'Using Tools';
-    case 'validating':
-      return 'Validating';
-    case 'retrying':
-      return 'Retrying';
-    case 'completed':
-      return 'Completed';
-    case 'failed':
-      return 'Failed';
-    case 'cancelled':
-      return 'Cancelled';
-    default:
-      return 'Queued';
-  }
-}
-
-function fallbackLlmState(sessionStatus?: string): LlmSessionState {
-  switch (normalizeSessionStatus(sessionStatus)) {
-    case 'running':
-      return 'analyzing';
-    case 'completed':
-      return 'completed';
-    case 'failed':
-      return 'failed';
-    case 'cancelled':
-      return 'cancelled';
-    default:
-      return 'queued';
-  }
-}
-
-function normalizeLlmPhase(raw?: string): LlmSessionPhase | undefined {
-  const value = (raw ?? '').trim().toLowerCase();
-  if (value === 'planning') {
-    return 'planning';
-  }
-  if (value === 'implementation' || value === 'implementing') {
-    return 'implementation';
-  }
-
-  return undefined;
-}
-
-function fallbackLlmPhase(state: LlmSessionState): LlmSessionPhase | undefined {
-  switch (state) {
-    case 'planning':
-    case 'awaiting-approval':
-      return 'planning';
-    case 'implementing':
-    case 'using-tools':
-    case 'validating':
-    case 'retrying':
-      return 'implementation';
-    default:
-      return undefined;
-  }
-}
-
-function llmPhaseLabel(phase?: LlmSessionPhase): string {
-  if (!phase) {
-    return 'Unknown';
-  }
-
-  return phase === 'planning' ? 'Planning' : 'Implementation';
-}
-
-function llmPhaseBadgeClass(phase?: LlmSessionPhase, selected = false): string {
-  if (selected) {
-    return 'bg-white/20 text-white';
-  }
-
-  if (phase === 'planning') {
-    return 'bg-cyan-100 text-cyan-700 dark:bg-cyan-900/40 dark:text-cyan-300';
-  }
-
-  if (phase === 'implementation') {
-    return 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300';
-  }
-
-  return 'bg-slate-200 text-slate-600 dark:bg-slate-800 dark:text-slate-300';
-}
-
-function composerModeBadgeClass(mode: ComposerMode): string {
-  switch (mode) {
-    case 'chat':
-      return 'bg-violet-100 text-violet-700 dark:bg-violet-900/40 dark:text-violet-300';
-    case 'planning':
-      return 'bg-cyan-100 text-cyan-700 dark:bg-cyan-900/40 dark:text-cyan-300';
-    case 'implementation':
-      return 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300';
-    default:
-      return 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300';
-  }
-}
-
-function composerModeDescription(mode: ComposerMode): string {
-  switch (mode) {
-    case 'chat':
-      return 'Conversational mode for clarification and context.';
-    case 'planning':
-      return 'Planning mode for architecture and execution plans.';
-    case 'implementation':
-      return 'Implementation mode with edit-capable tools.';
-    default:
-      return 'Start a new run (plan + implement).';
-  }
-}
-
-function resolveLlmStatus(session?: WorkSession): LlmSessionStatus {
-  const raw = session?.llmStatus;
-  const sessionFailureType = resolveSessionFailureType(session);
-  if (raw) {
-    const state = normalizeLlmSessionState(raw.state);
-    const phase = normalizeLlmPhase(raw.phase) ?? fallbackLlmPhase(state);
-    return {
-      state,
-      label: raw.label?.trim() || llmStatusLabel(state),
-      detail: raw.detail?.trim() || undefined,
-      failureType: normalizeFailureType(raw.failureType) ?? sessionFailureType,
-      phase,
-    };
-  }
-
-  const fallbackState = fallbackLlmState(session?.status);
-  const phase = fallbackLlmPhase(fallbackState);
-  return {
-    state: fallbackState,
-    label: llmStatusLabel(fallbackState),
-    failureType: sessionFailureType,
-    phase,
-  };
-}
-
-function llmStatusBadgeClass(status: LlmSessionStatus, selected = false): string {
-  if (selected) {
-    return 'bg-white/20 text-white';
-  }
-
-  switch (status.state) {
-    case 'analyzing':
-    case 'thinking':
-    case 'planning':
-      return 'bg-cyan-100 text-cyan-700 dark:bg-cyan-900/40 dark:text-cyan-300';
-    case 'awaiting-approval':
-      return 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300';
-    case 'implementing':
-    case 'using-tools':
-      return 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300';
-    case 'validating':
-      return 'bg-teal-100 text-teal-700 dark:bg-teal-900/40 dark:text-teal-300';
-    case 'retrying':
-      return 'bg-orange-100 text-orange-700 dark:bg-orange-900/40 dark:text-orange-300';
-    case 'completed':
-      return 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300';
-    case 'failed':
-      return 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300';
-    case 'cancelled':
-      return 'bg-slate-200 text-slate-600 dark:bg-slate-800 dark:text-slate-300';
-    default:
-      return 'bg-slate-200 text-slate-600 dark:bg-slate-800 dark:text-slate-300';
-  }
-}
-
-function summarizeChatPartsForTrace(parts?: ChatContentPart[]): string[] {
-  if (!parts || parts.length === 0) {
-    return [];
-  }
-
-  return parts.map((part, index) => {
-    if (part.type === 'text') {
-      return `part ${index + 1}: text ${compactInline(part.text, 280)}`;
-    }
-
-    const name = part.name?.trim() || `image-${index + 1}`;
-    return `part ${index + 1}: image ${name} (${part.mimeType}, base64 length ${part.data.length})`;
-  });
-}
-
-function indentBlock(text: string, prefix = '    '): string {
-  return text
-    .split('\n')
-    .map((line) => `${prefix}${line}`)
-    .join('\n');
-}
-
-function buildSessionTraceExport(
-  session: WorkSession,
-  chatMessages: ChatMessage[],
-  todos: AgentTodo[],
-): string {
-  const llmStatus = resolveLlmStatus(session);
-  const sessionFailureType = resolveSessionFailureType(session);
-  const lines: string[] = [];
-
-  lines.push('Orchestrace Chat Trace');
-  lines.push(`Exported at: ${new Date().toISOString()}`);
-  lines.push(`Run ID: ${session.id}`);
-  lines.push(`Workspace: ${session.workspaceName} (${session.workspacePath})`);
-  lines.push(`Provider/Model: ${session.provider}/${session.model}`);
-  lines.push(`Status: ${session.status}`);
-  if (sessionFailureType) {
-    lines.push(`Failure type: ${sessionFailureType}`);
-  }
-  lines.push(`LLM status: ${llmStatus.label}${llmStatus.detail ? ` - ${llmStatus.detail}` : ''}`);
-  lines.push(`Created: ${session.createdAt}`);
-  lines.push(`Updated: ${session.updatedAt}`);
-  lines.push(`Worktree enabled: ${session.useWorktree ? 'yes' : 'no'}`);
-  if (session.worktreePath) {
-    lines.push(`Worktree path: ${session.worktreePath}`);
-  }
-  if (session.worktreeBranch) {
-    lines.push(`Worktree branch: ${session.worktreeBranch}`);
-  }
-  lines.push('');
-
-  lines.push('Prompt:');
-  lines.push(indentBlock(session.prompt || '(empty prompt)'));
-  lines.push('');
-
-  lines.push(`Todos (${todos.length}):`);
-  if (todos.length === 0) {
-    lines.push('  - (none)');
-  } else {
-    for (const todo of todos) {
-      lines.push(`  - [${todo.done ? 'x' : ' '}] ${todo.text}`);
-    }
-  }
-  lines.push('');
-
-  lines.push(`Events (${session.events.length}):`);
-  if (session.events.length === 0) {
-    lines.push('  - (none)');
-  } else {
-    for (const event of session.events) {
-      lines.push(`  - [${event.time}] ${event.type}${event.taskId ? ` (${event.taskId})` : ''}${event.failureType ? ` [${event.failureType}]` : ''}`);
-      lines.push(indentBlock(stripRunTag(event.message), '      '));
-    }
-  }
-  lines.push('');
-
-  lines.push(`Chat Messages (${chatMessages.length}):`);
-  if (chatMessages.length === 0) {
-    lines.push('  - (none)');
-  } else {
-    for (const message of chatMessages) {
-      lines.push(`  - [${message.time}] ${message.role.toUpperCase()}`);
-      lines.push(indentBlock(message.content || '(empty message)', '      '));
-      const parts = summarizeChatPartsForTrace(message.contentParts);
-      if (parts.length > 0) {
-        lines.push('      Parts:');
-        for (const part of parts) {
-          lines.push(`        - ${part}`);
-        }
-      }
-    }
-  }
-
-  return lines.join('\n');
-}
-
-async function copyTextToClipboard(text: string): Promise<void> {
-  if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
-    await navigator.clipboard.writeText(text);
-    return;
-  }
-
-  if (typeof document !== 'undefined') {
-    const textarea = document.createElement('textarea');
-    textarea.value = text;
-    textarea.style.position = 'fixed';
-    textarea.style.opacity = '0';
-    document.body.appendChild(textarea);
-    textarea.focus();
-    textarea.select();
-    const copied = document.execCommand('copy');
-    document.body.removeChild(textarea);
-    if (copied) {
-      return;
-    }
-  }
-
-  throw new Error('Clipboard is not available in this browser context.');
-}
-
-function buildGraphLayout(session?: WorkSession): { nodes: GraphNodeView[]; width: number; height: number } {
-  if (!session) {
-    return { nodes: [], width: 900, height: 520 };
-  }
-
-  const baseNodes = session.agentGraph && session.agentGraph.length > 0
-    ? session.agentGraph
-    : [{ id: session.id, prompt: session.prompt, dependencies: [] }];
-
-  const nodeById = new Map(baseNodes.map((node) => [node.id, node]));
-  const levelById = new Map<string, number>();
-
-  const computeLevel = (id: string, trail = new Set<string>()): number => {
-    if (levelById.has(id)) {
-      return levelById.get(id) ?? 0;
-    }
-    if (trail.has(id)) {
-      return 0;
-    }
-    trail.add(id);
-    const node = nodeById.get(id);
-    if (!node || node.dependencies.length === 0) {
-      levelById.set(id, 0);
-      trail.delete(id);
-      return 0;
-    }
-    const level = Math.max(...node.dependencies.map((dep) => computeLevel(dep, trail) + 1));
-    levelById.set(id, level);
-    trail.delete(id);
-    return level;
-  };
-
-  for (const node of baseNodes) {
-    computeLevel(node.id);
-  }
-
-  const levelGroups = new Map<number, typeof baseNodes>();
-  for (const node of baseNodes) {
-    const level = levelById.get(node.id) ?? 0;
-    const group = levelGroups.get(level) ?? [];
-    group.push(node);
-    levelGroups.set(level, group);
-  }
-
-  const levels = [...levelGroups.keys()].sort((a, b) => a - b);
-  const maxPerLevel = Math.max(1, ...[...levelGroups.values()].map((group) => group.length));
-  const width = Math.max(900, levels.length * 280 + 180);
-  const height = Math.max(520, maxPerLevel * 140 + 180);
-
-  const nodes: GraphNodeView[] = [];
-  for (const level of levels) {
-    const group = levelGroups.get(level) ?? [];
-    const stepY = height / (group.length + 1);
-    group.forEach((node, index) => {
-      const status = normalizeTaskStatus(session.taskStatus[node.id]);
-      nodes.push({
-        id: node.id,
-        label: node.id,
-        prompt: node.prompt,
-        x: 130 + level * 260,
-        y: stepY * (index + 1),
-        status: node.status ?? status,
-        dependencies: node.dependencies,
-      });
-    });
-  }
-
-  return { nodes, width, height };
-}
+import type { ComposerImageAttachment, ComposerMode, FailureType, SessionLlmControls, Tab, ThemeMode, TimelineItem } from './app/types';
+import { readRunIdFromUrl, updateRunIdInUrl, buildRunDeepLink, compactRunId } from './app/utils/runUrl';
+import { compactInline, compactPromptDisplay } from './app/utils/text';
+import { formatTimelineEvent } from './app/utils/timeline';
+import { formatFailureTypeLabel, failureTypeBadgeClass, resolveSessionFailureType } from './app/utils/failure';
+import { normalizeTaskStatus, statusColor, normalizeSessionStatus, formatSessionStatus, sessionStatusBadgeClass } from './app/utils/status';
+import { resolveLlmStatus, llmPhaseBadgeClass, llmPhaseLabel, llmStatusBadgeClass, isLlmStatusBusy } from './app/utils/llm';
+import { buildSessionTraceExport } from './app/utils/traceExport';
+import { buildGraphLayout } from './app/utils/graph';
+import { composePrompt, composeRunPromptWithContext, toComposerContentParts, composerModeBadgeClass, composerModeDescription } from './app/utils/composer';
+import { copyTextToClipboard, readClipboardImage } from './app/utils/clipboard';
 
 function MarkdownMessage({ content, dark }: { content: string; dark: boolean }) {
   return (
@@ -1067,27 +203,6 @@ function UserMessageContent({
   );
 }
 
-async function readClipboardImage(item: DataTransferItem): Promise<ComposerImageAttachment | null> {
-  const file = item.getAsFile();
-  if (!file) {
-    return null;
-  }
-
-  const dataUrl = await new Promise<string>((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result ?? ''));
-    reader.onerror = () => reject(new Error('Failed to read pasted image'));
-    reader.readAsDataURL(file);
-  });
-
-  const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  return {
-    id,
-    name: file.name || 'pasted-image.png',
-    mime: file.type || 'image/png',
-    dataUrl,
-  };
-}
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<Tab>('graph');
@@ -1148,6 +263,7 @@ export default function App() {
 
   const selectedLlmStatus = useMemo(() => resolveLlmStatus(selectedSession), [selectedSession]);
   const selectedFailureType = useMemo(() => resolveSessionFailureType(selectedSession), [selectedSession]);
+  const selectedSessionRunning = selectedSession ? normalizeSessionStatus(selectedSession.status) === 'running' : false;
   const composerMode: ComposerMode = selectedSession
     ? (selectedSession.mode ?? 'chat')
     : 'run';
@@ -1902,6 +1018,9 @@ export default function App() {
                 onClick={() => setSelectedSessionId(session.id)}
               >
                 <div className="flex items-center gap-2">
+                  {normalizeSessionStatus(session.status) === 'running' && (
+                    <Loader2 className={`h-3.5 w-3.5 shrink-0 animate-spin ${isSelected ? 'text-blue-100' : 'text-blue-500 dark:text-blue-300'}`} />
+                  )}
                   <span className="min-w-0 flex-1 truncate">{compactPromptDisplay(session.prompt)}</span>
                   <span
                     className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${sessionStatusBadgeClass(
@@ -1971,7 +1090,10 @@ export default function App() {
                       <div className="mb-3 flex items-start justify-between gap-2">
                         <div>
                           <div className="text-xs font-bold uppercase tracking-widest text-slate-500 dark:text-slate-400">Entity Graph</div>
-                          <div className="mt-1 text-sm font-semibold text-slate-700 dark:text-slate-200">{compactPromptDisplay(selectedSession.prompt)}</div>
+                          <div className="mt-1 flex items-center gap-2 text-sm font-semibold text-slate-700 dark:text-slate-200">
+                            {selectedSessionRunning && <Loader2 className="h-4 w-4 animate-spin text-blue-500 dark:text-blue-300" />}
+                            <span>{compactPromptDisplay(selectedSession.prompt)}</span>
+                          </div>
                         </div>
                         <div className="flex items-center gap-1.5">
                           <span className={`rounded px-2 py-0.5 text-xs font-semibold uppercase tracking-wide ${sessionStatusBadgeClass(selectedSession.status)}`}>
@@ -1990,6 +1112,9 @@ export default function App() {
                           <span className={`rounded px-2 py-0.5 text-xs font-semibold uppercase tracking-wide ${llmStatusBadgeClass(selectedLlmStatus)}`}>
                             {selectedLlmStatus.label}
                           </span>
+                          {isLlmStatusBusy(selectedLlmStatus) && (
+                            <Loader2 className="h-3.5 w-3.5 animate-spin text-blue-500 dark:text-blue-300" />
+                          )}
                         </div>
                       </div>
                       <div className="overflow-auto rounded border border-slate-100 bg-slate-50 dark:border-slate-800 dark:bg-slate-950">
@@ -2107,7 +1232,15 @@ export default function App() {
               <section className="flex min-h-0 flex-1 flex-col">
                 <header className="border-b border-slate-200 bg-white px-4 py-3 dark:border-slate-800 dark:bg-slate-900">
                   <div className="mb-2 flex items-center justify-between gap-2">
-                    <div className="text-xs font-bold uppercase tracking-widest text-slate-500 dark:text-slate-400">LLM Work</div>
+                    <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-widest text-slate-500 dark:text-slate-400">
+                      <span>LLM Work</span>
+                      {selectedSessionRunning && (
+                        <span className="inline-flex items-center gap-1 rounded bg-blue-100 px-1.5 py-0.5 text-[10px] font-semibold normal-case tracking-normal text-blue-700 dark:bg-blue-900/40 dark:text-blue-300">
+                          <Loader2 className="h-3 w-3 animate-spin" />
+                          In progress
+                        </span>
+                      )}
+                    </div>
                     <div className="flex items-center gap-1.5">
                       <button
                         aria-label="Toggle tool list"
@@ -2329,6 +1462,12 @@ export default function App() {
                     </div>
                     <div className="text-[10px] text-slate-500 dark:text-slate-400">{composerModeDescription(composerMode)}</div>
                   </div>
+                  {selectedSessionRunning && (
+                    <div className="mb-2 flex items-center gap-1.5 rounded border border-blue-200 bg-blue-50 px-2 py-1 text-[11px] text-blue-700 dark:border-blue-800 dark:bg-blue-950/40 dark:text-blue-300">
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      <span>Agent is actively working. Follow progress in the timeline and graph.</span>
+                    </div>
+                  )}
                   <div className="flex gap-2">
                     <textarea
                       className="h-14 flex-1 resize-none rounded border border-slate-200 px-2 py-1.5 text-sm dark:border-slate-700 dark:bg-slate-900"

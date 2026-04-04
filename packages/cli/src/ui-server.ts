@@ -48,6 +48,26 @@ import type {
 } from './ui-server/types.js';
 import { WorkspaceManager } from './workspace-manager.js';
 
+const SUB_AGENT_READ_ONLY_TOOL_ALLOWLIST = [
+  'list_directory',
+  'read_file',
+  'search_files',
+  'git_diff',
+  'git_status',
+];
+
+function createReadOnlySubAgentToolset(cwd: string) {
+  return createAgentToolset({
+    cwd,
+    phase: 'planning',
+    permissions: {
+      allowWriteTools: false,
+      allowRunCommand: false,
+      toolAllowlist: [...SUB_AGENT_READ_ONLY_TOOL_ALLOWLIST],
+    },
+  });
+}
+
 export async function startUiServer(options: UiServerOptions = {}): Promise<void> {
   const port = options.port ?? 4310;
   const hmrEnabled = options.hmr ?? process.env.ORCHESTRACE_UI_HMR !== 'false';
@@ -226,6 +246,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           const subProvider = runSubAgentRequest.provider ?? activeProvider;
           const subModel = runSubAgentRequest.model ?? activeModel;
           const subAgentSignal = session.controller.signal;
+          const subAgentToolset = createReadOnlySubAgentToolset(session.workspacePath);
           const subAgent = await llm.spawnAgent({
             provider: subProvider,
             model: subModel,
@@ -234,6 +255,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
             systemPrompt: runSubAgentRequest.systemPrompt
               ?? 'You are a focused sub-agent. Use only the provided task-relevant context, avoid unrelated history, and return concise actionable output.',
             signal: subAgentSignal,
+            toolset: subAgentToolset,
             apiKey: await authManager.resolveApiKey(subProvider),
           });
 
@@ -1206,6 +1228,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                   const subProvider = runSubAgentRequest.provider ?? session.provider;
                   const subModel = runSubAgentRequest.model ?? session.model;
                   const subAgentSignal = session.controller.signal;
+                  const subAgentToolset = createReadOnlySubAgentToolset(session.workspacePath);
                   const subAgent = await llm.spawnAgent({
                     provider: subProvider,
                     model: subModel,
@@ -1214,6 +1237,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                     systemPrompt: runSubAgentRequest.systemPrompt
                       ?? 'You are a focused sub-agent. Use only the provided task-relevant context, avoid unrelated history, and return concise actionable output.',
                     signal: subAgentSignal,
+                    toolset: subAgentToolset,
                     apiKey: await authManager.resolveApiKey(subProvider),
                   });
 
@@ -1402,6 +1426,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
               const subProvider = runSubAgentRequest.provider ?? session.provider;
               const subModel = runSubAgentRequest.model ?? session.model;
               const subAgentSignal = session.controller.signal;
+              const subAgentToolset = createReadOnlySubAgentToolset(session.workspacePath);
               const subAgent = await llm.spawnAgent({
                 provider: subProvider,
                 model: subModel,
@@ -1410,6 +1435,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                 systemPrompt: runSubAgentRequest.systemPrompt
                   ?? 'You are a focused sub-agent. Use only the provided task-relevant context, avoid unrelated history, and return concise actionable output.',
                 signal: subAgentSignal,
+                toolset: subAgentToolset,
                 apiKey: await authManager.resolveApiKey(subProvider),
               });
 
@@ -2252,7 +2278,7 @@ function applyChecklistFromTodoArgs(
       .map((item) => {
         const id = asString(item.id) || randomUUID();
         const title = asString(item.title) || `Todo ${id}`;
-        const status = asString(item.status);
+        const status = normalizeChecklistTodoStatus(item.status);
         const previous = existing.find((entry) => entry.id === id);
         return {
           id,
@@ -2270,7 +2296,7 @@ function applyChecklistFromTodoArgs(
   if (toolName === 'todo_add') {
     const id = asString(args.id) || randomUUID();
     const title = asString(args.title) || `Todo ${id}`;
-    const status = asString(args.status);
+    const status = normalizeChecklistTodoStatus(args.status);
     const next = existing.filter((item) => item.id !== id);
     next.push({
       id,
@@ -2289,7 +2315,7 @@ function applyChecklistFromTodoArgs(
   }
 
   const index = existing.findIndex((item) => item.id === id);
-  const status = asString(args.status);
+  const status = normalizeChecklistTodoStatus(args.status);
   const title = asString(args.title);
   const details = asString(args.details);
   const appendDetails = asString(args.appendDetails);
@@ -2324,6 +2350,41 @@ function applyChecklistFromTodoArgs(
   next[index] = updated;
   sessionTodos.set(sessionId, next);
   return true;
+}
+
+function normalizeChecklistTodoStatus(value: unknown): 'todo' | 'in_progress' | 'done' | undefined {
+  const raw = asString(value);
+  if (!raw) {
+    return undefined;
+  }
+
+  const normalized = raw.toLowerCase().replace(/[-\s]+/g, '_');
+  if (normalized === 'todo' || normalized === 'pending' || normalized === 'backlog' || normalized === 'open') {
+    return 'todo';
+  }
+
+  if (
+    normalized === 'in_progress'
+    || normalized === 'inprogress'
+    || normalized === 'doing'
+    || normalized === 'active'
+    || normalized === 'wip'
+  ) {
+    return 'in_progress';
+  }
+
+  if (
+    normalized === 'done'
+    || normalized === 'completed'
+    || normalized === 'complete'
+    || normalized === 'finished'
+    || normalized === 'closed'
+    || normalized === 'resolved'
+  ) {
+    return 'done';
+  }
+
+  return undefined;
 }
 
 function parseTodoToolArgs(
@@ -2688,6 +2749,7 @@ function normalizeSessionAgentGraphNodes(rawNodes: unknown): SessionAgentGraphNo
 
     nodes.push({
       id,
+      name: asString(node.name) || undefined,
       prompt,
       dependencies,
       status: normalizeGraphNodeStatus(node.status),
@@ -2878,9 +2940,11 @@ function buildSessionSystemPrompt(session: WorkSession, phase: SessionPromptPhas
           'Use chat responses to clarify intent, summarize progress, and gather missing context.',
           'When direct implementation is requested, proceed with concrete action-oriented steps.',
           'When the user asks for planning, switch to planning mode and perform todo_set + agent_graph_set before presenting the plan.',
+          'When publishing agent_graph_set, use descriptive node ids/names instead of generic n1/n2 labels.',
           'Planning requests must also use subagent_spawn or subagent_spawn_batch with focused, task-relevant context per sub-agent.',
           'Pass nodeId on each sub-agent request so graph progress stays visible and current.',
           'When asked to inspect or change todos/agent graph, call the corresponding tools instead of simulating success.',
+          'When calling todo tools, use canonical statuses only: todo, in_progress, done.',
           'If no tool was executed, explicitly state that no tool output is available.',
           'Always end your response with 1-3 numbered next follow-up suggestions.',
         ]

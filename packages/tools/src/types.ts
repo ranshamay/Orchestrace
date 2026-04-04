@@ -60,6 +60,7 @@ export interface TodoItem {
 
 export interface AgentGraphNode {
   id: string;
+  name?: string;
   prompt: string;
   dependencies?: string[];
   provider?: string;

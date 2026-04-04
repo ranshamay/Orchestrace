@@ -78,7 +78,7 @@ export async function executeWithOptionalTools(params: {
     }
 
     context.messages.push(response);
-    const { results: toolResults, hadErrors } = await executeToolCalls(
+    const { results: toolResults, retryPrompts, hadErrors } = await executeToolCalls(
       toolset,
       context.tools ?? [],
       toolCalls,
@@ -86,6 +86,16 @@ export async function executeWithOptionalTools(params: {
       completionOptions,
     );
     context.messages.push(...toolResults);
+    for (const retryPrompt of retryPrompts) {
+      context.messages.push({
+        role: 'user',
+        content: [{
+          type: 'text',
+          text: retryPrompt,
+        }],
+        timestamp: Date.now(),
+      });
+    }
     previousRoundHadToolError = hadErrors;
   }
 }
@@ -110,8 +120,9 @@ async function executeToolCalls(
   toolCalls: ToolCall[],
   signal?: AbortSignal,
   completionOptions?: LlmCompletionOptions,
-): Promise<{ results: ToolResultMessage[]; hadErrors: boolean }> {
+): Promise<{ results: ToolResultMessage[]; retryPrompts: string[]; hadErrors: boolean }> {
   const results: ToolResultMessage[] = [];
+  const retryPrompts: string[] = [];
   let hadErrors = false;
 
   for (const toolCall of toolCalls) {
@@ -150,7 +161,9 @@ async function executeToolCalls(
       });
     } catch (error) {
       payload = {
-        content: `Tool execution failed: ${toErrorMessage(error)}`,
+        content:
+          `Tool execution failed: ${toErrorMessage(error)}\n`
+          + 'Inspect the error, correct the arguments, and retry this tool call.',
         isError: true,
       };
 
@@ -174,9 +187,21 @@ async function executeToolCalls(
       isError: payload.isError,
       timestamp: Date.now(),
     });
+
+    if (payload.isError) {
+      retryPrompts.push(buildToolCallRetryMessage(toolCall, payload.content));
+    }
   }
 
-  return { results, hadErrors };
+  return { results, retryPrompts, hadErrors };
+}
+
+function buildToolCallRetryMessage(toolCall: ToolCall, errorContent: string): string {
+  return [
+    `Tool call ${toolCall.name} (${toolCall.id}) failed.`,
+    errorContent,
+    'Correct the arguments using this error and retry this tool call.',
+  ].join('\n');
 }
 
 function getToolCalls(message: AssistantMessage): ToolCall[] {

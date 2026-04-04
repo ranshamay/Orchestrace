@@ -1,5 +1,5 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { dirname, join, relative, resolve, sep } from 'node:path';
 import { Type } from '@mariozechner/pi-ai';
 import type {
   AgentToolPhase,
@@ -13,8 +13,21 @@ import { sanitizeForPathSegment } from './path-utils.js';
 
 const todoStatusSchema = Type.Union([
   Type.Literal('todo'),
+  Type.Literal('pending'),
+  Type.Literal('backlog'),
+  Type.Literal('open'),
   Type.Literal('in_progress'),
+  Type.Literal('in-progress'),
+  Type.Literal('inprogress'),
+  Type.Literal('doing'),
+  Type.Literal('active'),
+  Type.Literal('wip'),
   Type.Literal('done'),
+  Type.Literal('completed'),
+  Type.Literal('complete'),
+  Type.Literal('finished'),
+  Type.Literal('closed'),
+  Type.Literal('resolved'),
 ]);
 
 const modeSchema = Type.Union([
@@ -22,6 +35,11 @@ const modeSchema = Type.Union([
   Type.Literal('planning'),
   Type.Literal('implementation'),
 ]);
+
+const SUBAGENT_CONTEXT_MAX_FILES = 3;
+const SUBAGENT_CONTEXT_MAX_CHARS_PER_FILE = 1200;
+const SUBAGENT_CONTEXT_MARKER = 'Auto-included file snippets';
+const PROMPT_FILE_PATH_PATTERN = /(?:^|[\s`"'])((?:\.?\.?\/)?[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)+\.[A-Za-z0-9._-]+)(?=$|[\s`"':),])/g;
 
 interface CoordinationToolsOptions extends AgentToolsetOptions {
   includeSubAgentTool: boolean;
@@ -214,6 +232,7 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
           nodes: Type.Array(
             Type.Object({
               id: Type.String({ minLength: 1 }),
+              name: Type.Optional(Type.String()),
               prompt: Type.String({ minLength: 1 }),
               dependencies: Type.Optional(Type.Array(Type.String())),
               provider: Type.Optional(Type.String()),
@@ -288,7 +307,7 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
 
         const request: SubAgentRequest = {
           nodeId: optionalString(toolArgs.nodeId),
-          prompt: asString(toolArgs.prompt, 'prompt'),
+          prompt: await enrichDelegationPromptWithFileSnippets(options.cwd, asString(toolArgs.prompt, 'prompt')),
           systemPrompt: optionalString(toolArgs.systemPrompt),
           provider: optionalString(toolArgs.provider),
           model: optionalString(toolArgs.model),
@@ -391,16 +410,21 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
           };
         }
 
-        const requests: SubAgentRequest[] = rawAgents
-          .filter((entry) => isRecord(entry))
-          .map((entry) => ({
+        const requests: SubAgentRequest[] = [];
+        for (const entry of rawAgents) {
+          if (!isRecord(entry)) {
+            continue;
+          }
+
+          requests.push({
             nodeId: optionalString(entry.nodeId),
-            prompt: asString(entry.prompt, 'prompt'),
+            prompt: await enrichDelegationPromptWithFileSnippets(options.cwd, asString(entry.prompt, 'prompt')),
             systemPrompt: optionalString(entry.systemPrompt),
             provider: optionalString(entry.provider),
             model: optionalString(entry.model),
             reasoning: normalizeReasoning(entry.reasoning),
-          }));
+          });
+        }
 
         const state = await readCoordinationState(statePath);
         const startIndex = state.subAgents.length;
@@ -614,6 +638,7 @@ function normalizeAgentGraphNodes(value: unknown): AgentGraphNode[] {
 
     nodes.push({
       id,
+      name: optionalString(entry.name),
       prompt,
       dependencies: optionalStringArray(entry.dependencies),
       provider: optionalString(entry.provider),
@@ -670,8 +695,34 @@ function normalizeSubAgentStatus(value: unknown): SubAgentRunRecord['status'] | 
 }
 
 function normalizeTodoStatus(value: unknown): TodoItem['status'] | undefined {
-  if (value === 'todo' || value === 'in_progress' || value === 'done') {
-    return value;
+  if (typeof value !== 'string') {
+    return undefined;
+  }
+
+  const normalized = value.trim().toLowerCase().replace(/[-\s]+/g, '_');
+  if (normalized === 'todo' || normalized === 'pending' || normalized === 'backlog' || normalized === 'open') {
+    return 'todo';
+  }
+
+  if (
+    normalized === 'in_progress'
+    || normalized === 'inprogress'
+    || normalized === 'doing'
+    || normalized === 'active'
+    || normalized === 'wip'
+  ) {
+    return 'in_progress';
+  }
+
+  if (
+    normalized === 'done'
+    || normalized === 'completed'
+    || normalized === 'complete'
+    || normalized === 'finished'
+    || normalized === 'closed'
+    || normalized === 'resolved'
+  ) {
+    return 'done';
   }
 
   return undefined;
@@ -725,6 +776,98 @@ function trimText(text: string, maxChars: number): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
+}
+
+async function enrichDelegationPromptWithFileSnippets(cwd: string, prompt: string): Promise<string> {
+  const trimmed = prompt.trim();
+  if (!trimmed || trimmed.includes(SUBAGENT_CONTEXT_MARKER)) {
+    return prompt;
+  }
+
+  const filePaths = extractCandidateFilePaths(trimmed);
+  if (filePaths.length === 0) {
+    return prompt;
+  }
+
+  const snippets = await collectFileSnippets(cwd, filePaths);
+  if (snippets.length === 0) {
+    return prompt;
+  }
+
+  const contextLines: string[] = [
+    '',
+    `[${SUBAGENT_CONTEXT_MARKER}]`,
+    'Referenced files were detected in the delegated prompt. Use these exact snippets when planning your answer.',
+  ];
+
+  for (const snippet of snippets) {
+    contextLines.push(`File: ${snippet.path}`);
+    contextLines.push('```');
+    contextLines.push(snippet.content);
+    contextLines.push('```');
+  }
+
+  return `${prompt}\n${contextLines.join('\n')}`;
+}
+
+function extractCandidateFilePaths(prompt: string): string[] {
+  const matches = prompt.matchAll(PROMPT_FILE_PATH_PATTERN);
+  const unique = new Set<string>();
+
+  for (const match of matches) {
+    const candidate = match[1]?.trim();
+    if (!candidate) {
+      continue;
+    }
+
+    const normalized = candidate.replace(/^\.\//, '');
+    if (normalized) {
+      unique.add(normalized);
+    }
+  }
+
+  return [...unique];
+}
+
+async function collectFileSnippets(cwd: string, filePaths: string[]): Promise<Array<{ path: string; content: string }>> {
+  const snippets: Array<{ path: string; content: string }> = [];
+
+  for (const filePath of filePaths) {
+    if (snippets.length >= SUBAGENT_CONTEXT_MAX_FILES) {
+      break;
+    }
+
+    const absolutePath = resolve(cwd, filePath);
+    if (!isWithinDirectory(absolutePath, cwd)) {
+      continue;
+    }
+
+    try {
+      const content = await readFile(absolutePath, 'utf-8');
+      if (content.includes('\u0000')) {
+        continue;
+      }
+
+      snippets.push({
+        path: toPosixPath(relative(cwd, absolutePath)),
+        content: trimText(content.trim(), SUBAGENT_CONTEXT_MAX_CHARS_PER_FILE),
+      });
+    } catch {
+      continue;
+    }
+  }
+
+  return snippets;
+}
+
+function isWithinDirectory(path: string, cwd: string): boolean {
+  const root = resolve(cwd);
+  const target = resolve(path);
+  return target === root || target.startsWith(`${root}${sep}`);
+}
+
+function toPosixPath(path: string): string {
+  return path.split(sep).join('/');
 }
 
 function now(): string {

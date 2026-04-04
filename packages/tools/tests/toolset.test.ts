@@ -285,3 +285,41 @@ describe('mode tools smoke test', () => {
     expect(afterSwitch.content).not.toContain('Tool run_command is not allowed while mode is planning');
   });
 });
+
+describe('subagent prompt enrichment', () => {
+  it('auto-includes referenced file snippets for batch delegation', async () => {
+    const cwd = await makeWorkspace();
+    const delegatedPrompts: string[] = [];
+
+    const toolset = createAgentToolset({
+      cwd,
+      phase: 'planning',
+      taskType: 'code',
+      graphId: 'g1',
+      taskId: 't1',
+      runSubAgent: async (request) => {
+        delegatedPrompts.push(request.prompt);
+        return { text: 'ok' };
+      },
+    });
+
+    const result = await toolset.executeTool({
+      id: '1',
+      name: 'subagent_spawn_batch',
+      arguments: {
+        agents: [
+          {
+            nodeId: 'n1',
+            prompt: 'Analyze src/file.ts and summarize its exported symbols.',
+          },
+        ],
+      },
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(delegatedPrompts).toHaveLength(1);
+    expect(delegatedPrompts[0]).toContain('[Auto-included file snippets]');
+    expect(delegatedPrompts[0]).toContain('File: src/file.ts');
+    expect(delegatedPrompts[0]).toContain('export const value = 1;');
+  });
+});

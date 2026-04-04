@@ -34,6 +34,7 @@ export interface SessionLlmStatus {
 
 export interface SessionAgentGraphNode {
   id: string;
+  name?: string;
   prompt: string;
   dependencies: string[];
   status?: 'pending' | 'running' | 'completed' | 'failed';

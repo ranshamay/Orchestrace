@@ -13,6 +13,26 @@ import { startUiServer } from './ui-server.js';
 import { WorkspaceManager } from './workspace-manager.js';
 import type { WorkspaceEntry } from './workspace-manager.js';
 
+const SUB_AGENT_READ_ONLY_TOOL_ALLOWLIST = [
+  'list_directory',
+  'read_file',
+  'search_files',
+  'git_diff',
+  'git_status',
+];
+
+function createReadOnlySubAgentToolset(cwd: string) {
+  return createAgentToolset({
+    cwd,
+    phase: 'planning',
+    permissions: {
+      allowWriteTools: false,
+      allowRunCommand: false,
+      toolAllowlist: [...SUB_AGENT_READ_ONLY_TOOL_ALLOWLIST],
+    },
+  });
+}
+
 interface ReplayRunTaskSummary {
   taskId: string;
   status: string;
@@ -380,6 +400,7 @@ async function runGraph(
       runSubAgent: async (request, _signal) => {
         const subProvider = request.provider ?? activeProvider;
         const subModel = request.model ?? activeModel;
+        const subAgentToolset = createReadOnlySubAgentToolset(cwd);
         const subAgent = await llm.spawnAgent({
           provider: subProvider,
           model: subModel,
@@ -387,6 +408,7 @@ async function runGraph(
           timeoutMs: resolveSubAgentTimeoutMs(),
           systemPrompt: request.systemPrompt
             ?? 'You are a focused sub-agent. Solve the given sub-task and return concise actionable output.',
+          toolset: subAgentToolset,
           apiKey: await authManager.resolveApiKey(subProvider),
         });
 
