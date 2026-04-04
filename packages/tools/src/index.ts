@@ -27,7 +27,7 @@ export function createAgentToolset(options: AgentToolsetOptions): LlmToolset {
   const dynamicModeEnabled = Boolean(options.modeController);
   const includeWriteTools = dynamicModeEnabled ? true : permissions.allowWriteTools;
   const includeRunCommandTool = dynamicModeEnabled ? true : permissions.allowRunCommand;
-  const includeSubAgentTool = dynamicModeEnabled ? true : options.phase !== 'planning';
+  const includeSubAgentTool = Boolean(options.runSubAgent);
 
   const allTools = [
     ...createFilesystemTools({

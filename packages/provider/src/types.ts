@@ -87,6 +87,7 @@ export interface LlmRequest {
   systemPrompt: string;
   prompt: LlmPromptInput;
   reasoning?: 'minimal' | 'low' | 'medium' | 'high';
+  timeoutMs?: number;
   signal?: AbortSignal;
   onTextDelta?: (delta: string) => void;
   onUsage?: (usage: { input: number; output: number; cost: number }) => void;
@@ -111,6 +112,7 @@ export interface LlmAgent {
 /** Options for spawning a dedicated agent. */
 export interface SpawnAgentRequest extends AgentModelConfig {
   systemPrompt: string;
+  timeoutMs?: number;
   signal?: AbortSignal;
   toolset?: LlmToolset;
   /** Explicit API key (e.g. from OAuth). If omitted, pi-ai reads env vars. */

@@ -68,6 +68,7 @@ export interface AgentGraphNode {
 }
 
 export interface SubAgentRequest {
+  nodeId?: string;
   prompt: string;
   systemPrompt?: string;
   provider?: string;

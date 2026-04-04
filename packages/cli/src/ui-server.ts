@@ -6,9 +6,14 @@ import { dirname, join } from 'node:path';
 import { orchestrate, PromptSectionName, renderPromptSections } from '@orchestrace/core';
 import type { DagEvent, PlanApprovalRequest, PromptSection, TaskGraph } from '@orchestrace/core';
 import { getModels } from '@mariozechner/pi-ai';
-import { PiAiAdapter, ProviderAuthManager } from '@orchestrace/provider';
+import { PiAiAdapter, ProviderAuthManager, type LlmToolCallEvent } from '@orchestrace/provider';
 import { createWorktree, type WorktreeHandle } from '@orchestrace/sandbox';
-import { DEFAULT_AGENT_TOOL_POLICY_VERSION, createAgentToolset } from '@orchestrace/tools';
+import {
+  DEFAULT_AGENT_TOOL_POLICY_VERSION,
+  createAgentToolset,
+  listAgentTools,
+  type AgentToolPhase,
+} from '@orchestrace/tools';
 import { now } from './ui-server/clock.js';
 import {
   buildChatContinuationInput,
@@ -58,6 +63,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
   const authSessions = new Map<string, AuthSession>();
   const sessionChats = new Map<string, SessionChatThread>();
   const sessionTodos = new Map<string, AgentTodoItem[]>();
+  const pendingSubagentNodeIdsBySession = new Map<string, Map<string, string[]>>();
   const chatStreams = new Map<string, ChatTokenStream>();
   const hmrClients = new Set<ServerResponse>();
   const workStreamClients = new Map<string, Set<ServerResponse>>();
@@ -92,6 +98,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     workSessions.delete(id);
     sessionChats.delete(id);
     sessionTodos.delete(id);
+    pendingSubagentNodeIdsBySession.delete(id);
 
     for (const [streamId, streamState] of [...chatStreams.entries()]) {
       if (streamState.sessionId !== id) {
@@ -215,20 +222,22 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         provider: activeProvider,
         model: activeModel,
         reasoning,
-        runSubAgent: async (runSubAgentRequest, signal) => {
+        runSubAgent: async (runSubAgentRequest, _signal) => {
           const subProvider = runSubAgentRequest.provider ?? activeProvider;
           const subModel = runSubAgentRequest.model ?? activeModel;
+          const subAgentSignal = session.controller.signal;
           const subAgent = await llm.spawnAgent({
             provider: subProvider,
             model: subModel,
             reasoning: runSubAgentRequest.reasoning ?? reasoning,
+            timeoutMs: resolveSubAgentTimeoutMs(),
             systemPrompt: runSubAgentRequest.systemPrompt
-              ?? 'You are a focused sub-agent. Solve the given sub-task and return concise actionable output.',
-            signal,
+              ?? 'You are a focused sub-agent. Use only the provided task-relevant context, avoid unrelated history, and return concise actionable output.',
+            signal: subAgentSignal,
             apiKey: await authManager.resolveApiKey(subProvider),
           });
 
-          const result = await subAgent.complete(runSubAgentRequest.prompt, signal);
+          const result = await subAgent.complete(runSubAgentRequest.prompt, subAgentSignal);
           return {
             text: result.text,
             usage: result.usage,
@@ -271,6 +280,17 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
 
           const graphChanged = applyAgentGraphFromToolEvent(session, event);
           if (graphChanged) {
+            uiStatePersistence.schedule();
+          }
+        }
+
+        if (event.type === 'task:tool-call') {
+          const graphProgressChanged = applyAgentGraphProgressFromToolEvent(
+            session,
+            event,
+            pendingSubagentNodeIdsBySession,
+          );
+          if (graphProgressChanged) {
             uiStatePersistence.schedule();
           }
         }
@@ -816,6 +836,31 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         return;
       }
 
+      if (req.method === 'GET' && pathname === '/api/work/tools') {
+        const id = asString(url.searchParams.get('id'));
+        if (!id) {
+          sendJson(res, 400, { error: 'Missing id' });
+          return;
+        }
+
+        const session = workSessions.get(id);
+        if (!session) {
+          sendJson(res, 404, { error: 'Unknown work session' });
+          return;
+        }
+
+        const requestedMode = normalizeAgentToolPhase(asString(url.searchParams.get('mode')));
+        const mode = requestedMode ?? resolveSessionToolMode(session);
+        const tools = listAgentTools({
+          cwd: session.workspacePath,
+          phase: mode,
+          runSubAgent: async () => ({ text: '' }),
+        });
+
+        sendJson(res, 200, { id, mode, tools });
+        return;
+      }
+
       if (req.method === 'GET' && pathname === '/api/work/agent') {
         const id = asString(url.searchParams.get('id'));
         if (!id) {
@@ -1152,8 +1197,33 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
             const chatAgent = await llm.spawnAgent({
               provider: session.provider,
               model: session.model,
+              timeoutMs: resolveLongTurnTimeoutMs(),
               systemPrompt: buildChatSystemPrompt(session),
-              toolset: createAgentToolset({ cwd: session.workspacePath, phase: 'chat' }),
+              toolset: createAgentToolset({
+                cwd: session.workspacePath,
+                phase: 'chat',
+                runSubAgent: async (runSubAgentRequest, _signal) => {
+                  const subProvider = runSubAgentRequest.provider ?? session.provider;
+                  const subModel = runSubAgentRequest.model ?? session.model;
+                  const subAgentSignal = session.controller.signal;
+                  const subAgent = await llm.spawnAgent({
+                    provider: subProvider,
+                    model: subModel,
+                    reasoning: runSubAgentRequest.reasoning,
+                    timeoutMs: resolveSubAgentTimeoutMs(),
+                    systemPrompt: runSubAgentRequest.systemPrompt
+                      ?? 'You are a focused sub-agent. Use only the provided task-relevant context, avoid unrelated history, and return concise actionable output.',
+                    signal: subAgentSignal,
+                    apiKey: await authManager.resolveApiKey(subProvider),
+                  });
+
+                  const result = await subAgent.complete(runSubAgentRequest.prompt, subAgentSignal);
+                  return {
+                    text: result.text,
+                    usage: result.usage,
+                  };
+                },
+              }),
               apiKey: await authManager.resolveApiKey(session.provider),
             });
 
@@ -1218,11 +1288,23 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                   time: now(),
                 });
               },
+              onToolCall: (toolEvent) => {
+                handleChatToolCallEvent(
+                  session,
+                  toolEvent,
+                  sessionTodos,
+                  pendingSubagentNodeIdsBySession,
+                  workStreamClients,
+                  uiStatePersistence,
+                );
+              },
             });
+
+            const responseText = ensureFollowUpSuggestions(response.text, 'chat');
 
             const assistantMessage: SessionChatMessage = {
               role: 'assistant',
-              content: response.text,
+              content: responseText,
               time: now(),
               usage: response.usage,
             };
@@ -1234,7 +1316,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
             uiStatePersistence.schedule();
 
             streamState.status = 'completed';
-            streamState.replyText = response.text;
+            streamState.replyText = responseText;
             streamState.usage = response.usage;
             streamState.usageEstimated = false;
             streamState.updatedAt = now();
@@ -1311,14 +1393,50 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         const chatAgent = await llm.spawnAgent({
           provider: session.provider,
           model: session.model,
+          timeoutMs: resolveLongTurnTimeoutMs(),
           systemPrompt: buildChatSystemPrompt(session),
-          toolset: createAgentToolset({ cwd: session.workspacePath, phase: 'chat' }),
+          toolset: createAgentToolset({
+            cwd: session.workspacePath,
+            phase: 'chat',
+            runSubAgent: async (runSubAgentRequest, _signal) => {
+              const subProvider = runSubAgentRequest.provider ?? session.provider;
+              const subModel = runSubAgentRequest.model ?? session.model;
+              const subAgentSignal = session.controller.signal;
+              const subAgent = await llm.spawnAgent({
+                provider: subProvider,
+                model: subModel,
+                reasoning: runSubAgentRequest.reasoning,
+                timeoutMs: resolveSubAgentTimeoutMs(),
+                systemPrompt: runSubAgentRequest.systemPrompt
+                  ?? 'You are a focused sub-agent. Use only the provided task-relevant context, avoid unrelated history, and return concise actionable output.',
+                signal: subAgentSignal,
+                apiKey: await authManager.resolveApiKey(subProvider),
+              });
+
+              const result = await subAgent.complete(runSubAgentRequest.prompt, subAgentSignal);
+              return {
+                text: result.text,
+                usage: result.usage,
+              };
+            },
+          }),
           apiKey: await authManager.resolveApiKey(session.provider),
         });
 
         const chatPrompt = buildChatContinuationInput(thread);
-        const response = await chatAgent.complete(chatPrompt);
-        const text = response.text;
+        const response = await chatAgent.complete(chatPrompt, undefined, {
+          onToolCall: (toolEvent) => {
+            handleChatToolCallEvent(
+              session,
+              toolEvent,
+              sessionTodos,
+              pendingSubagentNodeIdsBySession,
+              workStreamClients,
+              uiStatePersistence,
+            );
+          },
+        });
+        const text = ensureFollowUpSuggestions(response.text, 'chat');
 
         const assistantMessage: SessionChatMessage = {
           role: 'assistant',
@@ -1694,6 +1812,45 @@ function parseBooleanSetting(value: unknown): boolean | undefined {
   return undefined;
 }
 
+function resolveLongTurnTimeoutMs(): number {
+  return resolveConfiguredTimeoutMs(
+    ['ORCHESTRACE_LLM_LONG_TURN_TIMEOUT_MS', 'ORCHESTRACE_LLM_TIMEOUT_MS'],
+    300_000,
+  );
+}
+
+function resolveSubAgentTimeoutMs(): number {
+  return resolveConfiguredTimeoutMs(
+    ['ORCHESTRACE_SUBAGENT_TIMEOUT_MS', 'ORCHESTRACE_LLM_DELEGATION_TIMEOUT_MS', 'ORCHESTRACE_LLM_LONG_TURN_TIMEOUT_MS'],
+    300_000,
+  );
+}
+
+function resolveConfiguredTimeoutMs(keys: string[], fallbackMs: number): number {
+  for (const key of keys) {
+    const raw = process.env[key];
+    const parsed = parsePositiveInt(raw);
+    if (parsed) {
+      return parsed;
+    }
+  }
+
+  return fallbackMs;
+}
+
+function parsePositiveInt(raw: string | undefined): number | undefined {
+  if (!raw) {
+    return undefined;
+  }
+
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return undefined;
+  }
+
+  return parsed;
+}
+
 function resolveUseWorktreeDefault(): boolean {
   const raw = process.env.ORCHESTRACE_UI_USE_WORKTREE ?? process.env.ORCHESTRACE_USE_WORKTREE;
   const parsed = parseBooleanSetting(raw);
@@ -1731,6 +1888,32 @@ function normalizeLlmSessionState(raw: unknown): LlmSessionState {
       return 'cancelled';
     default:
       return 'queued';
+  }
+}
+
+function normalizeAgentToolPhase(value: string): AgentToolPhase | undefined {
+  if (value === 'chat' || value === 'planning' || value === 'implementation') {
+    return value;
+  }
+
+  return undefined;
+}
+
+function resolveSessionToolMode(session: WorkSession): AgentToolPhase {
+  const phase = session.llmStatus.phase;
+  if (phase === 'planning' || phase === 'implementation') {
+    return phase;
+  }
+
+  switch (session.llmStatus.state) {
+    case 'queued':
+    case 'analyzing':
+    case 'thinking':
+    case 'planning':
+    case 'awaiting-approval':
+      return 'planning';
+    default:
+      return 'implementation';
   }
 }
 
@@ -1969,6 +2152,66 @@ function previewToolLog(value: string | undefined): string {
   return compact.length > 600 ? `${compact.slice(0, 597)}...` : compact;
 }
 
+function handleChatToolCallEvent(
+  session: WorkSession,
+  toolEvent: LlmToolCallEvent,
+  sessionTodos: Map<string, AgentTodoItem[]>,
+  pendingSubagentNodeIdsBySession: Map<string, Map<string, string[]>>,
+  workStreamClients: Map<string, Set<ServerResponse>>,
+  uiStatePersistence: { schedule: () => void; flush: () => Promise<void> },
+): void {
+  const event = toChatToolDagEvent(toolEvent);
+  const uiEvent = toUiEvent(session.id, event);
+  if (uiEvent) {
+    session.events.push(uiEvent);
+    if (session.events.length > 200) {
+      session.events.shift();
+    }
+  }
+
+  let checklistChanged = false;
+  let graphChanged = false;
+  if (event.status === 'started') {
+    checklistChanged = applyChecklistFromToolEvent(session.id, event, sessionTodos);
+    if (checklistChanged) {
+      broadcastTodoUpdate(workStreamClients, session.id, sessionTodos.get(session.id) ?? []);
+    }
+
+    graphChanged = applyAgentGraphFromToolEvent(session, event) || graphChanged;
+  }
+
+  const graphProgressChanged = applyAgentGraphProgressFromToolEvent(
+    session,
+    event,
+    pendingSubagentNodeIdsBySession,
+  );
+
+  if (uiEvent || checklistChanged || graphChanged) {
+    session.updatedAt = now();
+    uiStatePersistence.schedule();
+  }
+
+  if (graphProgressChanged) {
+    session.updatedAt = now();
+    uiStatePersistence.schedule();
+  }
+}
+
+function toChatToolDagEvent(toolEvent: LlmToolCallEvent): Extract<DagEvent, { type: 'task:tool-call' }> {
+  return {
+    type: 'task:tool-call',
+    taskId: 'chat',
+    phase: 'implementation',
+    attempt: 1,
+    toolCallId: toolEvent.toolCallId,
+    toolName: toolEvent.toolName,
+    status: toolEvent.type,
+    input: toolEvent.arguments,
+    output: toolEvent.result,
+    isError: toolEvent.isError,
+  };
+}
+
 function applyChecklistFromToolEvent(
   sessionId: string,
   event: Extract<DagEvent, { type: 'task:tool-call' }>,
@@ -2200,8 +2443,203 @@ function applyAgentGraphFromToolEvent(
     return false;
   }
 
-  session.agentGraph = nodes;
+  session.agentGraph = nodes.map((node) => ({ ...node, status: 'pending' }));
   return true;
+}
+
+function applyAgentGraphProgressFromToolEvent(
+  session: WorkSession,
+  event: Extract<DagEvent, { type: 'task:tool-call' }>,
+  pendingSubagentNodeIdsBySession: Map<string, Map<string, string[]>>,
+): boolean {
+  if (event.toolName !== 'subagent_spawn' && event.toolName !== 'subagent_spawn_batch') {
+    return false;
+  }
+
+  if (session.agentGraph.length === 0) {
+    return false;
+  }
+
+  const pendingNodeIds = getPendingSubagentNodeIds(pendingSubagentNodeIdsBySession, session.id);
+
+  if (event.status === 'started') {
+    const input = parseToolInputObject(event.input);
+    if (!input) {
+      return false;
+    }
+
+    const nodeIds = resolveSubAgentNodeIds(session.agentGraph, event.toolName, input);
+    if (nodeIds.length === 0) {
+      return false;
+    }
+
+    pendingNodeIds.set(event.toolCallId, nodeIds);
+    return setAgentGraphNodeStatus(session, nodeIds, 'running');
+  }
+
+  if (event.status !== 'result') {
+    return false;
+  }
+
+  const nodeIds = pendingNodeIds.get(event.toolCallId) ?? [];
+
+  if (event.toolName === 'subagent_spawn') {
+    pendingNodeIds.delete(event.toolCallId);
+    if (nodeIds.length === 0) {
+      return false;
+    }
+
+    const terminalStatus: 'completed' | 'failed' = event.isError ? 'failed' : 'completed';
+    return setAgentGraphNodeStatus(session, nodeIds, terminalStatus);
+  }
+
+  if (event.toolName === 'subagent_spawn_batch') {
+    pendingNodeIds.delete(event.toolCallId);
+    const statusByNode = parseBatchNodeStatuses(event.output);
+    if (statusByNode.size > 0) {
+      let changed = false;
+      for (const [nodeId, status] of statusByNode.entries()) {
+        changed = setAgentGraphNodeStatus(session, [nodeId], status) || changed;
+      }
+      return changed;
+    }
+
+    if (nodeIds.length > 0) {
+      const terminalStatus: 'completed' | 'failed' = event.isError ? 'failed' : 'completed';
+      return setAgentGraphNodeStatus(session, nodeIds, terminalStatus);
+    }
+  }
+
+  return false;
+}
+
+function getPendingSubagentNodeIds(
+  pendingSubagentNodeIdsBySession: Map<string, Map<string, string[]>>,
+  sessionId: string,
+): Map<string, string[]> {
+  const existing = pendingSubagentNodeIdsBySession.get(sessionId);
+  if (existing) {
+    return existing;
+  }
+
+  const created = new Map<string, string[]>();
+  pendingSubagentNodeIdsBySession.set(sessionId, created);
+  return created;
+}
+
+function parseToolInputObject(input: string | undefined): Record<string, unknown> | undefined {
+  if (!input) {
+    return undefined;
+  }
+
+  try {
+    const parsed = JSON.parse(input);
+    if (parsed && typeof parsed === 'object') {
+      return parsed as Record<string, unknown>;
+    }
+  } catch {
+    return undefined;
+  }
+
+  return undefined;
+}
+
+function resolveSubAgentNodeIds(
+  nodes: SessionAgentGraphNode[],
+  toolName: string,
+  input: Record<string, unknown>,
+): string[] {
+  if (toolName === 'subagent_spawn') {
+    const single = resolveNodeIdFromSubAgentArgs(nodes, input);
+    return single ? [single] : [];
+  }
+
+  const rawAgents = Array.isArray(input.agents) ? input.agents : [];
+  const resolved = rawAgents
+    .filter((entry) => entry && typeof entry === 'object')
+    .map((entry) => resolveNodeIdFromSubAgentArgs(nodes, entry as Record<string, unknown>))
+    .filter((entry): entry is string => Boolean(entry));
+
+  return [...new Set(resolved)];
+}
+
+function resolveNodeIdFromSubAgentArgs(
+  nodes: SessionAgentGraphNode[],
+  args: Record<string, unknown>,
+): string | undefined {
+  const nodeId = asString(args.nodeId);
+  if (nodeId && nodes.some((node) => node.id === nodeId)) {
+    return nodeId;
+  }
+
+  const prompt = asString(args.prompt);
+  if (!prompt) {
+    return undefined;
+  }
+
+  const exactMatch = nodes.find((node) => node.prompt.trim() === prompt.trim());
+  if (exactMatch) {
+    return exactMatch.id;
+  }
+
+  const overlapMatch = nodes.find((node) => prompt.includes(node.prompt) || node.prompt.includes(prompt));
+  return overlapMatch?.id;
+}
+
+function setAgentGraphNodeStatus(
+  session: WorkSession,
+  nodeIds: string[],
+  status: 'running' | 'completed' | 'failed',
+): boolean {
+  let changed = false;
+  const targets = new Set(nodeIds);
+  session.agentGraph = session.agentGraph.map((node) => {
+    if (!targets.has(node.id)) {
+      return node;
+    }
+
+    if (node.status === status) {
+      return node;
+    }
+
+    changed = true;
+    return {
+      ...node,
+      status,
+    };
+  });
+
+  return changed;
+}
+
+function parseBatchNodeStatuses(output: string | undefined): Map<string, 'completed' | 'failed'> {
+  const statusByNode = new Map<string, 'completed' | 'failed'>();
+  if (!output) {
+    return statusByNode;
+  }
+
+  try {
+    const parsed = JSON.parse(output) as Record<string, unknown>;
+    const runs = Array.isArray(parsed.runs) ? parsed.runs : [];
+    for (const rawRun of runs) {
+      if (!rawRun || typeof rawRun !== 'object') {
+        continue;
+      }
+
+      const run = rawRun as Record<string, unknown>;
+      const nodeId = asString(run.nodeId);
+      const status = asString(run.status);
+      if (!nodeId || (status !== 'completed' && status !== 'failed')) {
+        continue;
+      }
+
+      statusByNode.set(nodeId, status);
+    }
+  } catch {
+    return statusByNode;
+  }
+
+  return statusByNode;
 }
 
 function parseAgentGraphToolArgs(input: string): Record<string, unknown> | undefined {
@@ -2252,6 +2690,7 @@ function normalizeSessionAgentGraphNodes(rawNodes: unknown): SessionAgentGraphNo
       id,
       prompt,
       dependencies,
+      status: normalizeGraphNodeStatus(node.status),
       provider: asString(node.provider) || undefined,
       model: asString(node.model) || undefined,
       reasoning,
@@ -2291,6 +2730,15 @@ function backfillAgentGraphFromUiEvents(session: WorkSession): boolean {
 
   session.agentGraph = latestNodes;
   return true;
+}
+
+function normalizeGraphNodeStatus(value: unknown): SessionAgentGraphNode['status'] {
+  const status = asString(value);
+  if (status === 'pending' || status === 'running' || status === 'completed' || status === 'failed') {
+    return status;
+  }
+
+  return 'pending';
 }
 
 function serializeWorkSession(session: WorkSession): Record<string, unknown> {
@@ -2420,6 +2868,8 @@ function resolveUiWatchPath(workspaceRoot: string): string | undefined {
 
 type SessionPromptPhase = 'chat' | 'planning' | 'implementation';
 
+type FollowUpSuggestionPhase = 'chat' | 'planning' | 'implementation';
+
 function buildSessionSystemPrompt(session: WorkSession, phase: SessionPromptPhase): string {
   const phaseRules =
     phase === 'chat'
@@ -2427,17 +2877,33 @@ function buildSessionSystemPrompt(session: WorkSession, phase: SessionPromptPhas
           'Keep continuity with prior messages and avoid repeating completed work.',
           'Use chat responses to clarify intent, summarize progress, and gather missing context.',
           'When direct implementation is requested, proceed with concrete action-oriented steps.',
+          'When the user asks for planning, switch to planning mode and perform todo_set + agent_graph_set before presenting the plan.',
+          'Planning requests must also use subagent_spawn or subagent_spawn_batch with focused, task-relevant context per sub-agent.',
+          'Pass nodeId on each sub-agent request so graph progress stays visible and current.',
+          'When asked to inspect or change todos/agent graph, call the corresponding tools instead of simulating success.',
+          'If no tool was executed, explicitly state that no tool output is available.',
+          'Always end your response with 1-3 numbered next follow-up suggestions.',
         ]
       : phase === 'planning'
         ? [
             'Produce a concrete implementation plan with explicit staged execution and validation steps.',
             'Do not perform direct code edits in planning mode.',
+            'Planning must produce and maintain todo_set and agent_graph_set state.',
+            'Planning must use subagent_spawn or subagent_spawn_batch for focused parallel research and delegate only relevant context.',
+            'For independent nodes, use subagent_spawn_batch so work runs in parallel.',
+            'Pass nodeId for each sub-agent request so graph status stays current.',
             'Keep todo and dependency graph state synchronized.',
+            'Always end your response with 1-3 numbered next follow-up suggestions.',
           ]
         : [
             'Execute approved work with minimal, scoped edits and verify outcomes.',
             'Read before editing, and use tool output to adapt after failures.',
+            'Read todo_get and agent_graph_get before coding, then keep todo_update current while implementing.',
+            'Use subagent_spawn or subagent_spawn_batch to execute parallelizable slices with minimal relevant context per agent.',
+            'For independent nodes, use subagent_spawn_batch so work runs in parallel.',
+            'Pass nodeId for each sub-agent request so graph status stays current.',
             'Iterate until validation passes or a true blocker is reached.',
+            'Always end your response with 1-3 numbered next follow-up suggestions.',
           ];
 
   const sections: PromptSection[] = [
@@ -2483,4 +2949,49 @@ function buildImplementationSystemPrompt(session: WorkSession): string {
 
 function buildChatSystemPrompt(session: WorkSession): string {
   return buildSessionSystemPrompt(session, 'chat');
+}
+
+function ensureFollowUpSuggestions(text: string, phase: FollowUpSuggestionPhase): string {
+  const trimmed = text.trim();
+  if (!trimmed) {
+    return buildFollowUpSuggestionsBlock(phase);
+  }
+
+  if (hasFollowUpSuggestions(trimmed)) {
+    return trimmed;
+  }
+
+  return `${trimmed}\n\n${buildFollowUpSuggestionsBlock(phase)}`;
+}
+
+function hasFollowUpSuggestions(text: string): boolean {
+  const normalized = text.toLowerCase();
+  return normalized.includes('next follow-up suggestions')
+    || normalized.includes('next followup suggestions')
+    || normalized.includes('next steps');
+}
+
+function buildFollowUpSuggestionsBlock(phase: FollowUpSuggestionPhase): string {
+  const suggestions = phase === 'planning'
+    ? [
+      'Review and approve the plan todo list and dependency graph before implementation.',
+      'Execute the first stage tasks and keep todo_update synchronized with real progress.',
+      'Run the planned verification commands after each stage to catch regressions early.',
+    ]
+    : phase === 'implementation'
+      ? [
+        'Run typecheck and tests for the touched packages to verify the change set.',
+        'Review the diff for scope control and update todos for completed and pending work.',
+        'Address the highest-risk follow-up item from validation output or reviewer feedback.',
+      ]
+      : [
+        'Clarify any missing constraints before the next major edit or planning step.',
+        'Switch to planning mode and publish todo_set plus agent_graph_set for the next objective.',
+        'Start implementation on the highest-priority todo item and keep progress synchronized.',
+      ];
+
+  return [
+    'Next Follow-up Suggestions:',
+    ...suggestions.map((item, index) => `${index + 1}. ${item}`),
+  ].join('\n');
 }

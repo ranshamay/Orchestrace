@@ -216,6 +216,10 @@ function toolInputSummary(toolName: string, payload: string): string {
     return 'Spawning sub-agent';
   }
 
+  if (toolName === 'subagent_spawn_batch') {
+    return 'Spawning sub-agents in parallel';
+  }
+
   return `Calling ${toolName}`;
 }
 
@@ -886,7 +890,7 @@ function buildGraphLayout(session?: WorkSession): { nodes: GraphNodeView[]; widt
         prompt: node.prompt,
         x: 130 + level * 260,
         y: stepY * (index + 1),
-        status,
+        status: node.status ?? status,
         dependencies: node.dependencies,
       });
     });
@@ -1529,7 +1533,8 @@ export default function App() {
 
     const loadTools = async () => {
       try {
-        const toolsState = await fetchWorkTools(selectedSessionId);
+        const requestedMode = composerMode !== 'run' ? composerMode : undefined;
+        const toolsState = await fetchWorkTools(selectedSessionId, requestedMode);
         if (cancelled) {
           return;
         }
@@ -1554,7 +1559,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [selectedSession?.mode, selectedSessionId, showToolsPanel]);
+  }, [composerMode, selectedSessionId, showToolsPanel]);
 
   useEffect(() => {
     if (copyTraceState !== 'copied') {

@@ -29,6 +29,7 @@ interface CoordinationToolsOptions extends AgentToolsetOptions {
 
 interface SubAgentRunRecord {
   id: string;
+  nodeId?: string;
   prompt: string;
   status: 'running' | 'completed' | 'failed';
   provider?: string;
@@ -262,6 +263,7 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
         name: 'subagent_spawn',
         description: 'Spawn a focused sub-agent for a dependent sub-task and return a concise result.',
         parameters: Type.Object({
+          nodeId: Type.Optional(Type.String()),
           prompt: Type.String({ minLength: 1 }),
           systemPrompt: Type.Optional(Type.String()),
           provider: Type.Optional(Type.String()),
@@ -285,6 +287,7 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
         }
 
         const request: SubAgentRequest = {
+          nodeId: optionalString(toolArgs.nodeId),
           prompt: asString(toolArgs.prompt, 'prompt'),
           systemPrompt: optionalString(toolArgs.systemPrompt),
           provider: optionalString(toolArgs.provider),
@@ -296,6 +299,7 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
         const id = `sub-${state.subAgents.length + 1}`;
         const record: SubAgentRunRecord = {
           id,
+          nodeId: request.nodeId,
           prompt: request.prompt,
           status: 'running',
           provider: request.provider,
@@ -343,6 +347,131 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
             isError: true,
           };
         }
+      },
+    });
+
+    tools.push({
+      tool: {
+        name: 'subagent_spawn_batch',
+        description: 'Spawn multiple focused sub-agents in parallel for independent sub-tasks.',
+        parameters: Type.Object({
+          agents: Type.Array(
+            Type.Object({
+              nodeId: Type.Optional(Type.String()),
+              prompt: Type.String({ minLength: 1 }),
+              systemPrompt: Type.Optional(Type.String()),
+              provider: Type.Optional(Type.String()),
+              model: Type.Optional(Type.String()),
+              reasoning: Type.Optional(
+                Type.Union([
+                  Type.Literal('minimal'),
+                  Type.Literal('low'),
+                  Type.Literal('medium'),
+                  Type.Literal('high'),
+                ]),
+              ),
+            }),
+            { minItems: 1 },
+          ),
+        }),
+      },
+      execute: async (toolArgs, signal) => {
+        if (!options.runSubAgent) {
+          return {
+            content: 'Sub-agent runner is not available in this context.',
+            isError: true,
+          };
+        }
+
+        const rawAgents = Array.isArray(toolArgs.agents) ? toolArgs.agents : [];
+        if (rawAgents.length === 0) {
+          return {
+            content: 'Missing agents. Provide at least one sub-agent request.',
+            isError: true,
+          };
+        }
+
+        const requests: SubAgentRequest[] = rawAgents
+          .filter((entry) => isRecord(entry))
+          .map((entry) => ({
+            nodeId: optionalString(entry.nodeId),
+            prompt: asString(entry.prompt, 'prompt'),
+            systemPrompt: optionalString(entry.systemPrompt),
+            provider: optionalString(entry.provider),
+            model: optionalString(entry.model),
+            reasoning: normalizeReasoning(entry.reasoning),
+          }));
+
+        const state = await readCoordinationState(statePath);
+        const startIndex = state.subAgents.length;
+        const records: SubAgentRunRecord[] = requests.map((request, index) => ({
+          id: `sub-${startIndex + index + 1}`,
+          nodeId: request.nodeId,
+          prompt: request.prompt,
+          status: 'running',
+          provider: request.provider,
+          model: request.model,
+          reasoning: request.reasoning,
+          startedAt: now(),
+        }));
+
+        state.subAgents.push(...records);
+        state.updatedAt = now();
+        await writeCoordinationState(statePath, state);
+
+        const settled = await Promise.all(records.map(async (record, index) => {
+          const request = requests[index];
+          try {
+            const result = await options.runSubAgent?.(request, signal);
+            return {
+              id: record.id,
+              nodeId: record.nodeId,
+              status: 'completed' as const,
+              outputPreview: trimText(result?.text ?? '', 1800),
+              usage: result?.usage,
+            };
+          } catch (error) {
+            return {
+              id: record.id,
+              nodeId: record.nodeId,
+              status: 'failed' as const,
+              error: error instanceof Error ? error.message : String(error),
+            };
+          }
+        }));
+
+        const latest = await readCoordinationState(statePath);
+        for (const result of settled) {
+          const current = latest.subAgents.find((entry) => entry.id === result.id);
+          if (!current) {
+            continue;
+          }
+
+          current.status = result.status;
+          current.finishedAt = now();
+          if (result.status === 'completed') {
+            current.outputPreview = result.outputPreview;
+            current.error = undefined;
+          } else {
+            current.error = result.error;
+          }
+        }
+
+        latest.updatedAt = now();
+        await writeCoordinationState(statePath, latest);
+
+        const failedCount = settled.filter((entry) => entry.status === 'failed').length;
+        const summary = {
+          total: settled.length,
+          completed: settled.length - failedCount,
+          failed: failedCount,
+          runs: settled,
+        };
+
+        return {
+          content: JSON.stringify(summary, null, 2),
+          isError: failedCount > 0,
+        };
       },
     });
   }
@@ -516,6 +645,7 @@ function normalizeSubAgentRecords(value: unknown): SubAgentRunRecord[] {
     const status = normalizeSubAgentStatus(entry.status) ?? 'failed';
     records.push({
       id,
+      nodeId: optionalString(entry.nodeId),
       prompt,
       status,
       provider: optionalString(entry.provider),

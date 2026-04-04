@@ -36,6 +36,7 @@ export interface SessionAgentGraphNode {
   id: string;
   prompt: string;
   dependencies: string[];
+  status?: 'pending' | 'running' | 'completed' | 'failed';
   provider?: string;
   model?: string;
   reasoning?: 'minimal' | 'low' | 'medium' | 'high';

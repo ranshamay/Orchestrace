@@ -67,6 +67,7 @@ export interface OrchestratorConfig extends RunnerConfig {
 type OrchestratorPhase = 'planning' | 'implementation';
 
 const DEFAULT_ORCHESTRATOR_PROMPT_VERSION = 'orchestrator-prompts-v2';
+const DEFAULT_LONG_TURN_TIMEOUT_MS = 300_000;
 
 /**
  * High-level orchestrator that wires the DAG scheduler to the LLM provider
@@ -157,6 +158,7 @@ export async function orchestrate(
       provider: model.provider,
       model: model.model,
       reasoning: model.reasoning,
+      timeoutMs: resolvePlanningTurnTimeoutMs(),
       systemPrompt:
         planningSystemPrompt
         ?? systemPrompt
@@ -285,6 +287,31 @@ export async function orchestrate(
       usage: planningResult.usage,
     });
 
+    if (createToolset) {
+      const planningContractError = buildPlanningContractError(planningToolCalls);
+      if (planningContractError) {
+        completedPlanningAttempt.failureType = 'validation';
+        completedPlanningAttempt.error = planningContractError;
+        emit({
+          type: 'task:verification-failed',
+          taskId: node.id,
+          attempt: 1,
+          error: planningContractError,
+        });
+        return {
+          taskId: node.id,
+          status: 'failed',
+          tokenDumpDir: taskTokenDumpDir,
+          error: planningContractError,
+          failureType: 'validation',
+          durationMs: Date.now() - start,
+          retries: 0,
+          usage,
+          replay,
+        };
+      }
+    }
+
     const persistedPlanPath = await persistPlan({
       baseDir: planOutputDir ?? join(cwd, '.orchestrace', 'plans'),
       graphId: graph.id,
@@ -339,6 +366,7 @@ export async function orchestrate(
       provider: model.provider,
       model: model.model,
       reasoning: model.reasoning,
+      timeoutMs: resolveImplementationTurnTimeoutMs(),
       systemPrompt:
         implementationSystemPrompt
         ?? systemPrompt
@@ -637,6 +665,8 @@ function buildPlanningPrompt(node: TaskNode, depOutputs: Map<string, TaskOutput>
         '- todo_set (required) to create a concrete todo list',
         '- todo_update to track progress changes',
         '- agent_graph_set (required) to define sub-agent dependency graph',
+        '- subagent_spawn/subagent_spawn_batch (required) to delegate focused planning research with only relevant context per sub-agent',
+        '- pass nodeId on each sub-agent request so graph progress can be tracked per node',
       ],
     },
     {
@@ -649,6 +679,8 @@ function buildPlanningPrompt(node: TaskNode, depOutputs: Map<string, TaskOutput>
         '4) files likely to change',
         '5) verification strategy with explicit commands',
         '6) rollback/risk notes',
+        '7) a sub-agent delegation map aligned to agent_graph_set nodes and minimal per-agent context',
+        '8) Next Follow-up Suggestions section with 1-3 numbered, concrete next actions',
       ],
     },
     {
@@ -719,7 +751,10 @@ function buildImplementationPrompt(params: {
         'If a tool call fails, read the error details, adjust arguments, and retry the tool call.',
         'Before coding, read todo_get and follow the todo list strictly.',
         'Update todo states using todo_update as you progress.',
-        'Read agent_graph_get and spawn dependent sub-agents with subagent_spawn when useful.',
+        'Read agent_graph_get and spawn dependent sub-agents with subagent_spawn throughout execution.',
+        'When multiple independent nodes are ready, use subagent_spawn_batch to run them in parallel.',
+        'Delegate only task-relevant context to each sub-agent; avoid sending full unrelated history.',
+        'Pass nodeId for each spawned sub-agent so the execution graph can reflect live progress.',
         'Keep sub-agent outputs concise and integrate them into the main implementation.',
       ],
     },
@@ -741,6 +776,12 @@ function buildImplementationPrompt(params: {
     {
       name: PromptSectionName.DependencyContext,
       lines: [depContext],
+    },
+    {
+      name: PromptSectionName.OutputContract,
+      lines: [
+        'End your implementation response with "Next Follow-up Suggestions" and 1-3 numbered, concrete next actions.',
+      ],
     },
   ];
 
@@ -771,11 +812,17 @@ function buildPhaseSystemPrompt(params: {
           'Produce a concrete, execution-ready plan before implementation.',
           'Do not edit files in planning mode.',
           'Keep todo and dependency graph state synchronized as you reason.',
+          'Planning must include successful todo_set and agent_graph_set tool calls.',
+          'Planning must include successful subagent_spawn or subagent_spawn_batch calls with focused context per sub-agent.',
+          'Planning responses must end with 1-3 concrete next follow-up suggestions.',
           'Return a plan that another agent could execute deterministically.',
         ]
       : [
           'Execute the approved plan and deliver validated code changes.',
           'Read relevant files before editing and keep edits minimal in scope.',
+          'Use todo and agent graph state as the execution backbone, updating progress continuously.',
+          'Use subagent_spawn or subagent_spawn_batch for parallelizable slices and delegate only relevant context to each sub-agent.',
+          'Implementation responses must end with 1-3 concrete next follow-up suggestions.',
           'Run verification and iterate until checks pass or a true blocker is reached.',
           'When blocked, report the blocker clearly and propose the best next step.',
         ];
@@ -985,6 +1032,29 @@ function buildCompletionFailureRetryHint(params: {
   }
 }
 
+function buildPlanningContractError(toolCalls: ReplayToolCallRecord[]): string | undefined {
+  const hasSubAgentDelegation = hasSuccessfulToolCall(toolCalls, 'subagent_spawn')
+    || hasSuccessfulToolCall(toolCalls, 'subagent_spawn_batch');
+  const requiredTools = ['todo_set', 'agent_graph_set'];
+  const missing = requiredTools.filter((toolName) => !hasSuccessfulToolCall(toolCalls, toolName));
+  if (!hasSubAgentDelegation) {
+    missing.push('subagent_spawn or subagent_spawn_batch');
+  }
+  if (missing.length === 0) {
+    return undefined;
+  }
+
+  return [
+    'Planning contract not satisfied.',
+    `Missing successful coordination tool call(s): ${missing.join(', ')}.`,
+    'Planning must publish todo_set + agent_graph_set and delegate focused work via subagent_spawn before implementation can begin.',
+  ].join(' ');
+}
+
+function hasSuccessfulToolCall(toolCalls: ReplayToolCallRecord[], toolName: string): boolean {
+  return toolCalls.some((call) => call.status === 'result' && call.toolName === toolName && !call.isError);
+}
+
 function resolvePromptVersion(params: {
   explicitVersion?: string;
   systemPrompt?: string;
@@ -1009,4 +1079,42 @@ function resolvePromptVersion(params: {
 
   const fingerprint = createHash('sha256').update(customPromptSource).digest('hex').slice(0, 12);
   return `custom-system-prompts-${fingerprint}`;
+}
+
+function resolvePlanningTurnTimeoutMs(): number {
+  return resolveConfiguredTimeoutMs(
+    ['ORCHESTRACE_LLM_PLANNING_TIMEOUT_MS', 'ORCHESTRACE_LLM_LONG_TURN_TIMEOUT_MS'],
+    DEFAULT_LONG_TURN_TIMEOUT_MS,
+  );
+}
+
+function resolveImplementationTurnTimeoutMs(): number {
+  return resolveConfiguredTimeoutMs(
+    ['ORCHESTRACE_LLM_DELEGATION_TIMEOUT_MS', 'ORCHESTRACE_LLM_LONG_TURN_TIMEOUT_MS'],
+    DEFAULT_LONG_TURN_TIMEOUT_MS,
+  );
+}
+
+function resolveConfiguredTimeoutMs(envKeys: string[], fallbackMs: number): number {
+  for (const key of envKeys) {
+    const value = parsePositiveInt(process.env[key]);
+    if (value) {
+      return value;
+    }
+  }
+
+  return fallbackMs;
+}
+
+function parsePositiveInt(raw: string | undefined): number | undefined {
+  if (!raw) {
+    return undefined;
+  }
+
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return undefined;
+  }
+
+  return parsed;
 }

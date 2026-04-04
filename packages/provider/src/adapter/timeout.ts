@@ -1,6 +1,10 @@
 const DEFAULT_TIMEOUT_MS = 120_000;
 
-export function resolveTimeoutMs(): number {
+export function resolveTimeoutMs(overrideMs?: number): number {
+  if (Number.isFinite(overrideMs) && (overrideMs as number) > 0) {
+    return overrideMs as number;
+  }
+
   const raw = process.env.ORCHESTRACE_LLM_TIMEOUT_MS;
   if (!raw) {
     return DEFAULT_TIMEOUT_MS;

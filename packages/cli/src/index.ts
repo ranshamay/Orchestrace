@@ -158,6 +158,10 @@ Environment variables:
   ORCHESTRACE_WORKSPACE          Active workspace identifier/path override
   ORCHESTRACE_UI_HMR             true/false UI hot reload
   ORCHESTRACE_LLM_TIMEOUT_MS     Per-request LLM timeout in milliseconds (default: 120000)
+  ORCHESTRACE_LLM_LONG_TURN_TIMEOUT_MS  Planning/delegation timeout override (default: 300000)
+  ORCHESTRACE_LLM_PLANNING_TIMEOUT_MS   Planning timeout override (default: long-turn timeout)
+  ORCHESTRACE_LLM_DELEGATION_TIMEOUT_MS Delegation timeout override (default: long-turn timeout)
+  ORCHESTRACE_SUBAGENT_TIMEOUT_MS       Sub-agent timeout override (default: delegation timeout)
   ORCHESTRACE_MAX_PARALLEL       Max concurrent tasks (default: 4)
   ORCHESTRACE_AUTO_APPROVE       true/false plan auto-approval
   ORCHESTRACE_AUTO_PUSH          true/false auto git commit + push
@@ -373,20 +377,20 @@ async function runGraph(
       provider: activeProvider,
       model: activeModel,
       reasoning,
-      runSubAgent: async (request, signal) => {
+      runSubAgent: async (request, _signal) => {
         const subProvider = request.provider ?? activeProvider;
         const subModel = request.model ?? activeModel;
         const subAgent = await llm.spawnAgent({
           provider: subProvider,
           model: subModel,
           reasoning: request.reasoning ?? reasoning,
+          timeoutMs: resolveSubAgentTimeoutMs(),
           systemPrompt: request.systemPrompt
             ?? 'You are a focused sub-agent. Solve the given sub-task and return concise actionable output.',
-          signal,
           apiKey: await authManager.resolveApiKey(subProvider),
         });
 
-        const result = await subAgent.complete(request.prompt, signal);
+        const result = await subAgent.complete(request.prompt);
         return {
           text: result.text,
           usage: result.usage,
@@ -978,6 +982,13 @@ function parsePositiveInt(raw: string | undefined): number | undefined {
   }
 
   return value;
+}
+
+function resolveSubAgentTimeoutMs(): number {
+  return parsePositiveInt(process.env.ORCHESTRACE_SUBAGENT_TIMEOUT_MS)
+    ?? parsePositiveInt(process.env.ORCHESTRACE_LLM_DELEGATION_TIMEOUT_MS)
+    ?? parsePositiveInt(process.env.ORCHESTRACE_LLM_LONG_TURN_TIMEOUT_MS)
+    ?? 300_000;
 }
 
 async function printWorkspaceList(manager: WorkspaceManager): Promise<void> {

@@ -42,7 +42,7 @@ export class PiAiAdapter implements LlmAdapter {
           if (request.reasoning && model.reasoning) {
             options.reasoning = request.reasoning;
           }
-          const timeoutMs = resolveTimeoutMs();
+          const timeoutMs = resolveTimeoutMs(request.timeoutMs);
           const timeoutSignal = createTimeoutSignal(signal ?? request.signal, timeoutMs);
           if (timeoutSignal.signal) {
             options.signal = timeoutSignal.signal;
@@ -220,6 +220,7 @@ export class PiAiAdapter implements LlmAdapter {
       model: request.model,
       systemPrompt: request.systemPrompt,
       reasoning: request.reasoning,
+      timeoutMs: request.timeoutMs,
       signal: request.signal,
       toolset: request.toolset,
       apiKey: request.apiKey,

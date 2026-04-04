@@ -25,6 +25,7 @@ function makeSingleNodeGraph(): TaskGraph {
 function createAdapter(params: {
   planningThrows?: boolean;
   failImplementationOnceWithType?: 'timeout' | 'rate_limit' | 'tool_runtime' | 'empty_response';
+  omitPlanningCoordination?: boolean;
 }): LlmAdapter {
   let implementationCalls = 0;
 
@@ -38,19 +39,47 @@ function createAdapter(params: {
         options?: LlmCompletionOptions,
       ) => {
         if (phase === 'planning') {
-          options?.onToolCall?.({
-            type: 'started',
-            toolCallId: 'plan-1',
-            toolName: 'read_file',
-            arguments: '{"path":"README.md"}',
-          });
-          options?.onToolCall?.({
-            type: 'result',
-            toolCallId: 'plan-1',
-            toolName: 'read_file',
-            result: 'ok',
-            isError: false,
-          });
+          if (!params.omitPlanningCoordination) {
+            options?.onToolCall?.({
+              type: 'started',
+              toolCallId: 'plan-todo-1',
+              toolName: 'todo_set',
+              arguments: '{"items":[{"id":"p1","title":"Plan","status":"in_progress"}]}',
+            });
+            options?.onToolCall?.({
+              type: 'result',
+              toolCallId: 'plan-todo-1',
+              toolName: 'todo_set',
+              result: 'Stored 1 todo item(s).',
+              isError: false,
+            });
+            options?.onToolCall?.({
+              type: 'started',
+              toolCallId: 'plan-graph-1',
+              toolName: 'agent_graph_set',
+              arguments: '{"nodes":[{"id":"a1","prompt":"Inspect docs"}]}',
+            });
+            options?.onToolCall?.({
+              type: 'result',
+              toolCallId: 'plan-graph-1',
+              toolName: 'agent_graph_set',
+              result: 'Stored agent dependency graph with 1 node(s).',
+              isError: false,
+            });
+            options?.onToolCall?.({
+              type: 'started',
+              toolCallId: 'plan-sub-1',
+              toolName: 'subagent_spawn',
+              arguments: '{"prompt":"Summarize only relevant planner constraints"}',
+            });
+            options?.onToolCall?.({
+              type: 'result',
+              toolCallId: 'plan-sub-1',
+              toolName: 'subagent_spawn',
+              result: 'Sub-agent sub-1 completed.',
+              isError: false,
+            });
+          }
 
           if (params.planningThrows) {
             throw new Error('planning exploded');
@@ -140,7 +169,7 @@ describe('orchestrate replay capture', () => {
       expect(output?.replay?.attempts.length).toBe(2);
       expect(output?.replay?.attempts[0]?.phase).toBe('planning');
       expect(output?.replay?.attempts[1]?.phase).toBe('implementation');
-      expect(output?.replay?.attempts[0]?.toolCalls.length).toBe(2);
+      expect(output?.replay?.attempts[0]?.toolCalls.length).toBe(6);
       expect(output?.replay?.attempts[1]?.toolCalls.length).toBe(2);
       expect(output?.replay?.attempts[0]?.stopReason).toBe('end_turn');
 
@@ -170,7 +199,7 @@ describe('orchestrate replay capture', () => {
       expect(output?.replay?.attempts.length).toBe(1);
       expect(output?.replay?.attempts[0]?.phase).toBe('planning');
       expect(output?.replay?.attempts[0]?.error).toContain('planning exploded');
-      expect(output?.replay?.attempts[0]?.toolCalls.length).toBe(2);
+      expect(output?.replay?.attempts[0]?.toolCalls.length).toBe(6);
       expect(output?.replay?.promptVersion.startsWith('custom-system-prompts-')).toBe(true);
     } finally {
       await rm(cwd, { recursive: true, force: true });
@@ -199,6 +228,34 @@ describe('orchestrate replay capture', () => {
       expect(output?.replay?.attempts[1]?.failureType).toBe('timeout');
       expect(output?.replay?.attempts[2]?.phase).toBe('implementation');
       expect(output?.replay?.attempts[2]?.error).toBeUndefined();
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('fails planning when required coordination tool calls are missing', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'orchestrace-replay-plan-contract-'));
+
+    try {
+      const outputs = await orchestrate(makeSingleNodeGraph(), {
+        llm: createAdapter({ omitPlanningCoordination: true }),
+        cwd,
+        requirePlanApproval: false,
+        planningSystemPrompt: 'planning',
+        implementationSystemPrompt: 'implementation',
+        createToolset: () => ({ tools: [], executeTool: async () => ({ content: 'noop' }) }),
+      });
+
+      const output = outputs.get('task-1');
+      expect(output).toBeDefined();
+      expect(output?.status).toBe('failed');
+      expect(output?.failureType).toBe('validation');
+      expect(output?.error).toContain('Planning contract not satisfied');
+      expect(output?.error).toContain('todo_set');
+      expect(output?.error).toContain('agent_graph_set');
+      expect(output?.error).toContain('subagent_spawn');
+      expect(output?.replay?.attempts.length).toBe(1);
+      expect(output?.replay?.attempts[0]?.failureType).toBe('validation');
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }

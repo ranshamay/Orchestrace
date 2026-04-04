@@ -38,6 +38,8 @@ function getDefaultPermissions(phase: string, taskType: string): AgentToolPermis
         'agent_graph_get',
         'agent_graph_set',
         'subagent_list',
+        'subagent_spawn',
+        'subagent_spawn_batch',
       ],
     };
   }
@@ -61,6 +63,8 @@ function getDefaultPermissions(phase: string, taskType: string): AgentToolPermis
         'agent_graph_get',
         'agent_graph_set',
         'subagent_list',
+        'subagent_spawn',
+        'subagent_spawn_batch',
       ],
     };
   }
@@ -87,6 +91,7 @@ function getDefaultPermissions(phase: string, taskType: string): AgentToolPermis
       'agent_graph_set',
       'subagent_list',
       'subagent_spawn',
+      'subagent_spawn_batch',
     ],
   };
 }

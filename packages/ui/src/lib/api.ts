@@ -50,7 +50,12 @@ export interface WorkSession {
   };
   taskStatus: Record<string, string>;
   events: Array<{ time: string; type: string; runId?: string; taskId?: string; failureType?: string; message: string }>;
-  agentGraph?: Array<{ id: string; prompt: string; dependencies: string[] }>;
+  agentGraph?: Array<{
+    id: string;
+    prompt: string;
+    dependencies: string[];
+    status?: 'pending' | 'running' | 'completed' | 'failed';
+  }>;
   output?: { text?: string; planPath?: string; failureType?: string };
   error?: string;
 }
@@ -118,8 +123,15 @@ export async function fetchWorkAgent(id: string): Promise<WorkAgentResponse> {
   return readJson(await fetch(`${API_BASE}/work/agent?id=${encodeURIComponent(id)}`));
 }
 
-export async function fetchWorkTools(id: string): Promise<WorkToolsResponse> {
-  return readJson(await fetch(`${API_BASE}/work/tools?id=${encodeURIComponent(id)}`));
+export async function fetchWorkTools(
+  id: string,
+  mode?: 'chat' | 'planning' | 'implementation',
+): Promise<WorkToolsResponse> {
+  const params = new URLSearchParams({ id });
+  if (mode) {
+    params.set('mode', mode);
+  }
+  return readJson(await fetch(`${API_BASE}/work/tools?${params.toString()}`));
 }
 
 export async function startWork(payload: {
