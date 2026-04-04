@@ -1237,6 +1237,30 @@ export default function App() {
     };
   }, [sessions]);
 
+  const failureTypeSummary = useMemo(() => {
+    const counts: Record<FailureType, number> = {
+      timeout: 0,
+      auth: 0,
+      rate_limit: 0,
+      tool_schema: 0,
+      tool_runtime: 0,
+      validation: 0,
+      empty_response: 0,
+      unknown: 0,
+    };
+
+    for (const session of sessions) {
+      const failureType = resolveSessionFailureType(session);
+      if (failureType) {
+        counts[failureType] += 1;
+      }
+    }
+
+    return (Object.entries(counts) as Array<[FailureType, number]>)
+      .filter(([, count]) => count > 0)
+      .sort((a, b) => b[1] - a[1]);
+  }, [sessions]);
+
   const graphLayout = useMemo(() => buildGraphLayout(selectedSession), [selectedSession]);
 
   const timelineItems = useMemo<TimelineItem[]>(() => {
@@ -1862,6 +1886,24 @@ export default function App() {
               <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] text-amber-700 dark:bg-amber-900/40 dark:text-amber-300">
                 cancelled {sessionStatusSummary.cancelled}
               </span>
+            </div>
+          )}
+
+          {failureTypeSummary.length > 0 && (
+            <div className="mb-3 px-1">
+              <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-slate-400 dark:text-slate-500">
+                Failure Mix
+              </div>
+              <div className="flex flex-wrap gap-1">
+                {failureTypeSummary.map(([failureType, count]) => (
+                  <span
+                    key={failureType}
+                    className={`rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${failureTypeBadgeClass(failureType)}`}
+                  >
+                    {formatFailureTypeLabel(failureType)} {count}
+                  </span>
+                ))}
+              </div>
             </div>
           )}
 
