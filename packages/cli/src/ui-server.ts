@@ -6,177 +6,42 @@ import { dirname, join } from 'node:path';
 import { orchestrate, PromptSectionName, renderPromptSections } from '@orchestrace/core';
 import type { DagEvent, PlanApprovalRequest, PromptSection, TaskGraph } from '@orchestrace/core';
 import { getModels } from '@mariozechner/pi-ai';
-import { PiAiAdapter, ProviderAuthManager, type LlmPromptInput, type LlmPromptPart } from '@orchestrace/provider';
+import { PiAiAdapter, ProviderAuthManager } from '@orchestrace/provider';
 import { createWorktree, type WorktreeHandle } from '@orchestrace/sandbox';
 import { DEFAULT_AGENT_TOOL_POLICY_VERSION, createAgentToolset } from '@orchestrace/tools';
+import { now } from './ui-server/clock.js';
+import {
+  buildChatContinuationInput,
+  cloneChatContentParts,
+  compactInlineImageMarkdown,
+  createSessionChatMessage,
+  createSessionChatThread,
+  estimateTokensFromText,
+  parseChatContentParts,
+  scheduleChatStreamCleanup,
+  summarizeChatContentParts,
+  trimThreadMessages,
+} from './ui-server/chat.js';
+import { asString, toErrorMessage } from './ui-server/strings.js';
+import { broadcastTodoUpdate, broadcastWorkStream, closeWorkStream, sendSse } from './ui-server/sse.js';
+import type {
+  AgentTodoItem,
+  AuthSession,
+  ChatTokenStream,
+  PersistedUiState,
+  PersistedWorkSession,
+  SessionAgentGraphNode,
+  SessionChatContentPart,
+  SessionChatMessage,
+  SessionChatThread,
+  SessionLlmStatus,
+  UiDagEvent,
+  UiServerOptions,
+  WorkSession,
+  WorkState,
+  LlmSessionState,
+} from './ui-server/types.js';
 import { WorkspaceManager } from './workspace-manager.js';
-
-export interface UiServerOptions {
-  port?: number;
-  workspace?: string;
-  hmr?: boolean;
-}
-
-type WorkState = 'running' | 'completed' | 'failed' | 'cancelled';
-
-type LlmSessionState =
-  | 'queued'
-  | 'analyzing'
-  | 'thinking'
-  | 'planning'
-  | 'awaiting-approval'
-  | 'implementing'
-  | 'using-tools'
-  | 'validating'
-  | 'retrying'
-  | 'completed'
-  | 'failed'
-  | 'cancelled';
-
-interface SessionLlmStatus {
-  state: LlmSessionState;
-  label: string;
-  detail?: string;
-  taskId?: string;
-  phase?: 'planning' | 'implementation';
-  updatedAt: string;
-}
-
-interface WorkSession {
-  id: string;
-  workspaceId: string;
-  workspaceName: string;
-  workspacePath: string;
-  prompt: string;
-  promptParts?: SessionChatContentPart[];
-  provider: string;
-  model: string;
-  autoApprove: boolean;
-  useWorktree: boolean;
-  worktreePath?: string;
-  worktreeBranch?: string;
-  createdAt: string;
-  updatedAt: string;
-  status: WorkState;
-  llmStatus: SessionLlmStatus;
-  taskStatus: Record<string, string>;
-  events: UiDagEvent[];
-  agentGraph: SessionAgentGraphNode[];
-  error?: string;
-  output?: { text?: string; planPath?: string };
-  controller: AbortController;
-  cleanupWorktree?: () => Promise<void>;
-}
-
-interface SessionAgentGraphNode {
-  id: string;
-  prompt: string;
-  dependencies: string[];
-  provider?: string;
-  model?: string;
-  reasoning?: 'minimal' | 'low' | 'medium' | 'high';
-}
-
-interface UiDagEvent {
-  time: string;
-  runId?: string;
-  type: DagEvent['type'];
-  taskId?: string;
-  message: string;
-}
-
-type AuthSessionState = 'running' | 'awaiting-auth' | 'awaiting-input' | 'completed' | 'failed';
-
-interface AuthSession {
-  id: string;
-  providerId: string;
-  state: AuthSessionState;
-  createdAt: string;
-  updatedAt: string;
-  authUrl?: string;
-  authInstructions?: string;
-  promptMessage?: string;
-  promptPlaceholder?: string;
-  error?: string;
-  resolveInput?: (value: string) => void;
-}
-
-type ChatRole = 'user' | 'assistant' | 'system';
-
-type SessionChatContentPart =
-  | { type: 'text'; text: string }
-  | { type: 'image'; data: string; mimeType: string; name?: string };
-
-interface SessionChatMessage {
-  role: ChatRole;
-  content: string;
-  contentParts?: SessionChatContentPart[];
-  time: string;
-  usage?: { input: number; output: number; cost: number };
-}
-
-interface SessionChatThread {
-  sessionId: string;
-  provider: string;
-  model: string;
-  workspacePath: string;
-  taskPrompt: string;
-  createdAt: string;
-  updatedAt: string;
-  messages: SessionChatMessage[];
-}
-
-interface AgentTodoItem {
-  id: string;
-  text: string;
-  done: boolean;
-  createdAt: string;
-  updatedAt: string;
-}
-
-interface ChatTokenStream {
-  id: string;
-  sessionId: string;
-  status: 'running' | 'completed' | 'failed';
-  replyText: string;
-  usage?: { input: number; output: number; cost: number };
-  usageEstimated?: boolean;
-  error?: string;
-  createdAt: string;
-  updatedAt: string;
-}
-
-interface PersistedWorkSession {
-  id: string;
-  workspaceId: string;
-  workspaceName: string;
-  workspacePath: string;
-  prompt: string;
-  promptParts?: SessionChatContentPart[];
-  provider: string;
-  model: string;
-  autoApprove: boolean;
-  useWorktree?: boolean;
-  worktreePath?: string;
-  worktreeBranch?: string;
-  createdAt: string;
-  updatedAt: string;
-  status: WorkState;
-  llmStatus?: SessionLlmStatus;
-  taskStatus: Record<string, string>;
-  events: UiDagEvent[];
-  agentGraph?: SessionAgentGraphNode[];
-  error?: string;
-  output?: { text?: string; planPath?: string };
-}
-
-interface PersistedUiState {
-  version: 1;
-  updatedAt: string;
-  sessions: PersistedWorkSession[];
-  chats: SessionChatThread[];
-  todos: Array<{ sessionId: string; items: AgentTodoItem[] }>;
-}
 
 export async function startUiServer(options: UiServerOptions = {}): Promise<void> {
   const port = options.port ?? 4310;
@@ -239,21 +104,6 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
 
     uiStatePersistence.schedule();
     return true;
-  }
-
-  function cloneChatContentParts(parts: SessionChatContentPart[] = []): SessionChatContentPart[] {
-    return parts.map((part) => {
-      if (part.type === 'text') {
-        return { type: 'text', text: part.text };
-      }
-
-      return {
-        type: 'image',
-        data: part.data,
-        mimeType: part.mimeType,
-        name: part.name,
-      };
-    });
   }
 
   async function startWorkSession(request: {
@@ -1513,77 +1363,6 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
   });
 }
 
-function sendSse(res: ServerResponse, event: string, payload: unknown): void {
-  res.write(`event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`);
-}
-
-function broadcastWorkStream(
-  streams: Map<string, Set<ServerResponse>>,
-  id: string,
-  event: string,
-  payload: unknown,
-): void {
-  const clients = streams.get(id);
-  if (!clients || clients.size === 0) {
-    return;
-  }
-
-  for (const client of [...clients]) {
-    try {
-      sendSse(client, event, payload);
-    } catch {
-      clients.delete(client);
-    }
-  }
-
-  if (clients.size === 0) {
-    streams.delete(id);
-  }
-}
-
-function closeWorkStream(streams: Map<string, Set<ServerResponse>>, id: string): void {
-  const clients = streams.get(id);
-  if (!clients) {
-    return;
-  }
-
-  for (const client of clients) {
-    try {
-      client.end();
-    } catch {
-      // ignore close errors
-    }
-  }
-  streams.delete(id);
-}
-
-function broadcastTodoUpdate(
-  streams: Map<string, Set<ServerResponse>>,
-  id: string,
-  todos: AgentTodoItem[],
-): void {
-  broadcastWorkStream(streams, id, 'todo-update', {
-    id,
-    todos: todos.map((item) => ({ ...item })),
-    time: now(),
-  });
-}
-
-function estimateTokensFromText(text: string): number {
-  // Rough heuristic for real-time UI counters until provider returns final usage.
-  if (!text) {
-    return 0;
-  }
-
-  return Math.max(1, Math.ceil(text.length / 4));
-}
-
-function scheduleChatStreamCleanup(streams: Map<string, ChatTokenStream>, streamId: string, ttlMs = 60_000): void {
-  setTimeout(() => {
-    streams.delete(streamId);
-  }, ttlMs);
-}
-
 function createUiStatePersistence(
   path: string,
   workSessions: Map<string, WorkSession>,
@@ -1831,10 +1610,6 @@ function hydratePersistedSession(session: PersistedWorkSession): WorkSession {
     controller: new AbortController(),
     cleanupWorktree: undefined,
   };
-}
-
-function now(): string {
-  return new Date().toISOString();
 }
 
 function createAuthSession(providerId: string): AuthSession {
@@ -2557,10 +2332,6 @@ function serializeAuthSession(session: AuthSession): Record<string, unknown> {
   };
 }
 
-function asString(value: unknown): string {
-  return typeof value === 'string' ? value.trim() : '';
-}
-
 function sendHtml(res: ServerResponse, html: string): void {
   res.statusCode = 200;
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
@@ -2596,10 +2367,6 @@ async function readJsonBody(req: IncomingMessage): Promise<Record<string, unknow
   return {};
 }
 
-function toErrorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
 function renderDashboardHtml(hmrEnabled: boolean): string {
     return `<!doctype html>
 <html lang="en">
@@ -2631,123 +2398,6 @@ function resolveUiWatchPath(workspaceRoot: string): string | undefined {
   }
 
   return undefined;
-}
-
-function parseChatContentParts(value: unknown): SessionChatContentPart[] {
-  if (!Array.isArray(value)) {
-    return [];
-  }
-
-  const parts: SessionChatContentPart[] = [];
-  for (const entry of value) {
-    if (!entry || typeof entry !== 'object') {
-      continue;
-    }
-
-    const type = asString((entry as Record<string, unknown>).type);
-    if (type === 'text') {
-      const text = asString((entry as Record<string, unknown>).text);
-      if (!text) {
-        continue;
-      }
-
-      parts.push({ type: 'text', text });
-      continue;
-    }
-
-    if (type !== 'image') {
-      continue;
-    }
-
-    const name = asString((entry as Record<string, unknown>).name) || undefined;
-    const rawData = asString((entry as Record<string, unknown>).data);
-    const rawMimeType = asString((entry as Record<string, unknown>).mimeType);
-
-    const dataUrlMatch = rawData.match(/^data:([^;]+);base64,(.+)$/);
-    const data = (dataUrlMatch ? dataUrlMatch[2] : rawData).replace(/\s+/g, '');
-    const mimeType = rawMimeType || dataUrlMatch?.[1] || 'image/png';
-
-    if (!data) {
-      continue;
-    }
-
-    parts.push({
-      type: 'image',
-      data,
-      mimeType,
-      name,
-    });
-  }
-
-  return parts;
-}
-
-function summarizeChatContentParts(parts: SessionChatContentPart[]): string {
-  const text = parts
-    .filter((part): part is Extract<SessionChatContentPart, { type: 'text' }> => part.type === 'text')
-    .map((part) => part.text.trim())
-    .filter((part) => part.length > 0)
-    .join('\n\n');
-
-  const images = parts.filter((part): part is Extract<SessionChatContentPart, { type: 'image' }> => part.type === 'image');
-  if (images.length === 0) {
-    return text;
-  }
-
-  const imageSummary = images
-    .map((part, index) => part.name || `image-${index + 1}`)
-    .join(', ');
-
-  if (!text) {
-    return `[attached ${images.length} image${images.length === 1 ? '' : 's'}: ${imageSummary}]`;
-  }
-
-  return `${text}\n\n[attached ${images.length} image${images.length === 1 ? '' : 's'}: ${imageSummary}]`;
-}
-
-function compactInlineImageMarkdown(text: string): string {
-  return text
-    .replace(/!\[[^\]]*\]\(data:image\/[a-zA-Z0-9.+-]+;base64,[^)]+\)/g, '[pasted-image]')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-function createSessionChatMessage(
-  role: ChatRole,
-  messageText: string,
-  parts: SessionChatContentPart[] = [],
-): SessionChatMessage {
-  const text = messageText.trim();
-  const content = text || summarizeChatContentParts(parts) || '(empty message)';
-
-  return {
-    role,
-    content,
-    contentParts: parts.length > 0 ? parts : undefined,
-    time: now(),
-  };
-}
-
-function createSessionChatThread(session: WorkSession, initialParts: SessionChatContentPart[] = []): SessionChatThread {
-  const created = now();
-  const promptText = compactInlineImageMarkdown(session.prompt);
-  const initialMessage = createSessionChatMessage(
-    'user',
-    `Initial task prompt:\n${promptText}`,
-    initialParts.length > 0 ? [{ type: 'text', text: 'Initial task prompt' }, ...initialParts] : [],
-  );
-  initialMessage.time = created;
-
-  return {
-    sessionId: session.id,
-    provider: session.provider,
-    model: session.model,
-    workspacePath: session.workspacePath,
-    taskPrompt: session.prompt,
-    createdAt: created,
-    updatedAt: created,
-    messages: [initialMessage],
-  };
 }
 
 type SessionPromptPhase = 'chat' | 'planning' | 'implementation';
@@ -2815,93 +2465,4 @@ function buildImplementationSystemPrompt(session: WorkSession): string {
 
 function buildChatSystemPrompt(session: WorkSession): string {
   return buildSessionSystemPrompt(session, 'chat');
-}
-
-function buildChatContinuationPrompt(thread: SessionChatThread): string {
-  const turns = thread.messages
-    .filter((message) => message.role === 'user' || message.role === 'assistant')
-    .map((message) => {
-      const content = message.contentParts && message.contentParts.length > 0
-        ? summarizeChatContentParts(message.contentParts)
-        : message.content;
-
-      return `${message.role.toUpperCase()}: ${content}`;
-    })
-    .join('\n\n');
-
-  return [
-    'Continue this conversation with full continuity.',
-    'Conversation so far:',
-    turns || '(no previous turns)',
-    '',
-    'Reply as ASSISTANT and continue from the latest user message.',
-  ].join('\n');
-}
-
-function buildChatContinuationInput(thread: SessionChatThread): LlmPromptInput {
-  const relevant = thread.messages.filter((message) => message.role === 'user' || message.role === 'assistant');
-  let latestMultimodalUser: SessionChatMessage | undefined;
-  for (let index = relevant.length - 1; index >= 0; index -= 1) {
-    const candidate = relevant[index];
-    if (
-      candidate.role === 'user'
-      && candidate.contentParts?.some((part) => part.type === 'image')
-    ) {
-      latestMultimodalUser = candidate;
-      break;
-    }
-  }
-
-  if (!latestMultimodalUser) {
-    return buildChatContinuationPrompt(thread);
-  }
-
-  const history = relevant
-    .filter((message) => message !== latestMultimodalUser)
-    .slice(-40)
-    .map((message) => {
-      const content = message.contentParts && message.contentParts.length > 0
-        ? summarizeChatContentParts(message.contentParts)
-        : message.content;
-      return `${message.role.toUpperCase()}: ${content}`;
-    })
-    .join('\n\n');
-
-  const multimodalParts: LlmPromptPart[] = (latestMultimodalUser.contentParts ?? [{ type: 'text', text: latestMultimodalUser.content }]).map((part) => {
-    if (part.type === 'text') {
-      return {
-        type: 'text',
-        text: part.text,
-      };
-    }
-
-    return {
-      type: 'image',
-      data: part.data,
-      mimeType: part.mimeType,
-    };
-  });
-
-  return [
-    {
-      type: 'text',
-      text: [
-        'Continue this conversation with full continuity.',
-        'Conversation so far (excluding latest multimodal user message):',
-        history || '(no previous turns)',
-        '',
-        'The latest user message follows as multimodal content (text + image attachments).',
-        'Reply as ASSISTANT and continue from that latest user message.',
-      ].join('\n'),
-    },
-    ...multimodalParts,
-  ];
-}
-
-function trimThreadMessages(thread: SessionChatThread, maxMessages = 80): void {
-  if (thread.messages.length <= maxMessages) {
-    return;
-  }
-
-  thread.messages.splice(0, thread.messages.length - maxMessages);
 }
