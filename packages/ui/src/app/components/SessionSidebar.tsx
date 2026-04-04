@@ -1,6 +1,6 @@
 import { Activity, Loader2, Moon, Sun } from 'lucide-react';
 import type { WorkSession } from '../../lib/api';
-import type { FailureType, LlmSessionStatus, Tab, ThemeMode } from '../types';
+import type { FailureType, Tab, ThemeMode } from '../types';
 import { compactPromptDisplay } from '../utils/text';
 import { compactRunId } from '../utils/runUrl';
 import { failureTypeBadgeClass, formatFailureTypeLabel, resolveSessionFailureType } from '../utils/failure';
