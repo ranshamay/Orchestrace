@@ -2,6 +2,7 @@ import { MessageSquare, Wrench } from 'lucide-react';
 import type { WorkSession } from '../../../lib/api';
 import type { FailureType, LlmSessionStatus, TimelineItem } from '../../types';
 import { Loader2 } from 'lucide-react';
+import { useRef, type MouseEvent } from 'react';
 import { SessionSummaryCard } from './SessionSummaryCard';
 import { ToolsPanel } from './ToolsPanel';
 import { TimelineList } from './TimelineList';
@@ -28,6 +29,8 @@ type Props = {
 };
 
 export function TimelinePanel(props: Props) {
+  const lastToolsToggleAtRef = useRef(0);
+
   const {
     selectedSessionId,
     selectedSession,
@@ -49,6 +52,20 @@ export function TimelinePanel(props: Props) {
     isDark,
   } = props;
 
+  const handleToggleTools = (event: MouseEvent<HTMLButtonElement>) => {
+    if (event.detail > 1) {
+      return;
+    }
+
+    const now = Date.now();
+    if (now - lastToolsToggleAtRef.current < 500) {
+      return;
+    }
+
+    lastToolsToggleAtRef.current = now;
+    setShowToolsPanel((current) => !current);
+  };
+
   return (
     <section className="flex min-h-0 flex-1 flex-col">
       <header className="border-b border-slate-200 bg-white px-4 py-3 dark:border-slate-800 dark:bg-slate-900">
@@ -58,7 +75,7 @@ export function TimelinePanel(props: Props) {
             {selectedSessionRunning && <span className="inline-flex items-center gap-1 rounded bg-blue-100 px-1.5 py-0.5 text-[10px] font-semibold normal-case tracking-normal text-blue-700 dark:bg-blue-900/40 dark:text-blue-300"><Loader2 className="h-3 w-3 animate-spin" />In progress</span>}
           </div>
           <div className="flex items-center gap-1.5">
-            <button aria-label="Toggle tool list" className={`inline-flex items-center gap-1 rounded border px-2 py-1 text-[10px] disabled:opacity-50 ${showToolsPanel ? 'border-indigo-300 bg-indigo-50 text-indigo-700 dark:border-indigo-800 dark:bg-indigo-950/40 dark:text-indigo-300' : 'border-slate-200 bg-white text-slate-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200'}`} disabled={!selectedSessionId} onClick={() => { setShowToolsPanel((current) => !current); }} title="Show currently available tools" type="button"><Wrench className="h-3 w-3" />Tools</button>
+            <button aria-label="Toggle tool list" className={`inline-flex items-center gap-1 rounded border px-2 py-1 text-[10px] disabled:opacity-50 ${showToolsPanel ? 'border-indigo-300 bg-indigo-50 text-indigo-700 dark:border-indigo-800 dark:bg-indigo-950/40 dark:text-indigo-300' : 'border-slate-200 bg-white text-slate-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200'}`} disabled={!selectedSessionId} onClick={handleToggleTools} title="Show currently available tools" type="button"><Wrench className="h-3 w-3" />Tools</button>
           </div>
         </div>
 
