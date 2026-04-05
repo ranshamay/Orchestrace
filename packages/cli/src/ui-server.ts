@@ -896,7 +896,20 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         const prompt = asString(body.prompt);
         const promptParts = parseChatContentParts(body.promptParts);
         const provider = asString(body.provider) || process.env.ORCHESTRACE_DEFAULT_PROVIDER || 'anthropic';
-        const model = asString(body.model) || process.env.ORCHESTRACE_DEFAULT_MODEL || 'claude-sonnet-4-20250514';
+        let model = asString(body.model);
+        if (!model) {
+          try {
+            model = getModels(provider as never)[0]?.id ?? '';
+          } catch (error) {
+            sendJson(res, 400, { error: toErrorMessage(error) });
+            return;
+          }
+
+          if (!model) {
+            sendJson(res, 400, { error: `No models available for provider ${provider}.` });
+            return;
+          }
+        }
         const autoApprove = Boolean(body.autoApprove);
         const useWorktree = parseBooleanSetting(body.useWorktree)
           ?? parseBooleanSetting(body.worktreeEnabled)

@@ -78,7 +78,7 @@ export function useBootstrapData() {
         const defaultWorkspace = workspacesState.activeWorkspaceId || workspacesState.workspaces[0]?.id || '';
         const initialControls: SessionLlmControls = {
           provider: defaultProvider,
-          model: providersState.defaults.model || '',
+          model: '',
           workspaceId: defaultWorkspace,
           autoApprove: true,
           useWorktree: window.localStorage.getItem('orchestrace-use-worktree') === 'true',

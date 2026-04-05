@@ -17,8 +17,11 @@ export function useProviderModels(workProvider: string, workModel: string, setWo
           [workProvider]: response.models,
         }));
 
-        if (!workModel && response.models.length > 0) {
-          setWorkModel(response.models[0]);
+        if (response.models.length > 0) {
+          const hasSelectedModel = workModel.length > 0 && response.models.includes(workModel);
+          if (!hasSelectedModel) {
+            setWorkModel(response.models[0]);
+          }
         }
       } catch {
         setProviderModels((previous) => ({

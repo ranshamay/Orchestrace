@@ -226,7 +226,7 @@ export async function startWork(payload: {
   workspaceId: string;
   prompt: string;
   provider: string;
-  model: string;
+  model?: string;
   autoApprove: boolean;
   useWorktree?: boolean;
   adaptiveConcurrency?: boolean;
