@@ -26,6 +26,7 @@ function createAdapter(params: {
   planningThrows?: boolean;
   failImplementationOnceWithType?: 'timeout' | 'rate_limit' | 'tool_runtime' | 'empty_response';
   omitPlanningCoordination?: boolean;
+  onPrompt?: (phase: 'planning' | 'implementation', prompt: LlmPromptInput) => void;
 }): LlmAdapter {
   let implementationCalls = 0;
 
@@ -38,6 +39,7 @@ function createAdapter(params: {
         _signal?: AbortSignal,
         options?: LlmCompletionOptions,
       ) => {
+        params.onPrompt?.(phase, _prompt);
         if (phase === 'planning') {
           if (!params.omitPlanningCoordination) {
             options?.onToolCall?.({
@@ -256,6 +258,41 @@ describe('orchestrate replay capture', () => {
       expect(output?.error).toContain('subagent_spawn');
       expect(output?.replay?.attempts.length).toBe(1);
       expect(output?.replay?.attempts[0]?.failureType).toBe('validation');
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('includes granular planning contract guidance in planning prompt', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'orchestrace-replay-plan-prompt-'));
+    const capturedPlanningPrompts: string[] = [];
+
+    try {
+      const outputs = await orchestrate(makeSingleNodeGraph(), {
+        llm: createAdapter({
+          onPrompt: (phase, prompt) => {
+            if (phase !== 'planning' || typeof prompt !== 'string') {
+              return;
+            }
+            capturedPlanningPrompts.push(prompt);
+          },
+        }),
+        cwd,
+        requirePlanApproval: false,
+        planningSystemPrompt: 'planning',
+        implementationSystemPrompt: 'implementation',
+      });
+
+      const output = outputs.get('task-1');
+      expect(output?.status).toBe('completed');
+      expect(capturedPlanningPrompts.length).toBeGreaterThan(0);
+      const planningPrompt = capturedPlanningPrompts[0] ?? '';
+      expect(planningPrompt).toContain('Decompose planning work into atomic tasks: each todo should represent one action and one completion outcome.');
+      expect(planningPrompt).toContain('Never bundle multiple actions in one task; split broad work into smaller tasks before finalizing the plan.');
+      expect(planningPrompt).toContain('If a task would take more than ~15 minutes or touches multiple independent areas, split it further.');
+      expect(planningPrompt).toContain('3) per-stage atomic tasks with explicit dependencies and concurrency boundaries');
+      expect(planningPrompt).toContain('8) atomic todo specification per task: {id, action, target, deps, verification, done_criteria}');
+      expect(planningPrompt).toContain('9) Next Follow-up Suggestions section with 1-3 numbered, concrete next actions');
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }

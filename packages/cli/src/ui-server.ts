@@ -952,10 +952,23 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           return;
         }
 
+        const followUpText = asString(body.followUp).trim();
+        const followUpParts = parseChatContentParts(body.followUpParts);
+        const retryPrompt = mergeRetryPromptWithFollowUp({
+          prompt: sourceSession.prompt,
+          followUpText,
+          followUpParts,
+        });
+        const retryPromptParts = mergeRetryPromptPartsWithFollowUp({
+          promptParts: sourceSession.promptParts,
+          followUpText,
+          followUpParts,
+        });
+
         const result = await startWorkSession({
           workspaceId: sourceSession.workspaceId,
-          prompt: sourceSession.prompt,
-          promptParts: sourceSession.promptParts,
+          prompt: retryPrompt,
+          promptParts: retryPromptParts,
           provider: sourceSession.provider,
           model: sourceSession.model,
           autoApprove: sourceSession.autoApprove,
@@ -3567,6 +3580,77 @@ type SessionPromptPhase = 'chat' | 'planning' | 'implementation';
 
 type FollowUpSuggestionPhase = 'chat' | 'planning' | 'implementation';
 
+function mergeRetryPromptWithFollowUp(params: {
+  prompt: string;
+  followUpText: string;
+  followUpParts: SessionChatContentPart[];
+}): string {
+  const { prompt, followUpText, followUpParts } = params;
+  const followUp = buildRetryFollowUpSummary({ followUpText, followUpParts });
+  if (!followUp) {
+    return prompt;
+  }
+
+  const base = prompt.trim();
+  if (!base) {
+    return followUp;
+  }
+
+  return `${base}\n\n${followUp}`;
+}
+
+function mergeRetryPromptPartsWithFollowUp(params: {
+  promptParts?: SessionChatContentPart[];
+  followUpText: string;
+  followUpParts: SessionChatContentPart[];
+}): SessionChatContentPart[] | undefined {
+  const baseParts = cloneChatContentParts(params.promptParts ?? []);
+  const followUpParts = buildRetryFollowUpParts({
+    followUpText: params.followUpText,
+    followUpParts: params.followUpParts,
+  });
+
+  if (followUpParts.length === 0) {
+    return baseParts.length > 0 ? baseParts : undefined;
+  }
+
+  if (baseParts.length === 0) {
+    return followUpParts;
+  }
+
+  return [
+    ...baseParts,
+    { type: 'text', text: 'Follow-up request:' },
+    ...followUpParts,
+  ];
+}
+
+function buildRetryFollowUpSummary(params: {
+  followUpText: string;
+  followUpParts: SessionChatContentPart[];
+}): string {
+  const followUpParts = buildRetryFollowUpParts(params);
+  if (followUpParts.length === 0) {
+    return '';
+  }
+
+  const summary = summarizeChatContentParts(followUpParts).trim();
+  return summary ? `Follow-up request:\n${summary}` : '';
+}
+
+function buildRetryFollowUpParts(params: {
+  followUpText: string;
+  followUpParts: SessionChatContentPart[];
+}): SessionChatContentPart[] {
+  const merged: SessionChatContentPart[] = [];
+  const text = params.followUpText.trim();
+  if (text) {
+    merged.push({ type: 'text', text });
+  }
+
+  return [...merged, ...cloneChatContentParts(params.followUpParts)];
+}
+
 function buildSessionSystemPrompt(session: WorkSession, phase: SessionPromptPhase): string {
   const phaseRules =
     phase === 'chat'
@@ -3575,6 +3659,8 @@ function buildSessionSystemPrompt(session: WorkSession, phase: SessionPromptPhas
           'Use chat responses to clarify intent, summarize progress, and gather missing context.',
           'When direct implementation is requested, proceed with concrete action-oriented steps.',
           'When the user asks for planning, switch to planning mode and perform todo_set + agent_graph_set before presenting the plan.',
+          'When planning, require atomic task granularity: one action per task with explicit done criteria and verification commands.',
+          'Reject broad bundled tasks; split work into smaller units before finalizing the plan.',
           'When publishing agent_graph_set, use descriptive node ids/names instead of generic n1/n2 labels.',
           'Planning requests must also use subagent_spawn or subagent_spawn_batch with focused, task-relevant context per sub-agent.',
           'Pass nodeId on each sub-agent request so graph progress stays visible and current.',
@@ -3587,6 +3673,9 @@ function buildSessionSystemPrompt(session: WorkSession, phase: SessionPromptPhas
         ? [
             'Produce a concrete implementation plan with explicit staged execution and validation steps.',
             'Do not perform direct code edits in planning mode.',
+            'Planning output must be highly granular and atomic: each task should represent one action and one completion outcome.',
+            'Split broad, multi-area, or multi-step tasks into smaller independent tasks before finalizing.',
+            'Each planned task must include explicit dependencies, concrete done criteria, and at least one verification command.',
             'Planning must produce and maintain todo_set and agent_graph_set state.',
             'Planning must use subagent_spawn or subagent_spawn_batch for focused parallel research and delegate only relevant context.',
             'For independent nodes, use subagent_spawn_batch so work runs in parallel.',
