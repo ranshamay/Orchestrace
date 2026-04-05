@@ -122,6 +122,18 @@ export class PiAiAdapter implements LlmAdapter {
               blockTypes,
               prompt: summarizePromptInput(prompt),
             });
+
+            if (failureType === 'auth' && request.refreshApiKey && !authRetryUsed) {
+              authRetryUsed = true;
+              try {
+                activeApiKey = await request.refreshApiKey();
+              } catch {
+                // Ignore refresh errors and fall through to throw.
+              }
+              attempt -= 1;
+              continue;
+            }
+
             throw createLlmFailureError({
               provider: request.provider,
               model: request.model,
