@@ -24,6 +24,11 @@ function toolInputSummary(toolName: string, payload: string): string {
     return command ? `Running: ${compactInline(command, 160)}` : 'Running command';
   }
 
+  if (toolName === 'playwright_run') {
+    const command = parsed && typeof parsed.command === 'string' ? parsed.command : 'test';
+    return `Running Playwright: ${compactInline(command, 160)}`;
+  }
+
   if (toolName.startsWith('todo_')) {
     return 'Updating checklist';
   }

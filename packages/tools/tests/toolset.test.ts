@@ -81,6 +81,7 @@ describe('createAgentToolset phase policy', () => {
       'git_diff',
       'git_status',
       'list_directory',
+      'playwright_run',
       'read_file',
       'read_files',
       'run_command',

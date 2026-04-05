@@ -54,7 +54,7 @@ export function useBootstrapData() {
   useEffect(() => {
     const bootstrap = async () => {
       try {
-        const [providersState, workspacesState, sessionsState, githubAuthStatusResponse, preferencesResponse] = await Promise.all([
+        const [providersResult, workspacesResult, sessionsResult, githubAuthStatusResult, preferencesResult] = await Promise.allSettled([
           fetchProviders(),
           fetchWorkspaces(),
           fetchSessions(),
@@ -62,32 +62,72 @@ export function useBootstrapData() {
           fetchUiPreferences(),
         ]);
 
-        setProviders(providersState.providers);
-        setProviderStatuses(providersState.statuses);
-        setWorkspaces(workspacesState.workspaces);
-        setActiveWorkspaceId(workspacesState.activeWorkspaceId ?? '');
-        setSessions(sessionsState.sessions);
-        setGithubAuthStatus(githubAuthStatusResponse.status);
+        const bootstrapErrors: string[] = [];
 
-        const runIdFromUrl = readRunIdFromUrl();
-        const hasRunIdInResults = Boolean(runIdFromUrl && sessionsState.sessions.some((session) => session.id === runIdFromUrl));
-        const initialSessionId = hasRunIdInResults ? runIdFromUrl : sessionsState.sessions[0]?.id ?? '';
+        let providersState;
+        if (providersResult.status === 'fulfilled') {
+          providersState = providersResult.value;
+          setProviders(providersState.providers);
+          setProviderStatuses(providersState.statuses);
+        } else {
+          bootstrapErrors.push(toErrorMessage(providersResult.reason));
+        }
 
-        setSelectedSessionId(initialSessionId);
-        updateRunIdInUrl(initialSessionId);
+        let workspacesState;
+        if (workspacesResult.status === 'fulfilled') {
+          workspacesState = workspacesResult.value;
+          setWorkspaces(workspacesState.workspaces);
+          setActiveWorkspaceId(workspacesState.activeWorkspaceId ?? '');
+        } else {
+          bootstrapErrors.push(toErrorMessage(workspacesResult.reason));
+        }
 
-        const connectedProvider = providersState.statuses.find((status) => status.source !== 'none')?.provider || '';
-        const defaultProvider = connectedProvider || providersState.defaults.provider || providersState.providers[0]?.id || '';
-        const defaultWorkspace = workspacesState.activeWorkspaceId || workspacesState.workspaces[0]?.id || '';
+        let sessionsState;
+        if (sessionsResult.status === 'fulfilled') {
+          sessionsState = sessionsResult.value;
+          setSessions(sessionsState.sessions);
+
+          const runIdFromUrl = readRunIdFromUrl();
+          const hasRunIdInResults = Boolean(
+            runIdFromUrl && sessionsState.sessions.some((session) => session.id === runIdFromUrl),
+          );
+          const initialSessionId = hasRunIdInResults ? runIdFromUrl : sessionsState.sessions[0]?.id ?? '';
+
+          setSelectedSessionId(initialSessionId);
+          updateRunIdInUrl(initialSessionId);
+        } else {
+          bootstrapErrors.push(toErrorMessage(sessionsResult.reason));
+        }
+
+        if (githubAuthStatusResult.status === 'fulfilled') {
+          setGithubAuthStatus(githubAuthStatusResult.value.status);
+        }
+
+        const preferences = preferencesResult.status === 'fulfilled'
+          ? preferencesResult.value.preferences
+          : {
+              useWorktree: false,
+              adaptiveConcurrency: false,
+              batchConcurrency: 8,
+              batchMinConcurrency: 1,
+            };
+
+        if (preferencesResult.status === 'rejected') {
+          bootstrapErrors.push(toErrorMessage(preferencesResult.reason));
+        }
+
+        const connectedProvider = providersState?.statuses.find((status) => status.source !== 'none')?.provider || '';
+        const defaultProvider = connectedProvider || providersState?.defaults.provider || providersState?.providers[0]?.id || '';
+        const defaultWorkspace = workspacesState?.activeWorkspaceId || workspacesState?.workspaces[0]?.id || '';
         const initialControls: SessionLlmControls = {
           provider: defaultProvider,
           model: '',
           workspaceId: defaultWorkspace,
           autoApprove: true,
-          useWorktree: preferencesResponse.preferences.useWorktree,
-          adaptiveConcurrency: preferencesResponse.preferences.adaptiveConcurrency,
-          batchConcurrency: preferencesResponse.preferences.batchConcurrency,
-          batchMinConcurrency: preferencesResponse.preferences.batchMinConcurrency,
+          useWorktree: preferences.useWorktree,
+          adaptiveConcurrency: preferences.adaptiveConcurrency,
+          batchConcurrency: preferences.batchConcurrency,
+          batchMinConcurrency: preferences.batchMinConcurrency,
         };
 
         setDefaultLlmControls(initialControls);
@@ -99,8 +139,12 @@ export function useBootstrapData() {
         setAdaptiveConcurrency(initialControls.adaptiveConcurrency);
         setBatchConcurrency(initialControls.batchConcurrency);
         setBatchMinConcurrency(initialControls.batchMinConcurrency);
+
+        if (bootstrapErrors.length > 0) {
+          setErrorMessage(bootstrapErrors[0]);
+        }
       } catch (error) {
-        setErrorMessage(error instanceof Error ? error.message : String(error));
+        setErrorMessage(toErrorMessage(error));
       } finally {
         setBootstrapComplete(true);
       }
@@ -108,6 +152,14 @@ export function useBootstrapData() {
 
     void bootstrap();
   }, []);
+
+  function toErrorMessage(error: unknown): string {
+    if (error instanceof Error) {
+      return error.message;
+    }
+
+    return String(error);
+  }
 
   return {
     providers,

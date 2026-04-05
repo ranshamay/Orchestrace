@@ -43,10 +43,40 @@ export function useSessionActions(params: SessionActionsParams) {
 
   const hasComposerContent = composerText.trim().length > 0 || composerImages.length > 0;
 
+  const continueSelectedSession = useCallback(async (sessionId: string) => {
+    const payload = composePrompt(composerText, composerImages);
+    const contentParts = toComposerContentParts(composerText, composerImages);
+
+    await sendChatMessage(sessionId, {
+      message: payload,
+      messageParts: composerImages.length > 0 ? contentParts : undefined,
+    });
+
+    await refreshSessionsOnly({ setSessions });
+    const agentState = await fetchWorkAgent(sessionId);
+    setChatMessages(agentState.messages);
+    setTodos(agentState.todos);
+    setComposerText('');
+    setComposerImages([]);
+  }, [
+    composerImages,
+    composerText,
+    setChatMessages,
+    setComposerImages,
+    setComposerText,
+    setSessions,
+    setTodos,
+  ]);
+
   const handleStartFromComposer = useCallback(async () => {
     if (!hasComposerContent || !workProvider || !workWorkspaceId) return;
     setErrorMessage('');
     try {
+      if (selectedSessionId) {
+        await continueSelectedSession(selectedSessionId);
+        return;
+      }
+
       const payload = composePrompt(composerText, composerImages);
       const runPrompt = selectedSession ? composeRunPromptWithContext(selectedSession.prompt, payload) : payload;
       const contentParts = toComposerContentParts(composerText, composerImages);
@@ -76,8 +106,10 @@ export function useSessionActions(params: SessionActionsParams) {
     composerImages,
     composerText,
     adaptiveConcurrency,
+    continueSelectedSession,
     hasComposerContent,
     selectedSession,
+    selectedSessionId,
     setComposerImages,
     setComposerText,
     setErrorMessage,
@@ -97,33 +129,16 @@ export function useSessionActions(params: SessionActionsParams) {
     }
     setErrorMessage('');
     try {
-      const payload = composePrompt(composerText, composerImages);
-      const contentParts = toComposerContentParts(composerText, composerImages);
-      await sendChatMessage(selectedSessionId, {
-        message: payload,
-        messageParts: composerImages.length > 0 ? contentParts : undefined,
-      });
-      await refreshSessionsOnly({ setSessions });
-      const agentState = await fetchWorkAgent(selectedSessionId);
-      setChatMessages(agentState.messages);
-      setTodos(agentState.todos);
-      setComposerText('');
-      setComposerImages([]);
+      await continueSelectedSession(selectedSessionId);
     } catch (error) {
       setErrorMessage(toErrorMessage(error));
     }
   }, [
-    composerImages,
-    composerText,
+    continueSelectedSession,
     hasComposerContent,
     handleStartFromComposer,
     selectedSessionId,
-    setChatMessages,
-    setComposerImages,
-    setComposerText,
     setErrorMessage,
-    setSessions,
-    setTodos,
   ]);
 
   const handleDelete = useCallback(async (targetSessionId?: string) => {

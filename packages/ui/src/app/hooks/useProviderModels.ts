@@ -1,29 +1,42 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type Dispatch, type SetStateAction } from 'react';
 import { fetchModels } from '../../lib/api';
 
-export function useProviderModels(workProvider: string, workModel: string, setWorkModel: (model: string) => void) {
+export function useProviderModels(
+  workProvider: string,
+  workModel: string,
+  setWorkModel: Dispatch<SetStateAction<string>>,
+) {
   const [providerModels, setProviderModels] = useState<Record<string, string[]>>({});
 
   useEffect(() => {
-    const loadModels = async () => {
-      if (!workProvider) {
-        return;
-      }
+    if (!workProvider) {
+      return;
+    }
 
+    let cancelled = false;
+
+    const loadModels = async () => {
       try {
         const response = await fetchModels(workProvider);
+        if (cancelled) {
+          return;
+        }
+
         setProviderModels((previous) => ({
           ...previous,
           [workProvider]: response.models,
         }));
 
         if (response.models.length > 0) {
-          const hasSelectedModel = workModel.length > 0 && response.models.includes(workModel);
-          if (!hasSelectedModel) {
-            setWorkModel(response.models[0]);
-          }
+          setWorkModel((current) => (current.length > 0 && response.models.includes(current)
+            ? current
+            : response.models[0]));
         }
       } catch {
+        if (cancelled) {
+          return;
+        }
+
         setProviderModels((previous) => ({
           ...previous,
           [workProvider]: [],
@@ -32,7 +45,27 @@ export function useProviderModels(workProvider: string, workModel: string, setWo
     };
 
     void loadModels();
-  }, [setWorkModel, workModel, workProvider]);
+
+    return () => {
+      cancelled = true;
+    };
+  }, [setWorkModel, workProvider]);
+
+  useEffect(() => {
+    if (!workProvider) {
+      return;
+    }
+
+    const models = providerModels[workProvider] ?? [];
+    if (models.length === 0) {
+      return;
+    }
+
+    const hasSelectedModel = workModel.length > 0 && models.includes(workModel);
+    if (!hasSelectedModel) {
+      setWorkModel(models[0]);
+    }
+  }, [providerModels, setWorkModel, workModel, workProvider]);
 
   return {
     providerModels,

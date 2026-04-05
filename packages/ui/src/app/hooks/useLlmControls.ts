@@ -113,7 +113,16 @@ export function useLlmControls(params: Params) {
 
   useEffect(() => {
     if (!selectedSessionId) {
-      applyWorkingControls(defaultLlmControls);
+      const shouldHydrateDefaults = (
+        !workProvider
+        && !workModel
+        && !workWorkspaceId
+      );
+
+      if (shouldHydrateDefaults) {
+        applyWorkingControls(defaultLlmControls);
+      }
+
       return;
     }
 
@@ -137,7 +146,16 @@ export function useLlmControls(params: Params) {
     };
 
     applyWorkingControls(sessionControls);
-  }, [applyWorkingControls, defaultLlmControls, llmControlsBySessionId, selectedSession, selectedSessionId]);
+  }, [
+    applyWorkingControls,
+    defaultLlmControls,
+    llmControlsBySessionId,
+    selectedSession,
+    selectedSessionId,
+    workModel,
+    workProvider,
+    workWorkspaceId,
+  ]);
 
   return {
     llmControlsBySessionId,

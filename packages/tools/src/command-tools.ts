@@ -10,6 +10,15 @@ import {
 } from './command-tools/guards.js';
 
 const GITHUB_API_BASE_URL = 'https://api.github.com';
+const PLAYWRIGHT_ALLOWED_COMMANDS = new Set([
+  'test',
+  'show-report',
+  'codegen',
+  'install',
+  'install-deps',
+  '--version',
+]);
+const PLAYWRIGHT_MAX_ARGS = 64;
 const DEFAULT_COMMAND_BATCH_CONCURRENCY = 8;
 const MAX_COMMAND_BATCH_CONCURRENCY = 64;
 const MAX_COMMAND_BATCH_ITEMS = 200;
@@ -274,6 +283,83 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
           };
         },
       },
+      {
+        tool: {
+          name: 'playwright_run',
+          description: 'Run Playwright CLI commands for browser-based verification inside the workspace.',
+          parameters: Type.Object({
+            command: Type.Optional(Type.String({
+              description: 'Playwright subcommand (test, show-report, codegen, install, install-deps, --version). Defaults to test.',
+            })),
+            args: Type.Optional(Type.Array(
+              Type.String({ description: 'Additional args passed to Playwright CLI.' }),
+              { maxItems: PLAYWRIGHT_MAX_ARGS },
+            )),
+            path: Type.Optional(Type.String({ description: 'Optional relative working directory inside workspace.' })),
+            timeoutMs: Type.Optional(Type.Number({ minimum: 1000, maximum: 900000 })),
+          }),
+        },
+        execute: async (toolArgs, signal) => {
+          const command = asString(toolArgs.command) ?? 'test';
+          const args = asStringArray(toolArgs.args, 'args') ?? [];
+          const path = asString(toolArgs.path) ?? '.';
+          const cwd = resolveWorkspacePath(options.cwd, path);
+          const relativeCwd = toWorkspaceRelative(options.cwd, cwd);
+          const timeoutMs = asPositiveInteger(toolArgs.timeoutMs) ?? Math.max(options.commandTimeoutMs ?? 120000, 180000);
+
+          if (/\s/.test(command)) {
+            return {
+              content: 'Invalid command. Use the command field for a single Playwright subcommand and pass flags via args.',
+              isError: true,
+            };
+          }
+
+          if (!PLAYWRIGHT_ALLOWED_COMMANDS.has(command)) {
+            return {
+              content: `Unsupported Playwright command: ${command}. Supported commands: ${[...PLAYWRIGHT_ALLOWED_COMMANDS].join(', ')}`,
+              isError: true,
+            };
+          }
+
+          const runnerCandidates = [
+            { binary: 'playwright', prefix: [] as string[], label: 'playwright' },
+            { binary: 'pnpm', prefix: ['exec', 'playwright'], label: 'pnpm exec playwright' },
+            { binary: 'npx', prefix: ['playwright'], label: 'npx playwright' },
+          ];
+
+          let selectedRunner: string | undefined;
+          let selectedResult;
+
+          for (const candidate of runnerCandidates) {
+            const result = await runCommand(candidate.binary, [...candidate.prefix, command, ...args], {
+              cwd,
+              timeoutMs,
+              signal,
+            });
+
+            if (result.exitCode === -1) {
+              continue;
+            }
+
+            selectedRunner = candidate.label;
+            selectedResult = result;
+            break;
+          }
+
+          if (!selectedResult || !selectedRunner) {
+            return {
+              content: 'Playwright CLI was not found. Install it in the workspace (for example: pnpm add -D playwright @playwright/test).',
+              isError: true,
+            };
+          }
+
+          const output = formatCommandOutput(selectedResult, options.maxOutputChars ?? 24000);
+          return {
+            content: `runner: ${selectedRunner}\ncwd: ${relativeCwd}\nexitCode: ${selectedResult.exitCode}\n${output}`,
+            isError: selectedResult.exitCode !== 0,
+          };
+        },
+      },
     );
   }
 
@@ -535,6 +621,25 @@ function asBoolean(value: unknown): boolean | undefined {
   }
 
   return undefined;
+}
+
+function asStringArray(value: unknown, field: string): string[] | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  if (!Array.isArray(value)) {
+    throw new Error(`Invalid ${field}: expected an array of strings.`);
+  }
+
+  return value.map((entry, index) => {
+    const parsed = asString(entry);
+    if (!parsed) {
+      throw new Error(`Invalid ${field}[${index}]: expected a non-empty string.`);
+    }
+
+    return parsed;
+  });
 }
 
 async function mapWithConcurrency<T, U>(

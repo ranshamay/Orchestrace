@@ -108,7 +108,7 @@ function isToolAllowed(toolName: string, permissions: AgentToolPermissions): boo
     return false;
   }
 
-  if ((toolName === 'run_command' || toolName === 'run_command_batch') && !permissions.allowRunCommand) {
+  if ((toolName === 'run_command' || toolName === 'run_command_batch' || toolName === 'playwright_run') && !permissions.allowRunCommand) {
     return false;
   }
 

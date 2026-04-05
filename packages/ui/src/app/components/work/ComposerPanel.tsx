@@ -92,12 +92,12 @@ export function ComposerPanel(props: Props) {
               }
             }
           }}
-          placeholder={selectedSessionId ? 'Continue autonomously from this run context and start a new execution...' : 'Describe task and start autonomous execution...'}
+          placeholder={selectedSessionId ? 'Continue in this session context...' : 'Describe task and start autonomous execution...'}
           value={composerText}
         />
         <div className="flex flex-col gap-2">
           <div className="flex gap-2">
-            <button className="inline-flex items-center gap-1 rounded bg-blue-600 px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50" disabled={!hasComposerContent || !workWorkspaceId || !workProvider || !workModel} onClick={() => { void onStartFromComposer(); }} type="button"><Play className="h-3 w-3" /> Run</button>
+            <button className="inline-flex items-center gap-1 rounded bg-blue-600 px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50" disabled={!hasComposerContent || !workWorkspaceId || !workProvider || !workModel} onClick={() => { void onStartFromComposer(); }} type="button"><Play className="h-3 w-3" /> {selectedSessionId ? 'Continue' : 'Run'}</button>
             <button className="rounded bg-red-600 px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50" disabled={!selectedSessionId || !selectedSession || normalizeSessionStatus(selectedSession.status) !== 'running'} onClick={() => { void onStop(); }} type="button">Stop</button>
           </div>
           <button className="rounded bg-slate-800 px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50 dark:bg-slate-700" disabled={!hasComposerContent || !workWorkspaceId || !workProvider || !workModel} onClick={() => { void onSendChat(); }} type="button">Autonomous Run</button>
