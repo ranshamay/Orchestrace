@@ -72,7 +72,7 @@ A JSON-serializable directed acyclic graph where each node is a task with:
 2. **Validation-driven** — Every task can have shell command gates. If `pnpm tsc --noEmit` fails, the task fails and retries with error context.
 3. **Dependency-aware** — Task B receives Task A's output as context automatically. The scheduler handles ordering.
 4. **Parallel by default** — Independent tasks run concurrently (configurable `maxParallel`). Dependent tasks wait.
-5. **Isolation for safety** — Tasks marked `isolated: true` get their own git worktree branch, merged back on success.
+5. **Workspace isolation (optional)** — Code/refactor implementation can run in native git worktrees selected just before implementation.
 
 ---
 
@@ -160,7 +160,7 @@ plan.json → CLI parses graph
 | **Agent tools** | P0 | File read/write, terminal exec, git operations — the actual capabilities the LLM needs |
 | **Tool-use loop** | P0 | Convert LLM adapter from single-shot `completeSimple` to multi-turn tool-use with pi-ai |
 | **Planner agent** | P1 | Expand from per-task deep planning to full multi-task graph generation |
-| **Worktree integration** | P1 | Wire `isolated: true` tasks to actually use git worktrees in the scheduler |
+| **Worktree integration** | P1 | Native pre-implementation git worktree selection is wired; continue refining policies/tooling around it |
 | **Error context in retry** | P1 | Feed validation errors back into the retry prompt |
 | **AbortController support** | P2 | Wire `config.signal` to cancel in-flight LLM calls and child processes |
 | **Streaming output** | P2 | Use pi-ai `stream()` instead of `completeSimple()` for real-time output |
@@ -223,11 +223,9 @@ Tools execute in the task's working directory:
 
 #### 2.1 Wire Worktrees to Scheduler
 
-When a task has `isolated: true`:
-1. Before launch: `createWorktree(repoRoot, taskId)`
-2. Set tool execution `cwd` to worktree path
-3. On success: `mergeWorktree(handle, targetBranch)`
-4. On failure: `handle.cleanup()`
+Native git worktrees are prepared just-in-time before implementation when code/refactor tasks require them.
+Tool execution `cwd` then points to the selected native worktree path.
+No code-managed merge/cleanup lifecycle is performed automatically.
 
 #### 2.2 Error-Aware Retry Prompts
 

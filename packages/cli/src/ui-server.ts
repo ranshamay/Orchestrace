@@ -1,13 +1,13 @@
 import { randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { existsSync, watch, type FSWatcher } from 'node:fs';
 import { homedir } from 'node:os';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
-import { promisify } from 'node:util';
 import { orchestrate, PromptSectionName, renderPromptSections } from '@orchestrace/core';
-import type { DagEvent, PlanApprovalRequest, PromptSection, TaskGraph } from '@orchestrace/core';
+import type { DagEvent, PlanApprovalRequest, PromptSection, TaskGraph, TaskNode } from '@orchestrace/core';
 import { getModels } from '@mariozechner/pi-ai';
 import { PiAiAdapter, ProviderAuthManager, type LlmToolCallEvent } from '@orchestrace/provider';
 import {
@@ -178,6 +178,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       });
     }
 
+// Native git worktree lifecycle is user-managed; no automatic cleanup.
     closeWorkStream(workStreamClients, id);
     workSessions.delete(id);
     sessionChats.delete(id);
@@ -250,28 +251,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       normalizePositiveSetting(request.batchMinConcurrency, uiPreferences.batchMinConcurrency),
     );
 
-    let workspacePath = workspace.path;
-    let executionContext: ExecutionContext = 'workspace';
-    let selectedWorktreePath: string | undefined;
-    let selectedWorktreeBranch: string | undefined;
-    if (requestedExecutionContext === 'git-worktree') {
-      try {
-        const resolved = await resolveSessionWorkspacePath({
-          workspaceRoot: workspace.path,
-          executionContext: requestedExecutionContext,
-          selectedWorktreePath: requestedWorktreePath,
-        });
-        workspacePath = resolved.workspacePath;
-        executionContext = resolved.executionContext;
-        selectedWorktreePath = resolved.selectedWorktreePath;
-        selectedWorktreeBranch = resolved.worktreeBranch;
-      } catch (error) {
-        return {
-          error: toErrorMessage(error),
-          statusCode: 400,
-        };
-      }
-    }
+const executionContext = requestedExecutionContext;
+    const selectedWorktreePath = requestedWorktreePath;
 
     const controller = new AbortController();
     const createdAt = now();
@@ -279,7 +260,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       id,
       workspaceId: workspace.id,
       workspaceName: workspace.name,
-      workspacePath,
+      workspacePath: workspace.path,
       prompt: normalizedPrompt,
       promptParts: promptParts.length > 0 ? cloneChatContentParts(promptParts) : undefined,
       provider: request.provider,
@@ -291,8 +272,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       adaptiveConcurrency,
       batchConcurrency,
       batchMinConcurrency,
-      worktreePath: selectedWorktreePath,
-      worktreeBranch: selectedWorktreeBranch,
+      worktreePath: undefined,
+      worktreeBranch: undefined,
       createdAt,
       updatedAt: createdAt,
       status: 'running',
@@ -312,11 +293,12 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     broadcastTodoUpdate(workStreamClients, id, sessionTodos.get(id) ?? []);
 
     const graph = buildSingleTaskGraph(id, normalizedPrompt);
+    const baseWorkspacePath = workspace.path;
 
     void orchestrate(graph, {
       llm,
-      cwd: session.workspacePath,
-      planOutputDir: join(session.workspacePath, '.orchestrace', 'plans'),
+      cwd: baseWorkspacePath,
+      planOutputDir: join(baseWorkspacePath, '.orchestrace', 'plans'),
       promptVersion: process.env.ORCHESTRACE_PROMPT_VERSION,
       policyVersion: process.env.ORCHESTRACE_POLICY_VERSION ?? DEFAULT_AGENT_TOOL_POLICY_VERSION,
       defaultModel: { provider: request.provider, model: request.model },
@@ -325,10 +307,40 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       maxParallel: 1,
       requirePlanApproval: !request.autoApprove,
       onPlanApproval: async (_approvalRequest: PlanApprovalRequest) => request.autoApprove,
+      prepareImplementation: async ({ task, graphId, cwd }) => {
+        const requiresCodeChange = task.type === 'code' || task.type === 'refactor';
+        if (!session.useWorktree || !requiresCodeChange) {
+          return { cwd };
+        }
+
+        let selectedCwd = cwd;
+        try {
+          const prepared = await ensureNativeGitWorktree({
+            repoRoot: workspace.path,
+            sessionId: session.id,
+            task,
+            graphId,
+          });
+          selectedCwd = prepared.path;
+          session.worktreePath = prepared.path;
+          session.worktreeBranch = prepared.branch;
+          session.workspacePath = prepared.path;
+          session.updatedAt = now();
+          uiStatePersistence.schedule();
+        } catch (error) {
+          const detail = `Failed to prepare git worktree before implementation: ${toErrorMessage(error)}`;
+          session.updatedAt = now();
+          session.llmStatus = createLlmStatus('failed', session.updatedAt, { detail });
+          session.error = detail;
+          throw new Error(detail);
+        }
+
+        return { cwd: selectedCwd };
+      },
       signal: controller.signal,
       resolveApiKey: async (providerId) => authManager.resolveApiKey(providerId),
-      createToolset: ({ phase, task, graphId, provider: activeProvider, model: activeModel, reasoning }) => createAgentToolset({
-        cwd: session.workspacePath,
+      createToolset: ({ phase, task, graphId, cwd: effectiveCwd, provider: activeProvider, model: activeModel, reasoning }) => createAgentToolset({
+        cwd: effectiveCwd,
         phase,
         taskType: task.type,
         graphId,
@@ -2521,8 +2533,9 @@ function toPersistedSession(session: WorkSession): PersistedWorkSession {
 }
 
 function hydratePersistedSession(session: PersistedWorkSession): WorkSession {
-  const resumedStatus: WorkState = session.status === 'running' ? 'failed' : session.status;
-  const resumedError = session.status === 'running'
+  const wasInterrupted = session.status === 'running';
+  const resumedStatus: WorkState = wasInterrupted ? 'failed' : session.status;
+  const resumedError = wasInterrupted
     ? 'Session interrupted because the UI server restarted.'
     : session.error;
   const resumedUpdatedAt = asString(session.updatedAt) || now();
@@ -2972,6 +2985,115 @@ function parseGithubScopes(scopes: string | undefined): string[] {
     .split(',')
     .map((part) => part.trim())
     .filter((part) => part.length > 0);
+}
+
+interface NativeGitWorktreeRequest {
+  repoRoot: string;
+  sessionId: string;
+  task: TaskNode;
+  graphId: string;
+}
+
+async function ensureNativeGitWorktree(request: NativeGitWorktreeRequest): Promise<{ path: string; branch?: string }> {
+  const worktreesRoot = join(request.repoRoot, '.worktrees');
+  const sessionToken = sanitizeGitToken(request.sessionId, 24);
+  const taskToken = sanitizeGitToken(request.task.id, 24);
+  const graphToken = sanitizeGitToken(request.graphId, 24);
+  const worktreePath = join(worktreesRoot, `${sessionToken}-${taskToken}`);
+  const targetBranch = `orchestrace/${graphToken}/${taskToken}-${sessionToken.slice(0, 8)}`;
+
+  const existing = await listNativeGitWorktrees(request.repoRoot);
+  const existingEntry = existing.find((entry) => entry.path === worktreePath);
+  if (existingEntry) {
+    return {
+      path: worktreePath,
+      branch: existingEntry.branch,
+    };
+  }
+
+  if (existsSync(worktreePath)) {
+    throw new Error(`Native git worktree path already exists but is not registered: ${worktreePath}`);
+  }
+
+  await mkdir(worktreesRoot, { recursive: true });
+  await runGit(request.repoRoot, ['worktree', 'add', '--detach', worktreePath, 'HEAD']);
+
+  let branch: string | undefined;
+  try {
+    await runGit(worktreePath, ['switch', '-c', targetBranch]);
+    branch = targetBranch;
+  } catch {
+    branch = await getCurrentBranchName(worktreePath);
+  }
+
+  return {
+    path: worktreePath,
+    branch,
+  };
+}
+
+async function listNativeGitWorktrees(repoRoot: string): Promise<Array<{ path: string; branch?: string }>> {
+  const output = await runGit(repoRoot, ['worktree', 'list', '--porcelain']);
+  const lines = output.split(/\r?\n/);
+  const entries: Array<{ path: string; branch?: string }> = [];
+  let pendingPath: string | undefined;
+  let pendingBranch: string | undefined;
+
+  const flush = () => {
+    if (!pendingPath) {
+      return;
+    }
+
+    entries.push({ path: pendingPath, branch: pendingBranch });
+    pendingPath = undefined;
+    pendingBranch = undefined;
+  };
+
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line) {
+      flush();
+      continue;
+    }
+
+    if (line.startsWith('worktree ')) {
+      flush();
+      pendingPath = line.slice('worktree '.length).trim();
+      continue;
+    }
+
+    if (line.startsWith('branch ')) {
+      const ref = line.slice('branch '.length).trim();
+      pendingBranch = ref.startsWith('refs/heads/') ? ref.slice('refs/heads/'.length) : ref;
+    }
+  }
+
+  flush();
+  return entries;
+}
+
+async function getCurrentBranchName(repoPath: string): Promise<string | undefined> {
+  const branch = (await runGit(repoPath, ['branch', '--show-current'])).trim();
+  return branch || undefined;
+}
+
+async function runGit(repoPath: string, args: string[]): Promise<string> {
+  const { stdout } = await execFileAsync('git', ['-C', repoPath, ...args], {
+    maxBuffer: 10 * 1024 * 1024,
+  });
+  return typeof stdout === 'string' ? stdout : String(stdout ?? '');
+}
+
+function sanitizeGitToken(value: string, maxLength = 32): string {
+  const sanitized = value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._/-]+/g, '-')
+    .replace(/^-+/, '')
+    .replace(/-+$/, '');
+
+  const trimmed = sanitized.slice(0, maxLength);
+  return trimmed || 'task';
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

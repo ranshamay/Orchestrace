@@ -38,15 +38,13 @@ export function buildGraphLayout(session?: WorkSession): { nodes: GraphNodeView[
       return (node.dependencies ?? []).every((dep) => (statusById.get(dep) ?? 'pending') === 'completed');
     });
 
-    if (readyPending) {
-      statusById.set(readyPending.id, 'running');
-    } else if (baseNodes.length > 0) {
-      const nonTerminal = baseNodes.find((node) => {
-        const status = statusById.get(node.id) ?? 'pending';
-        return status !== 'completed' && status !== 'failed';
-      });
-      const fallback = nonTerminal ?? baseNodes[0];
-      statusById.set(fallback.id, 'running');
+const nonTerminal = baseNodes.find((node) => {
+      const status = statusById.get(node.id) ?? 'pending';
+      return status !== 'completed' && status !== 'failed';
+    });
+    const candidate = readyPending ?? nonTerminal ?? baseNodes[0];
+    if (candidate) {
+      statusById.set(candidate.id, 'running');
     }
   }
 

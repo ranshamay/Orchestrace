@@ -12,9 +12,9 @@ Vendor-agnostic agent orchestration system. Define task graphs (or a single prom
 │                    @orchestrace/core                     │
 │  DAG Engine │ Scheduler │ Orchestrator │ Validator        │
 ├──────────────────┬──────────────────────────────────────┤
-│ @orchestrace/    │         @orchestrace/sandbox          │
-│    provider      │  Native Git Worktree helpers          │
-│  (pi-ai BYOK)   │  Docker Containers / Cloud Runtime     │
+│ @orchestrace/    │         Workspace execution            │
+│    provider      │  Native Git Worktrees │ Containers   │
+│  (pi-ai BYOK)   │  (user-managed)        │ (optional)  │
 └──────────────────┴──────────────────────────────────────┘
 ```
 
@@ -24,7 +24,7 @@ Vendor-agnostic agent orchestration system. Define task graphs (or a single prom
 |---------|-------------|
 | `@orchestrace/core` | DAG engine, dependency scheduler, orchestration loop, validation |
 | `@orchestrace/provider` | LLM abstraction wrapping [pi-ai](https://www.npmjs.com/package/@mariozechner/pi-ai) — BYOK multi-provider |
-| `@orchestrace/sandbox` | Optional native git worktree and Docker sandbox helpers |
+| `@orchestrace/sandbox` | Optional sandbox helpers (worktree/container utilities) |
 | `@orchestrace/cli` | CLI to execute task graph plans |
 
 ## Quick Start
@@ -134,9 +134,8 @@ export ANTHROPIC_API_KEY=sk-...
 - **BYOK** — Bring your own keys for OpenAI, Anthropic, Google, Groq, xAI, Mistral, or any OpenAI-compatible API
 - **Approval gate** — Plans are persisted under `.orchestrace/plans/...` and require user approval before implementation
 - **Git finalize** — Optional stage/commit/push after success (`--push`)
-- **Git worktree isolation** — Parallel tasks get their own worktree to avoid conflicts
-- **Docker sandbox** — Run tasks in isolated containers for cloud execution
-- **Sub-agent support** — Tasks marked `isolated: true` run in separate worktrees
+- **Native git worktree support** — When enabled for code/refactor work, implementation runs in a native git worktree prepared just before implementation
+- **Docker sandbox** — Optional containerized execution utilities
 
 ## Supported Providers (via pi-ai)
 

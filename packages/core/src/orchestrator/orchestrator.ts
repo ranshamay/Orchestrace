@@ -29,6 +29,15 @@ export interface OrchestratorConfig extends RunnerConfig {
   llm: LlmAdapter;
   /** Working directory for validation commands. */
   cwd: string;
+  /** Optional hook invoked right before implementation starts for a task. */
+  prepareImplementation?: (params: {
+    task: TaskNode;
+    graphId: string;
+    cwd: string;
+    provider: string;
+    model: string;
+    reasoning?: 'minimal' | 'low' | 'medium' | 'high';
+  }) => Promise<{ cwd?: string } | void>;
   /** System prompt for planning calls. */
   planningSystemPrompt?: string;
   /** System prompt for implementation calls. */
@@ -95,6 +104,7 @@ export async function orchestrate(
     onEvent,
     promptVersion,
     policyVersion,
+    prepareImplementation,
   } = config;
 
   const emit = onEvent ?? (() => {});
@@ -366,6 +376,21 @@ export async function orchestrate(
       emit({ type: 'task:approved', taskId: node.id });
     }
 
+    let implementationCwd = cwd;
+    if (prepareImplementation) {
+      const prepared = await prepareImplementation({
+        task: node,
+        graphId: graph.id,
+        cwd,
+        provider: model.provider,
+        model: model.model,
+        reasoning: model.reasoning,
+      });
+      if (prepared?.cwd) {
+        implementationCwd = prepared.cwd;
+      }
+    }
+
     const implAgent = await llm.spawnAgent({
       provider: model.provider,
       model: model.model,
@@ -378,7 +403,7 @@ export async function orchestrate(
           phase: 'implementation',
           task: node,
           graphId: graph.id,
-          cwd,
+          cwd: implementationCwd,
           provider: model.provider,
           model: model.model,
           reasoning: model.reasoning,
@@ -388,7 +413,7 @@ export async function orchestrate(
         phase: 'implementation',
         task: node,
         graphId: graph.id,
-        cwd,
+        cwd: implementationCwd,
         provider: model.provider,
         model: model.model,
         reasoning: model.reasoning,
@@ -565,7 +590,7 @@ export async function orchestrate(
       }
 
       emit({ type: 'task:validating', taskId: node.id });
-      const validationResults = await validate(output, node.validation, cwd);
+      const validationResults = await validate(output, node.validation, implementationCwd);
       output.validationResults = validationResults;
       lastValidationResults = validationResults;
       const allPassed = validationResults.every((result) => result.passed);
