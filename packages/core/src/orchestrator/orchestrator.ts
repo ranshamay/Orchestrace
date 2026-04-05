@@ -1351,7 +1351,8 @@ function collectSubAgentNodeIds(toolCalls: ReplayToolCallRecord[]): Set<string> 
   const nodeIds = new Set<string>();
 
   for (const call of toolCalls) {
-    if (call.status !== 'result' || call.isError) {
+    // Accept both 'started' and 'result' events since result events may lack input
+    if (call.isError) {
       continue;
     }
 
@@ -1366,13 +1367,13 @@ function collectSubAgentNodeIds(toolCalls: ReplayToolCallRecord[]): Set<string> 
 
     if (call.toolName === 'subagent_spawn_batch') {
       const parsed = parseToolCallInput(call.input);
-      const requests = parsed && Array.isArray(parsed.requests) ? parsed.requests : [];
-      for (const rawRequest of requests) {
-        if (!rawRequest || typeof rawRequest !== 'object') {
+      const agents = parsed && Array.isArray(parsed.agents) ? parsed.agents : [];
+      for (const rawAgent of agents) {
+        if (!rawAgent || typeof rawAgent !== 'object') {
           continue;
         }
-        const request = rawRequest as Record<string, unknown>;
-        const nodeId = typeof request.nodeId === 'string' ? request.nodeId.trim() : '';
+        const agent = rawAgent as Record<string, unknown>;
+        const nodeId = typeof agent.nodeId === 'string' ? agent.nodeId.trim() : '';
         if (nodeId) {
           nodeIds.add(nodeId);
         }
