@@ -33,6 +33,13 @@ export interface Workspace {
   path: string;
 }
 
+export interface UiPreferences {
+  useWorktree: boolean;
+  adaptiveConcurrency: boolean;
+  batchConcurrency: number;
+  batchMinConcurrency: number;
+}
+
 export interface WorkspacesResponse {
   activeWorkspaceId?: string;
   workspaces: Workspace[];
@@ -201,6 +208,19 @@ export async function fetchModels(provider: string): Promise<{ provider: string;
 
 export async function fetchWorkspaces(): Promise<WorkspacesResponse> {
   return readJson(await fetch(`${API_BASE}/workspaces`));
+}
+
+export async function fetchUiPreferences(): Promise<{ preferences: UiPreferences }> {
+  return readJson(await fetch(`${API_BASE}/ui/preferences`));
+}
+
+export async function updateUiPreferences(patch: Partial<UiPreferences>): Promise<{ preferences: UiPreferences }> {
+  const res = await fetch(`${API_BASE}/ui/preferences`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patch),
+  });
+  return readJson(res);
 }
 
 export async function fetchSessions(): Promise<WorkSessionsResponse> {

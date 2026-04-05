@@ -3,6 +3,7 @@ import {
   fetchGithubAuthStatus,
   fetchProviders,
   fetchSessions,
+  fetchUiPreferences,
   fetchWorkspaces,
   type GithubAuthStatus,
   type ProviderInfo,
@@ -48,15 +49,17 @@ export function useBootstrapData() {
   const [batchConcurrency, setBatchConcurrency] = useState(8);
   const [batchMinConcurrency, setBatchMinConcurrency] = useState(1);
   const [errorMessage, setErrorMessage] = useState('');
+  const [bootstrapComplete, setBootstrapComplete] = useState(false);
 
   useEffect(() => {
     const bootstrap = async () => {
       try {
-        const [providersState, workspacesState, sessionsState, githubAuthStatusResponse] = await Promise.all([
+        const [providersState, workspacesState, sessionsState, githubAuthStatusResponse, preferencesResponse] = await Promise.all([
           fetchProviders(),
           fetchWorkspaces(),
           fetchSessions(),
           fetchGithubAuthStatus(),
+          fetchUiPreferences(),
         ]);
 
         setProviders(providersState.providers);
@@ -81,10 +84,10 @@ export function useBootstrapData() {
           model: providersState.defaults.model || '',
           workspaceId: defaultWorkspace,
           autoApprove: true,
-          useWorktree: window.localStorage.getItem('orchestrace-use-worktree') === 'true',
-          adaptiveConcurrency: false,
-          batchConcurrency: 8,
-          batchMinConcurrency: 1,
+          useWorktree: preferencesResponse.preferences.useWorktree,
+          adaptiveConcurrency: preferencesResponse.preferences.adaptiveConcurrency,
+          batchConcurrency: preferencesResponse.preferences.batchConcurrency,
+          batchMinConcurrency: preferencesResponse.preferences.batchMinConcurrency,
         };
 
         setDefaultLlmControls(initialControls);
@@ -98,6 +101,8 @@ export function useBootstrapData() {
         setBatchMinConcurrency(initialControls.batchMinConcurrency);
       } catch (error) {
         setErrorMessage(error instanceof Error ? error.message : String(error));
+      } finally {
+        setBootstrapComplete(true);
       }
     };
 
@@ -135,5 +140,6 @@ export function useBootstrapData() {
     setBatchMinConcurrency,
     errorMessage,
     setErrorMessage,
+    bootstrapComplete,
   };
 }

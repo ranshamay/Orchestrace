@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { type AgentTodo, type ChatMessage } from './lib/api';
+import { type AgentTodo, type ChatMessage, updateUiPreferences } from './lib/api';
 import type { ComposerImageAttachment, Tab } from './app/types';
 import { buildTimelineItems } from './app/utils/timelineItems';
 import { useBootstrapData } from './app/hooks/useBootstrapData';
@@ -38,6 +38,7 @@ export default function App() {
     workWorkspaceId, setWorkWorkspaceId, autoApprove, setAutoApprove,
     useWorktree, setUseWorktree, errorMessage, setErrorMessage,
     adaptiveConcurrency, setAdaptiveConcurrency,
+    bootstrapComplete,
     batchConcurrency, setBatchConcurrency,
     batchMinConcurrency, setBatchMinConcurrency,
   } = bootstrap;
@@ -81,8 +82,19 @@ export default function App() {
   const { sessionStatusSummary, failureTypeSummary } = useMemo(() => selectSidebarSummaries(sessions), [sessions]);
 
   useEffect(() => {
-    window.localStorage.setItem('orchestrace-use-worktree', useWorktree ? 'true' : 'false');
-  }, [useWorktree]);
+    if (!bootstrapComplete) {
+      return;
+    }
+
+    void updateUiPreferences({
+      useWorktree,
+      adaptiveConcurrency,
+      batchConcurrency,
+      batchMinConcurrency,
+    }).catch((error) => {
+      setErrorMessage(error instanceof Error ? error.message : String(error));
+    });
+  }, [adaptiveConcurrency, batchConcurrency, batchMinConcurrency, bootstrapComplete, setErrorMessage, useWorktree]);
 
   const sessionSidebarProps = buildSessionSidebarProps({
     activeTab,

@@ -36,12 +36,14 @@ import type {
   ChatTokenStream,
   PersistedUiState,
   PersistedWorkSession,
+  PersistedUiPreferences,
   SessionAgentGraphNode,
   SessionChatContentPart,
   SessionChatMessage,
   SessionChatThread,
   SessionLlmStatus,
   UiDagEvent,
+  UiPreferences,
   UiServerOptions,
   WorkSession,
   WorkState,
@@ -121,14 +123,22 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
   const sessionTodos = new Map<string, AgentTodoItem[]>();
   const pendingSubagentNodeIdsBySession = new Map<string, Map<string, string[]>>();
   const chatStreams = new Map<string, ChatTokenStream>();
+  let uiPreferences = resolveUiPreferencesDefaults();
   const hmrClients = new Set<ServerResponse>();
   const workStreamClients = new Map<string, Set<ServerResponse>>();
   const chatStreamClients = new Map<string, Set<ServerResponse>>();
   const uiStatePath = join(workspaceManager.getRootDir(), '.orchestrace', 'ui-state.json');
 
-  await restoreUiState(uiStatePath, workSessions, sessionChats, sessionTodos);
+  const restoredUiPreferences = await restoreUiState(uiStatePath, workSessions, sessionChats, sessionTodos);
+  uiPreferences = normalizeUiPreferences(restoredUiPreferences, resolveUiPreferencesDefaults());
 
-  const uiStatePersistence = createUiStatePersistence(uiStatePath, workSessions, sessionChats, sessionTodos);
+  const uiStatePersistence = createUiStatePersistence(
+    uiStatePath,
+    workSessions,
+    sessionChats,
+    sessionTodos,
+    () => ({ ...uiPreferences }),
+  );
 
   function deleteWorkSession(id: string): boolean {
     const session = workSessions.get(id);
@@ -206,12 +216,12 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       : (prompt || summarizeChatContentParts(promptParts));
 
     const id = randomUUID();
-    const useWorktree = request.useWorktree ?? resolveUseWorktreeDefault();
-    const adaptiveConcurrency = request.adaptiveConcurrency ?? resolveAdaptiveConcurrencyDefault();
-    const batchConcurrency = normalizePositiveSetting(request.batchConcurrency, resolveBatchConcurrencyDefault());
+    const useWorktree = request.useWorktree ?? uiPreferences.useWorktree;
+    const adaptiveConcurrency = request.adaptiveConcurrency ?? uiPreferences.adaptiveConcurrency;
+    const batchConcurrency = normalizePositiveSetting(request.batchConcurrency, uiPreferences.batchConcurrency);
     const batchMinConcurrency = Math.min(
       batchConcurrency,
-      normalizePositiveSetting(request.batchMinConcurrency, resolveBatchMinConcurrencyDefault()),
+      normalizePositiveSetting(request.batchMinConcurrency, uiPreferences.batchMinConcurrency),
     );
 
     let worktreeHandle: WorktreeHandle | undefined;
@@ -657,6 +667,24 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         return;
       }
 
+      if (req.method === 'GET' && pathname === '/api/ui/preferences') {
+        sendJson(res, 200, { preferences: { ...uiPreferences } });
+        return;
+      }
+
+      if (req.method === 'POST' && pathname === '/api/ui/preferences') {
+        const body = await readJsonBody(req);
+        if (!isRecord(body)) {
+          sendJson(res, 400, { error: 'Invalid preferences payload' });
+          return;
+        }
+
+        uiPreferences = normalizeUiPreferences(body, uiPreferences);
+        uiStatePersistence.schedule();
+        sendJson(res, 200, { preferences: { ...uiPreferences } });
+        return;
+      }
+
       if (req.method === 'GET' && pathname === '/api/models') {
         const provider = asString(url.searchParams.get('provider'));
         if (!provider) {
@@ -902,14 +930,11 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           ?? parseBooleanSetting(body.worktreeEnabled)
           ?? parseBooleanSetting(body.enableWorktree);
         const adaptiveConcurrency = parseBooleanSetting(body.adaptiveConcurrency)
-          ?? parseBooleanSetting(body.adaptiveToolConcurrency)
-          ?? resolveAdaptiveConcurrencyDefault();
+          ?? parseBooleanSetting(body.adaptiveToolConcurrency);
         const batchConcurrency = parsePositiveSetting(body.batchConcurrency)
-          ?? parsePositiveSetting(body.toolBatchConcurrency)
-          ?? resolveBatchConcurrencyDefault();
+          ?? parsePositiveSetting(body.toolBatchConcurrency);
         const batchMinConcurrency = parsePositiveSetting(body.batchMinConcurrency)
-          ?? parsePositiveSetting(body.toolBatchMinConcurrency)
-          ?? resolveBatchMinConcurrencyDefault();
+          ?? parsePositiveSetting(body.toolBatchMinConcurrency);
         const result = await startWorkSession({
           workspaceId,
           prompt,
@@ -1722,6 +1747,7 @@ function createUiStatePersistence(
   workSessions: Map<string, WorkSession>,
   sessionChats: Map<string, SessionChatThread>,
   sessionTodos: Map<string, AgentTodoItem[]>,
+  getUiPreferences: () => UiPreferences,
 ): { schedule: () => void; flush: () => Promise<void> } {
   let dirty = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -1740,7 +1766,7 @@ function createUiStatePersistence(
     try {
       while (dirty) {
         dirty = false;
-        await persistUiState(path, workSessions, sessionChats, sessionTodos);
+        await persistUiState(path, workSessions, sessionChats, sessionTodos, getUiPreferences());
       }
     } finally {
       writing = false;
@@ -1775,10 +1801,10 @@ async function restoreUiState(
   workSessions: Map<string, WorkSession>,
   sessionChats: Map<string, SessionChatThread>,
   sessionTodos: Map<string, AgentTodoItem[]>,
-): Promise<void> {
+): Promise<PersistedUiPreferences | undefined> {
   const payload = await readPersistedUiState(path);
   if (!payload) {
-    return;
+    return undefined;
   }
 
   for (const persisted of payload.sessions) {
@@ -1843,6 +1869,8 @@ async function restoreUiState(
       backfillAgentGraphFromUiEvents(session);
     }
   }
+
+  return payload.preferences;
 }
 
 async function persistUiState(
@@ -1850,6 +1878,7 @@ async function persistUiState(
   workSessions: Map<string, WorkSession>,
   sessionChats: Map<string, SessionChatThread>,
   sessionTodos: Map<string, AgentTodoItem[]>,
+  preferences: UiPreferences,
 ): Promise<void> {
   const payload: PersistedUiState = {
     version: 1,
@@ -1869,6 +1898,7 @@ async function persistUiState(
         items: items.map((item) => ({ ...item })),
       }))
       .sort((a, b) => b.sessionId.localeCompare(a.sessionId)),
+    preferences: { ...preferences },
   };
 
   await mkdir(dirname(path), { recursive: true });
@@ -1892,6 +1922,7 @@ async function readPersistedUiState(path: string): Promise<PersistedUiState | un
       todos: Array.isArray(parsed.todos)
         ? parsed.todos as Array<{ sessionId: string; items: AgentTodoItem[] }>
         : [],
+      preferences: isRecord(parsed.preferences) ? parsed.preferences as PersistedUiPreferences : undefined,
     };
   } catch {
     return undefined;
@@ -2495,6 +2526,36 @@ function resolveUseWorktreeDefault(): boolean {
   const raw = process.env.ORCHESTRACE_UI_USE_WORKTREE ?? process.env.ORCHESTRACE_USE_WORKTREE;
   const parsed = parseBooleanSetting(raw);
   return parsed ?? false;
+}
+
+function resolveUiPreferencesDefaults(): UiPreferences {
+  const batchConcurrency = resolveBatchConcurrencyDefault();
+  const batchMinConcurrency = Math.min(batchConcurrency, resolveBatchMinConcurrencyDefault());
+  return {
+    useWorktree: resolveUseWorktreeDefault(),
+    adaptiveConcurrency: resolveAdaptiveConcurrencyDefault(),
+    batchConcurrency,
+    batchMinConcurrency,
+  };
+}
+
+function normalizeUiPreferences(value: unknown, fallback: UiPreferences): UiPreferences {
+  if (!isRecord(value)) {
+    return { ...fallback };
+  }
+
+  const batchConcurrency = normalizePositiveSetting(value.batchConcurrency, fallback.batchConcurrency);
+  const batchMinConcurrency = Math.min(
+    batchConcurrency,
+    normalizePositiveSetting(value.batchMinConcurrency, fallback.batchMinConcurrency),
+  );
+
+  return {
+    useWorktree: parseBooleanSetting(value.useWorktree) ?? fallback.useWorktree,
+    adaptiveConcurrency: parseBooleanSetting(value.adaptiveConcurrency) ?? fallback.adaptiveConcurrency,
+    batchConcurrency,
+    batchMinConcurrency,
+  };
 }
 
 function resolveAdaptiveConcurrencyDefault(): boolean {
