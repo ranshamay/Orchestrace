@@ -5,7 +5,7 @@ import { compactPromptDisplay } from '../../utils/text';
 import { formatFailureTypeLabel, failureTypeBadgeClass } from '../../utils/failure';
 import { statusColor, formatSessionStatus, sessionStatusBadgeClass } from '../../utils/status';
 import { buildGraphLayout } from '../../utils/graph';
-import { isLlmStatusBusy, llmPhaseBadgeClass, llmPhaseLabel, llmStatusBadgeClass } from '../../utils/llm';
+import { isLlmStatusBusy, llmStatusBadgeClass } from '../../utils/llm';
 
 type Props = {
   selectedSession?: WorkSession;
@@ -222,51 +222,45 @@ function GraphDefs() {
 
 export function EntityGraphCard({ selectedSession, selectedSessionRunning, selectedFailureType, selectedLlmStatus, isDark }: Props) {
   if (!selectedSession) {
-    return <div className="text-center text-sm italic text-slate-400 dark:text-slate-500">Select a session to inspect its flow.</div>;
+    return (
+      <div className="flex h-full items-center justify-center text-sm text-slate-400 dark:text-slate-500">
+        Select a session to visualize its execution graph
+      </div>
+    );
   }
 
   const graphLayout = buildGraphLayout(selectedSession);
 
   return (
-    <div className="rounded-lg border border-slate-200 bg-white p-3 shadow-sm dark:border-slate-700 dark:bg-slate-900">
-      <div className="mb-3 flex items-start justify-between gap-2">
-        <div>
-          <div className="text-xs font-bold uppercase tracking-widest text-slate-500 dark:text-slate-400">Entity Graph</div>
-          <div className="mt-1 flex items-center gap-2 text-sm font-semibold text-slate-700 dark:text-slate-200">
-            {selectedSessionRunning && <Loader2 className="h-4 w-4 animate-spin text-blue-500 dark:text-blue-300" />}
-            <span>{compactPromptDisplay(selectedSession.prompt)}</span>
-          </div>
+    <div className="rounded-xl border border-slate-200/60 bg-white shadow-sm dark:border-slate-700/60 dark:bg-slate-900">
+      <div className="flex items-center justify-between px-3 py-2">
+        <div className="flex items-center gap-2 text-sm">
+          {selectedSessionRunning && <Loader2 className="h-3.5 w-3.5 animate-spin text-blue-500 dark:text-blue-300" />}
+          <span className="font-semibold text-slate-700 dark:text-slate-200">{compactPromptDisplay(selectedSession.prompt)}</span>
         </div>
-        <div className="flex items-center gap-1.5">
-          <span className={`rounded px-2 py-0.5 text-xs font-semibold uppercase tracking-wide ${sessionStatusBadgeClass(selectedSession.status)}`}>
+        <div className="flex items-center gap-1">
+          <span className={`rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${sessionStatusBadgeClass(selectedSession.status)}`}>
             {formatSessionStatus(selectedSession.status)}
           </span>
           {selectedFailureType && (
-            <span className={`rounded px-2 py-0.5 text-xs font-semibold uppercase tracking-wide ${failureTypeBadgeClass(selectedFailureType)}`}>
+            <span className={`rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${failureTypeBadgeClass(selectedFailureType)}`}>
               {formatFailureTypeLabel(selectedFailureType)}
             </span>
           )}
-          {selectedLlmStatus.phase && (
-            <span className={`rounded px-2 py-0.5 text-xs font-semibold uppercase tracking-wide ${llmPhaseBadgeClass(selectedLlmStatus.phase)}`}>
-              {llmPhaseLabel(selectedLlmStatus.phase)}
-            </span>
-          )}
-          <span className={`rounded px-2 py-0.5 text-xs font-semibold uppercase tracking-wide ${llmStatusBadgeClass(selectedLlmStatus)}`}>
+          <span className={`rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${llmStatusBadgeClass(selectedLlmStatus)}`}>
             {selectedLlmStatus.label}
           </span>
-          {isLlmStatusBusy(selectedLlmStatus) && <Loader2 className="h-3.5 w-3.5 animate-spin text-blue-500 dark:text-blue-300" />}
+          {isLlmStatusBusy(selectedLlmStatus) && <Loader2 className="h-3 w-3 animate-spin text-blue-500 dark:text-blue-300" />}
         </div>
       </div>
-      <div className="overflow-auto rounded-lg border border-slate-100 bg-slate-50 dark:border-slate-800 dark:bg-slate-950">
+      <div className="overflow-auto rounded-b-xl border-t border-slate-100/60 bg-slate-50 dark:border-slate-800/60 dark:bg-slate-950">
         <svg aria-label="Entity graph" className="block" height={graphLayout.height} role="img" width={graphLayout.width}>
           <GraphDefs />
-          {/* edges first (below nodes) */}
           {graphLayout.nodes.flatMap((node) => node.dependencies.map((dep) => {
             const fromNode = graphLayout.nodes.find((c) => c.id === dep);
             if (!fromNode) return null;
             return <GraphEdge from={fromNode} isDark={isDark} key={`edge-${dep}-${node.id}`} to={node} />;
           }))}
-          {/* nodes */}
           {graphLayout.nodes.map((node, i) => (
             <GraphNode delay={i * 60} isDark={isDark} key={node.id} node={node} />
           ))}
