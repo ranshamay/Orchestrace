@@ -12,6 +12,21 @@ export interface ProvidersResponse {
   defaults: { provider: string; model: string };
 }
 
+export type ProviderAuthSessionState = 'running' | 'awaiting-auth' | 'awaiting-input' | 'completed' | 'failed';
+
+export interface ProviderAuthSession {
+  id: string;
+  providerId: string;
+  state: ProviderAuthSessionState;
+  createdAt: string;
+  updatedAt: string;
+  authUrl?: string;
+  authInstructions?: string;
+  promptMessage?: string;
+  promptPlaceholder?: string;
+  error?: string;
+}
+
 export interface Workspace {
   id: string;
   name: string;
@@ -136,6 +151,28 @@ async function readJson<T>(res: Response): Promise<T> {
 
 export async function fetchProviders(): Promise<ProvidersResponse> {
   return readJson(await fetch(`${API_BASE}/providers`));
+}
+
+export async function startProviderAuth(providerId: string): Promise<{ sessionId: string }> {
+  const res = await fetch(`${API_BASE}/auth/start`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ providerId }),
+  });
+  return readJson(res);
+}
+
+export async function fetchProviderAuthSession(id: string): Promise<{ session: ProviderAuthSession }> {
+  return readJson(await fetch(`${API_BASE}/auth/session?id=${encodeURIComponent(id)}`));
+}
+
+export async function respondProviderAuthSession(sessionId: string, value: string): Promise<{ ok: boolean }> {
+  const res = await fetch(`${API_BASE}/auth/respond`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sessionId, value }),
+  });
+  return readJson(res);
 }
 
 export async function fetchGithubAuthStatus(): Promise<GithubAuthStatusResponse> {
