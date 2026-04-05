@@ -95,6 +95,8 @@ export interface LlmRequest {
   toolset?: LlmToolset;
   /** Explicit API key (e.g. from OAuth). If omitted, pi-ai reads env vars. */
   apiKey?: string;
+  /** Optional credential refresh hook used for a single auth-retry before failing. */
+  refreshApiKey?: () => Promise<string | undefined>;
 }
 
 /** Stream-time callbacks for incremental completion output and usage. */
@@ -117,6 +119,8 @@ export interface SpawnAgentRequest extends AgentModelConfig {
   toolset?: LlmToolset;
   /** Explicit API key (e.g. from OAuth). If omitted, pi-ai reads env vars. */
   apiKey?: string;
+  /** Optional credential refresh hook used for a single auth-retry before failing. */
+  refreshApiKey?: () => Promise<string | undefined>;
 }
 
 /**

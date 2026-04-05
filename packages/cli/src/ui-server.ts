@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { existsSync, watch, type FSWatcher } from 'node:fs';
+import { homedir } from 'node:os';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { orchestrate, PromptSectionName, renderPromptSections } from '@orchestrace/core';
@@ -56,10 +57,43 @@ const SUB_AGENT_READ_ONLY_TOOL_ALLOWLIST = [
   'git_status',
 ];
 
-function createReadOnlySubAgentToolset(cwd: string) {
+const GITHUB_PROVIDER_ID = 'github';
+const GITHUB_API_BASE_URL = 'https://api.github.com';
+const GITHUB_DEVICE_AUTH_SCOPES_DEFAULT = ['repo', 'workflow', 'read:org'];
+// Public OAuth app client id used for GitHub device flow (mirrors CLI-style auth UX).
+const GITHUB_DEVICE_AUTH_CLIENT_ID_DEFAULT = '178c6fc778ccc68e1d6a';
+const DEFAULT_UI_ADAPTIVE_CONCURRENCY = false;
+const DEFAULT_UI_BATCH_CONCURRENCY = 8;
+const DEFAULT_UI_BATCH_MIN_CONCURRENCY = 1;
+
+type GithubDeviceAuthSessionState = 'awaiting-user' | 'polling' | 'completed' | 'failed';
+
+interface GithubDeviceAuthSession {
+  id: string;
+  state: GithubDeviceAuthSessionState;
+  clientId: string;
+  scopes: string[];
+  deviceCode: string;
+  userCode: string;
+  verificationUri: string;
+  verificationUriComplete?: string;
+  intervalSeconds: number;
+  expiresAt: string;
+  createdAt: string;
+  updatedAt: string;
+  error?: string;
+}
+
+function createReadOnlySubAgentToolset(
+  cwd: string,
+  options?: { adaptiveConcurrency?: boolean; batchConcurrency?: number; batchMinConcurrency?: number },
+) {
   return createAgentToolset({
     cwd,
     phase: 'planning',
+    adaptiveConcurrency: options?.adaptiveConcurrency,
+    batchConcurrency: options?.batchConcurrency,
+    batchMinConcurrency: options?.batchMinConcurrency,
     permissions: {
       allowWriteTools: false,
       allowRunCommand: false,
@@ -77,10 +111,12 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
   }
 
   const authManager = new ProviderAuthManager();
+  const githubAuthManager = createGithubAuthManager();
   const llm = new PiAiAdapter();
 
   const workSessions = new Map<string, WorkSession>();
   const authSessions = new Map<string, AuthSession>();
+  const githubDeviceAuthSessions = new Map<string, GithubDeviceAuthSession>();
   const sessionChats = new Map<string, SessionChatThread>();
   const sessionTodos = new Map<string, AgentTodoItem[]>();
   const pendingSubagentNodeIdsBySession = new Map<string, Map<string, string[]>>();
@@ -141,6 +177,9 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     model: string;
     autoApprove: boolean;
     useWorktree?: boolean;
+    adaptiveConcurrency?: boolean;
+    batchConcurrency?: number;
+    batchMinConcurrency?: number;
   }): Promise<{ id: string } | { error: string; statusCode: number }> {
     const promptParts = cloneChatContentParts(request.promptParts ?? []);
     const prompt = asString(request.prompt);
@@ -168,6 +207,12 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
 
     const id = randomUUID();
     const useWorktree = request.useWorktree ?? resolveUseWorktreeDefault();
+    const adaptiveConcurrency = request.adaptiveConcurrency ?? resolveAdaptiveConcurrencyDefault();
+    const batchConcurrency = normalizePositiveSetting(request.batchConcurrency, resolveBatchConcurrencyDefault());
+    const batchMinConcurrency = Math.min(
+      batchConcurrency,
+      normalizePositiveSetting(request.batchMinConcurrency, resolveBatchMinConcurrencyDefault()),
+    );
 
     let worktreeHandle: WorktreeHandle | undefined;
     let executionPath = workspace.path;
@@ -196,6 +241,9 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       model: request.model,
       autoApprove: request.autoApprove,
       useWorktree,
+      adaptiveConcurrency,
+      batchConcurrency,
+      batchMinConcurrency,
       worktreePath: worktreeHandle?.path,
       worktreeBranch: worktreeHandle?.branch,
       createdAt,
@@ -242,11 +290,19 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         provider: activeProvider,
         model: activeModel,
         reasoning,
+        adaptiveConcurrency: session.adaptiveConcurrency,
+        batchConcurrency: session.batchConcurrency,
+        batchMinConcurrency: session.batchMinConcurrency,
+        resolveGithubToken: () => githubAuthManager.resolveApiKey(GITHUB_PROVIDER_ID),
         runSubAgent: async (runSubAgentRequest, _signal) => {
           const subProvider = runSubAgentRequest.provider ?? activeProvider;
           const subModel = runSubAgentRequest.model ?? activeModel;
           const subAgentSignal = session.controller.signal;
-          const subAgentToolset = createReadOnlySubAgentToolset(session.workspacePath);
+          const subAgentToolset = createReadOnlySubAgentToolset(session.workspacePath, {
+            adaptiveConcurrency: session.adaptiveConcurrency,
+            batchConcurrency: session.batchConcurrency,
+            batchMinConcurrency: session.batchMinConcurrency,
+          });
           const subAgent = await llm.spawnAgent({
             provider: subProvider,
             model: subModel,
@@ -257,6 +313,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
             signal: subAgentSignal,
             toolset: subAgentToolset,
             apiKey: await authManager.resolveApiKey(subProvider),
+                      refreshApiKey: () => authManager.resolveApiKey(subProvider),
           });
 
           const result = await subAgent.complete(runSubAgentRequest.prompt, subAgentSignal);
@@ -726,6 +783,113 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         return;
       }
 
+      if (req.method === 'GET' && pathname === '/api/github/auth/status') {
+        const status = await resolveGithubAuthStatus(githubAuthManager);
+        sendJson(res, 200, { status });
+        return;
+      }
+
+      if (req.method === 'POST' && pathname === '/api/github/auth/start') {
+        const body = await readJsonBody(req);
+        const requestedClientId = asString(body.clientId)?.trim();
+        const envClientId = asString(process.env.ORCHESTRACE_GITHUB_OAUTH_CLIENT_ID)?.trim();
+        const clientId = requestedClientId || envClientId || GITHUB_DEVICE_AUTH_CLIENT_ID_DEFAULT;
+        if (!clientId) {
+          sendJson(res, 400, {
+            error: 'Unable to resolve GitHub OAuth client id.',
+          });
+          return;
+        }
+
+        const requestedScopes = Array.isArray(body.scopes)
+          ? body.scopes
+            .map((entry) => asString(entry))
+            .filter((entry): entry is string => Boolean(entry))
+          : [];
+        const scopes = requestedScopes.length > 0 ? requestedScopes : [...GITHUB_DEVICE_AUTH_SCOPES_DEFAULT];
+
+        try {
+          const session = await startGithubDeviceAuthSession({
+            clientId,
+            scopes,
+          });
+          githubDeviceAuthSessions.set(session.id, session);
+          void pollGithubDeviceAuthSession({
+            session,
+            githubAuthManager,
+            sessions: githubDeviceAuthSessions,
+          });
+
+          sendJson(res, 200, {
+            sessionId: session.id,
+            session: serializeGithubDeviceAuthSession(session),
+          });
+        } catch (error) {
+          sendJson(res, 400, { error: toErrorMessage(error) });
+        }
+
+        return;
+      }
+
+      if (req.method === 'GET' && pathname === '/api/github/auth/session') {
+        const id = asString(url.searchParams.get('id'));
+        if (!id) {
+          sendJson(res, 400, { error: 'Missing id' });
+          return;
+        }
+
+        const session = githubDeviceAuthSessions.get(id);
+        if (!session) {
+          sendJson(res, 404, { error: 'Unknown GitHub auth session' });
+          return;
+        }
+
+        sendJson(res, 200, { session: serializeGithubDeviceAuthSession(session) });
+        return;
+      }
+
+      if (req.method === 'POST' && pathname === '/api/github/request') {
+        const body = await readJsonBody(req);
+        const token = await githubAuthManager.resolveApiKey(GITHUB_PROVIDER_ID);
+        if (!token) {
+          sendJson(res, 401, { error: 'GitHub PR auth is not configured. Complete device login in Settings first and ensure you have access to the remote workspace repository.' });
+          return;
+        }
+
+        const path = asString(body.path);
+        const method = asString(body.method);
+        const graphqlQuery = asString(body.graphqlQuery);
+        const graphqlVariables = body.graphqlVariables;
+        const requestBody = body.body;
+
+        if (!path && !graphqlQuery) {
+          sendJson(res, 400, { error: 'Provide either path (REST) or graphqlQuery (GraphQL).' });
+          return;
+        }
+
+        if (path && graphqlQuery) {
+          sendJson(res, 400, { error: 'Provide either path or graphqlQuery, not both.' });
+          return;
+        }
+
+        try {
+          const response = await runGithubApiRequest({
+            token,
+            method,
+            path,
+            body: requestBody,
+            graphqlQuery,
+            graphqlVariables,
+            signal: undefined,
+          });
+
+          sendJson(res, 200, { response });
+        } catch (error) {
+          sendJson(res, 400, { error: toErrorMessage(error) });
+        }
+        return;
+      }
+
       if (req.method === 'POST' && pathname === '/api/work/start') {
         const body = await readJsonBody(req);
         const workspaceId = asString(body.workspaceId);
@@ -736,7 +900,16 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         const autoApprove = Boolean(body.autoApprove);
         const useWorktree = parseBooleanSetting(body.useWorktree)
           ?? parseBooleanSetting(body.worktreeEnabled)
-          ?? parseBooleanSetting(body.enableWorktree)
+          ?? parseBooleanSetting(body.enableWorktree);
+        const adaptiveConcurrency = parseBooleanSetting(body.adaptiveConcurrency)
+          ?? parseBooleanSetting(body.adaptiveToolConcurrency)
+          ?? resolveAdaptiveConcurrencyDefault();
+        const batchConcurrency = parsePositiveSetting(body.batchConcurrency)
+          ?? parsePositiveSetting(body.toolBatchConcurrency)
+          ?? resolveBatchConcurrencyDefault();
+        const batchMinConcurrency = parsePositiveSetting(body.batchMinConcurrency)
+          ?? parsePositiveSetting(body.toolBatchMinConcurrency)
+          ?? resolveBatchMinConcurrencyDefault();
         const result = await startWorkSession({
           workspaceId,
           prompt,
@@ -745,6 +918,9 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           model,
           autoApprove,
           useWorktree,
+          adaptiveConcurrency,
+          batchConcurrency,
+          batchMinConcurrency,
         });
 
         if ('error' in result) {
@@ -784,6 +960,9 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           model: sourceSession.model,
           autoApprove: sourceSession.autoApprove,
           useWorktree: sourceSession.useWorktree,
+          adaptiveConcurrency: sourceSession.adaptiveConcurrency,
+          batchConcurrency: sourceSession.batchConcurrency,
+          batchMinConcurrency: sourceSession.batchMinConcurrency,
         });
 
         if ('error' in result) {
@@ -876,6 +1055,10 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         const tools = listAgentTools({
           cwd: session.workspacePath,
           phase: mode,
+          adaptiveConcurrency: session.adaptiveConcurrency,
+          batchConcurrency: session.batchConcurrency,
+          batchMinConcurrency: session.batchMinConcurrency,
+          resolveGithubToken: () => githubAuthManager.resolveApiKey(GITHUB_PROVIDER_ID),
           runSubAgent: async () => ({ text: '' }),
         });
 
@@ -1224,11 +1407,19 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
               toolset: createAgentToolset({
                 cwd: session.workspacePath,
                 phase: 'chat',
+                adaptiveConcurrency: session.adaptiveConcurrency,
+                batchConcurrency: session.batchConcurrency,
+                batchMinConcurrency: session.batchMinConcurrency,
+                resolveGithubToken: () => githubAuthManager.resolveApiKey(GITHUB_PROVIDER_ID),
                 runSubAgent: async (runSubAgentRequest, _signal) => {
                   const subProvider = runSubAgentRequest.provider ?? session.provider;
                   const subModel = runSubAgentRequest.model ?? session.model;
                   const subAgentSignal = session.controller.signal;
-                  const subAgentToolset = createReadOnlySubAgentToolset(session.workspacePath);
+                  const subAgentToolset = createReadOnlySubAgentToolset(session.workspacePath, {
+                    adaptiveConcurrency: session.adaptiveConcurrency,
+                    batchConcurrency: session.batchConcurrency,
+                    batchMinConcurrency: session.batchMinConcurrency,
+                  });
                   const subAgent = await llm.spawnAgent({
                     provider: subProvider,
                     model: subModel,
@@ -1239,6 +1430,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                     signal: subAgentSignal,
                     toolset: subAgentToolset,
                     apiKey: await authManager.resolveApiKey(subProvider),
+                      refreshApiKey: () => authManager.resolveApiKey(subProvider),
                   });
 
                   const result = await subAgent.complete(runSubAgentRequest.prompt, subAgentSignal);
@@ -1249,6 +1441,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                 },
               }),
               apiKey: await authManager.resolveApiKey(session.provider),
+                refreshApiKey: () => authManager.resolveApiKey(session.provider),
             });
 
             const chatPrompt = buildChatContinuationInput(thread);
@@ -1422,11 +1615,19 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           toolset: createAgentToolset({
             cwd: session.workspacePath,
             phase: 'chat',
+            adaptiveConcurrency: session.adaptiveConcurrency,
+            batchConcurrency: session.batchConcurrency,
+            batchMinConcurrency: session.batchMinConcurrency,
+            resolveGithubToken: () => githubAuthManager.resolveApiKey(GITHUB_PROVIDER_ID),
             runSubAgent: async (runSubAgentRequest, _signal) => {
               const subProvider = runSubAgentRequest.provider ?? session.provider;
               const subModel = runSubAgentRequest.model ?? session.model;
               const subAgentSignal = session.controller.signal;
-              const subAgentToolset = createReadOnlySubAgentToolset(session.workspacePath);
+              const subAgentToolset = createReadOnlySubAgentToolset(session.workspacePath, {
+                adaptiveConcurrency: session.adaptiveConcurrency,
+                batchConcurrency: session.batchConcurrency,
+                batchMinConcurrency: session.batchMinConcurrency,
+              });
               const subAgent = await llm.spawnAgent({
                 provider: subProvider,
                 model: subModel,
@@ -1437,6 +1638,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                 signal: subAgentSignal,
                 toolset: subAgentToolset,
                 apiKey: await authManager.resolveApiKey(subProvider),
+                refreshApiKey: () => authManager.resolveApiKey(subProvider),
               });
 
               const result = await subAgent.complete(runSubAgentRequest.prompt, subAgentSignal);
@@ -1447,6 +1649,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
             },
           }),
           apiKey: await authManager.resolveApiKey(session.provider),
+          refreshApiKey: () => authManager.resolveApiKey(session.provider),
         });
 
         const chatPrompt = buildChatContinuationInput(thread);
@@ -1720,6 +1923,9 @@ function toPersistedSession(session: WorkSession): PersistedWorkSession {
     model: session.model,
     autoApprove: session.autoApprove,
     useWorktree: session.useWorktree,
+    adaptiveConcurrency: session.adaptiveConcurrency,
+    batchConcurrency: session.batchConcurrency,
+    batchMinConcurrency: session.batchMinConcurrency,
     worktreePath: session.worktreePath,
     worktreeBranch: session.worktreeBranch,
     createdAt: session.createdAt,
@@ -1752,6 +1958,12 @@ function hydratePersistedSession(session: PersistedWorkSession): WorkSession {
     ...session,
     promptParts: promptParts.length > 0 ? promptParts : undefined,
     useWorktree: Boolean(session.useWorktree),
+    adaptiveConcurrency: parseBooleanSetting(session.adaptiveConcurrency) ?? resolveAdaptiveConcurrencyDefault(),
+    batchConcurrency: normalizePositiveSetting(session.batchConcurrency, resolveBatchConcurrencyDefault()),
+    batchMinConcurrency: Math.min(
+      normalizePositiveSetting(session.batchConcurrency, resolveBatchConcurrencyDefault()),
+      normalizePositiveSetting(session.batchMinConcurrency, resolveBatchMinConcurrencyDefault()),
+    ),
     worktreePath: asString(session.worktreePath) || undefined,
     worktreeBranch: asString(session.worktreeBranch) || undefined,
     agentGraph: normalizeSessionAgentGraphNodes(session.agentGraph),
@@ -1771,6 +1983,386 @@ function createAuthSession(providerId: string): AuthSession {
     createdAt: now(),
     updatedAt: now(),
   };
+}
+
+function createGithubAuthManager(): ProviderAuthManager {
+  return new ProviderAuthManager({
+    authFilePath: join(homedir(), '.orchestrace', 'github-auth.json'),
+  });
+}
+
+async function startGithubDeviceAuthSession(params: {
+  clientId: string;
+  scopes: string[];
+}): Promise<GithubDeviceAuthSession> {
+  const body = new URLSearchParams({
+    client_id: params.clientId,
+    scope: params.scopes.join(' '),
+  });
+
+  const response = await fetch('https://github.com/login/device/code', {
+    method: 'POST',
+    headers: {
+      Accept: 'application/json',
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body,
+  });
+
+  const payload = await readJsonLikeResponse(response);
+  if (!isRecord(payload)) {
+    throw new Error('Invalid GitHub device auth response.');
+  }
+
+  if (!response.ok) {
+    throw new Error(formatGithubOAuthError(payload));
+  }
+
+  const deviceCode = asString(payload.device_code);
+  const userCode = asString(payload.user_code);
+  const verificationUri = asString(payload.verification_uri);
+  const verificationUriComplete = asString(payload.verification_uri_complete);
+  const expiresIn = asPositiveInt(payload.expires_in) ?? 900;
+  const intervalSeconds = asPositiveInt(payload.interval) ?? 5;
+
+  if (!deviceCode || !userCode || !verificationUri) {
+    throw new Error('GitHub device auth response is missing required fields.');
+  }
+
+  const createdAt = now();
+  const expiresAt = new Date(Date.now() + (expiresIn * 1000)).toISOString();
+  return {
+    id: randomUUID(),
+    state: 'awaiting-user',
+    clientId: params.clientId,
+    scopes: [...params.scopes],
+    deviceCode,
+    userCode,
+    verificationUri,
+    verificationUriComplete,
+    intervalSeconds,
+    expiresAt,
+    createdAt,
+    updatedAt: createdAt,
+  };
+}
+
+async function pollGithubDeviceAuthSession(params: {
+  session: GithubDeviceAuthSession;
+  githubAuthManager: ProviderAuthManager;
+  sessions: Map<string, GithubDeviceAuthSession>;
+}): Promise<void> {
+  const { session, githubAuthManager, sessions } = params;
+  const deadline = Date.parse(session.expiresAt);
+  let intervalMs = Math.max(2, session.intervalSeconds) * 1000;
+
+  session.state = 'polling';
+  session.updatedAt = now();
+
+  while (Date.now() < deadline) {
+    await waitMs(intervalMs);
+
+    const activeSession = sessions.get(session.id);
+    if (!activeSession) {
+      return;
+    }
+
+    const response = await fetch('https://github.com/login/oauth/access_token', {
+      method: 'POST',
+      headers: {
+        Accept: 'application/json',
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: new URLSearchParams({
+        client_id: activeSession.clientId,
+        device_code: activeSession.deviceCode,
+        grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
+      }),
+    });
+
+    const payload = await readJsonLikeResponse(response);
+    if (!isRecord(payload)) {
+      activeSession.state = 'failed';
+      activeSession.error = 'Invalid GitHub token response payload.';
+      activeSession.updatedAt = now();
+      return;
+    }
+
+    const accessToken = asString(payload.access_token);
+    if (response.ok && accessToken) {
+      await githubAuthManager.configureApiKey(GITHUB_PROVIDER_ID, accessToken);
+      activeSession.state = 'completed';
+      activeSession.updatedAt = now();
+      return;
+    }
+
+    const oauthError = asString(payload.error);
+    if (oauthError === 'authorization_pending') {
+      activeSession.updatedAt = now();
+      continue;
+    }
+
+    if (oauthError === 'slow_down') {
+      intervalMs += 5000;
+      activeSession.updatedAt = now();
+      continue;
+    }
+
+    activeSession.state = 'failed';
+    activeSession.error = formatGithubOAuthError(payload);
+    activeSession.updatedAt = now();
+    return;
+  }
+
+  const activeSession = sessions.get(session.id);
+  if (activeSession && activeSession.state !== 'completed') {
+    activeSession.state = 'failed';
+    activeSession.error = 'GitHub device login timed out before authorization completed.';
+    activeSession.updatedAt = now();
+  }
+}
+
+async function readJsonLikeResponse(response: Response): Promise<unknown> {
+  const text = await response.text();
+  if (!text.trim()) {
+    return undefined;
+  }
+
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
+  }
+}
+
+function serializeGithubDeviceAuthSession(session: GithubDeviceAuthSession): Record<string, unknown> {
+  return {
+    id: session.id,
+    state: session.state,
+    userCode: session.userCode,
+    verificationUri: session.verificationUri,
+    verificationUriComplete: session.verificationUriComplete,
+    scopes: [...session.scopes],
+    expiresAt: session.expiresAt,
+    createdAt: session.createdAt,
+    updatedAt: session.updatedAt,
+    error: session.error,
+  };
+}
+
+function formatGithubOAuthError(payload: Record<string, unknown>): string {
+  const error = asString(payload.error) ?? 'unknown_error';
+  const description = asString(payload.error_description);
+  return description ? `${error}: ${description}` : error;
+}
+
+function asPositiveInt(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+    return Math.floor(value);
+  }
+
+  if (typeof value === 'string') {
+    const parsed = Number.parseInt(value, 10);
+    if (Number.isFinite(parsed) && parsed > 0) {
+      return parsed;
+    }
+  }
+
+  return undefined;
+}
+
+async function waitMs(ms: number): Promise<void> {
+  await new Promise<void>((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+async function resolveGithubAuthStatus(authManager: ProviderAuthManager): Promise<Record<string, unknown>> {
+  const status = await authManager.getStatus(GITHUB_PROVIDER_ID);
+  const token = await authManager.resolveApiKey(GITHUB_PROVIDER_ID);
+  if (!token) {
+    return {
+      connected: false,
+      source: status.source,
+      storedApiKeyConfigured: status.storedApiKeyConfigured,
+      scopes: [],
+    };
+  }
+
+  try {
+    const profile = await runGithubApiRequest({ token, path: '/user', method: 'GET' });
+    const data = profile.data;
+    const login = isRecord(data) && typeof data.login === 'string' ? data.login : undefined;
+    const name = isRecord(data) && typeof data.name === 'string' ? data.name : undefined;
+    const scopes = parseGithubScopes(asString(profile.scopes.oauth));
+    const profileError = profile.ok ? undefined : toGithubProfileError(profile.data);
+
+    return {
+      connected: profile.ok,
+      source: status.source,
+      storedApiKeyConfigured: status.storedApiKeyConfigured,
+      login,
+      name,
+      scopes,
+      rateLimit: profile.rateLimit,
+      lastStatusCode: profile.status,
+      error: profileError,
+    };
+  } catch (error) {
+    return {
+      connected: false,
+      source: status.source,
+      storedApiKeyConfigured: status.storedApiKeyConfigured,
+      scopes: [],
+      error: toErrorMessage(error),
+    };
+  }
+}
+
+function toGithubProfileError(data: unknown): string {
+  if (isRecord(data)) {
+    const message = asString(data.message);
+    const documentationUrl = asString(data.documentation_url);
+    if (message && documentationUrl) {
+      return `${message} (${documentationUrl})`;
+    }
+
+    if (message) {
+      return message;
+    }
+  }
+
+  return toErrorMessage(data);
+}
+
+async function runGithubApiRequest(params: {
+  token: string;
+  method?: string;
+  path?: string;
+  body?: unknown;
+  graphqlQuery?: string;
+  graphqlVariables?: unknown;
+  signal?: AbortSignal;
+}): Promise<{
+  ok: boolean;
+  status: number;
+  statusText: string;
+  data: unknown;
+  rateLimit: {
+    limit?: string;
+    remaining?: string;
+    reset?: string;
+    resource?: string;
+  };
+  scopes: {
+    oauth?: string;
+    accepted?: string;
+  };
+}> {
+  const method = toGithubApiMethod(params.method);
+  const graphqlQuery = asString(params.graphqlQuery);
+  const path = asString(params.path);
+  const isGraphql = Boolean(graphqlQuery);
+  const url = isGraphql
+    ? `${GITHUB_API_BASE_URL}/graphql`
+    : `${GITHUB_API_BASE_URL}${normalizeGithubApiPath(path ?? '')}`;
+
+  if (!isGraphql && (method === 'GET' || method === 'HEAD') && params.body !== undefined) {
+    throw new Error(`HTTP ${method} request must not include body.`);
+  }
+
+  const payload = isGraphql
+    ? {
+        query: graphqlQuery,
+        ...(params.graphqlVariables !== undefined ? { variables: params.graphqlVariables } : {}),
+      }
+    : params.body;
+
+  const response = await fetch(url, {
+    method: isGraphql ? 'POST' : method,
+    headers: {
+      Authorization: `token ${params.token}`,
+      Accept: 'application/vnd.github+json',
+      'X-GitHub-Api-Version': '2022-11-28',
+      ...(payload !== undefined ? { 'Content-Type': 'application/json' } : {}),
+    },
+    body: payload !== undefined ? JSON.stringify(payload) : undefined,
+    signal: params.signal,
+  });
+
+  const text = await response.text();
+  const contentType = response.headers.get('content-type') ?? '';
+  let data: unknown = text;
+  if (contentType.includes('application/json') && text.trim().length > 0) {
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = text;
+    }
+  }
+
+  return {
+    ok: response.ok,
+    status: response.status,
+    statusText: response.statusText,
+    data,
+    rateLimit: {
+      limit: response.headers.get('x-ratelimit-limit') ?? undefined,
+      remaining: response.headers.get('x-ratelimit-remaining') ?? undefined,
+      reset: response.headers.get('x-ratelimit-reset') ?? undefined,
+      resource: response.headers.get('x-ratelimit-resource') ?? undefined,
+    },
+    scopes: {
+      oauth: response.headers.get('x-oauth-scopes') ?? undefined,
+      accepted: response.headers.get('x-accepted-oauth-scopes') ?? undefined,
+    },
+  };
+}
+
+function toGithubApiMethod(value: string | undefined): string {
+  const normalized = (value ?? 'GET').trim().toUpperCase();
+  if (!normalized) {
+    return 'GET';
+  }
+
+  const allowed = new Set(['GET', 'POST', 'PATCH', 'PUT', 'DELETE']);
+  if (!allowed.has(normalized)) {
+    throw new Error(`Unsupported GitHub API method: ${normalized}`);
+  }
+
+  return normalized;
+}
+
+function normalizeGithubApiPath(path: string): string {
+  const trimmed = path.trim();
+  if (!trimmed) {
+    throw new Error('Missing GitHub REST path.');
+  }
+
+  if (trimmed.startsWith('https://api.github.com/')) {
+    return `/${trimmed.slice('https://api.github.com/'.length)}`;
+  }
+
+  if (!trimmed.startsWith('/')) {
+    return `/${trimmed}`;
+  }
+
+  return trimmed;
+}
+
+function parseGithubScopes(scopes: string | undefined): string[] {
+  if (!scopes) {
+    return [];
+  }
+
+  return scopes
+    .split(',')
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
 }
 
 function buildSingleTaskGraph(id: string, prompt: string, isolated = false): TaskGraph {
@@ -1838,6 +2430,28 @@ function parseBooleanSetting(value: unknown): boolean | undefined {
   return undefined;
 }
 
+function parsePositiveSetting(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    const normalized = Math.floor(value);
+    return normalized > 0 ? normalized : undefined;
+  }
+
+  if (typeof value !== 'string') {
+    return undefined;
+  }
+
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return undefined;
+  }
+
+  return parsed;
+}
+
+function normalizePositiveSetting(value: unknown, fallback: number): number {
+  return parsePositiveSetting(value) ?? fallback;
+}
+
 function resolveLongTurnTimeoutMs(): number {
   return resolveConfiguredTimeoutMs(
     ['ORCHESTRACE_LLM_LONG_TURN_TIMEOUT_MS', 'ORCHESTRACE_LLM_TIMEOUT_MS'],
@@ -1881,6 +2495,24 @@ function resolveUseWorktreeDefault(): boolean {
   const raw = process.env.ORCHESTRACE_UI_USE_WORKTREE ?? process.env.ORCHESTRACE_USE_WORKTREE;
   const parsed = parseBooleanSetting(raw);
   return parsed ?? false;
+}
+
+function resolveAdaptiveConcurrencyDefault(): boolean {
+  const raw = process.env.ORCHESTRACE_UI_ADAPTIVE_CONCURRENCY ?? process.env.ORCHESTRACE_ADAPTIVE_CONCURRENCY;
+  const parsed = parseBooleanSetting(raw);
+  return parsed ?? DEFAULT_UI_ADAPTIVE_CONCURRENCY;
+}
+
+function resolveBatchConcurrencyDefault(): number {
+  return parsePositiveInt(process.env.ORCHESTRACE_UI_BATCH_CONCURRENCY)
+    ?? parsePositiveInt(process.env.ORCHESTRACE_BATCH_CONCURRENCY)
+    ?? DEFAULT_UI_BATCH_CONCURRENCY;
+}
+
+function resolveBatchMinConcurrencyDefault(): number {
+  return parsePositiveInt(process.env.ORCHESTRACE_UI_BATCH_MIN_CONCURRENCY)
+    ?? parsePositiveInt(process.env.ORCHESTRACE_BATCH_MIN_CONCURRENCY)
+    ?? DEFAULT_UI_BATCH_MIN_CONCURRENCY;
 }
 
 function normalizeLlmSessionState(raw: unknown): LlmSessionState {
@@ -2828,6 +3460,9 @@ function serializeWorkSession(session: WorkSession): Record<string, unknown> {
     model: session.model,
     autoApprove: session.autoApprove,
     useWorktree: session.useWorktree,
+    adaptiveConcurrency: session.adaptiveConcurrency,
+    batchConcurrency: session.batchConcurrency,
+    batchMinConcurrency: session.batchMinConcurrency,
     worktreePath: session.worktreePath,
     worktreeBranch: session.worktreeBranch,
     createdAt: session.createdAt,
@@ -2966,7 +3601,9 @@ function buildSessionSystemPrompt(session: WorkSession, phase: SessionPromptPhas
             'Use subagent_spawn or subagent_spawn_batch to execute parallelizable slices with minimal relevant context per agent.',
             'For independent nodes, use subagent_spawn_batch so work runs in parallel.',
             'Pass nodeId for each sub-agent request so graph status stays current.',
+            'Use github_api for GitHub REST/GraphQL operations; do not use gh CLI.',
             'Iterate until validation passes or a true blocker is reached.',
+            'After each push or PR update, query remote CI/check status with github_api and keep fixing/re-pushing until checks pass or a true blocker is reached.',
             'Always end your response with 1-3 numbered next follow-up suggestions.',
           ];
 

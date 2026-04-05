@@ -153,6 +153,17 @@ export class ProviderAuthManager {
     return { path: this.authFilePath };
   }
 
+  async clearApiKey(providerId: string): Promise<{ path: string; removed: boolean }> {
+    const store = await this.loadStore();
+    const removed = providerId in store.apiKeys;
+    if (removed) {
+      delete store.apiKeys[providerId];
+      await this.saveStore(store);
+    }
+
+    return { path: this.authFilePath, removed };
+  }
+
   async resolveApiKey(providerId: string): Promise<string | undefined> {
     const store = await this.loadStore();
 

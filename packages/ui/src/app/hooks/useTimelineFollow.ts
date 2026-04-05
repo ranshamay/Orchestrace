@@ -5,7 +5,8 @@ export function useTimelineFollow(latestTimelineKey: string, selectedSessionId: 
   const [followTimelineTail, setFollowTimelineTail] = useState(true);
 
   useEffect(() => {
-    setFollowTimelineTail(true);
+    const resetFollow = () => setFollowTimelineTail(true);
+    queueMicrotask(resetFollow);
   }, [selectedSessionId]);
 
   useEffect(() => {

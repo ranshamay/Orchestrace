@@ -124,6 +124,9 @@ export interface WorkSession {
   model: string;
   autoApprove: boolean;
   useWorktree: boolean;
+  adaptiveConcurrency: boolean;
+  batchConcurrency: number;
+  batchMinConcurrency: number;
   worktreePath?: string;
   worktreeBranch?: string;
   createdAt: string;
@@ -150,6 +153,9 @@ export interface PersistedWorkSession {
   model: string;
   autoApprove: boolean;
   useWorktree?: boolean;
+  adaptiveConcurrency?: boolean;
+  batchConcurrency?: number;
+  batchMinConcurrency?: number;
   worktreePath?: string;
   worktreeBranch?: string;
   createdAt: string;

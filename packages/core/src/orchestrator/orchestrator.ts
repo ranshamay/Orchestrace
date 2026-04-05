@@ -133,6 +133,9 @@ export async function orchestrate(
       model: 'claude-sonnet-4-20250514',
     };
     const apiKey = await resolveApiKey?.(model.provider);
+    const refreshApiKey = resolveApiKey
+      ? async () => resolveApiKey(model.provider)
+      : undefined;
 
     const usage = { input: 0, output: 0, cost: 0 };
     const replay: TaskReplayRecord = {
@@ -182,6 +185,7 @@ export async function orchestrate(
         reasoning: model.reasoning,
       }),
       apiKey,
+      refreshApiKey,
     });
 
     emit({ type: 'task:planning', taskId: node.id });
@@ -390,6 +394,7 @@ export async function orchestrate(
         reasoning: model.reasoning,
       }),
       apiKey,
+      refreshApiKey,
     });
 
     const taskRetryBudget = Math.max(0, node.validation?.maxRetries ?? 0);
@@ -759,7 +764,9 @@ function buildImplementationPrompt(params: {
         'Pass nodeId for each spawned sub-agent so the execution graph can reflect live progress.',
         'Keep sub-agent outputs concise and integrate them into the main implementation.',
         'Before finishing, ensure all todos are done and all agent graph nodes are completed (no failed nodes).',
-        'After validation succeeds, create/switch a feature branch, commit all changes, push the branch, and open a PR (use gh when available).',
+        'After validation succeeds, create/switch a feature branch, commit all changes, push the branch, and open/update a PR using github_api (never gh CLI).',
+        'After each push or PR update, probe remote CI/check status via github_api and continue until checks are green or a true blocker is reached.',
+        'If remote checks fail, inspect failing workflows/check-runs, fix root causes, rerun local validation, push again, and re-check CI.',
         'If git/PR automation fails, read the exact error, retry with corrected command/flags, and continue from the same point.',
       ],
     },
@@ -828,7 +835,8 @@ function buildPhaseSystemPrompt(params: {
           'Use todo and agent graph state as the execution backbone, updating progress continuously.',
           'Use subagent_spawn or subagent_spawn_batch for parallelizable slices and delegate only relevant context to each sub-agent.',
           'Do not stop until todo list is done and agent graph nodes are completed or a real blocker remains.',
-          'After validation passes, complete git finish-up: feature branch, commit, push, and PR creation.',
+          'After validation passes, complete git finish-up: feature branch, commit, push, and PR creation/update via github_api (never gh CLI).',
+          'After each push, query remote CI/check status via github_api and keep fixing/re-pushing until checks pass or a true blocker is reached.',
           'When finish-up fails, retry using the failure reason and continue from the same point.',
           'Implementation responses must end with 1-3 concrete next follow-up suggestions.',
           'Run verification and iterate until checks pass or a true blocker is reached.',
