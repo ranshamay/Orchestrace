@@ -61,6 +61,12 @@ const DEFAULT_UI_BATCH_CONCURRENCY = 8;
 const DEFAULT_UI_BATCH_MIN_CONCURRENCY = 1;
 const SUBAGENT_WORKER_PROMPT_PREVIEW_MAX_CHARS = 220;
 const SUBAGENT_WORKER_OUTPUT_PREVIEW_MAX_CHARS = 420;
+const SUBAGENT_RETRY_MAX_ATTEMPTS = 2;
+const SUBAGENT_RETRY_BASE_DELAY_MS = 300;
+const CHAT_RETRY_MAX_ATTEMPTS = 2;
+const CHAT_RETRY_BASE_DELAY_MS = 300;
+const PHASE_PROGRESS_PLAN_WEIGHT_DEFAULT = 30;
+const PHASE_PROGRESS_IMPLEMENTATION_WEIGHT_DEFAULT = 70;
 
 type GithubDeviceAuthSessionState = 'awaiting-user' | 'polling' | 'completed' | 'failed';
 
@@ -361,7 +367,11 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
               refreshApiKey: () => authManager.resolveApiKey(subProvider),
             });
 
-            const result = await subAgent.complete(runSubAgentRequest.prompt, subAgentSignal);
+            const result = await completeSubAgentWithRetry(
+              subAgent,
+              runSubAgentRequest.prompt,
+              subAgentSignal,
+            );
             emitSubAgentWorkerEvent({
               session,
               uiStatePersistence,
@@ -492,6 +502,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         failureType,
       };
       session.error = failed ? failedOutput?.error ?? 'Execution failed' : undefined;
+
+      enforceCompletedSessionContract(session, sessionTodos.get(session.id) ?? []);
 
       broadcastWorkStream(workStreamClients, session.id, 'end', {
         id: session.id,
@@ -1148,9 +1160,16 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       }
 
       if (req.method === 'GET' && pathname === '/api/work') {
+        let changed = false;
         const sessions = [...workSessions.values()]
           .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
-          .map(serializeWorkSession);
+          .map((session) => {
+            changed = enforceCompletedSessionContract(session, sessionTodos.get(session.id) ?? []) || changed;
+            return serializeWorkSession(session, sessionTodos.get(session.id) ?? []);
+          });
+        if (changed) {
+          uiStatePersistence.schedule();
+        }
         sendJson(res, 200, { sessions });
         return;
       }
@@ -1219,10 +1238,15 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           }
         }
 
+        const contractChanged = enforceCompletedSessionContract(session, sessionTodos.get(id) ?? []);
+        if (contractChanged) {
+          uiStatePersistence.schedule();
+        }
+
         uiStatePersistence.schedule();
 
         sendJson(res, 200, {
-          session: serializeWorkSession(session),
+          session: serializeWorkSession(session, sessionTodos.get(id) ?? []),
           messages: thread.messages.filter((message) => message.role !== 'system'),
           todos: (sessionTodos.get(id) ?? []).map((item) => ({ ...item })),
         });
@@ -1272,6 +1296,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         const todo: AgentTodoItem = {
           id: randomUUID(),
           text,
+          status: 'todo',
           done: false,
           createdAt: now(),
           updatedAt: now(),
@@ -1313,6 +1338,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         const requested = body.done;
         const nextDone = typeof requested === 'boolean' ? requested : !target.done;
         target.done = nextDone;
+        target.status = nextDone ? 'done' : 'todo';
         target.updatedAt = now();
         session.updatedAt = now();
         uiStatePersistence.schedule();
@@ -1504,6 +1530,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           return;
         }
 
+        await ensureSessionWorkspaceReady(session, workspaceManager, uiStatePersistence);
+
         const thread = sessionChats.get(id) ?? createSessionChatThread(session);
         sessionChats.set(id, thread);
 
@@ -1512,11 +1540,15 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         trimThreadMessages(thread);
         thread.updatedAt = now();
 
+        const continuationPhase = resolveSessionToolMode(session);
         const chatStartedAt = now();
         session.status = 'running';
         session.updatedAt = chatStartedAt;
         session.llmStatus = createLlmStatus('analyzing', chatStartedAt, {
           detail: 'Processing follow-up prompt.',
+          phase: continuationPhase === 'planning' || continuationPhase === 'implementation'
+            ? continuationPhase
+            : undefined,
         });
         uiStatePersistence.schedule();
 
@@ -1535,7 +1567,6 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
 
         void (async () => {
           try {
-            const continuationPhase = resolveSessionToolMode(session);
             const chatAgent = await llm.spawnAgent({
               provider: session.provider,
               model: session.model,
@@ -1599,7 +1630,11 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                       refreshApiKey: () => authManager.resolveApiKey(subProvider),
                     });
 
-                    const result = await subAgent.complete(runSubAgentRequest.prompt, subAgentSignal);
+                    const result = await completeSubAgentWithRetry(
+                      subAgent,
+                      runSubAgentRequest.prompt,
+                      subAgentSignal,
+                    );
                     emitSubAgentWorkerEvent({
                       session,
                       uiStatePersistence,
@@ -1643,77 +1678,101 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
             });
 
             const chatPrompt = buildChatContinuationInput(thread);
-            const response = await chatAgent.complete(chatPrompt, undefined, {
-              onTextDelta: (delta) => {
-                if (!delta) {
-                  return;
-                }
+            let response: Awaited<ReturnType<typeof chatAgent.complete>> | undefined;
+            let receivedTextDelta = false;
+            for (let attempt = 1; attempt <= CHAT_RETRY_MAX_ATTEMPTS; attempt += 1) {
+              try {
+                response = await chatAgent.complete(chatPrompt, undefined, {
+                  onTextDelta: (delta) => {
+                    if (!delta) {
+                      return;
+                    }
 
-                streamState.replyText += delta;
-                streamState.updatedAt = now();
+                    receivedTextDelta = true;
+                    streamState.replyText += delta;
+                    streamState.updatedAt = now();
 
-                const estimatedOutput = estimateTokensFromText(streamState.replyText);
-                streamState.usage = {
-                  input: streamState.usage?.input ?? 0,
-                  output: estimatedOutput,
-                  cost: streamState.usage?.cost ?? 0,
-                };
-                streamState.usageEstimated = true;
+                    const estimatedOutput = estimateTokensFromText(streamState.replyText);
+                    streamState.usage = {
+                      input: streamState.usage?.input ?? 0,
+                      output: estimatedOutput,
+                      cost: streamState.usage?.cost ?? 0,
+                    };
+                    streamState.usageEstimated = true;
 
-                broadcastWorkStream(chatStreamClients, streamId, 'token', {
-                  streamId,
-                  sessionId: session.id,
-                  delta,
-                  time: now(),
+                    broadcastWorkStream(chatStreamClients, streamId, 'token', {
+                      streamId,
+                      sessionId: session.id,
+                      delta,
+                      time: now(),
+                    });
+
+                    broadcastWorkStream(chatStreamClients, streamId, 'usage', {
+                      streamId,
+                      sessionId: session.id,
+                      usage: streamState.usage,
+                      estimated: true,
+                      time: now(),
+                    });
+                  },
+                  onUsage: (usage) => {
+                    const isZeroUsage = usage.input === 0 && usage.output === 0 && usage.cost === 0;
+                    if (isZeroUsage && streamState.replyText.length > 0) {
+                      return;
+                    }
+
+                    const previous = streamState.usage;
+                    if (
+                      previous
+                      && previous.input === usage.input
+                      && previous.output === usage.output
+                      && previous.cost === usage.cost
+                    ) {
+                      return;
+                    }
+
+                    streamState.usage = usage;
+                    streamState.usageEstimated = false;
+                    streamState.updatedAt = now();
+
+                    broadcastWorkStream(chatStreamClients, streamId, 'usage', {
+                      streamId,
+                      sessionId: session.id,
+                      usage,
+                      estimated: false,
+                      time: now(),
+                    });
+                  },
+                  onToolCall: (toolEvent) => {
+                    handleChatToolCallEvent(
+                      session,
+                      toolEvent,
+                      sessionTodos,
+                      pendingSubagentNodeIdsBySession,
+                      workStreamClients,
+                      uiStatePersistence,
+                    );
+                  },
                 });
-
-                broadcastWorkStream(chatStreamClients, streamId, 'usage', {
-                  streamId,
-                  sessionId: session.id,
-                  usage: streamState.usage,
-                  estimated: true,
-                  time: now(),
-                });
-              },
-              onUsage: (usage) => {
-                const isZeroUsage = usage.input === 0 && usage.output === 0 && usage.cost === 0;
-                if (isZeroUsage && streamState.replyText.length > 0) {
-                  return;
-                }
-
-                const previous = streamState.usage;
+                break;
+              } catch (error) {
                 if (
-                  previous
-                  && previous.input === usage.input
-                  && previous.output === usage.output
-                  && previous.cost === usage.cost
+                  attempt >= CHAT_RETRY_MAX_ATTEMPTS
+                  || receivedTextDelta
+                  || !isRetryableSubAgentError(error)
                 ) {
-                  return;
+                  throw error;
                 }
 
-                streamState.usage = usage;
-                streamState.usageEstimated = false;
-                streamState.updatedAt = now();
-
-                broadcastWorkStream(chatStreamClients, streamId, 'usage', {
-                  streamId,
-                  sessionId: session.id,
-                  usage,
-                  estimated: false,
-                  time: now(),
+                await new Promise<void>((resolve) => {
+                  setTimeout(resolve, CHAT_RETRY_BASE_DELAY_MS * attempt);
                 });
-              },
-              onToolCall: (toolEvent) => {
-                handleChatToolCallEvent(
-                  session,
-                  toolEvent,
-                  sessionTodos,
-                  pendingSubagentNodeIdsBySession,
-                  workStreamClients,
-                  uiStatePersistence,
-                );
-              },
-            });
+              }
+            }
+
+            if (!response) {
+              throw new Error('Chat completion failed before producing a response.');
+            }
 
             const responseText = ensureFollowUpSuggestions(response.text, continuationPhase);
 
@@ -1733,6 +1792,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
             session.llmStatus = createLlmStatus('completed', completedAt, {
               detail: 'Follow-up response generated.',
             });
+            enforceCompletedSessionContract(session, sessionTodos.get(session.id) ?? []);
             uiStatePersistence.schedule();
 
             streamState.status = 'completed';
@@ -1807,6 +1867,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           return;
         }
 
+        await ensureSessionWorkspaceReady(session, workspaceManager, uiStatePersistence);
+
         const thread = sessionChats.get(id) ?? createSessionChatThread(session);
         sessionChats.set(id, thread);
         uiStatePersistence.schedule();
@@ -1814,17 +1876,20 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         const userMessage = createSessionChatMessage('user', message, messageParts);
         thread.messages.push(userMessage);
         trimThreadMessages(thread);
+        const continuationPhase = resolveSessionToolMode(session);
         const chatStartedAt = now();
         thread.updatedAt = chatStartedAt;
         session.status = 'running';
         session.updatedAt = chatStartedAt;
         session.llmStatus = createLlmStatus('analyzing', chatStartedAt, {
           detail: 'Processing follow-up prompt.',
+          phase: continuationPhase === 'planning' || continuationPhase === 'implementation'
+            ? continuationPhase
+            : undefined,
         });
         uiStatePersistence.schedule();
 
         try {
-          const continuationPhase = resolveSessionToolMode(session);
           const chatAgent = await llm.spawnAgent({
             provider: session.provider,
             model: session.model,
@@ -1888,7 +1953,11 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                     refreshApiKey: () => authManager.resolveApiKey(subProvider),
                   });
 
-                  const result = await subAgent.complete(runSubAgentRequest.prompt, subAgentSignal);
+                  const result = await completeSubAgentWithRetry(
+                    subAgent,
+                    runSubAgentRequest.prompt,
+                    subAgentSignal,
+                  );
                   emitSubAgentWorkerEvent({
                     session,
                     uiStatePersistence,
@@ -1932,18 +2001,36 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           });
 
           const chatPrompt = buildChatContinuationInput(thread);
-          const response = await chatAgent.complete(chatPrompt, undefined, {
-            onToolCall: (toolEvent) => {
-              handleChatToolCallEvent(
-                session,
-                toolEvent,
-                sessionTodos,
-                pendingSubagentNodeIdsBySession,
-                workStreamClients,
-                uiStatePersistence,
-              );
-            },
-          });
+          let response: Awaited<ReturnType<typeof chatAgent.complete>> | undefined;
+          for (let attempt = 1; attempt <= CHAT_RETRY_MAX_ATTEMPTS; attempt += 1) {
+            try {
+              response = await chatAgent.complete(chatPrompt, undefined, {
+                onToolCall: (toolEvent) => {
+                  handleChatToolCallEvent(
+                    session,
+                    toolEvent,
+                    sessionTodos,
+                    pendingSubagentNodeIdsBySession,
+                    workStreamClients,
+                    uiStatePersistence,
+                  );
+                },
+              });
+              break;
+            } catch (error) {
+              if (attempt >= CHAT_RETRY_MAX_ATTEMPTS || !isRetryableSubAgentError(error)) {
+                throw error;
+              }
+
+              await new Promise<void>((resolve) => {
+                setTimeout(resolve, CHAT_RETRY_BASE_DELAY_MS * attempt);
+              });
+            }
+          }
+
+          if (!response) {
+            throw new Error('Chat completion failed before producing a response.');
+          }
           const text = ensureFollowUpSuggestions(response.text, continuationPhase);
 
           const assistantMessage: SessionChatMessage = {
@@ -1962,6 +2049,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           session.llmStatus = createLlmStatus('completed', completedAt, {
             detail: 'Follow-up response generated.',
           });
+          enforceCompletedSessionContract(session, sessionTodos.get(session.id) ?? []);
           uiStatePersistence.schedule();
 
           sendJson(res, 200, {
@@ -2113,7 +2201,9 @@ async function restoreUiState(
         .map((item) => ({
           id: asString(item.id) || randomUUID(),
           text: asString(item.text),
+          status: normalizeChecklistTodoStatus(item.status) ?? (Boolean(item.done) ? 'done' : 'todo'),
           done: Boolean(item.done),
+          weight: normalizeProgressWeight(item.weight),
           createdAt: asString(item.createdAt) || now(),
           updatedAt: asString(item.updatedAt) || now(),
         }))
@@ -2129,6 +2219,7 @@ async function restoreUiState(
       if ((session.agentGraph?.length ?? 0) === 0) {
         backfillAgentGraphFromUiEvents(session);
       }
+      enforceCompletedSessionContract(session, existingItems);
       continue;
     }
 
@@ -2139,9 +2230,66 @@ async function restoreUiState(
     if ((session.agentGraph?.length ?? 0) === 0) {
       backfillAgentGraphFromUiEvents(session);
     }
+
+    enforceCompletedSessionContract(session, sessionTodos.get(sessionId) ?? []);
   }
 
   return payload.preferences;
+}
+
+function computeSessionCompletionState(
+  session: WorkSession,
+  todos: AgentTodoItem[],
+): {
+  satisfied: boolean;
+  pendingTodoCount: number;
+  nonCompletedNodeCount: number;
+  failedNodeCount: number;
+} {
+  const pendingTodoCount = todos.filter((item) => !item.done).length;
+  const nonCompletedNodes = session.agentGraph.filter((node) => node.status !== 'completed');
+  const nonCompletedNodeCount = nonCompletedNodes.length;
+  const failedNodeCount = nonCompletedNodes.filter((node) => node.status === 'failed').length;
+
+  return {
+    satisfied: pendingTodoCount === 0 && nonCompletedNodeCount === 0,
+    pendingTodoCount,
+    nonCompletedNodeCount,
+    failedNodeCount,
+  };
+}
+
+function enforceCompletedSessionContract(session: WorkSession, todos: AgentTodoItem[]): boolean {
+  if (session.status !== 'completed') {
+    return false;
+  }
+
+  const completion = computeSessionCompletionState(session, todos);
+  if (completion.satisfied) {
+    return false;
+  }
+
+  const detailParts: string[] = [];
+  if (completion.pendingTodoCount > 0) {
+    detailParts.push(`${completion.pendingTodoCount} todo(s) not done`);
+  }
+  if (completion.nonCompletedNodeCount > 0) {
+    const graphDetail = completion.failedNodeCount > 0
+      ? `${completion.nonCompletedNodeCount} graph node(s) not completed (${completion.failedNodeCount} failed)`
+      : `${completion.nonCompletedNodeCount} graph node(s) not completed`;
+    detailParts.push(graphDetail);
+  }
+
+  const detail = `Completion contract not satisfied: ${detailParts.join('; ')}.`;
+  const updatedAt = now();
+  session.status = 'failed';
+  session.updatedAt = updatedAt;
+  session.error = detail;
+  session.llmStatus = createLlmStatus('failed', updatedAt, {
+    detail,
+    failureType: 'validation',
+  });
+  return true;
 }
 
 async function persistUiState(
@@ -2928,11 +3076,12 @@ function resolveSessionToolMode(session: WorkSession): AgentToolPhase {
 
   switch (session.llmStatus.state) {
     case 'queued':
-    case 'analyzing':
-    case 'thinking':
     case 'planning':
     case 'awaiting-approval':
       return 'planning';
+    case 'analyzing':
+    case 'thinking':
+      return session.agentGraph.length > 0 ? 'implementation' : 'planning';
     default:
       return 'implementation';
   }
@@ -3381,12 +3530,15 @@ function applyChecklistFromTodoArgs(
       .map((item) => {
         const id = asString(item.id) || randomUUID();
         const title = asString(item.title) || `Todo ${id}`;
-        const status = normalizeChecklistTodoStatus(item.status);
+        const status = normalizeChecklistTodoStatus(item.status) ?? 'todo';
+        const weight = normalizeProgressWeight(item.weight);
         const previous = existing.find((entry) => entry.id === id);
         return {
           id,
           text: compactTodoText(title, item.details),
           done: status === 'done',
+          status,
+          weight,
           createdAt: previous?.createdAt ?? nowTime,
           updatedAt: nowTime,
         };
@@ -3399,12 +3551,15 @@ function applyChecklistFromTodoArgs(
   if (toolName === 'todo_add') {
     const id = asString(args.id) || randomUUID();
     const title = asString(args.title) || `Todo ${id}`;
-    const status = normalizeChecklistTodoStatus(args.status);
+    const status = normalizeChecklistTodoStatus(args.status) ?? 'todo';
+    const weight = normalizeProgressWeight(args.weight);
     const next = existing.filter((item) => item.id !== id);
     next.push({
       id,
       text: compactTodoText(title, args.details),
       done: status === 'done',
+      status,
+      weight,
       createdAt: nowTime,
       updatedAt: nowTime,
     });
@@ -3419,6 +3574,7 @@ function applyChecklistFromTodoArgs(
 
   const index = existing.findIndex((item) => item.id === id);
   const status = normalizeChecklistTodoStatus(args.status);
+  const nextWeight = args.weight === undefined ? undefined : normalizeProgressWeight(args.weight);
   const title = asString(args.title);
   const details = asString(args.details);
   const appendDetails = asString(args.appendDetails);
@@ -3429,6 +3585,8 @@ function applyChecklistFromTodoArgs(
       id,
       text: fallbackText,
       done: status === 'done',
+      status: status ?? 'todo',
+      weight: nextWeight,
       createdAt: nowTime,
       updatedAt: nowTime,
     };
@@ -3446,6 +3604,8 @@ function applyChecklistFromTodoArgs(
     ...item,
     text: nextText,
     done: status ? status === 'done' : item.done,
+    status: status ?? item.status,
+    weight: nextWeight === undefined ? item.weight : nextWeight,
     updatedAt: nowTime,
   };
 
@@ -3508,6 +3668,7 @@ function parseTodoToolArgs(
   const title = extractQuotedField(input, 'title');
   const details = extractQuotedField(input, 'details');
   const appendDetails = extractQuotedField(input, 'appendDetails');
+  const weight = extractNumericField(input, 'weight');
 
   if (toolName === 'todo_update') {
     if (!id) {
@@ -3517,6 +3678,7 @@ function parseTodoToolArgs(
     return {
       id,
       status,
+      weight,
       title,
       details,
       appendDetails,
@@ -3532,6 +3694,7 @@ function parseTodoToolArgs(
       id,
       title: title || `Todo ${id}`,
       status,
+      weight,
       details,
     };
   }
@@ -3544,6 +3707,17 @@ function extractQuotedField(input: string, key: string): string | undefined {
   const pattern = new RegExp(`"${key}"\\s*:\\s*"([^"]+)"`);
   const match = input.match(pattern);
   return match?.[1];
+}
+
+function extractNumericField(input: string, key: string): number | undefined {
+  const pattern = new RegExp(`"${key}"\\s*:\\s*(-?\\d+(?:\\.\\d+)?)`);
+  const match = input.match(pattern);
+  if (!match) {
+    return undefined;
+  }
+
+  const parsed = Number.parseFloat(match[1]);
+  return Number.isFinite(parsed) ? parsed : undefined;
 }
 
 function backfillChecklistFromUiEvents(
@@ -3854,6 +4028,7 @@ function normalizeSessionAgentGraphNodes(rawNodes: unknown): SessionAgentGraphNo
       id,
       name: asString(node.name) || undefined,
       prompt,
+      weight: normalizeProgressWeight(node.weight),
       dependencies,
       status: normalizeGraphNodeStatus(node.status),
       provider: asString(node.provider) || undefined,
@@ -3906,7 +4081,287 @@ function normalizeGraphNodeStatus(value: unknown): SessionAgentGraphNode['status
   return 'pending';
 }
 
-function serializeWorkSession(session: WorkSession): Record<string, unknown> {
+type SessionProgressSource = 'graph+todos' | 'graph' | 'todos' | 'llm';
+type SessionProgressConfidence = 'high' | 'medium' | 'low';
+
+function normalizeProgressWeight(value: unknown): number | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
+    return undefined;
+  }
+
+  return Math.round(value * 100) / 100;
+}
+
+function clampUnit(value: number): number {
+  if (Number.isNaN(value) || !Number.isFinite(value)) {
+    return 0;
+  }
+
+  return Math.min(1, Math.max(0, value));
+}
+
+function llmStateProgressFraction(state: LlmSessionState): number {
+  switch (state) {
+    case 'queued':
+      return 0.02;
+    case 'analyzing':
+      return 0.12;
+    case 'thinking':
+      return 0.2;
+    case 'planning':
+      return 0.32;
+    case 'awaiting-approval':
+      return 0.4;
+    case 'implementing':
+      return 0.62;
+    case 'using-tools':
+      return 0.75;
+    case 'validating':
+      return 0.9;
+    case 'retrying':
+      return 0.72;
+    case 'completed':
+      return 1;
+    case 'failed':
+    case 'cancelled':
+    default:
+      return 0;
+  }
+}
+
+function computeGraphProgressFraction(session: WorkSession): {
+  fraction: number;
+  total: number;
+  completed: number;
+  completedWeight: number;
+  totalWeight: number;
+  running: number;
+  failed: number;
+} | undefined {
+  const nodes = serializeAgentGraphWithProgressInvariant(session);
+  if (nodes.length === 0) {
+    return undefined;
+  }
+
+  const hasExplicitWeights = nodes.every((node) => normalizeProgressWeight(node.weight) !== undefined);
+  const runningScore = clampUnit(Math.max(0.25, Math.min(0.9, llmStateProgressFraction(session.llmStatus.state))));
+  let score = 0;
+  let completed = 0;
+  let completedWeight = 0;
+  let totalWeight = 0;
+  let running = 0;
+  let failed = 0;
+
+  for (const node of nodes) {
+    const weight = hasExplicitWeights ? (normalizeProgressWeight(node.weight) ?? 0) : 1;
+    totalWeight += weight;
+
+    const status = node.status ?? 'pending';
+    if (status === 'completed') {
+      score += weight;
+      completed += 1;
+      completedWeight += weight;
+      continue;
+    }
+
+    if (status === 'running') {
+      score += weight * runningScore;
+      running += 1;
+      continue;
+    }
+
+    if (status === 'failed') {
+      failed += 1;
+    }
+  }
+
+  return {
+    fraction: clampUnit(score / Math.max(1, totalWeight)),
+    total: nodes.length,
+    completed,
+    completedWeight,
+    totalWeight,
+    running,
+    failed,
+  };
+}
+
+function computeTodoProgressFraction(todos: AgentTodoItem[]): {
+  fraction: number;
+  total: number;
+  done: number;
+  inProgress: number;
+  doneWeight: number;
+  totalWeight: number;
+} | undefined {
+  if (todos.length === 0) {
+    return undefined;
+  }
+
+  const hasExplicitWeights = todos.every((item) => normalizeProgressWeight(item.weight) !== undefined);
+  let score = 0;
+  let done = 0;
+  let inProgress = 0;
+  let doneWeight = 0;
+  let totalWeight = 0;
+
+  for (const item of todos) {
+    const status = item.status ?? (item.done ? 'done' : 'todo');
+    const weight = hasExplicitWeights ? (normalizeProgressWeight(item.weight) ?? 0) : 1;
+    totalWeight += weight;
+
+    if (status === 'done' || item.done) {
+      score += weight;
+      done += 1;
+      doneWeight += weight;
+      continue;
+    }
+
+    if (status === 'in_progress') {
+      score += weight * 0.5;
+      inProgress += 1;
+    }
+  }
+
+  return {
+    fraction: clampUnit(score / Math.max(1, totalWeight)),
+    total: todos.length,
+    done,
+    inProgress,
+    doneWeight,
+    totalWeight,
+  };
+}
+
+function computeSessionProgress(session: WorkSession, todos: AgentTodoItem[]): {
+  percent: number;
+  planningPercent: number;
+  implementationPercent: number;
+  weightedOverallPercent: number;
+  source: SessionProgressSource;
+  confidence: SessionProgressConfidence;
+  weights: {
+    planning: number;
+    implementation: number;
+    source: 'configured' | 'planning-only' | 'implementation-only' | 'fallback';
+  };
+  graphPercent?: number;
+  todoPercent?: number;
+  llmPercent?: number;
+  totals: {
+    todos: number;
+    todosDone: number;
+    todosInProgress: number;
+    todoWeightTotal: number;
+    todoWeightDone: number;
+    nodes: number;
+    nodesCompleted: number;
+    nodesRunning: number;
+    nodesFailed: number;
+    nodeWeightTotal: number;
+    nodeWeightCompleted: number;
+  };
+} {
+  const graph = computeGraphProgressFraction(session);
+  const checklist = computeTodoProgressFraction(todos);
+  const llm = clampUnit(llmStateProgressFraction(session.llmStatus.state));
+  const implementationStarted = Boolean(
+    session.llmStatus.phase === 'implementation'
+    || session.llmStatus.state === 'implementing'
+    || session.llmStatus.state === 'using-tools'
+    || session.llmStatus.state === 'validating'
+    || session.llmStatus.state === 'retrying'
+    || (graph && (graph.completed > 0 || graph.running > 0 || graph.failed > 0)),
+  );
+  const planningFraction = implementationStarted ? 1 : (checklist?.fraction ?? llm);
+  const implementationFraction = graph?.fraction ?? llm;
+
+  let source: SessionProgressSource;
+  let confidence: SessionProgressConfidence;
+  let overallFraction: number;
+  let planningWeight = 50;
+  let implementationWeight = 50;
+  let weightSource: 'configured' | 'planning-only' | 'implementation-only' | 'fallback' = 'fallback';
+
+  if (graph && checklist) {
+    source = 'graph+todos';
+    confidence = 'high';
+    planningWeight = PHASE_PROGRESS_PLAN_WEIGHT_DEFAULT;
+    implementationWeight = PHASE_PROGRESS_IMPLEMENTATION_WEIGHT_DEFAULT;
+    weightSource = 'configured';
+    const total = planningWeight + implementationWeight;
+    overallFraction = total > 0
+      ? ((planningFraction * planningWeight) + (graph.fraction * implementationWeight)) / total
+      : Math.min(graph.fraction, planningFraction);
+  } else if (graph) {
+    source = 'graph';
+    confidence = 'medium';
+    planningWeight = 0;
+    implementationWeight = 100;
+    weightSource = 'implementation-only';
+    overallFraction = graph.fraction;
+  } else if (checklist) {
+    source = 'todos';
+    confidence = 'medium';
+    planningWeight = 100;
+    implementationWeight = 0;
+    weightSource = 'planning-only';
+    overallFraction = planningFraction;
+  } else {
+    source = 'llm';
+    confidence = 'low';
+    overallFraction = implementationStarted
+      ? ((planningFraction * PHASE_PROGRESS_PLAN_WEIGHT_DEFAULT)
+        + (implementationFraction * PHASE_PROGRESS_IMPLEMENTATION_WEIGHT_DEFAULT))
+        / (PHASE_PROGRESS_PLAN_WEIGHT_DEFAULT + PHASE_PROGRESS_IMPLEMENTATION_WEIGHT_DEFAULT)
+      : llm;
+  }
+
+  const planningPercent = Math.floor(planningFraction * 100);
+  const implementationPercent = Math.floor(implementationFraction * 100);
+
+  if (session.status === 'completed') {
+    overallFraction = 1;
+  } else {
+    overallFraction = Math.min(0.99, clampUnit(overallFraction));
+  }
+
+  const weightedOverallPercent = Math.floor(overallFraction * 100);
+
+  return {
+    percent: weightedOverallPercent,
+    planningPercent,
+    implementationPercent,
+    weightedOverallPercent,
+    source,
+    confidence,
+    weights: {
+      planning: planningWeight,
+      implementation: implementationWeight,
+      source: weightSource,
+    },
+    graphPercent: graph ? Math.floor(graph.fraction * 100) : undefined,
+    todoPercent: checklist ? Math.floor(checklist.fraction * 100) : undefined,
+    llmPercent: source === 'llm' ? Math.floor(llm * 100) : undefined,
+    totals: {
+      todos: checklist?.total ?? 0,
+      todosDone: checklist?.done ?? 0,
+      todosInProgress: checklist?.inProgress ?? 0,
+      todoWeightTotal: checklist?.totalWeight ?? 0,
+      todoWeightDone: checklist?.doneWeight ?? 0,
+      nodes: graph?.total ?? 0,
+      nodesCompleted: graph?.completed ?? 0,
+      nodesRunning: graph?.running ?? 0,
+      nodesFailed: graph?.failed ?? 0,
+      nodeWeightTotal: graph?.totalWeight ?? 0,
+      nodeWeightCompleted: graph?.completedWeight ?? 0,
+    },
+  };
+}
+
+function serializeWorkSession(session: WorkSession, todos: AgentTodoItem[] = []): Record<string, unknown> {
+  const serializedAgentGraph = serializeAgentGraphWithProgressInvariant(session);
+  const progress = computeSessionProgress(session, todos);
   return {
     id: session.id,
     workspaceId: session.workspaceId,
@@ -3942,13 +4397,44 @@ function serializeWorkSession(session: WorkSession): Record<string, unknown> {
     llmStatus: session.llmStatus,
     taskStatus: session.taskStatus,
     events: session.events,
-    agentGraph: session.agentGraph.map((node) => ({
-      ...node,
-      dependencies: [...node.dependencies],
-    })),
+    agentGraph: serializedAgentGraph,
+    progress,
     error: session.error,
     output: session.output,
   };
+}
+
+function serializeAgentGraphWithProgressInvariant(session: WorkSession): SessionAgentGraphNode[] {
+  const nodes = session.agentGraph.map((node) => ({
+    ...node,
+    dependencies: [...node.dependencies],
+  }));
+
+  if (session.status !== 'running' || nodes.length === 0) {
+    return nodes;
+  }
+
+  if (nodes.some((node) => node.status === 'running')) {
+    return nodes;
+  }
+
+  const statusById = new Map(nodes.map((node) => [node.id, node.status ?? 'pending']));
+  const readyPending = nodes.find((node) => {
+    const status = statusById.get(node.id) ?? 'pending';
+    if (status === 'completed' || status === 'failed') {
+      return false;
+    }
+
+    return (node.dependencies ?? []).every((dep) => (statusById.get(dep) ?? 'pending') === 'completed');
+  });
+
+  const nonTerminal = nodes.find((node) => {
+    const status = statusById.get(node.id) ?? 'pending';
+    return status !== 'completed' && status !== 'failed';
+  });
+
+  const targetId = (readyPending ?? nonTerminal ?? nodes[0]).id;
+  return nodes.map((node) => (node.id === targetId ? { ...node, status: 'running' } : node));
 }
 
 function serializeAuthSession(session: AuthSession): Record<string, unknown> {
@@ -4034,6 +4520,67 @@ function resolveUiWatchPath(workspaceRoot: string): string | undefined {
   return undefined;
 }
 
+async function ensureSessionWorkspaceReady(
+  session: WorkSession,
+  workspaceManager: WorkspaceManager,
+  uiStatePersistence: { schedule: () => void; flush: () => Promise<void> },
+): Promise<void> {
+  if (existsSync(session.workspacePath)) {
+    return;
+  }
+
+  const workspace = await workspaceManager.selectWorkspace(session.workspaceId);
+  session.workspacePath = workspace.path;
+  session.workspaceName = workspace.name;
+  session.useWorktree = false;
+  session.worktreePath = undefined;
+  session.worktreeBranch = undefined;
+  session.updatedAt = now();
+  uiStatePersistence.schedule();
+}
+
+function isRetryableSubAgentError(error: unknown): boolean {
+  const message = toErrorMessage(error).toLowerCase();
+  return message.includes('aborted')
+    || message.includes('timeout')
+    || message.includes('timed out')
+    || message.includes('rate limit')
+    || message.includes('429')
+    || message.includes('temporar')
+    || message.includes('econnreset')
+    || message.includes('etimedout')
+    || message.includes('network');
+}
+
+async function completeSubAgentWithRetry(
+  subAgent: {
+    complete: (
+      prompt: string,
+      signal?: AbortSignal,
+    ) => Promise<{ text: string; usage?: { input: number; output: number; cost: number } }>;
+  },
+  prompt: string,
+  signal?: AbortSignal,
+): Promise<{ text: string; usage?: { input: number; output: number; cost: number } }> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= SUBAGENT_RETRY_MAX_ATTEMPTS; attempt += 1) {
+    try {
+      return await subAgent.complete(prompt, signal);
+    } catch (error) {
+      lastError = error;
+      if (attempt >= SUBAGENT_RETRY_MAX_ATTEMPTS || !isRetryableSubAgentError(error)) {
+        throw error;
+      }
+
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, SUBAGENT_RETRY_BASE_DELAY_MS * attempt);
+      });
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error(toErrorMessage(lastError));
+}
+
 type SessionPromptPhase = 'chat' | 'planning' | 'implementation';
 
 type FollowUpSuggestionPhase = 'chat' | 'planning' | 'implementation';
@@ -4117,6 +4664,8 @@ function buildSessionSystemPrompt(session: WorkSession, phase: SessionPromptPhas
           'Use chat responses to clarify intent, summarize progress, and gather missing context.',
           'When direct implementation is requested, proceed with concrete action-oriented steps.',
           'When the user asks for planning, switch to planning mode and perform todo_set + agent_graph_set before presenting the plan.',
+          'In planning mode, todo_set items must include numeric weight values that sum to 100 for planning-progress tracking.',
+          'In planning mode, agent_graph_set nodes must include numeric weight values that sum to 100 for implementation-progress tracking.',
           'When planning, require atomic task granularity: one action per task with explicit done criteria and verification commands.',
           'Reject broad bundled tasks; split work into smaller units before finalizing the plan.',
           'When publishing agent_graph_set, use descriptive node ids/names instead of generic n1/n2 labels.',
@@ -4125,8 +4674,9 @@ function buildSessionSystemPrompt(session: WorkSession, phase: SessionPromptPhas
           'When asked to inspect or change todos/agent graph, call the corresponding tools instead of simulating success.',
           'For reading multiple files, prefer read_files with concurrency over repeated one-by-one read_file calls.',
           'When calling todo tools, use canonical statuses only: todo, in_progress, done.',
+          'Do not ask the user to continue after partial progress; continue autonomously until completion or a concrete blocker is reached.',
+          'For transient tool or sub-agent failures (timeouts, aborts, rate limits), retry automatically before surfacing a blocker.',
           'If no tool was executed, explicitly state that no tool output is available.',
-          'Always end your response with 1-3 numbered next follow-up suggestions.',
         ]
       : phase === 'planning'
         ? [
@@ -4136,12 +4686,15 @@ function buildSessionSystemPrompt(session: WorkSession, phase: SessionPromptPhas
             'Split broad, multi-area, or multi-step tasks into smaller independent tasks before finalizing.',
             'Each planned task must include explicit dependencies, concrete done criteria, and at least one verification command.',
             'Planning must produce and maintain todo_set and agent_graph_set state.',
+            'todo_set items must include numeric weight values and the total todo weight must sum to 100.',
+            'agent_graph_set nodes must include numeric weight values and the total node weight must sum to 100.',
             'Planning must use subagent_spawn or subagent_spawn_batch for focused parallel research and delegate only relevant context.',
             'For independent nodes, use subagent_spawn_batch so work runs in parallel.',
             'For multi-file inspection, use read_files with concurrency to reduce latency; avoid repeated single-file reads when possible.',
             'Pass nodeId for each sub-agent request so graph status stays current.',
             'Keep todo and dependency graph state synchronized.',
-            'Always end your response with 1-3 numbered next follow-up suggestions.',
+            'Do not ask the user to continue after partial progress; continue autonomously until completion or a concrete blocker is reached.',
+            'For transient tool or sub-agent failures (timeouts, aborts, rate limits), retry automatically before surfacing a blocker.',
           ]
         : [
             'Execute approved work with minimal, scoped edits and verify outcomes.',
@@ -4154,7 +4707,8 @@ function buildSessionSystemPrompt(session: WorkSession, phase: SessionPromptPhas
             'Use github_api for GitHub REST/GraphQL operations; do not use gh CLI.',
             'Iterate until validation passes or a true blocker is reached.',
             'After each push or PR update, query remote CI/check status with github_api and keep fixing/re-pushing until checks pass or a true blocker is reached.',
-            'Always end your response with 1-3 numbered next follow-up suggestions.',
+            'Do not ask the user to continue after partial progress; continue autonomously until completion or a concrete blocker is reached.',
+            'For transient tool or sub-agent failures (timeouts, aborts, rate limits), retry automatically before surfacing a blocker.',
           ];
 
   const sections: PromptSection[] = [
@@ -4205,7 +4759,11 @@ function buildChatSystemPrompt(session: WorkSession): string {
 function ensureFollowUpSuggestions(text: string, phase: FollowUpSuggestionPhase): string {
   const trimmed = text.trim();
   if (!trimmed) {
-    return buildFollowUpSuggestionsBlock(phase);
+    return phase === 'chat' ? buildFollowUpSuggestionsBlock(phase) : 'No response generated.';
+  }
+
+  if (phase !== 'chat') {
+    return trimmed;
   }
 
   if (hasFollowUpSuggestions(trimmed)) {

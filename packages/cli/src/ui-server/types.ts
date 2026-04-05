@@ -36,6 +36,7 @@ export interface SessionAgentGraphNode {
   id: string;
   name?: string;
   prompt: string;
+  weight?: number;
   dependencies: string[];
   status?: 'pending' | 'running' | 'completed' | 'failed';
   provider?: string;
@@ -96,7 +97,9 @@ export interface SessionChatThread {
 export interface AgentTodoItem {
   id: string;
   text: string;
+  status?: 'todo' | 'in_progress' | 'done';
   done: boolean;
+  weight?: number;
   createdAt: string;
   updatedAt: string;
 }

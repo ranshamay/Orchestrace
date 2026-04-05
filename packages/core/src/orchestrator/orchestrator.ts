@@ -672,9 +672,11 @@ function buildPlanningPrompt(node: TaskNode, depOutputs: Map<string, TaskOutput>
         'If a task would take more than ~15 minutes or touches multiple independent areas, split it further.',
         'You MUST use coordination tools during planning:',
         '- todo_set (required) to create a concrete todo list',
+        '- todo_set items must include numeric weight per item, and the total weight must sum to exactly 100',
         '- todo_update to track progress changes',
         '- todo statuses must be exactly: todo, in_progress, done',
         '- agent_graph_set (required) to define sub-agent dependency graph',
+        '- agent_graph_set nodes must include numeric weight per node, and the total node weight must sum to exactly 100',
         '- in agent_graph_set, provide descriptive node ids/names (avoid generic n1/n2 labels)',
         '- agent_graph_set nodes must map to atomic execution units with explicit dependency ids',
         '- subagent_spawn/subagent_spawn_batch (required) to delegate focused planning research with only relevant context per sub-agent',
@@ -833,6 +835,8 @@ function buildPhaseSystemPrompt(params: {
           'Planning output must be atomic: each planned task should be one action, one artifact, and one verification path.',
           'Before finalizing, split any multi-action task into separate todo and graph nodes.',
           'Each todo and graph node must include explicit dependency ids and deterministic done criteria.',
+          'todo_set must define weighted planning breakdown where item weights sum to 100.',
+          'agent_graph_set must define weighted implementation breakdown where node weights sum to 100.',
           'Planning must include successful todo_set and agent_graph_set tool calls.',
           'Planning must include successful subagent_spawn or subagent_spawn_batch calls with focused context per sub-agent.',
           'Prefer smallest safe units for parallelism; independent atomic tasks should be separated into parallelizable nodes.',
@@ -1066,19 +1070,100 @@ function buildPlanningContractError(toolCalls: ReplayToolCallRecord[]): string |
   if (!hasSubAgentDelegation) {
     missing.push('subagent_spawn or subagent_spawn_batch');
   }
-  if (missing.length === 0) {
+
+  const contractIssues: string[] = [];
+  if (missing.length > 0) {
+    contractIssues.push(`Missing successful coordination tool call(s): ${missing.join(', ')}.`);
+  }
+
+  const todoSetResult = latestSuccessfulToolCall(toolCalls, 'todo_set');
+  if (todoSetResult) {
+    const total = parseWeightedSum(todoSetResult.input, 'items');
+    if (total === undefined) {
+      contractIssues.push('todo_set must include numeric weight for each item.');
+    } else if (!isWeightTotalValid(total)) {
+      contractIssues.push(`todo_set item weights must sum to 100 (received ${formatWeightTotal(total)}).`);
+    }
+  }
+
+  const graphSetResult = latestSuccessfulToolCall(toolCalls, 'agent_graph_set');
+  if (graphSetResult) {
+    const total = parseWeightedSum(graphSetResult.input, 'nodes');
+    if (total === undefined) {
+      contractIssues.push('agent_graph_set must include numeric weight for each node.');
+    } else if (!isWeightTotalValid(total)) {
+      contractIssues.push(`agent_graph_set node weights must sum to 100 (received ${formatWeightTotal(total)}).`);
+    }
+  }
+
+  if (contractIssues.length === 0) {
     return undefined;
   }
 
   return [
     'Planning contract not satisfied.',
-    `Missing successful coordination tool call(s): ${missing.join(', ')}.`,
+    ...contractIssues,
     'Planning must publish todo_set + agent_graph_set and delegate focused work via subagent_spawn before implementation can begin.',
   ].join(' ');
 }
 
 function hasSuccessfulToolCall(toolCalls: ReplayToolCallRecord[], toolName: string): boolean {
   return toolCalls.some((call) => call.status === 'result' && call.toolName === toolName && !call.isError);
+}
+
+function latestSuccessfulToolCall(
+  toolCalls: ReplayToolCallRecord[],
+  toolName: string,
+): ReplayToolCallRecord | undefined {
+  for (let index = toolCalls.length - 1; index >= 0; index -= 1) {
+    const call = toolCalls[index];
+    if (call.status === 'result' && call.toolName === toolName && !call.isError) {
+      return call;
+    }
+  }
+
+  return undefined;
+}
+
+function parseWeightedSum(input: string | undefined, listKey: 'items' | 'nodes'): number | undefined {
+  if (!input) {
+    return undefined;
+  }
+
+  try {
+    const parsed = JSON.parse(input) as Record<string, unknown>;
+    const entries = Array.isArray(parsed[listKey]) ? parsed[listKey] : undefined;
+    if (!entries || entries.length === 0) {
+      return undefined;
+    }
+
+    let sum = 0;
+    for (const rawEntry of entries) {
+      if (!rawEntry || typeof rawEntry !== 'object') {
+        return undefined;
+      }
+
+      const entry = rawEntry as Record<string, unknown>;
+      const weight = entry.weight;
+      if (typeof weight !== 'number' || !Number.isFinite(weight) || weight <= 0) {
+        return undefined;
+      }
+
+      sum += weight;
+    }
+
+    return sum;
+  } catch {
+    return undefined;
+  }
+}
+
+function isWeightTotalValid(value: number): boolean {
+  return Math.abs(value - 100) <= 0.5;
+}
+
+function formatWeightTotal(value: number): string {
+  return Number.isInteger(value) ? String(value) : value.toFixed(2);
 }
 
 function resolvePromptVersion(params: {

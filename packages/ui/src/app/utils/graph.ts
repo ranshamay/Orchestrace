@@ -41,17 +41,12 @@ export function buildGraphLayout(session?: WorkSession): { nodes: GraphNodeView[
     if (readyPending) {
       statusById.set(readyPending.id, 'running');
     } else if (baseNodes.length > 0) {
-      const syntheticId = '__orchestrator__';
-      if (!baseNodes.find((node) => node.id === syntheticId)) {
-        baseNodes = [...baseNodes, {
-          id: syntheticId,
-          name: 'orchestrator',
-          prompt: session.llmStatus?.detail || 'Coordinating remaining workflow tasks.',
-          dependencies: baseNodes.map((node) => node.id),
-          status: 'running' as const,
-        }];
-      }
-      statusById.set(syntheticId, 'running');
+      const nonTerminal = baseNodes.find((node) => {
+        const status = statusById.get(node.id) ?? 'pending';
+        return status !== 'completed' && status !== 'failed';
+      });
+      const fallback = nonTerminal ?? baseNodes[0];
+      statusById.set(fallback.id, 'running');
     }
   }
 
@@ -87,7 +82,7 @@ export function buildGraphLayout(session?: WorkSession): { nodes: GraphNodeView[
     const stepY = height / (group.length + 1);
     group.forEach((node, index) => {
       const status = statusById.get(node.id) ?? normalizeTaskStatus(session.taskStatus[node.id]);
-      nodes.push({ id: node.id, label: graphNodeLabel(node), prompt: node.prompt, x: 130 + level * 260, y: stepY * (index + 1), status: node.status ?? status, dependencies: node.dependencies });
+      nodes.push({ id: node.id, label: graphNodeLabel(node), prompt: node.prompt, x: 130 + level * 260, y: stepY * (index + 1), status, dependencies: node.dependencies });
     });
   }
 

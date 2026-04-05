@@ -112,6 +112,7 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
               id: Type.String({ minLength: 1 }),
               title: Type.String({ minLength: 1 }),
               status: todoStatusSchema,
+              weight: Type.Optional(Type.Number({ minimum: 0 })),
               details: Type.Optional(Type.String()),
               dependsOn: Type.Optional(Type.Array(Type.String())),
             }),
@@ -139,6 +140,7 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
           id: Type.String({ minLength: 1 }),
           title: Type.String({ minLength: 1 }),
           status: Type.Optional(todoStatusSchema),
+          weight: Type.Optional(Type.Number({ minimum: 0 })),
           details: Type.Optional(Type.String()),
           dependsOn: Type.Optional(Type.Array(Type.String())),
         }),
@@ -149,6 +151,7 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
           id: asString(toolArgs.id, 'id'),
           title: asString(toolArgs.title, 'title'),
           status: normalizeTodoStatus(toolArgs.status) ?? 'todo',
+          weight: optionalWeight(toolArgs.weight),
           details: optionalString(toolArgs.details),
           dependsOn: optionalStringArray(toolArgs.dependsOn),
         };
@@ -170,6 +173,7 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
         parameters: Type.Object({
           id: Type.String({ minLength: 1 }),
           status: Type.Optional(todoStatusSchema),
+          weight: Type.Optional(Type.Number({ minimum: 0 })),
           title: Type.Optional(Type.String()),
           details: Type.Optional(Type.String()),
           appendDetails: Type.Optional(Type.String()),
@@ -191,6 +195,10 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
         const status = normalizeTodoStatus(toolArgs.status);
         if (status) {
           existing.status = status;
+        }
+
+        if (toolArgs.weight !== undefined) {
+          existing.weight = optionalWeight(toolArgs.weight);
         }
 
         const title = optionalString(toolArgs.title);
@@ -246,6 +254,7 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
               id: Type.String({ minLength: 1 }),
               name: Type.Optional(Type.String()),
               prompt: Type.String({ minLength: 1 }),
+              weight: Type.Optional(Type.Number({ minimum: 0 })),
               dependencies: Type.Optional(Type.Array(Type.String())),
               provider: Type.Optional(Type.String()),
               model: Type.Optional(Type.String()),
@@ -718,6 +727,7 @@ function normalizeTodoItems(value: unknown): TodoItem[] {
       id,
       title,
       status: normalizeTodoStatus(entry.status) ?? 'todo',
+      weight: optionalWeight(entry.weight),
       details: optionalString(entry.details),
       dependsOn: optionalStringArray(entry.dependsOn),
     });
@@ -747,6 +757,7 @@ function normalizeAgentGraphNodes(value: unknown): AgentGraphNode[] {
       id,
       name: optionalString(entry.name),
       prompt,
+      weight: optionalWeight(entry.weight),
       dependencies: optionalStringArray(entry.dependencies),
       provider: optionalString(entry.provider),
       model: optionalString(entry.model),
@@ -871,6 +882,14 @@ function optionalStringArray(value: unknown): string[] | undefined {
     .filter((entry): entry is string => Boolean(entry));
 
   return result.length > 0 ? result : undefined;
+}
+
+function optionalWeight(value: unknown): number | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
+    return undefined;
+  }
+
+  return Math.round(value * 100) / 100;
 }
 
 function trimText(text: string, maxChars: number): string {

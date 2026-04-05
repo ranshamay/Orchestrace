@@ -58,6 +58,7 @@ export interface TodoItem {
   id: string;
   title: string;
   status: 'todo' | 'in_progress' | 'done';
+  weight?: number;
   details?: string;
   dependsOn?: string[];
 }
@@ -66,6 +67,7 @@ export interface AgentGraphNode {
   id: string;
   name?: string;
   prompt: string;
+  weight?: number;
   dependencies?: string[];
   provider?: string;
   model?: string;
