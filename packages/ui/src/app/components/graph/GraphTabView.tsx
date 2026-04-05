@@ -36,11 +36,13 @@ export function GraphTabView({
 }: Props) {
   return (
     <div className="flex h-full flex-col lg:flex-row">
-      <section className="flex min-w-0 flex-1 flex-col border-b border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900 lg:border-b-0 lg:border-r">
+      <aside className="flex w-full flex-col bg-white dark:bg-slate-900 lg:w-[420px]">{rightPane}</aside>
+
+      <section className="flex min-w-0 flex-1 flex-col border-b border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900 lg:border-b-0 lg:border-l">
         <header className="border-b border-slate-200 p-4 dark:border-slate-800">
           <div className="flex items-start justify-between gap-3">
             <div className="text-xs text-slate-500 dark:text-slate-400">
-              Center graph is the execution control plane. Edit LLM controls here, then use the right panel composer to start a run or chat with the selected run.
+              Center graph is the execution control plane. Edit LLM controls here, then use the left panel composer to start a run or chat with the selected run.
             </div>
             <button
               className="shrink-0 rounded border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold uppercase tracking-wide text-slate-600 hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300 dark:hover:bg-slate-800"
@@ -74,8 +76,6 @@ export function GraphTabView({
           </div>
         </div>
       </section>
-
-      <aside className="flex w-full flex-col bg-white dark:bg-slate-900 lg:w-[420px]">{rightPane}</aside>
     </div>
   );
 }
