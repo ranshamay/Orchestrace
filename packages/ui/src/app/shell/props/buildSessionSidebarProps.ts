@@ -7,6 +7,7 @@ type Params = {
   theme: ThemeMode;
   setTheme: SessionSidebarProps['setTheme'];
   sessions: SessionSidebarProps['sessions'];
+  desktopWidthPx: number;
   selectedSessionId: string;
   setSessionSelection: (id: string) => void;
   setCopyTraceState: (next: { sessionId: string; state: 'idle' | 'copied' | 'failed' }) => void;
@@ -26,6 +27,7 @@ export function buildSessionSidebarProps(params: Params): SessionSidebarProps {
     setActiveTab: params.setActiveTab,
     theme: params.theme,
     setTheme: params.setTheme,
+    desktopWidthPx: params.desktopWidthPx,
     sessions: params.sessions,
     selectedSessionId: params.selectedSessionId,
     onSelectSession: params.setSessionSelection,

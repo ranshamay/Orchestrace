@@ -49,6 +49,8 @@ export type AppMainContentProps = {
   providerStatuses: Array<{ provider: string; source: string }>;
   activeWorkspaceId: string;
   onSetUseWorktree: (next: boolean) => void;
+  rightPaneWidthPx: number;
+  onSetRightPaneWidthPx: (next: number) => void;
 };
 
 export function AppMainContent(props: AppMainContentProps) {
@@ -79,6 +81,8 @@ export function AppMainContent(props: AppMainContentProps) {
       onAddTodo={props.onAddTodo}
       onToggleTodo={props.onToggleTodo}
       onOpenLlmControls={props.onOpenLlmControls}
+      rightPaneWidthPx={props.rightPaneWidthPx}
+      onSetRightPaneWidthPx={props.onSetRightPaneWidthPx}
       rightPane={(
         <TimelinePanel
           selectedSessionId={props.selectedSessionId}

@@ -1,3 +1,4 @@
+import type { CSSProperties } from 'react';
 import { Activity, Copy, Loader2, Moon, Plus, RotateCcw, Sun, Trash2 } from 'lucide-react';
 import type { WorkSession } from '../../lib/api';
 import type { FailureType, Tab, ThemeMode } from '../types';
@@ -12,6 +13,7 @@ export type SessionSidebarProps = {
   setActiveTab: (tab: Tab) => void;
   theme: ThemeMode;
   setTheme: (updater: (current: ThemeMode) => ThemeMode) => void;
+  desktopWidthPx?: number;
   sessions: WorkSession[];
   selectedSessionId: string;
   onSelectSession: (id: string) => void;
@@ -30,6 +32,7 @@ export function SessionSidebar(props: SessionSidebarProps) {
     setActiveTab,
     theme,
     setTheme,
+    desktopWidthPx,
     sessions,
     selectedSessionId,
     onSelectSession,
@@ -42,9 +45,15 @@ export function SessionSidebar(props: SessionSidebarProps) {
     failureTypeSummary,
   } = props;
   const isDark = theme === 'dark';
+  const sidebarStyle: (CSSProperties & Record<'--session-sidebar-width', string>) | undefined = desktopWidthPx
+    ? { '--session-sidebar-width': `${desktopWidthPx}px` }
+    : undefined;
 
   return (
-    <aside className="w-full border-b border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900 md:w-64 md:border-b-0 md:border-l">
+    <aside
+      className="w-full border-b border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900 md:w-[var(--session-sidebar-width)] md:border-b-0 md:border-l"
+      style={sidebarStyle}
+    >
       <div className="border-b border-slate-100 px-4 py-3 dark:border-slate-800">
         <div className="flex items-center gap-2">
           <Activity className="h-5 w-5 text-blue-600" />

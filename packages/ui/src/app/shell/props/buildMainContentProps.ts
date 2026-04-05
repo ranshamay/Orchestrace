@@ -40,6 +40,8 @@ type Params = {
   providerStatuses: AppMainContentProps['providerStatuses'];
   activeWorkspaceId: string;
   onSetUseWorktree: (next: boolean) => void;
+  rightPaneWidthPx: number;
+  onSetRightPaneWidthPx: (next: number) => void;
 };
 
 export function buildMainContentProps(params: Params): AppMainContentProps {
@@ -87,5 +89,7 @@ export function buildMainContentProps(params: Params): AppMainContentProps {
     providerStatuses: params.providerStatuses,
     activeWorkspaceId: params.activeWorkspaceId,
     onSetUseWorktree: params.onSetUseWorktree,
+    rightPaneWidthPx: params.rightPaneWidthPx,
+    onSetRightPaneWidthPx: params.onSetRightPaneWidthPx,
   };
 }

@@ -19,6 +19,49 @@ import { buildMainContentProps } from './app/shell/props/buildMainContentProps';
 import { buildLlmModalProps } from './app/shell/props/buildLlmModalProps';
 import { AppShell } from './app/shell/AppShell';
 
+const LAYOUT_PREFERENCES_KEY = 'orchestrace.ui.layout.widths.v1';
+const DEFAULT_SESSION_SIDEBAR_WIDTH = 256;
+const DEFAULT_RIGHT_PANE_WIDTH = 420;
+
+type LayoutPreferences = {
+  sessionSidebarWidthPx: number;
+  rightPaneWidthPx: number;
+};
+
+function readLayoutPreferences(): LayoutPreferences {
+  if (typeof window === 'undefined') {
+    return {
+      sessionSidebarWidthPx: DEFAULT_SESSION_SIDEBAR_WIDTH,
+      rightPaneWidthPx: DEFAULT_RIGHT_PANE_WIDTH,
+    };
+  }
+
+  try {
+    const raw = window.localStorage.getItem(LAYOUT_PREFERENCES_KEY);
+    if (!raw) {
+      return {
+        sessionSidebarWidthPx: DEFAULT_SESSION_SIDEBAR_WIDTH,
+        rightPaneWidthPx: DEFAULT_RIGHT_PANE_WIDTH,
+      };
+    }
+
+    const parsed = JSON.parse(raw) as Partial<LayoutPreferences>;
+    return {
+      sessionSidebarWidthPx: Number.isFinite(parsed.sessionSidebarWidthPx)
+        ? Math.max(220, Math.round(parsed.sessionSidebarWidthPx as number))
+        : DEFAULT_SESSION_SIDEBAR_WIDTH,
+      rightPaneWidthPx: Number.isFinite(parsed.rightPaneWidthPx)
+        ? Math.max(320, Math.round(parsed.rightPaneWidthPx as number))
+        : DEFAULT_RIGHT_PANE_WIDTH,
+    };
+  } catch {
+    return {
+      sessionSidebarWidthPx: DEFAULT_SESSION_SIDEBAR_WIDTH,
+      rightPaneWidthPx: DEFAULT_RIGHT_PANE_WIDTH,
+    };
+  }
+}
+
 export default function App() {
   const [activeTab, setActiveTab] = useState<Tab>('graph');
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
@@ -28,6 +71,7 @@ export default function App() {
   const [showToolsPanel, setShowToolsPanel] = useState(false);
   const [todoInput, setTodoInput] = useState('');
   const [copyTraceState, setCopyTraceState] = useState<{ sessionId: string; state: 'idle' | 'copied' | 'failed' }>({ sessionId: '', state: 'idle' });
+  const [layoutPreferences, setLayoutPreferences] = useState<LayoutPreferences>(() => readLayoutPreferences());
 
   const bootstrap = useBootstrapData();
   const {
@@ -84,6 +128,10 @@ export default function App() {
     window.localStorage.setItem('orchestrace-use-worktree', useWorktree ? 'true' : 'false');
   }, [useWorktree]);
 
+  useEffect(() => {
+    window.localStorage.setItem(LAYOUT_PREFERENCES_KEY, JSON.stringify(layoutPreferences));
+  }, [layoutPreferences]);
+
   const sessionSidebarProps = buildSessionSidebarProps({
     activeTab,
     setActiveTab,
@@ -97,6 +145,7 @@ export default function App() {
     copyTraceState,
     sessionStatusSummary,
     failureTypeSummary,
+    desktopWidthPx: layoutPreferences.sessionSidebarWidthPx,
   });
 
   const mainContentProps = buildMainContentProps({
@@ -137,6 +186,8 @@ export default function App() {
     providerStatuses,
     activeWorkspaceId,
     onSetUseWorktree: (next) => updateActiveLlmControls({ useWorktree: next }),
+    rightPaneWidthPx: layoutPreferences.rightPaneWidthPx,
+    onSetRightPaneWidthPx: (next) => setLayoutPreferences((current) => ({ ...current, rightPaneWidthPx: next })),
   });
 
   const llmModalProps = buildLlmModalProps({
@@ -169,6 +220,8 @@ export default function App() {
       mainContentProps={mainContentProps}
       llmModalProps={llmModalProps}
       errorMessage={errorMessage}
+      sessionSidebarWidthPx={layoutPreferences.sessionSidebarWidthPx}
+      onSetSessionSidebarWidthPx={(next) => setLayoutPreferences((current) => ({ ...current, sessionSidebarWidthPx: next }))}
     />
   );
 }

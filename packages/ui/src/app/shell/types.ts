@@ -7,4 +7,6 @@ export type AppShellProps = {
   mainContentProps: AppMainContentProps;
   llmModalProps: LlmControlsModalProps;
   errorMessage: string;
+  sessionSidebarWidthPx: number;
+  onSetSessionSidebarWidthPx: (next: number) => void;
 };
