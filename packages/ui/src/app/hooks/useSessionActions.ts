@@ -44,7 +44,7 @@ export function useSessionActions(params: SessionActionsParams) {
   const hasComposerContent = composerText.trim().length > 0 || composerImages.length > 0;
 
   const handleStartFromComposer = useCallback(async () => {
-    if (!hasComposerContent || !workProvider || !workModel || !workWorkspaceId) return;
+    if (!hasComposerContent || !workProvider || !workWorkspaceId) return;
     setErrorMessage('');
     try {
       const payload = composePrompt(composerText, composerImages);
@@ -54,7 +54,7 @@ export function useSessionActions(params: SessionActionsParams) {
         workspaceId: workWorkspaceId,
         prompt: runPrompt,
         provider: workProvider,
-        model: workModel,
+        ...(workModel ? { model: workModel } : {}),
         autoApprove,
         useWorktree,
         adaptiveConcurrency,
