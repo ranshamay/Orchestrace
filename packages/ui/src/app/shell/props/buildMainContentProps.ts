@@ -17,6 +17,7 @@ type Params = {
     hasComposerContent: boolean;
     handleComposerPaste: AppMainContentProps['onComposerPaste'];
     handleStartFromComposer: AppMainContentProps['onStartFromComposer'];
+    handleSendChat: AppMainContentProps['onSendChat'];
     handleStop: AppMainContentProps['onStop'];
   };
   openLlmControlsModal: () => void;
@@ -82,6 +83,7 @@ export function buildMainContentProps(params: Params): AppMainContentProps {
     hasComposerContent: params.actions.hasComposerContent,
     onComposerPaste: params.actions.handleComposerPaste,
     onStartFromComposer: params.actions.handleStartFromComposer,
+    onSendChat: params.actions.handleSendChat,
     onStop: params.actions.handleStop,
     providers: params.providers,
     providerStatuses: params.providerStatuses,

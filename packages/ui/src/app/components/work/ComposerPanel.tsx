@@ -85,7 +85,11 @@ export function ComposerPanel(props: Props) {
           onKeyDown={(event) => {
             if (event.key === 'Enter' && !event.shiftKey) {
               event.preventDefault();
-              void onStartFromComposer();
+              if (selectedSessionId) {
+                void onSendChat();
+              } else {
+                void onStartFromComposer();
+              }
             }
           }}
           placeholder={selectedSessionId ? 'Continue autonomously from this run context and start a new execution...' : 'Describe task and start autonomous execution...'}
