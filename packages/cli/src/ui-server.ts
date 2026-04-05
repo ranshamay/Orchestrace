@@ -1433,6 +1433,13 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         thread.messages.push(userMessage);
         trimThreadMessages(thread);
         thread.updatedAt = now();
+
+        const chatStartedAt = now();
+        session.status = 'running';
+        session.updatedAt = chatStartedAt;
+        session.llmStatus = createLlmStatus('analyzing', chatStartedAt, {
+          detail: 'Processing follow-up prompt.',
+        });
         uiStatePersistence.schedule();
 
         const streamId = randomUUID();
@@ -1450,14 +1457,19 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
 
         void (async () => {
           try {
+            const continuationPhase = resolveSessionToolMode(session);
             const chatAgent = await llm.spawnAgent({
               provider: session.provider,
               model: session.model,
               timeoutMs: resolveLongTurnTimeoutMs(),
-              systemPrompt: buildChatSystemPrompt(session),
+              systemPrompt: continuationPhase === 'planning'
+                ? buildPlanningSystemPrompt(session)
+                : continuationPhase === 'implementation'
+                  ? buildImplementationSystemPrompt(session)
+                  : buildChatSystemPrompt(session),
               toolset: createAgentToolset({
                 cwd: session.workspacePath,
-                phase: 'chat',
+                phase: continuationPhase,
                 adaptiveConcurrency: session.adaptiveConcurrency,
                 batchConcurrency: session.batchConcurrency,
                 batchMinConcurrency: session.batchMinConcurrency,
@@ -1568,7 +1580,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
               },
             });
 
-            const responseText = ensureFollowUpSuggestions(response.text, 'chat');
+            const responseText = ensureFollowUpSuggestions(response.text, continuationPhase);
 
             const assistantMessage: SessionChatMessage = {
               role: 'assistant',
@@ -1579,8 +1591,13 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
 
             thread.messages.push(assistantMessage);
             trimThreadMessages(thread);
-            thread.updatedAt = now();
-            session.updatedAt = now();
+            const completedAt = now();
+            thread.updatedAt = completedAt;
+            session.status = 'completed';
+            session.updatedAt = completedAt;
+            session.llmStatus = createLlmStatus('completed', completedAt, {
+              detail: 'Follow-up response generated.',
+            });
             uiStatePersistence.schedule();
 
             streamState.status = 'completed';
@@ -1602,6 +1619,13 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
             streamState.status = 'failed';
             streamState.error = toErrorMessage(error);
             streamState.updatedAt = now();
+
+            const failedAt = now();
+            session.status = 'failed';
+            session.updatedAt = failedAt;
+            session.llmStatus = createLlmStatus('failed', failedAt, {
+              detail: streamState.error,
+            });
             uiStatePersistence.schedule();
 
             broadcastWorkStream(chatStreamClients, streamId, 'chat-error', {
@@ -1655,88 +1679,117 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         const userMessage = createSessionChatMessage('user', message, messageParts);
         thread.messages.push(userMessage);
         trimThreadMessages(thread);
-        thread.updatedAt = now();
+        const chatStartedAt = now();
+        thread.updatedAt = chatStartedAt;
+        session.status = 'running';
+        session.updatedAt = chatStartedAt;
+        session.llmStatus = createLlmStatus('analyzing', chatStartedAt, {
+          detail: 'Processing follow-up prompt.',
+        });
         uiStatePersistence.schedule();
 
-        const chatAgent = await llm.spawnAgent({
-          provider: session.provider,
-          model: session.model,
-          timeoutMs: resolveLongTurnTimeoutMs(),
-          systemPrompt: buildChatSystemPrompt(session),
-          toolset: createAgentToolset({
-            cwd: session.workspacePath,
-            phase: 'chat',
-            adaptiveConcurrency: session.adaptiveConcurrency,
-            batchConcurrency: session.batchConcurrency,
-            batchMinConcurrency: session.batchMinConcurrency,
-            resolveGithubToken: () => githubAuthManager.resolveApiKey(GITHUB_PROVIDER_ID),
-            runSubAgent: async (runSubAgentRequest, _signal) => {
-              const subProvider = runSubAgentRequest.provider ?? session.provider;
-              const subModel = runSubAgentRequest.model ?? session.model;
-              const subAgentSignal = session.controller.signal;
-              const subAgentToolset = createReadOnlySubAgentToolset(session.workspacePath, {
-                adaptiveConcurrency: session.adaptiveConcurrency,
-                batchConcurrency: session.batchConcurrency,
-                batchMinConcurrency: session.batchMinConcurrency,
-              });
-              const subAgent = await llm.spawnAgent({
-                provider: subProvider,
-                model: subModel,
-                reasoning: runSubAgentRequest.reasoning,
-                timeoutMs: resolveSubAgentTimeoutMs(),
-                systemPrompt: runSubAgentRequest.systemPrompt
-                  ?? 'You are a focused sub-agent. Use only the provided task-relevant context, avoid unrelated history, and return concise actionable output.',
-                signal: subAgentSignal,
-                toolset: subAgentToolset,
-                apiKey: await authManager.resolveApiKey(subProvider),
-                refreshApiKey: () => authManager.resolveApiKey(subProvider),
-              });
+        try {
+          const continuationPhase = resolveSessionToolMode(session);
+          const chatAgent = await llm.spawnAgent({
+            provider: session.provider,
+            model: session.model,
+            timeoutMs: resolveLongTurnTimeoutMs(),
+            systemPrompt: continuationPhase === 'planning'
+              ? buildPlanningSystemPrompt(session)
+              : continuationPhase === 'implementation'
+                ? buildImplementationSystemPrompt(session)
+                : buildChatSystemPrompt(session),
+            toolset: createAgentToolset({
+              cwd: session.workspacePath,
+              phase: continuationPhase,
+              adaptiveConcurrency: session.adaptiveConcurrency,
+              batchConcurrency: session.batchConcurrency,
+              batchMinConcurrency: session.batchMinConcurrency,
+              resolveGithubToken: () => githubAuthManager.resolveApiKey(GITHUB_PROVIDER_ID),
+              runSubAgent: async (runSubAgentRequest, _signal) => {
+                const subProvider = runSubAgentRequest.provider ?? session.provider;
+                const subModel = runSubAgentRequest.model ?? session.model;
+                const subAgentSignal = session.controller.signal;
+                const subAgentToolset = createReadOnlySubAgentToolset(session.workspacePath, {
+                  adaptiveConcurrency: session.adaptiveConcurrency,
+                  batchConcurrency: session.batchConcurrency,
+                  batchMinConcurrency: session.batchMinConcurrency,
+                });
+                const subAgent = await llm.spawnAgent({
+                  provider: subProvider,
+                  model: subModel,
+                  reasoning: runSubAgentRequest.reasoning,
+                  timeoutMs: resolveSubAgentTimeoutMs(),
+                  systemPrompt: runSubAgentRequest.systemPrompt
+                    ?? 'You are a focused sub-agent. Use only the provided task-relevant context, avoid unrelated history, and return concise actionable output.',
+                  signal: subAgentSignal,
+                  toolset: subAgentToolset,
+                  apiKey: await authManager.resolveApiKey(subProvider),
+                  refreshApiKey: () => authManager.resolveApiKey(subProvider),
+                });
 
-              const result = await subAgent.complete(runSubAgentRequest.prompt, subAgentSignal);
-              return {
-                text: result.text,
-                usage: result.usage,
-              };
+                const result = await subAgent.complete(runSubAgentRequest.prompt, subAgentSignal);
+                return {
+                  text: result.text,
+                  usage: result.usage,
+                };
+              },
+            }),
+            apiKey: await authManager.resolveApiKey(session.provider),
+            refreshApiKey: () => authManager.resolveApiKey(session.provider),
+          });
+
+          const chatPrompt = buildChatContinuationInput(thread);
+          const response = await chatAgent.complete(chatPrompt, undefined, {
+            onToolCall: (toolEvent) => {
+              handleChatToolCallEvent(
+                session,
+                toolEvent,
+                sessionTodos,
+                pendingSubagentNodeIdsBySession,
+                workStreamClients,
+                uiStatePersistence,
+              );
             },
-          }),
-          apiKey: await authManager.resolveApiKey(session.provider),
-          refreshApiKey: () => authManager.resolveApiKey(session.provider),
-        });
+          });
+          const text = ensureFollowUpSuggestions(response.text, continuationPhase);
 
-        const chatPrompt = buildChatContinuationInput(thread);
-        const response = await chatAgent.complete(chatPrompt, undefined, {
-          onToolCall: (toolEvent) => {
-            handleChatToolCallEvent(
-              session,
-              toolEvent,
-              sessionTodos,
-              pendingSubagentNodeIdsBySession,
-              workStreamClients,
-              uiStatePersistence,
-            );
-          },
-        });
-        const text = ensureFollowUpSuggestions(response.text, 'chat');
+          const assistantMessage: SessionChatMessage = {
+            role: 'assistant',
+            content: text,
+            time: now(),
+            usage: response.usage,
+          };
 
-        const assistantMessage: SessionChatMessage = {
-          role: 'assistant',
-          content: text,
-          time: now(),
-          usage: response.usage,
-        };
+          thread.messages.push(assistantMessage);
+          trimThreadMessages(thread);
+          const completedAt = now();
+          thread.updatedAt = completedAt;
+          session.status = 'completed';
+          session.updatedAt = completedAt;
+          session.llmStatus = createLlmStatus('completed', completedAt, {
+            detail: 'Follow-up response generated.',
+          });
+          uiStatePersistence.schedule();
 
-        thread.messages.push(assistantMessage);
-        trimThreadMessages(thread);
-        thread.updatedAt = now();
-        session.updatedAt = now();
-        uiStatePersistence.schedule();
-
-        sendJson(res, 200, {
-          ok: true,
-          reply: assistantMessage,
-          messages: thread.messages.filter((entry) => entry.role !== 'system'),
-        });
-        return;
+          sendJson(res, 200, {
+            ok: true,
+            reply: assistantMessage,
+            messages: thread.messages.filter((entry) => entry.role !== 'system'),
+          });
+          return;
+        } catch (error) {
+          const failedAt = now();
+          const detail = toErrorMessage(error);
+          session.status = 'failed';
+          session.updatedAt = failedAt;
+          session.llmStatus = createLlmStatus('failed', failedAt, {
+            detail,
+          });
+          uiStatePersistence.schedule();
+          sendJson(res, 500, { error: detail });
+          return;
+        }
       }
 
       sendJson(res, 404, { error: 'Not found' });
@@ -2007,9 +2060,15 @@ function hydratePersistedSession(session: PersistedWorkSession): WorkSession {
     : session.error;
   const resumedUpdatedAt = asString(session.updatedAt) || now();
   const promptParts = parseChatContentParts(session.promptParts);
-  const resumedLlmStatus = session.llmStatus
+  const persistedLlmStatus = session.llmStatus
     ? normalizeLlmStatus(session.llmStatus, resumedUpdatedAt)
-    : deriveLlmStatusFromWorkState(resumedStatus, resumedUpdatedAt, resumedError);
+    : undefined;
+  const resumedLlmStatus = resolveHydratedLlmStatus(
+    resumedStatus,
+    resumedUpdatedAt,
+    resumedError,
+    persistedLlmStatus,
+  );
 
   return {
     ...session,
@@ -2030,6 +2089,31 @@ function hydratePersistedSession(session: PersistedWorkSession): WorkSession {
     controller: new AbortController(),
     cleanupWorktree: undefined,
   };
+}
+
+function resolveHydratedLlmStatus(
+  status: WorkState,
+  updatedAt: string,
+  error: string | undefined,
+  persisted: SessionLlmStatus | undefined,
+): SessionLlmStatus {
+  if (!persisted) {
+    return deriveLlmStatusFromWorkState(status, updatedAt, error);
+  }
+
+  if (status === 'completed' && persisted.state !== 'completed') {
+    return deriveLlmStatusFromWorkState(status, updatedAt, error);
+  }
+
+  if (status === 'failed' && persisted.state !== 'failed') {
+    return deriveLlmStatusFromWorkState(status, updatedAt, error);
+  }
+
+  if (status === 'cancelled' && persisted.state !== 'cancelled') {
+    return deriveLlmStatusFromWorkState(status, updatedAt, error);
+  }
+
+  return persisted;
 }
 
 function createAuthSession(providerId: string): AuthSession {
@@ -2846,14 +2930,18 @@ function toUiEvent(runId: string, event: DagEvent): UiDagEvent | undefined {
       if (event.status === 'started') {
         return {
           ...base,
-          message: tagged(`${event.taskId}: tool ${event.toolName} input ${previewToolLog(event.input)}`),
+          message: tagged(
+            `${event.taskId}: tool ${event.toolName} input ${previewToolLog(event.input, resolveToolPreviewLimit(event.toolName, 'input'))}`,
+          ),
         };
       }
 
       const errorSuffix = event.isError ? ' [error]' : '';
       return {
         ...base,
-        message: tagged(`${event.taskId}: tool ${event.toolName} output${errorSuffix} ${previewToolLog(event.output)}`),
+        message: tagged(
+          `${event.taskId}: tool ${event.toolName} output${errorSuffix} ${previewToolLog(event.output, resolveToolPreviewLimit(event.toolName, 'output'))}`,
+        ),
       };
     }
     case 'task:verification-failed':
@@ -2884,7 +2972,7 @@ function toUiEvent(runId: string, event: DagEvent): UiDagEvent | undefined {
   }
 }
 
-function previewToolLog(value: string | undefined): string {
+function previewToolLog(value: string | undefined, maxChars = 600): string {
   if (!value) {
     return '(empty)';
   }
@@ -2894,7 +2982,23 @@ function previewToolLog(value: string | undefined): string {
     return '(blank)';
   }
 
-  return compact.length > 600 ? `${compact.slice(0, 597)}...` : compact;
+  if (compact.length <= maxChars) {
+    return compact;
+  }
+
+  return `${compact.slice(0, Math.max(0, maxChars - 3))}...`;
+}
+
+function resolveToolPreviewLimit(toolName: string, direction: 'input' | 'output'): number {
+  if (toolName === 'subagent_spawn_batch') {
+    return direction === 'input' ? 12_000 : 20_000;
+  }
+
+  if (toolName === 'subagent_spawn') {
+    return direction === 'input' ? 4_000 : 12_000;
+  }
+
+  return 600;
 }
 
 function handleChatToolCallEvent(

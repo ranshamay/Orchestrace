@@ -280,11 +280,18 @@ export async function cancelWork(id: string): Promise<{ ok: boolean }> {
   return readJson(res);
 }
 
-export async function retryWork(id: string): Promise<{ id: string; sourceId: string }> {
+export async function retryWork(
+  id: string,
+  payload?: { followUp?: string; followUpParts?: ChatContentPart[] },
+): Promise<{ id: string; sourceId: string }> {
   const res = await fetch(`${API_BASE}/work/retry`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ id }),
+    body: JSON.stringify({
+      id,
+      followUp: payload?.followUp,
+      followUpParts: payload?.followUpParts,
+    }),
   });
   return readJson(res);
 }

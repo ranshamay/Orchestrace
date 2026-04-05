@@ -13,7 +13,9 @@ export function selectSessionViewState(selectedSession?: WorkSession) {
   const selectedLlmStatus = resolveLlmStatus(selectedSession);
   const selectedFailureType = resolveSessionFailureType(selectedSession);
   const selectedSessionRunning = selectedSession ? normalizeSessionStatus(selectedSession.status) === 'running' : false;
-  const composerMode: ComposerMode = selectedSession ? (selectedSession.mode ?? 'chat') : 'run';
+  const composerMode: ComposerMode = selectedSession
+    ? (selectedSession.mode ?? fallbackComposerModeFromLlmState(selectedLlmStatus.state))
+    : 'run';
 
   return {
     selectedLlmStatus,
@@ -21,6 +23,22 @@ export function selectSessionViewState(selectedSession?: WorkSession) {
     selectedSessionRunning,
     composerMode,
   };
+}
+
+function fallbackComposerModeFromLlmState(state: string): ComposerMode {
+  const normalized = state.toLowerCase();
+
+  if (
+    normalized === 'planning'
+    || normalized === 'awaiting-approval'
+    || normalized === 'analyzing'
+    || normalized === 'thinking'
+    || normalized === 'queued'
+  ) {
+    return 'planning';
+  }
+
+  return 'implementation';
 }
 
 export function selectSidebarSummaries(sessions: WorkSession[]) {

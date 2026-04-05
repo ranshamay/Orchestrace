@@ -2,6 +2,132 @@ import type { TimelineItem } from '../types';
 import { normalizeFailureType } from './failure';
 import { compactInline, parseJsonObject, stripRunTag, stripTaskPrefix } from './text';
 
+function asNumber(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+function formatTokenCount(value: number): string {
+  return Math.round(value).toLocaleString();
+}
+
+function summarizeSubAgentBatchInput(payload: string): string | undefined {
+  const parsed = parseJsonObject(payload);
+  const rawAgents = parsed && Array.isArray(parsed.agents) ? parsed.agents : [];
+  if (rawAgents.length === 0) {
+    return undefined;
+  }
+
+  const concurrency = asNumber(parsed?.concurrency);
+  const adaptiveConcurrency = parsed?.adaptiveConcurrency === true;
+  const minConcurrency = asNumber(parsed?.minConcurrency);
+
+  const settings: string[] = [];
+  if (concurrency) {
+    settings.push(`c=${concurrency}`);
+  }
+  if (adaptiveConcurrency) {
+    settings.push(minConcurrency ? `adaptive,min=${minConcurrency}` : 'adaptive');
+  }
+
+  const items = rawAgents
+    .slice(0, 4)
+    .map((entry, index) => {
+      if (!entry || typeof entry !== 'object') {
+        return `task-${index + 1}`;
+      }
+
+      const record = entry as Record<string, unknown>;
+      const nodeId = typeof record.nodeId === 'string' && record.nodeId.trim() ? record.nodeId.trim() : `task-${index + 1}`;
+      const prompt = typeof record.prompt === 'string' ? record.prompt.trim() : '';
+      return prompt ? `${nodeId} (${prompt.length} chars)` : nodeId;
+    });
+
+  const suffix = rawAgents.length > items.length ? `, +${rawAgents.length - items.length} more` : '';
+  const settingsText = settings.length > 0 ? ` (${settings.join(', ')})` : '';
+  return `Spawning ${rawAgents.length} sub-agents${settingsText}: ${items.join(', ')}${suffix}`;
+}
+
+function summarizeSubAgentInput(payload: string): string | undefined {
+  const parsed = parseJsonObject(payload);
+  if (!parsed) {
+    return undefined;
+  }
+
+  const nodeId = typeof parsed.nodeId === 'string' && parsed.nodeId.trim() ? parsed.nodeId.trim() : undefined;
+  const prompt = typeof parsed.prompt === 'string' ? parsed.prompt.trim() : '';
+  const nodeText = nodeId ? ` ${nodeId}` : '';
+  if (prompt) {
+    return `Spawning sub-agent${nodeText} (${prompt.length} chars)`;
+  }
+
+  return `Spawning sub-agent${nodeText}`;
+}
+
+function summarizeSubAgentBatchOutput(payload: string): string | undefined {
+  const parsed = parseJsonObject(payload);
+  if (!parsed) {
+    return undefined;
+  }
+
+  const total = asNumber(parsed.total);
+  const completed = asNumber(parsed.completed);
+  const failed = asNumber(parsed.failed);
+  const usage = parsed.usage && typeof parsed.usage === 'object' ? parsed.usage as Record<string, unknown> : undefined;
+  const usageInput = asNumber(usage?.input);
+  const usageOutput = asNumber(usage?.output);
+  const decomposition = parsed.decomposition && typeof parsed.decomposition === 'object'
+    ? parsed.decomposition as Record<string, unknown>
+    : undefined;
+  const averagePromptChars = asNumber(decomposition?.averagePromptChars);
+
+  const pieces: string[] = [];
+  if (typeof completed === 'number' && typeof total === 'number') {
+    pieces.push(`Batch result ${completed}/${total} completed`);
+  } else if (typeof total === 'number') {
+    pieces.push(`Batch result (${total} tasks)`);
+  } else {
+    pieces.push('Batch result');
+  }
+
+  if (typeof failed === 'number' && failed > 0) {
+    pieces.push(`${failed} failed`);
+  }
+
+  if (typeof usageInput === 'number' || typeof usageOutput === 'number') {
+    pieces.push(`in ${formatTokenCount(usageInput ?? 0)}, out ${formatTokenCount(usageOutput ?? 0)}`);
+  }
+
+  if (typeof averagePromptChars === 'number' && averagePromptChars > 0) {
+    pieces.push(`avg task ${averagePromptChars} chars`);
+  }
+
+  return pieces.join(' • ');
+}
+
+function summarizeSubAgentOutput(payload: string, isError: boolean): string | undefined {
+  const parsed = parseJsonObject(payload);
+  if (!parsed) {
+    return undefined;
+  }
+
+  const status = typeof parsed.status === 'string' ? parsed.status : undefined;
+  const usage = parsed.usage && typeof parsed.usage === 'object' ? parsed.usage as Record<string, unknown> : undefined;
+  const usageInput = asNumber(usage?.input);
+  const usageOutput = asNumber(usage?.output);
+  const nodeId = typeof parsed.nodeId === 'string' && parsed.nodeId.trim() ? parsed.nodeId.trim() : undefined;
+  const prefix = nodeId ? `Sub-agent ${nodeId}` : 'Sub-agent';
+
+  if (status === 'failed' || isError) {
+    return `${prefix} failed`;
+  }
+
+  if (typeof usageInput === 'number' || typeof usageOutput === 'number') {
+    return `${prefix} completed • in ${formatTokenCount(usageInput ?? 0)}, out ${formatTokenCount(usageOutput ?? 0)}`;
+  }
+
+  return `${prefix} completed`;
+}
+
 function toolInputSummary(toolName: string, payload: string): string {
   const parsed = parseJsonObject(payload);
   if (toolName === 'read_file') {
@@ -38,17 +164,31 @@ function toolInputSummary(toolName: string, payload: string): string {
   }
 
   if (toolName === 'subagent_spawn') {
-    return 'Spawning sub-agent';
+    return summarizeSubAgentInput(payload) ?? 'Spawning sub-agent';
   }
 
   if (toolName === 'subagent_spawn_batch') {
-    return 'Spawning sub-agents in parallel';
+    return summarizeSubAgentBatchInput(payload) ?? 'Spawning sub-agents in parallel';
   }
 
   return `Calling ${toolName}`;
 }
 
-function toolOutputSummary(payload: string, isError: boolean): string {
+function toolOutputSummary(toolName: string, payload: string, isError: boolean): string {
+  if (toolName === 'subagent_spawn_batch') {
+    const summary = summarizeSubAgentBatchOutput(payload);
+    if (summary) {
+      return summary;
+    }
+  }
+
+  if (toolName === 'subagent_spawn') {
+    const summary = summarizeSubAgentOutput(payload, isError);
+    if (summary) {
+      return summary;
+    }
+  }
+
   if (isError) {
     return compactInline(payload || 'Tool returned an error.', 260);
   }
@@ -84,8 +224,13 @@ function renderToolEventContent(params: {
 }): string {
   const summary = params.direction === 'input'
     ? toolInputSummary(params.toolName, params.payload)
-    : toolOutputSummary(params.payload, params.isError);
-  const displayPayload = formatToolPayloadForDisplay(params.payload);
+    : toolOutputSummary(params.toolName, params.payload, params.isError);
+  const payloadLimit = params.toolName === 'subagent_spawn_batch'
+    ? 20_000
+    : params.toolName === 'subagent_spawn'
+      ? 12_000
+      : 6000;
+  const displayPayload = formatToolPayloadForDisplay(params.payload, payloadLimit);
   const codeLanguage = displayPayload.startsWith('{') || displayPayload.startsWith('[') ? 'json' : 'text';
 
   return `${summary}\n\n\`\`\`${codeLanguage}\n${displayPayload}\n\`\`\``;

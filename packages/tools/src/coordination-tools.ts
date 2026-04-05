@@ -43,6 +43,8 @@ const SUBAGENT_SNIPPET_READ_CONCURRENCY = 8;
 const SUBAGENT_BATCH_DEFAULT_CONCURRENCY = 8;
 const SUBAGENT_BATCH_MAX_CONCURRENCY = 64;
 const SUBAGENT_BATCH_MIN_CONCURRENCY = 1;
+const SUBAGENT_PROMPT_SOFT_LIMIT_CHARS = 2200;
+const SUBAGENT_PROMPT_PREVIEW_MAX_CHARS = 220;
 const PROMPT_FILE_PATH_PATTERN = /(?:^|[\s`"'])((?:\.?\.?\/)?[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)+\.[A-Za-z0-9._-]+)(?=$|[\s`"':),])/g;
 
 interface CoordinationToolsOptions extends AgentToolsetOptions {
@@ -61,6 +63,12 @@ interface SubAgentRunRecord {
   finishedAt?: string;
   outputPreview?: string;
   error?: string;
+}
+
+interface UsageTotals {
+  input: number;
+  output: number;
+  cost: number;
 }
 
 interface CoordinationState {
@@ -339,6 +347,7 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
           const latest = await readCoordinationState(statePath);
           const current = latest.subAgents.find((entry) => entry.id === id);
           const preview = trimText(result.text, 1800);
+          const usage = usageOrZero(result.usage);
           if (current) {
             current.status = 'completed';
             current.finishedAt = now();
@@ -348,10 +357,16 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
           await writeCoordinationState(statePath, latest);
 
           return {
-            content: `Sub-agent ${id} completed.\n\n${preview}`,
-            details: {
-              usage: result.usage,
-            },
+            content: JSON.stringify({
+              id,
+              nodeId: request.nodeId,
+              status: 'completed',
+              promptChars: request.prompt.length,
+              usage,
+              usageReported: Boolean(result.usage),
+              outputPreview: preview,
+            }, null, 2),
+            details: { usage: result.usage },
           };
         } catch (error) {
           const latest = await readCoordinationState(statePath);
@@ -366,7 +381,13 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
           await writeCoordinationState(statePath, latest);
 
           return {
-            content: `Sub-agent ${id} failed: ${message}`,
+            content: JSON.stringify({
+              id,
+              nodeId: request.nodeId,
+              status: 'failed',
+              promptChars: request.prompt.length,
+              error: message,
+            }, null, 2),
             isError: true,
           };
         }
@@ -473,14 +494,19 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
               id: record.id,
               nodeId: record.nodeId,
               status: 'completed' as const,
+              promptChars: request.prompt.length,
+              promptPreview: compactPromptPreview(request.prompt),
               outputPreview: trimText(result?.text ?? '', 1800),
-              usage: result?.usage,
+              usage: usageOrZero(result?.usage),
+              usageReported: Boolean(result?.usage),
             };
           } catch (error) {
             return {
               id: record.id,
               nodeId: record.nodeId,
               status: 'failed' as const,
+              promptChars: request.prompt.length,
+              promptPreview: compactPromptPreview(request.prompt),
               error: error instanceof Error ? error.message : String(error),
             };
           }
@@ -499,6 +525,21 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
             };
 
         const settled = batchRun.results;
+        const usageTotals = settled.reduce<UsageTotals>((totals, entry) => {
+          if (entry.status !== 'completed' || !entry.usage) {
+            return totals;
+          }
+
+          totals.input += entry.usage.input;
+          totals.output += entry.usage.output;
+          totals.cost += entry.usage.cost;
+          return totals;
+        }, { input: 0, output: 0, cost: 0 });
+
+        const promptSizes = settled.map((entry) => entry.promptChars ?? 0);
+        const totalPromptChars = promptSizes.reduce((sum, value) => sum + value, 0);
+        const maxPromptChars = promptSizes.length > 0 ? Math.max(...promptSizes) : 0;
+        const oversized = settled.filter((entry) => (entry.promptChars ?? 0) > SUBAGENT_PROMPT_SOFT_LIMIT_CHARS);
 
         const latest = await readCoordinationState(statePath);
         for (const result of settled) {
@@ -530,6 +571,14 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
           windows: batchRun.windows,
           completed: settled.length - failedCount,
           failed: failedCount,
+          usage: usageTotals,
+          decomposition: {
+            totalPromptChars,
+            averagePromptChars: settled.length > 0 ? Math.round(totalPromptChars / settled.length) : 0,
+            maxPromptChars,
+            promptSoftLimitChars: SUBAGENT_PROMPT_SOFT_LIMIT_CHARS,
+            oversizedTasks: oversized.map((entry) => entry.nodeId ?? entry.id),
+          },
           runs: settled,
         };
 
@@ -592,6 +641,23 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
   }
 
   return tools;
+}
+
+function usageOrZero(usage: { input: number; output: number; cost: number } | undefined): UsageTotals {
+  return {
+    input: usage?.input ?? 0,
+    output: usage?.output ?? 0,
+    cost: usage?.cost ?? 0,
+  };
+}
+
+function compactPromptPreview(prompt: string): string {
+  const compact = prompt.replace(/\s+/g, ' ').trim();
+  if (compact.length <= SUBAGENT_PROMPT_PREVIEW_MAX_CHARS) {
+    return compact;
+  }
+
+  return `${compact.slice(0, SUBAGENT_PROMPT_PREVIEW_MAX_CHARS - 3)}...`;
 }
 
 function normalizeAgentToolPhase(value: unknown): AgentToolPhase | undefined {
