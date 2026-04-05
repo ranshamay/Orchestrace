@@ -44,6 +44,7 @@ export type AppMainContentProps = {
   hasComposerContent: boolean;
   onComposerPaste: (event: React.ClipboardEvent<HTMLTextAreaElement>) => Promise<void>;
   onStartFromComposer: () => Promise<void>;
+  onSendChat: () => Promise<void>;
   onStop: () => Promise<void>;
   providers: ProviderInfo[];
   providerStatuses: Array<{ provider: string; source: string }>;
@@ -117,7 +118,7 @@ export function AppMainContent(props: AppMainContentProps) {
               onComposerPaste={props.onComposerPaste}
               onStartFromComposer={props.onStartFromComposer}
               onStop={props.onStop}
-              onSendChat={props.onStartFromComposer}
+              onSendChat={props.onSendChat}
             />
           )}
           isDark={props.isDark}
