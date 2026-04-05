@@ -15,6 +15,10 @@ type Params = {
   setWorkWorkspaceId: (value: string) => void;
   autoApprove: boolean;
   setAutoApprove: (value: boolean) => void;
+  executionContext: SessionLlmControls['executionContext'];
+  setExecutionContext: (value: SessionLlmControls['executionContext']) => void;
+  selectedWorktreePath: string;
+  setSelectedWorktreePath: (value: string) => void;
   useWorktree: boolean;
   setUseWorktree: (value: boolean) => void;
   adaptiveConcurrency: boolean;
@@ -39,6 +43,10 @@ export function useLlmControls(params: Params) {
     setWorkWorkspaceId,
     autoApprove,
     setAutoApprove,
+    executionContext,
+    setExecutionContext,
+    selectedWorktreePath,
+    setSelectedWorktreePath,
     useWorktree,
     setUseWorktree,
     adaptiveConcurrency,
@@ -56,7 +64,12 @@ export function useLlmControls(params: Params) {
     if (workModel !== controls.model) setWorkModel(controls.model);
     if (workWorkspaceId !== controls.workspaceId) setWorkWorkspaceId(controls.workspaceId);
     if (autoApprove !== controls.autoApprove) setAutoApprove(controls.autoApprove);
-    if (useWorktree !== controls.useWorktree) setUseWorktree(controls.useWorktree);
+    if (executionContext !== controls.executionContext) setExecutionContext(controls.executionContext);
+    if (selectedWorktreePath !== (controls.selectedWorktreePath ?? '')) {
+      setSelectedWorktreePath(controls.selectedWorktreePath ?? '');
+    }
+    const shouldUseWorktree = controls.executionContext === 'git-worktree';
+    if (useWorktree !== shouldUseWorktree) setUseWorktree(shouldUseWorktree);
     if (adaptiveConcurrency !== controls.adaptiveConcurrency) setAdaptiveConcurrency(controls.adaptiveConcurrency);
     if (batchConcurrency !== controls.batchConcurrency) setBatchConcurrency(controls.batchConcurrency);
     if (batchMinConcurrency !== controls.batchMinConcurrency) setBatchMinConcurrency(controls.batchMinConcurrency);
@@ -69,10 +82,14 @@ export function useLlmControls(params: Params) {
     setAutoApprove,
     setBatchConcurrency,
     setBatchMinConcurrency,
+    setExecutionContext,
+    setSelectedWorktreePath,
     setUseWorktree,
     setWorkModel,
     setWorkProvider,
     setWorkWorkspaceId,
+    executionContext,
+    selectedWorktreePath,
     useWorktree,
     workModel,
     workProvider,
@@ -80,12 +97,16 @@ export function useLlmControls(params: Params) {
   ]);
 
   const updateActiveLlmControls = useCallback((patch: Partial<SessionLlmControls>) => {
+    const nextExecutionContext = patch.executionContext ?? executionContext;
+    const nextSelectedWorktreePath = patch.selectedWorktreePath ?? selectedWorktreePath;
     const next: SessionLlmControls = {
       provider: patch.provider ?? workProvider,
       model: patch.model ?? workModel,
       workspaceId: patch.workspaceId ?? workWorkspaceId,
       autoApprove: patch.autoApprove ?? autoApprove,
-      useWorktree: patch.useWorktree ?? useWorktree,
+      executionContext: nextExecutionContext,
+      selectedWorktreePath: nextSelectedWorktreePath || undefined,
+      useWorktree: patch.useWorktree ?? (nextExecutionContext === 'git-worktree'),
       adaptiveConcurrency: patch.adaptiveConcurrency ?? adaptiveConcurrency,
       batchConcurrency: patch.batchConcurrency ?? batchConcurrency,
       batchMinConcurrency: patch.batchMinConcurrency ?? batchMinConcurrency,
@@ -103,7 +124,9 @@ export function useLlmControls(params: Params) {
     autoApprove,
     batchConcurrency,
     batchMinConcurrency,
+    executionContext,
     selectedSessionId,
+    selectedWorktreePath,
     setDefaultLlmControls,
     useWorktree,
     workModel,
@@ -134,12 +157,19 @@ export function useLlmControls(params: Params) {
 
     if (!selectedSession) return;
 
+    const sessionExecutionContext: SessionLlmControls['executionContext'] =
+      selectedSession.executionContext ?? (selectedSession.useWorktree ? 'git-worktree' : 'workspace');
+
     const sessionControls: SessionLlmControls = {
       provider: selectedSession.provider || defaultLlmControls.provider,
       model: selectedSession.model || defaultLlmControls.model,
       workspaceId: selectedSession.workspaceId || defaultLlmControls.workspaceId,
       autoApprove: selectedSession.autoApprove,
-      useWorktree: selectedSession.useWorktree ?? defaultLlmControls.useWorktree,
+      executionContext: sessionExecutionContext,
+      selectedWorktreePath: selectedSession.selectedWorktreePath
+        ?? selectedSession.worktreePath
+        ?? defaultLlmControls.selectedWorktreePath,
+      useWorktree: sessionExecutionContext === 'git-worktree',
       adaptiveConcurrency: selectedSession.adaptiveConcurrency ?? defaultLlmControls.adaptiveConcurrency,
       batchConcurrency: selectedSession.batchConcurrency ?? defaultLlmControls.batchConcurrency,
       batchMinConcurrency: selectedSession.batchMinConcurrency ?? defaultLlmControls.batchMinConcurrency,

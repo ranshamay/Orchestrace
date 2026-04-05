@@ -47,9 +47,6 @@ importers:
       '@orchestrace/provider':
         specifier: workspace:*
         version: link:../provider
-      '@orchestrace/sandbox':
-        specifier: workspace:*
-        version: link:../sandbox
       '@orchestrace/tools':
         specifier: workspace:*
         version: link:../tools

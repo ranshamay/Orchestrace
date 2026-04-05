@@ -2,7 +2,7 @@ import { Loader2, Play } from 'lucide-react';
 import type { ComposerImageAttachment, ComposerMode } from '../../types';
 import { compactPromptDisplay } from '../../utils/text';
 import { composerModeBadgeClass, composerModeDescription } from '../../utils/composer';
-import type { WorkSession, Workspace } from '../../../lib/api';
+import type { GitWorktreeInfo, WorkSession, Workspace } from '../../../lib/api';
 import { normalizeSessionStatus } from '../../utils/status';
 
 type Props = {
@@ -15,6 +15,9 @@ type Props = {
   workProvider: string;
   workModel: string;
   autoApprove: boolean;
+  executionContext: 'workspace' | 'git-worktree';
+  selectedWorktreePath: string;
+  availableWorktrees: GitWorktreeInfo[];
   useWorktree: boolean;
   composerText: string;
   setComposerText: (value: string) => void;
@@ -38,6 +41,9 @@ export function ComposerPanel(props: Props) {
     workProvider,
     workModel,
     autoApprove,
+    executionContext,
+    selectedWorktreePath,
+    availableWorktrees,
     useWorktree,
     composerText,
     setComposerText,
@@ -57,7 +63,14 @@ export function ComposerPanel(props: Props) {
         <div className="truncate">Provider: <span className="font-mono">{workProvider || 'none'}</span></div>
         <div className="truncate">Model: <span className="font-mono">{workModel || 'none'}</span></div>
         <div>Auto-approve: <span className="font-mono">{autoApprove ? 'on' : 'off'}</span></div>
-        <div>Worktree: <span className="font-mono">{useWorktree ? 'on' : 'off'}</span></div>
+        <div>Execution: <span className="font-mono">{executionContext}</span></div>
+        <div className="col-span-2 truncate">Worktree path: <span className="font-mono">{selectedWorktreePath || (executionContext === 'git-worktree' ? 'auto-select' : 'n/a')}</span></div>
+        {executionContext === 'git-worktree' && availableWorktrees.length === 0 && (
+          <div className="col-span-2 text-amber-700 dark:text-amber-300">No secondary git worktrees discovered for this workspace.</div>
+        )}
+        {executionContext === 'git-worktree' && useWorktree === false && (
+          <div className="col-span-2 text-amber-700 dark:text-amber-300">Legacy useWorktree flag is off; context still controls execution target.</div>
+        )}
       </div>
       {selectedSession && (
         <div className="mb-2 rounded border border-blue-200 bg-blue-50 px-2 py-1.5 text-[11px] text-blue-800 dark:border-blue-900/60 dark:bg-blue-950/40 dark:text-blue-200">

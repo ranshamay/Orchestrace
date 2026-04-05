@@ -16,7 +16,6 @@
     "@mariozechner/pi-ai": "^0.64.0",
     "@orchestrace/core": "workspace:*",
     "@orchestrace/provider": "workspace:*",
-    "@orchestrace/sandbox": "workspace:*",
     "@orchestrace/tools": "workspace:*",
     "dotenv": "^17.4.0"
   },

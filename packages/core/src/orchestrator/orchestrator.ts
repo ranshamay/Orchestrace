@@ -673,13 +673,17 @@ function buildPlanningPrompt(node: TaskNode, depOutputs: Map<string, TaskOutput>
         'You MUST use coordination tools during planning:',
         '- todo_set (required) to create a concrete todo list',
         '- todo_set items must include numeric weight per item, and the total weight must sum to exactly 100',
+        '- todo_set item ids must be unique, and dependsOn can only reference ids from the same todo_set payload',
+        '- todo_set item status values must be exactly one of: todo, in_progress, done',
         '- todo_update to track progress changes',
         '- todo statuses must be exactly: todo, in_progress, done',
         '- agent_graph_set (required) to define sub-agent dependency graph',
         '- agent_graph_set nodes must include numeric weight per node, and the total node weight must sum to exactly 100',
+        '- agent_graph_set node ids must be unique, and dependency ids can only reference nodes from the same payload',
         '- in agent_graph_set, provide descriptive node ids/names (avoid generic n1/n2 labels)',
         '- agent_graph_set nodes must map to atomic execution units with explicit dependency ids',
         '- subagent_spawn/subagent_spawn_batch (required) to delegate focused planning research with only relevant context per sub-agent',
+        '- subagent_spawn/subagent_spawn_batch calls must include nodeId values that map back to agent_graph_set node ids',
         '- pass nodeId on each sub-agent request so graph progress can be tracked per node',
       ],
     },
@@ -836,7 +840,11 @@ function buildPhaseSystemPrompt(params: {
           'Before finalizing, split any multi-action task into separate todo and graph nodes.',
           'Each todo and graph node must include explicit dependency ids and deterministic done criteria.',
           'todo_set must define weighted planning breakdown where item weights sum to 100.',
+          'todo_set ids must be unique and dependsOn references must resolve to known todo_set ids.',
+          'todo_set status values must be exactly todo, in_progress, or done.',
           'agent_graph_set must define weighted implementation breakdown where node weights sum to 100.',
+          'agent_graph_set ids must be unique and dependency ids must resolve within the same payload.',
+          'subagent delegation must include nodeId values that map to agent_graph_set node ids.',
           'Planning must include successful todo_set and agent_graph_set tool calls.',
           'Planning must include successful subagent_spawn or subagent_spawn_batch calls with focused context per sub-agent.',
           'Prefer smallest safe units for parallelism; independent atomic tasks should be separated into parallelizable nodes.',
@@ -1078,21 +1086,39 @@ function buildPlanningContractError(toolCalls: ReplayToolCallRecord[]): string |
 
   const todoSetResult = latestSuccessfulToolCall(toolCalls, 'todo_set');
   if (todoSetResult) {
-    const total = parseWeightedSum(todoSetResult.input, 'items');
-    if (total === undefined) {
+    const todoValidation = validateWeightedListPayload(todoSetResult.input, 'items');
+    if (todoValidation.sum === undefined) {
       contractIssues.push('todo_set must include numeric weight for each item.');
-    } else if (!isWeightTotalValid(total)) {
-      contractIssues.push(`todo_set item weights must sum to 100 (received ${formatWeightTotal(total)}).`);
+    } else if (!isWeightTotalValid(todoValidation.sum)) {
+      contractIssues.push(`todo_set item weights must sum to 100 (received ${formatWeightTotal(todoValidation.sum)}).`);
+    }
+
+    for (const issue of todoValidation.issues) {
+      contractIssues.push(`todo_set ${issue}`);
     }
   }
 
+  let graphNodeIds = new Set<string>();
   const graphSetResult = latestSuccessfulToolCall(toolCalls, 'agent_graph_set');
   if (graphSetResult) {
-    const total = parseWeightedSum(graphSetResult.input, 'nodes');
-    if (total === undefined) {
+    const graphValidation = validateWeightedListPayload(graphSetResult.input, 'nodes');
+    graphNodeIds = graphValidation.ids;
+    if (graphValidation.sum === undefined) {
       contractIssues.push('agent_graph_set must include numeric weight for each node.');
-    } else if (!isWeightTotalValid(total)) {
-      contractIssues.push(`agent_graph_set node weights must sum to 100 (received ${formatWeightTotal(total)}).`);
+    } else if (!isWeightTotalValid(graphValidation.sum)) {
+      contractIssues.push(`agent_graph_set node weights must sum to 100 (received ${formatWeightTotal(graphValidation.sum)}).`);
+    }
+
+    for (const issue of graphValidation.issues) {
+      contractIssues.push(`agent_graph_set ${issue}`);
+    }
+  }
+
+  if (graphNodeIds.size > 0 && hasSubAgentDelegation) {
+    const delegatedNodeIds = collectSubAgentNodeIds(toolCalls);
+    const mappedNodes = [...graphNodeIds].filter((nodeId) => delegatedNodeIds.has(nodeId));
+    if (mappedNodes.length === 0) {
+      contractIssues.push('subagent delegation must include nodeId values that map to agent_graph_set node ids.');
     }
   }
 
@@ -1125,37 +1151,188 @@ function latestSuccessfulToolCall(
   return undefined;
 }
 
-function parseWeightedSum(input: string | undefined, listKey: 'items' | 'nodes'): number | undefined {
+function validateWeightedListPayload(
+  input: string | undefined,
+  listKey: 'items' | 'nodes',
+): {
+  sum: number | undefined;
+  issues: string[];
+  ids: Set<string>;
+} {
+  const issues: string[] = [];
+  const ids = new Set<string>();
+  const dependenciesById = new Map<string, string[]>();
+  let sum = 0;
+
   if (!input) {
-    return undefined;
+    return { sum: undefined, issues, ids };
   }
 
   try {
     const parsed = JSON.parse(input) as Record<string, unknown>;
     const entries = Array.isArray(parsed[listKey]) ? parsed[listKey] : undefined;
     if (!entries || entries.length === 0) {
-      return undefined;
+      issues.push('must include at least one entry.');
+      return { sum: undefined, issues, ids };
     }
 
-    let sum = 0;
-    for (const rawEntry of entries) {
+    for (let index = 0; index < entries.length; index += 1) {
+      const rawEntry = entries[index];
+      const prefix = `entry #${index + 1}`;
       if (!rawEntry || typeof rawEntry !== 'object') {
-        return undefined;
+        issues.push(`${prefix} must be an object.`);
+        continue;
       }
 
       const entry = rawEntry as Record<string, unknown>;
-      const weight = entry.weight;
-      if (typeof weight !== 'number' || !Number.isFinite(weight) || weight <= 0) {
-        return undefined;
+      const rawId = entry.id;
+      const id = typeof rawId === 'string' ? rawId.trim() : '';
+      if (!id) {
+        issues.push(`${prefix} must include a non-empty id.`);
+      } else if (ids.has(id)) {
+        issues.push(`${prefix} uses duplicate id "${id}".`);
+      } else {
+        ids.add(id);
       }
 
-      sum += weight;
+      const weight = entry.weight;
+      if (typeof weight !== 'number' || !Number.isFinite(weight) || weight <= 0) {
+        issues.push(`${prefix} must include a positive numeric weight.`);
+      } else {
+        sum += weight;
+      }
+
+      if (listKey === 'items') {
+        const status = typeof entry.status === 'string' ? entry.status.trim() : '';
+        if (status !== 'todo' && status !== 'in_progress' && status !== 'done') {
+          issues.push(`${prefix} has invalid status "${status || '<missing>'}"; expected todo, in_progress, or done.`);
+        }
+      }
+
+      const dependencyKey = listKey === 'items' ? 'dependsOn' : 'dependencies';
+      const rawDeps = entry[dependencyKey];
+      const deps = Array.isArray(rawDeps)
+        ? rawDeps
+          .map((value) => typeof value === 'string' ? value.trim() : '')
+          .filter((value) => value.length > 0)
+        : [];
+      if (id) {
+        dependenciesById.set(id, deps);
+      }
     }
 
-    return sum;
+    for (const [id, deps] of dependenciesById.entries()) {
+      for (const dep of deps) {
+        if (dep === id) {
+          issues.push(`entry "${id}" cannot depend on itself.`);
+          continue;
+        }
+        if (!ids.has(dep)) {
+          issues.push(`entry "${id}" references unknown dependency "${dep}".`);
+        }
+      }
+    }
+
+    if (hasDependencyCycle(dependenciesById)) {
+      issues.push('contains a dependency cycle.');
+    }
+
+    return { sum, issues, ids };
+  } catch {
+    return {
+      sum: undefined,
+      ids,
+      issues: ['payload is not valid JSON.'],
+    };
+  }
+}
+
+function hasDependencyCycle(dependenciesById: Map<string, string[]>): boolean {
+  const stateById = new Map<string, 'visiting' | 'visited'>();
+
+  const visit = (nodeId: string): boolean => {
+    const current = stateById.get(nodeId);
+    if (current === 'visiting') {
+      return true;
+    }
+    if (current === 'visited') {
+      return false;
+    }
+
+    stateById.set(nodeId, 'visiting');
+    const deps = dependenciesById.get(nodeId) ?? [];
+    for (const dep of deps) {
+      if (!dependenciesById.has(dep)) {
+        continue;
+      }
+      if (visit(dep)) {
+        return true;
+      }
+    }
+    stateById.set(nodeId, 'visited');
+    return false;
+  };
+
+  for (const nodeId of dependenciesById.keys()) {
+    if (visit(nodeId)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function collectSubAgentNodeIds(toolCalls: ReplayToolCallRecord[]): Set<string> {
+  const nodeIds = new Set<string>();
+
+  for (const call of toolCalls) {
+    if (call.status !== 'result' || call.isError) {
+      continue;
+    }
+
+    if (call.toolName === 'subagent_spawn') {
+      const parsed = parseToolCallInput(call.input);
+      const nodeId = parsed && typeof parsed.nodeId === 'string' ? parsed.nodeId.trim() : '';
+      if (nodeId) {
+        nodeIds.add(nodeId);
+      }
+      continue;
+    }
+
+    if (call.toolName === 'subagent_spawn_batch') {
+      const parsed = parseToolCallInput(call.input);
+      const requests = parsed && Array.isArray(parsed.requests) ? parsed.requests : [];
+      for (const rawRequest of requests) {
+        if (!rawRequest || typeof rawRequest !== 'object') {
+          continue;
+        }
+        const request = rawRequest as Record<string, unknown>;
+        const nodeId = typeof request.nodeId === 'string' ? request.nodeId.trim() : '';
+        if (nodeId) {
+          nodeIds.add(nodeId);
+        }
+      }
+    }
+  }
+
+  return nodeIds;
+}
+
+function parseToolCallInput(input: string | undefined): Record<string, unknown> | undefined {
+  if (!input) {
+    return undefined;
+  }
+
+  try {
+    const parsed = JSON.parse(input);
+    if (parsed && typeof parsed === 'object') {
+      return parsed as Record<string, unknown>;
+    }
   } catch {
     return undefined;
   }
+
+  return undefined;
 }
 
 function isWeightTotalValid(value: number): boolean {

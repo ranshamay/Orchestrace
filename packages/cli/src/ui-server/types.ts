@@ -7,6 +7,7 @@ export interface UiServerOptions {
 }
 
 export type WorkState = 'running' | 'completed' | 'failed' | 'cancelled';
+export type ExecutionContext = 'workspace' | 'git-worktree';
 
 export type LlmSessionState =
   | 'queued'
@@ -126,6 +127,8 @@ export interface WorkSession {
   provider: string;
   model: string;
   autoApprove: boolean;
+  executionContext: ExecutionContext;
+  selectedWorktreePath?: string;
   useWorktree: boolean;
   adaptiveConcurrency: boolean;
   batchConcurrency: number;
@@ -142,7 +145,6 @@ export interface WorkSession {
   error?: string;
   output?: { text?: string; planPath?: string; failureType?: string };
   controller: AbortController;
-  cleanupWorktree?: () => Promise<void>;
 }
 
 export interface PersistedWorkSession {
@@ -155,6 +157,8 @@ export interface PersistedWorkSession {
   provider: string;
   model: string;
   autoApprove: boolean;
+  executionContext?: ExecutionContext;
+  selectedWorktreePath?: string;
   useWorktree?: boolean;
   adaptiveConcurrency?: boolean;
   batchConcurrency?: number;
@@ -173,6 +177,8 @@ export interface PersistedWorkSession {
 }
 
 export interface UiPreferences {
+  executionContext: ExecutionContext;
+  selectedWorktreePath?: string;
   useWorktree: boolean;
   adaptiveConcurrency: boolean;
   batchConcurrency: number;
@@ -180,6 +186,8 @@ export interface UiPreferences {
 }
 
 export interface PersistedUiPreferences {
+  executionContext?: ExecutionContext;
+  selectedWorktreePath?: string;
   useWorktree?: boolean;
   adaptiveConcurrency?: boolean;
   batchConcurrency?: number;

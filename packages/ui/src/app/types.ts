@@ -38,6 +38,8 @@ export type SessionLlmControls = {
   model: string;
   workspaceId: string;
   autoApprove: boolean;
+  executionContext: 'workspace' | 'git-worktree';
+  selectedWorktreePath?: string;
   useWorktree: boolean;
   adaptiveConcurrency: boolean;
   batchConcurrency: number;

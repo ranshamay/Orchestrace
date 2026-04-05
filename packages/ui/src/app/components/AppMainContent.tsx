@@ -1,4 +1,4 @@
-import type { AgentTodo, ProviderInfo, WorkSession, Workspace } from '../../lib/api';
+import type { AgentTodo, GitWorktreeInfo, ProviderInfo, WorkSession, Workspace } from '../../lib/api';
 import type { ComposerImageAttachment, ComposerMode, FailureType, LlmSessionStatus, TimelineItem } from '../types';
 import { GraphTabView } from './graph/GraphTabView';
 import { TimelinePanel } from './work/TimelinePanel';
@@ -36,6 +36,9 @@ export type AppMainContentProps = {
   workProvider: string;
   workModel: string;
   autoApprove: boolean;
+  executionContext: 'workspace' | 'git-worktree';
+  selectedWorktreePath: string;
+  availableWorktrees: GitWorktreeInfo[];
   useWorktree: boolean;
   composerText: string;
   setComposerText: (value: string) => void;
@@ -49,7 +52,8 @@ export type AppMainContentProps = {
   providers: ProviderInfo[];
   providerStatuses: Array<{ provider: string; source: string }>;
   activeWorkspaceId: string;
-  onSetUseWorktree: (next: boolean) => void;
+  onSetExecutionContext: (next: 'workspace' | 'git-worktree') => void;
+  onSetSelectedWorktreePath: (next: string) => void;
 };
 
 export function AppMainContent(props: AppMainContentProps) {
@@ -60,8 +64,11 @@ export function AppMainContent(props: AppMainContentProps) {
         providerStatuses={props.providerStatuses}
         workspaces={props.workspaces}
         activeWorkspaceId={props.activeWorkspaceId}
-        useWorktree={props.useWorktree}
-        setUseWorktree={props.onSetUseWorktree}
+        executionContext={props.executionContext}
+        setExecutionContext={props.onSetExecutionContext}
+        selectedWorktreePath={props.selectedWorktreePath}
+        setSelectedWorktreePath={props.onSetSelectedWorktreePath}
+        availableWorktrees={props.availableWorktrees}
       />
     );
   }
@@ -109,6 +116,9 @@ export function AppMainContent(props: AppMainContentProps) {
               workProvider={props.workProvider}
               workModel={props.workModel}
               autoApprove={props.autoApprove}
+              executionContext={props.executionContext}
+              selectedWorktreePath={props.selectedWorktreePath}
+              availableWorktrees={props.availableWorktrees}
               useWorktree={props.useWorktree}
               composerText={props.composerText}
               setComposerText={props.setComposerText}

@@ -33,7 +33,18 @@ export interface Workspace {
   path: string;
 }
 
+export type ExecutionContext = 'workspace' | 'git-worktree';
+
+export interface GitWorktreeInfo {
+  path: string;
+  branch?: string;
+  detached: boolean;
+  isPrimary?: boolean;
+}
+
 export interface UiPreferences {
+  executionContext: ExecutionContext;
+  selectedWorktreePath?: string;
   useWorktree: boolean;
   adaptiveConcurrency: boolean;
   batchConcurrency: number;
@@ -43,6 +54,13 @@ export interface UiPreferences {
 export interface WorkspacesResponse {
   activeWorkspaceId?: string;
   workspaces: Workspace[];
+}
+
+export interface WorktreesResponse {
+  workspaceId: string;
+  workspaceName: string;
+  workspacePath: string;
+  worktrees: GitWorktreeInfo[];
 }
 
 export interface WorkSessionProgress {
@@ -84,6 +102,8 @@ export interface WorkSession {
   provider: string;
   model: string;
   autoApprove: boolean;
+  executionContext?: ExecutionContext;
+  selectedWorktreePath?: string;
   useWorktree?: boolean;
   adaptiveConcurrency?: boolean;
   batchConcurrency?: number;
@@ -244,6 +264,11 @@ export async function fetchWorkspaces(): Promise<WorkspacesResponse> {
   return readJson(await fetch(`${API_BASE}/workspaces`));
 }
 
+export async function fetchWorktrees(workspaceId?: string): Promise<WorktreesResponse> {
+  const query = workspaceId ? `?workspaceId=${encodeURIComponent(workspaceId)}` : '';
+  return readJson(await fetch(`${API_BASE}/worktrees${query}`));
+}
+
 export async function fetchUiPreferences(): Promise<{ preferences: UiPreferences }> {
   return readJson(await fetch(`${API_BASE}/ui/preferences`));
 }
@@ -282,6 +307,8 @@ export async function startWork(payload: {
   provider: string;
   model?: string;
   autoApprove: boolean;
+  executionContext?: ExecutionContext;
+  selectedWorktreePath?: string;
   useWorktree?: boolean;
   adaptiveConcurrency?: boolean;
   batchConcurrency?: number;

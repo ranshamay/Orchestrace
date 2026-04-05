@@ -46,7 +46,11 @@ export function buildSessionTraceExport(
   lines.push(`LLM status: ${llmStatus.label}${llmStatus.detail ? ` - ${llmStatus.detail}` : ''}`);
   lines.push(`Created: ${session.createdAt}`);
   lines.push(`Updated: ${session.updatedAt}`);
-  lines.push(`Worktree enabled: ${session.useWorktree ? 'yes' : 'no'}`);
+  lines.push(`Execution context: ${session.executionContext ?? (session.useWorktree ? 'git-worktree' : 'workspace')}`);
+  if (session.selectedWorktreePath) {
+    lines.push(`Selected worktree path: ${session.selectedWorktreePath}`);
+  }
+  lines.push(`Worktree enabled (legacy): ${session.useWorktree ? 'yes' : 'no'}`);
   if (session.worktreePath) {
     lines.push(`Worktree path: ${session.worktreePath}`);
   }

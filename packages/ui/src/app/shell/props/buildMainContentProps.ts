@@ -32,6 +32,9 @@ type Params = {
   workProvider: string;
   workModel: string;
   autoApprove: boolean;
+  executionContext: AppMainContentProps['executionContext'];
+  selectedWorktreePath: string;
+  availableWorktrees: AppMainContentProps['availableWorktrees'];
   useWorktree: boolean;
   composerText: string;
   setComposerText: (value: string) => void;
@@ -40,7 +43,8 @@ type Params = {
   providers: AppMainContentProps['providers'];
   providerStatuses: AppMainContentProps['providerStatuses'];
   activeWorkspaceId: string;
-  onSetUseWorktree: (next: boolean) => void;
+  onSetExecutionContext: AppMainContentProps['onSetExecutionContext'];
+  onSetSelectedWorktreePath: AppMainContentProps['onSetSelectedWorktreePath'];
 };
 
 export function buildMainContentProps(params: Params): AppMainContentProps {
@@ -75,6 +79,9 @@ export function buildMainContentProps(params: Params): AppMainContentProps {
     workProvider: params.workProvider,
     workModel: params.workModel,
     autoApprove: params.autoApprove,
+    executionContext: params.executionContext,
+    selectedWorktreePath: params.selectedWorktreePath,
+    availableWorktrees: params.availableWorktrees,
     useWorktree: params.useWorktree,
     composerText: params.composerText,
     setComposerText: params.setComposerText,
@@ -88,6 +95,7 @@ export function buildMainContentProps(params: Params): AppMainContentProps {
     providers: params.providers,
     providerStatuses: params.providerStatuses,
     activeWorkspaceId: params.activeWorkspaceId,
-    onSetUseWorktree: params.onSetUseWorktree,
+    onSetExecutionContext: params.onSetExecutionContext,
+    onSetSelectedWorktreePath: params.onSetSelectedWorktreePath,
   };
 }

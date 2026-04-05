@@ -13,8 +13,8 @@ Vendor-agnostic agent orchestration system. Define task graphs (or a single prom
 │  DAG Engine │ Scheduler │ Orchestrator │ Validator        │
 ├──────────────────┬──────────────────────────────────────┤
 │ @orchestrace/    │         @orchestrace/sandbox          │
-│    provider      │  Git Worktrees │ Docker Containers    │
-│  (pi-ai BYOK)   │  Parallel Isolation │ Cloud Runtime   │
+│    provider      │  Native Git Worktree helpers          │
+│  (pi-ai BYOK)   │  Docker Containers / Cloud Runtime     │
 └──────────────────┴──────────────────────────────────────┘
 ```
 
@@ -24,7 +24,7 @@ Vendor-agnostic agent orchestration system. Define task graphs (or a single prom
 |---------|-------------|
 | `@orchestrace/core` | DAG engine, dependency scheduler, orchestration loop, validation |
 | `@orchestrace/provider` | LLM abstraction wrapping [pi-ai](https://www.npmjs.com/package/@mariozechner/pi-ai) — BYOK multi-provider |
-| `@orchestrace/sandbox` | Git worktree isolation + Docker container management |
+| `@orchestrace/sandbox` | Optional native git worktree and Docker sandbox helpers |
 | `@orchestrace/cli` | CLI to execute task graph plans |
 
 ## Quick Start

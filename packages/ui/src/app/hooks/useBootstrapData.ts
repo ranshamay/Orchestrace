@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import {
+  type ExecutionContext,
   fetchGithubAuthStatus,
   fetchProviders,
   fetchSessions,
@@ -34,6 +35,8 @@ export function useBootstrapData() {
     model: '',
     workspaceId: '',
     autoApprove: true,
+    executionContext: 'workspace',
+    selectedWorktreePath: undefined,
     useWorktree: false,
     adaptiveConcurrency: false,
     batchConcurrency: 8,
@@ -44,6 +47,8 @@ export function useBootstrapData() {
   const [workModel, setWorkModel] = useState('');
   const [workWorkspaceId, setWorkWorkspaceId] = useState('');
   const [autoApprove, setAutoApprove] = useState(true);
+  const [executionContext, setExecutionContext] = useState<ExecutionContext>('workspace');
+  const [selectedWorktreePath, setSelectedWorktreePath] = useState<string>('');
   const [useWorktree, setUseWorktree] = useState(false);
   const [adaptiveConcurrency, setAdaptiveConcurrency] = useState(false);
   const [batchConcurrency, setBatchConcurrency] = useState(8);
@@ -106,6 +111,8 @@ export function useBootstrapData() {
         const preferences = preferencesResult.status === 'fulfilled'
           ? preferencesResult.value.preferences
           : {
+              executionContext: 'workspace' as const,
+              selectedWorktreePath: undefined,
               useWorktree: false,
               adaptiveConcurrency: false,
               batchConcurrency: 8,
@@ -119,12 +126,16 @@ export function useBootstrapData() {
         const connectedProvider = providersState?.statuses.find((status) => status.source !== 'none')?.provider || '';
         const defaultProvider = connectedProvider || providersState?.defaults.provider || providersState?.providers[0]?.id || '';
         const defaultWorkspace = workspacesState?.activeWorkspaceId || workspacesState?.workspaces[0]?.id || '';
+        const defaultExecutionContext: ExecutionContext = preferences.executionContext
+          ?? (preferences.useWorktree ? 'git-worktree' : 'workspace');
         const initialControls: SessionLlmControls = {
           provider: defaultProvider,
           model: '',
           workspaceId: defaultWorkspace,
           autoApprove: true,
-          useWorktree: preferences.useWorktree,
+          executionContext: defaultExecutionContext,
+          selectedWorktreePath: preferences.selectedWorktreePath,
+          useWorktree: defaultExecutionContext === 'git-worktree',
           adaptiveConcurrency: preferences.adaptiveConcurrency,
           batchConcurrency: preferences.batchConcurrency,
           batchMinConcurrency: preferences.batchMinConcurrency,
@@ -135,6 +146,8 @@ export function useBootstrapData() {
         setWorkModel(initialControls.model);
         setWorkWorkspaceId(initialControls.workspaceId);
         setAutoApprove(initialControls.autoApprove);
+        setExecutionContext(initialControls.executionContext);
+        setSelectedWorktreePath(initialControls.selectedWorktreePath ?? '');
         setUseWorktree(initialControls.useWorktree);
         setAdaptiveConcurrency(initialControls.adaptiveConcurrency);
         setBatchConcurrency(initialControls.batchConcurrency);
@@ -182,6 +195,10 @@ export function useBootstrapData() {
     setWorkWorkspaceId,
     autoApprove,
     setAutoApprove,
+    executionContext,
+    setExecutionContext,
+    selectedWorktreePath,
+    setSelectedWorktreePath,
     useWorktree,
     setUseWorktree,
     adaptiveConcurrency,
