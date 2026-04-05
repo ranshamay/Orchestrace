@@ -10,7 +10,7 @@ type Props = {
   defaultExpanded?: boolean;
 };
 
-export function ToolChip({ item, isDark, defaultExpanded }: Props) {
+export function ToolChip({ item, isDark: _isDark, defaultExpanded }: Props) {
   const [expanded, setExpanded] = useState(defaultExpanded ?? item.toolStatus === 'error');
   const Icon = getToolIcon(item.toolName ?? '');
   const displayName = getToolDisplayName(item.toolName ?? '');

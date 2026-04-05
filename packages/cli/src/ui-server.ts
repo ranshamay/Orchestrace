@@ -3481,6 +3481,13 @@ function normalizeAgentToolPhase(value: string): AgentToolPhase | undefined {
   return undefined;
 }
 
+function hasImplementationGraphActivity(session: WorkSession): boolean {
+  return session.agentGraph.some((node) => {
+    const status = node.status ?? 'pending';
+    return status === 'running' || status === 'completed' || status === 'failed';
+  });
+}
+
 function resolveSessionToolMode(session: WorkSession): AgentToolPhase {
   const phase = session.llmStatus.phase;
   if (phase === 'planning' || phase === 'implementation') {
@@ -3491,12 +3498,20 @@ function resolveSessionToolMode(session: WorkSession): AgentToolPhase {
     case 'queued':
     case 'planning':
     case 'awaiting-approval':
-      return 'planning';
     case 'analyzing':
     case 'thinking':
-      return session.agentGraph.length > 0 ? 'implementation' : 'planning';
-    default:
+      return 'planning';
+    case 'implementing':
+    case 'using-tools':
+    case 'validating':
+    case 'retrying':
       return 'implementation';
+    case 'completed':
+    case 'failed':
+    case 'cancelled':
+      return hasImplementationGraphActivity(session) ? 'implementation' : 'planning';
+    default:
+      return 'planning';
   }
 }
 
@@ -3587,6 +3602,7 @@ function deriveLlmStatusFromDagEvent(event: DagEvent, updatedAt: string): Sessio
       return createLlmStatus('analyzing', updatedAt, {
         detail: 'Reviewing prompt and dependencies.',
         taskId: event.taskId,
+        phase: 'planning',
       });
     case 'task:stream-delta':
       return createLlmStatus('thinking', updatedAt, {
@@ -3598,21 +3614,25 @@ function deriveLlmStatusFromDagEvent(event: DagEvent, updatedAt: string): Sessio
       return createLlmStatus('planning', updatedAt, {
         detail: 'Plan drafted and saved.',
         taskId: event.taskId,
+        phase: 'planning',
       });
     case 'task:approval-requested':
       return createLlmStatus('awaiting-approval', updatedAt, {
         detail: 'Waiting for plan approval.',
         taskId: event.taskId,
+        phase: 'planning',
       });
     case 'task:approved':
       return createLlmStatus('implementing', updatedAt, {
         detail: 'Plan approved. Starting implementation.',
         taskId: event.taskId,
+        phase: 'implementation',
       });
     case 'task:implementation-attempt':
       return createLlmStatus('implementing', updatedAt, {
         detail: `Implementation attempt ${event.attempt}/${event.maxAttempts}.`,
         taskId: event.taskId,
+        phase: 'implementation',
       });
     case 'task:tool-call':
       if (event.status !== 'started') {
@@ -3627,22 +3647,26 @@ function deriveLlmStatusFromDagEvent(event: DagEvent, updatedAt: string): Sessio
       return createLlmStatus('validating', updatedAt, {
         detail: 'Running verification checks.',
         taskId: event.taskId,
+        phase: 'implementation',
       });
     case 'task:verification-failed':
       return createLlmStatus('retrying', updatedAt, {
         detail: `Verification failed on attempt ${event.attempt}.`,
         taskId: event.taskId,
+        phase: 'implementation',
       });
     case 'task:retrying':
       return createLlmStatus('retrying', updatedAt, {
         detail: `Retrying (${event.attempt}/${event.maxRetries}).`,
         taskId: event.taskId,
+        phase: 'implementation',
       });
     case 'task:completed':
     case 'graph:completed':
       return createLlmStatus('completed', updatedAt, {
         detail: 'Run completed successfully.',
         taskId: 'taskId' in event ? event.taskId : undefined,
+        phase: 'implementation',
       });
     case 'task:failed':
     case 'graph:failed':
@@ -3823,6 +3847,15 @@ function emitSubAgentWorkerEvent(params: {
   if (params.status === 'started') {
     params.session.llmStatus = createLlmStatus('using-tools', params.session.updatedAt, {
       detail: params.nodeId ? `Running sub-agent ${params.nodeId}.` : 'Running sub-agent.',
+      taskId: params.taskId,
+      phase: params.phase,
+    });
+  } else {
+    const detail = params.status === 'failed'
+      ? (params.nodeId ? `Sub-agent ${params.nodeId} failed.` : 'Sub-agent failed.')
+      : (params.nodeId ? `Sub-agent ${params.nodeId} completed.` : 'Sub-agent completed.');
+    params.session.llmStatus = createLlmStatus('using-tools', params.session.updatedAt, {
+      detail,
       taskId: params.taskId,
       phase: params.phase,
     });
@@ -4208,6 +4241,10 @@ function applyAgentGraphProgressFromToolEvent(
   }
 
   if (session.agentGraph.length === 0) {
+    return false;
+  }
+
+  if (resolveSessionToolMode(session) !== 'implementation') {
     return false;
   }
 
@@ -4678,16 +4715,10 @@ function computeSessionProgress(session: WorkSession, todos: AgentTodoItem[]): {
   const graph = computeGraphProgressFraction(session);
   const checklist = computeTodoProgressFraction(todos);
   const llm = clampUnit(llmStateProgressFraction(session.llmStatus.state));
-  const implementationStarted = Boolean(
-    session.llmStatus.phase === 'implementation'
-    || session.llmStatus.state === 'implementing'
-    || session.llmStatus.state === 'using-tools'
-    || session.llmStatus.state === 'validating'
-    || session.llmStatus.state === 'retrying'
-    || (graph && (graph.completed > 0 || graph.running > 0 || graph.failed > 0)),
-  );
-  const planningFraction = implementationStarted ? 1 : (checklist?.fraction ?? llm);
-  const implementationFraction = graph?.fraction ?? llm;
+  const mode = resolveSessionToolMode(session);
+  const isPlanningMode = mode === 'planning';
+  const planningFraction = isPlanningMode ? (checklist?.fraction ?? llm) : 1;
+  const implementationFraction = isPlanningMode ? 0 : (graph?.fraction ?? llm);
 
   let source: SessionProgressSource;
   let confidence: SessionProgressConfidence;
@@ -4696,7 +4727,14 @@ function computeSessionProgress(session: WorkSession, todos: AgentTodoItem[]): {
   let implementationWeight = 50;
   let weightSource: 'configured' | 'planning-only' | 'implementation-only' | 'fallback' = 'fallback';
 
-  if (graph && checklist) {
+  if (isPlanningMode) {
+    source = checklist ? 'todos' : 'llm';
+    confidence = checklist ? 'medium' : 'low';
+    planningWeight = 100;
+    implementationWeight = 0;
+    weightSource = 'planning-only';
+    overallFraction = planningFraction;
+  } else if (graph && checklist) {
     source = 'graph+todos';
     confidence = 'high';
     planningWeight = PHASE_PROGRESS_PLAN_WEIGHT_DEFAULT;
@@ -4704,30 +4742,33 @@ function computeSessionProgress(session: WorkSession, todos: AgentTodoItem[]): {
     weightSource = 'configured';
     const total = planningWeight + implementationWeight;
     overallFraction = total > 0
-      ? ((planningFraction * planningWeight) + (graph.fraction * implementationWeight)) / total
-      : Math.min(graph.fraction, planningFraction);
+      ? ((planningFraction * planningWeight) + (implementationFraction * implementationWeight)) / total
+      : Math.min(implementationFraction, planningFraction);
   } else if (graph) {
     source = 'graph';
     confidence = 'medium';
     planningWeight = 0;
     implementationWeight = 100;
     weightSource = 'implementation-only';
-    overallFraction = graph.fraction;
+    overallFraction = implementationFraction;
   } else if (checklist) {
-    source = 'todos';
-    confidence = 'medium';
-    planningWeight = 100;
-    implementationWeight = 0;
-    weightSource = 'planning-only';
-    overallFraction = planningFraction;
+    source = 'llm';
+    confidence = 'low';
+    planningWeight = PHASE_PROGRESS_PLAN_WEIGHT_DEFAULT;
+    implementationWeight = PHASE_PROGRESS_IMPLEMENTATION_WEIGHT_DEFAULT;
+    weightSource = 'configured';
+    overallFraction = ((planningFraction * planningWeight)
+      + (implementationFraction * implementationWeight))
+      / (planningWeight + implementationWeight);
   } else {
     source = 'llm';
     confidence = 'low';
-    overallFraction = implementationStarted
-      ? ((planningFraction * PHASE_PROGRESS_PLAN_WEIGHT_DEFAULT)
-        + (implementationFraction * PHASE_PROGRESS_IMPLEMENTATION_WEIGHT_DEFAULT))
-        / (PHASE_PROGRESS_PLAN_WEIGHT_DEFAULT + PHASE_PROGRESS_IMPLEMENTATION_WEIGHT_DEFAULT)
-      : llm;
+    planningWeight = PHASE_PROGRESS_PLAN_WEIGHT_DEFAULT;
+    implementationWeight = PHASE_PROGRESS_IMPLEMENTATION_WEIGHT_DEFAULT;
+    weightSource = 'configured';
+    overallFraction = ((planningFraction * planningWeight)
+      + (implementationFraction * implementationWeight))
+      / (planningWeight + implementationWeight);
   }
 
   const planningPercent = Math.floor(planningFraction * 100);
@@ -4809,6 +4850,7 @@ function serializeWorkSession(session: WorkSession, todos: AgentTodoItem[] = [])
     createdAt: session.createdAt,
     updatedAt: session.updatedAt,
     status: session.status,
+    mode: resolveSessionToolMode(session),
     llmStatus: session.llmStatus,
     taskStatus: session.taskStatus,
     events: session.events,

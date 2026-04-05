@@ -14,7 +14,7 @@ export function selectSessionViewState(selectedSession?: WorkSession) {
   const selectedSessionRunning = selectedSession ? normalizeSessionStatus(selectedSession.status) === 'running' : false;
   const selectedFailureType = selectedSessionRunning ? undefined : resolveSessionFailureType(selectedSession);
   const composerMode: ComposerMode = selectedSession
-    ? (selectedSession.mode ?? fallbackComposerModeFromLlmState(selectedLlmStatus.state))
+    ? (selectedSession.mode ?? fallbackComposerModeFromLlmStatus(selectedLlmStatus))
     : 'run';
 
   return {
@@ -25,8 +25,12 @@ export function selectSessionViewState(selectedSession?: WorkSession) {
   };
 }
 
-function fallbackComposerModeFromLlmState(state: string): ComposerMode {
-  const normalized = state.toLowerCase();
+function fallbackComposerModeFromLlmStatus(status: { state: string; phase?: 'planning' | 'implementation' }): ComposerMode {
+  if (status.phase === 'planning' || status.phase === 'implementation') {
+    return status.phase;
+  }
+
+  const normalized = status.state.toLowerCase();
 
   if (
     normalized === 'planning'

@@ -53,6 +53,18 @@ export function GraphTabView({
     direction: 'normal',
   });
 
+  const graphHint = useMemo(() => {
+    if (!selectedSessionId) {
+      return 'Center graph is the execution control plane. Configure LLM controls here, then start a new run from the composer.';
+    }
+
+    if (selectedSessionRunning) {
+      return 'Center graph is the execution control plane. Follow active progress here and use the composer for follow-up chat on the selected run.';
+    }
+
+    return 'Center graph is the execution control plane. Review this run here, then use the composer to start a new run or continue this run.';
+  }, [selectedSessionId, selectedSessionRunning]);
+
   return (
     <div className="flex h-full flex-col lg:flex-row">
       <aside
@@ -82,7 +94,7 @@ export function GraphTabView({
         <header className="border-b border-slate-200 p-4 dark:border-slate-800">
           <div className="flex items-start justify-between gap-3">
             <div className="text-xs text-slate-500 dark:text-slate-400">
-              Center graph is the execution control plane. Edit LLM controls here, then use the left panel composer to start a run or chat with the selected run.
+              {graphHint}
             </div>
             <button
               className="shrink-0 rounded border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold uppercase tracking-wide text-slate-600 hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300 dark:hover:bg-slate-800"

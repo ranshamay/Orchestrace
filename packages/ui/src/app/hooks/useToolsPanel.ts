@@ -26,7 +26,10 @@ export function useToolsPanel(showToolsPanel: boolean, selectedSessionId: string
 
     const loadTools = async () => {
       try {
-        const requestedMode = composerMode !== 'run' ? composerMode : undefined;
+        const requestedMode: 'chat' | 'planning' | 'implementation' | undefined =
+          selectedSessionMode && selectedSessionMode !== 'run'
+            ? selectedSessionMode
+            : (composerMode !== 'run' ? composerMode : undefined);
         const toolsState = await fetchWorkTools(selectedSessionId, requestedMode);
         if (cancelled) {
           return;
