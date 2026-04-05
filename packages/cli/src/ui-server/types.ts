@@ -169,10 +169,25 @@ export interface PersistedWorkSession {
   output?: { text?: string; planPath?: string; failureType?: string };
 }
 
+export interface UiPreferences {
+  useWorktree: boolean;
+  adaptiveConcurrency: boolean;
+  batchConcurrency: number;
+  batchMinConcurrency: number;
+}
+
+export interface PersistedUiPreferences {
+  useWorktree?: boolean;
+  adaptiveConcurrency?: boolean;
+  batchConcurrency?: number;
+  batchMinConcurrency?: number;
+}
+
 export interface PersistedUiState {
   version: 1;
   updatedAt: string;
   sessions: PersistedWorkSession[];
   chats: SessionChatThread[];
   todos: Array<{ sessionId: string; items: AgentTodoItem[] }>;
+  preferences?: PersistedUiPreferences;
 }
