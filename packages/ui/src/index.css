@@ -1,3 +1,9 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+body.is-horizontal-resizing {
+  cursor: col-resize;
+  user-select: none;
+  -webkit-user-select: none;
+}
