@@ -59,6 +59,7 @@ import type {
   WorkState,
   LlmSessionState,
   ExecutionContext,
+  SessionCreationReason,
 } from './ui-server/types.js';
 import { WorkspaceManager } from './workspace-manager.js';
 
@@ -302,6 +303,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     adaptiveConcurrency?: boolean;
     batchConcurrency?: number;
     batchMinConcurrency?: number;
+    creationReason?: SessionCreationReason;
+    sourceSessionId?: string;
   }): Promise<{ id: string } | { error: string; statusCode: number }> {
     const promptParts = cloneChatContentParts(request.promptParts ?? []);
     const prompt = asString(request.prompt);
@@ -385,6 +388,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       batchMinConcurrency,
       worktreePath: selectedWorktreePath,
       worktreeBranch: selectedWorktreeBranch,
+      creationReason: request.creationReason ?? 'start',
+      sourceSessionId: asString(request.sourceSessionId) || undefined,
       createdAt,
       updatedAt: createdAt,
       status: 'running',
@@ -1187,6 +1192,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           adaptiveConcurrency,
           batchConcurrency,
           batchMinConcurrency,
+          creationReason: 'start',
         });
 
         if ('error' in result) {
@@ -1244,6 +1250,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           adaptiveConcurrency: sourceSession.adaptiveConcurrency,
           batchConcurrency: sourceSession.batchConcurrency,
           batchMinConcurrency: sourceSession.batchMinConcurrency,
+          creationReason: 'retry',
+          sourceSessionId: id,
         });
 
         if ('error' in result) {
@@ -2749,6 +2757,8 @@ function toPersistedSession(session: WorkSession): PersistedWorkSession {
     batchMinConcurrency: session.batchMinConcurrency,
     worktreePath: session.worktreePath,
     worktreeBranch: session.worktreeBranch,
+    creationReason: session.creationReason,
+    sourceSessionId: session.sourceSessionId,
     createdAt: session.createdAt,
     updatedAt: session.updatedAt,
     status: session.status,
@@ -2799,6 +2809,8 @@ function hydratePersistedSession(session: PersistedWorkSession): WorkSession {
     ),
     worktreePath: asString(session.worktreePath) || undefined,
     worktreeBranch: asString(session.worktreeBranch) || undefined,
+    creationReason: normalizeSessionCreationReason(session.creationReason),
+    sourceSessionId: asString(session.sourceSessionId) || undefined,
     agentGraph: normalizeSessionAgentGraphNodes(session.agentGraph),
     status: resumedStatus,
     llmStatus: resumedLlmStatus,
@@ -3311,7 +3323,7 @@ function normalizePositiveSetting(value: unknown, fallback: number): number {
 function resolveLongTurnTimeoutMs(): number {
   return resolveConfiguredTimeoutMs(
     ['ORCHESTRACE_LLM_LONG_TURN_TIMEOUT_MS', 'ORCHESTRACE_LLM_TIMEOUT_MS'],
-    300_000,
+    600_000,
   );
 }
 
@@ -3356,6 +3368,15 @@ function normalizeExecutionContext(raw: unknown): ExecutionContext | undefined {
     return 'git-worktree';
   }
   return undefined;
+}
+
+function normalizeSessionCreationReason(raw: unknown): SessionCreationReason {
+  const value = asString(raw).trim().toLowerCase();
+  if (value === 'retry') {
+    return 'retry';
+  }
+
+  return 'start';
 }
 
 function resolveExecutionContextDefault(): ExecutionContext {
@@ -4244,10 +4265,6 @@ function applyAgentGraphProgressFromToolEvent(
     return false;
   }
 
-  if (resolveSessionToolMode(session) !== 'implementation') {
-    return false;
-  }
-
   const pendingNodeIds = getPendingSubagentNodeIds(pendingSubagentNodeIdsBySession, session.id);
 
   if (event.status === 'started') {
@@ -4847,6 +4864,8 @@ function serializeWorkSession(session: WorkSession, todos: AgentTodoItem[] = [])
     batchMinConcurrency: session.batchMinConcurrency,
     worktreePath: session.worktreePath,
     worktreeBranch: session.worktreeBranch,
+    creationReason: session.creationReason,
+    sourceSessionId: session.sourceSessionId,
     createdAt: session.createdAt,
     updatedAt: session.updatedAt,
     status: session.status,

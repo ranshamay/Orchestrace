@@ -1,4 +1,4 @@
-import { MessageSquare, Wrench } from 'lucide-react';
+import { Copy, MessageSquare, Wrench } from 'lucide-react';
 import type { WorkSession } from '../../../lib/api';
 import type { FailureType, LlmSessionStatus, TimelineItem } from '../../types';
 import { Loader2 } from 'lucide-react';
@@ -26,6 +26,8 @@ type Props = {
   timelineItems: TimelineItem[];
   composer: React.ReactNode;
   isDark: boolean;
+  copyTraceState: 'idle' | 'copied' | 'failed';
+  onCopyTrace: () => void;
 };
 
 export function TimelinePanel(props: Props) {
@@ -50,6 +52,8 @@ export function TimelinePanel(props: Props) {
     timelineItems,
     composer,
     isDark,
+    copyTraceState,
+    onCopyTrace,
   } = props;
 
   const handleToggleTools = (event: MouseEvent<HTMLButtonElement>) => {
@@ -75,6 +79,21 @@ export function TimelinePanel(props: Props) {
             {selectedSessionRunning && <span className="inline-flex items-center gap-1 rounded bg-blue-100 px-1.5 py-0.5 text-[10px] font-semibold normal-case tracking-normal text-blue-700 dark:bg-blue-900/40 dark:text-blue-300"><Loader2 className="h-3 w-3 animate-spin" />In progress</span>}
           </div>
           <div className="flex items-center gap-1.5">
+            <button
+              className={`inline-flex items-center gap-1 rounded border px-2 py-1 text-[10px] disabled:opacity-50 ${
+                copyTraceState === 'copied'
+                  ? 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300'
+                  : copyTraceState === 'failed'
+                    ? 'border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-300'
+                    : 'border-slate-200 bg-white text-slate-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200'
+              }`}
+              disabled={!selectedSessionId}
+              onClick={onCopyTrace}
+              type="button"
+            >
+              <Copy className="h-3 w-3" />
+              {copyTraceState === 'copied' ? 'Copied' : copyTraceState === 'failed' ? 'Copy failed' : 'Copy Chat'}
+            </button>
             <button aria-label="Toggle tool list" className={`inline-flex items-center gap-1 rounded border px-2 py-1 text-[10px] disabled:opacity-50 ${showToolsPanel ? 'border-indigo-300 bg-indigo-50 text-indigo-700 dark:border-indigo-800 dark:bg-indigo-950/40 dark:text-indigo-300' : 'border-slate-200 bg-white text-slate-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200'}`} disabled={!selectedSessionId} onClick={handleToggleTools} title="Show currently available tools" type="button"><Wrench className="h-3 w-3" />Tools</button>
           </div>
         </div>

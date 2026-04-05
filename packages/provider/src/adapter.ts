@@ -11,7 +11,7 @@ import type {
 } from './types.js';
 import { createContext, normalizeModelEndpoint } from './adapter/context.js';
 import { executeWithOptionalTools } from './adapter/tools.js';
-import { resolveTimeoutMs, createTimeoutSignal, mapTimeoutError } from './adapter/timeout.js';
+import { resolveTimeoutMs, mapTimeoutError } from './adapter/timeout.js';
 import { resolveEmptyResponseRetries } from './adapter/retry.js';
 import { summarizePromptInput, logFailureDump } from './adapter/failure.js';
 import { mergeUsage } from './adapter/usage.js';
@@ -46,10 +46,6 @@ export class PiAiAdapter implements LlmAdapter {
             options.reasoning = request.reasoning;
           }
           const timeoutMs = resolveTimeoutMs(request.timeoutMs);
-          const timeoutSignal = createTimeoutSignal(signal ?? request.signal, timeoutMs);
-          if (timeoutSignal.signal) {
-            options.signal = timeoutSignal.signal;
-          }
           if (activeApiKey) {
             options.apiKey = activeApiKey;
           }
@@ -61,7 +57,8 @@ export class PiAiAdapter implements LlmAdapter {
               options,
               completionOptions,
               toolset: request.toolset,
-              signal: timeoutSignal.signal,
+              signal: signal ?? request.signal,
+              timeoutMs,
               onUsage: (value) => {
                 hasUsage = true;
                 mergeUsage(usage, value);
@@ -89,8 +86,6 @@ export class PiAiAdapter implements LlmAdapter {
               message: mapped.message,
               cause: error,
             });
-          } finally {
-            timeoutSignal.cleanup();
           }
 
           let text = '';

@@ -34,6 +34,7 @@ export interface Workspace {
 }
 
 export type ExecutionContext = 'workspace' | 'git-worktree';
+export type SessionCreationReason = 'start' | 'retry';
 
 export interface GitWorktreeInfo {
   path: string;
@@ -110,6 +111,8 @@ export interface WorkSession {
   batchMinConcurrency?: number;
   worktreePath?: string;
   worktreeBranch?: string;
+  creationReason?: SessionCreationReason;
+  sourceSessionId?: string;
   createdAt: string;
   updatedAt: string;
   status: string;

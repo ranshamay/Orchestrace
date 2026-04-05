@@ -96,6 +96,12 @@ export default function App() {
   const { sessionStatusSummary, failureTypeSummary } = useMemo(() => selectSidebarSummaries(sessions), [sessions]);
 
   useEffect(() => {
+    if (copyTraceState.state !== 'copied') return;
+    const timer = setTimeout(() => setCopyTraceState({ sessionId: '', state: 'idle' }), 2200);
+    return () => clearTimeout(timer);
+  }, [copyTraceState]);
+
+  useEffect(() => {
     if (!bootstrapComplete) {
       return;
     }
@@ -210,6 +216,8 @@ export default function App() {
       useWorktree: next === 'git-worktree',
     }),
     onSetSelectedWorktreePath: (next) => updateActiveLlmControls({ selectedWorktreePath: next }),
+    copyTraceState: copyTraceState.sessionId === selectedSessionId ? copyTraceState.state : 'idle',
+    setCopyTraceState: (state) => setCopyTraceState({ sessionId: selectedSessionId, state }),
   });
 
   const llmModalProps = buildLlmModalProps({

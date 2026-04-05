@@ -37,6 +37,10 @@ export function buildSessionTraceExport(
   lines.push('Orchestrace Chat Trace');
   lines.push(`Exported at: ${new Date().toISOString()}`);
   lines.push(`Run ID: ${session.id}`);
+  lines.push(`Creation reason: ${session.creationReason ?? 'unknown'}`);
+  if (session.sourceSessionId) {
+    lines.push(`Source session: ${session.sourceSessionId}`);
+  }
   lines.push(`Workspace: ${session.workspaceName} (${session.workspacePath})`);
   lines.push(`Provider/Model: ${session.provider}/${session.model}`);
   lines.push(`Status: ${session.status}`);

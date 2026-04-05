@@ -86,6 +86,7 @@ export function SessionSidebar(props: SessionSidebarProps) {
 
         {sessions.map((session) => {
           const isSelected = selectedSessionId === session.id;
+          const lineageLabel = formatSessionLineageLabel(session);
           const llmStatus = resolveLlmStatus(session);
           const sessionFailureType = resolveSessionFailureType(session);
           const statusFallbackPercent = normalizeSessionStatus(session.status) === 'completed' ? 100 : 0;
@@ -116,7 +117,10 @@ export function SessionSidebar(props: SessionSidebarProps) {
                   <span className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${sessionStatusBadgeClass(session.status, isSelected)}`}>{formatSessionStatus(session.status)}</span>
                 </div>
                 <div className={`mt-1 flex items-center justify-between gap-2 font-mono text-[10px] ${isSelected ? 'text-blue-100' : 'text-slate-500 dark:text-slate-400'}`}>
-                  <span>run {compactRunId(session.id)}</span>
+                  <div className="min-w-0">
+                    <div>run {compactRunId(session.id)}</div>
+                    {lineageLabel && <div className="truncate font-sans text-[9px] uppercase tracking-wide">{lineageLabel}</div>}
+                  </div>
                   <div className="flex items-center gap-1">
                     {sessionFailureType && <span className={`rounded px-1.5 py-0.5 font-sans font-semibold uppercase tracking-wide ${failureTypeBadgeClass(sessionFailureType, isSelected)}`}>{formatFailureTypeLabel(sessionFailureType)}</span>}
                     {llmStatus.phase && <span className={`rounded px-1.5 py-0.5 font-sans font-semibold uppercase tracking-wide ${llmPhaseBadgeClass(llmStatus.phase, isSelected)}`}>{llmPhaseLabel(llmStatus.phase)}</span>}
@@ -236,4 +240,21 @@ function progressBadgeClass(percent: number, selected: boolean): string {
   }
 
   return 'bg-slate-200 text-slate-600 dark:bg-slate-800 dark:text-slate-300';
+}
+
+function formatSessionLineageLabel(session: WorkSession): string | undefined {
+  const sourceSessionId = session.sourceSessionId?.trim();
+  if (sourceSessionId) {
+    return `retry of ${compactRunId(sourceSessionId)}`;
+  }
+
+  if (session.creationReason === 'retry') {
+    return 'retry';
+  }
+
+  if (session.creationReason === 'start') {
+    return 'started';
+  }
+
+  return undefined;
 }

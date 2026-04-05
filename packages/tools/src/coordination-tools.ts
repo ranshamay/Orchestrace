@@ -31,13 +31,13 @@ const todoStatusSchema = Type.Union([
   Type.Literal('finished'),
   Type.Literal('closed'),
   Type.Literal('resolved'),
-]);
+], { description: 'Task status. Use "todo"/"pending"/"backlog"/"open" for not-started, "in_progress"/"doing"/"active"/"wip" for in-progress, or "done"/"completed"/"finished"/"closed"/"resolved" for complete.' });
 
 const modeSchema = Type.Union([
   Type.Literal('chat'),
   Type.Literal('planning'),
   Type.Literal('implementation'),
-]);
+], { description: 'Session mode: "chat" for conversational responses, "planning" for creating an execution plan, or "implementation" for executing the plan.' });
 
 const SUBAGENT_CONTEXT_MAX_FILES = 3;
 const SUBAGENT_CONTEXT_MAX_CHARS_PER_FILE = 1200;
@@ -58,7 +58,7 @@ const PROMPT_FILE_PATH_PATTERN = /(?:^|[\s`"'])((?:\.?\.?\/)?[A-Za-z0-9._-]+(?:\
 const subAgentContextPacketSchema = Type.Object({
   objective: Type.String({ minLength: 1 }),
   boundaries: Type.Optional(Type.Object({
-    writePolicy: Type.Optional(Type.Union([Type.Literal('none'), Type.Literal('scoped'), Type.Literal('full')])),
+    writePolicy: Type.Optional(Type.Union([Type.Literal('none'), Type.Literal('read_only'), Type.Literal('scoped'), Type.Literal('full')], { description: 'File write policy: "none" or "read_only" (no writes), "scoped" (write within cwd), or "full" (unrestricted). Defaults to scoped if omitted.' })),
     allowedTools: Type.Optional(Type.Array(Type.String())),
     timeoutMs: Type.Optional(Type.Number({ minimum: 1 })),
   })),
@@ -284,7 +284,7 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
                   Type.Literal('low'),
                   Type.Literal('medium'),
                   Type.Literal('high'),
-                ]),
+                ], { description: 'LLM reasoning effort: "minimal" for simple tasks, "low"/"medium" for moderate complexity, "high" for complex multi-step reasoning.' }),
               ),
             }),
           ),
@@ -335,7 +335,7 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
               Type.Literal('low'),
               Type.Literal('medium'),
               Type.Literal('high'),
-            ]),
+            ], { description: 'LLM reasoning effort: "minimal" for simple tasks, "low"/"medium" for moderate complexity, "high" for complex multi-step reasoning.' }),
           ),
         }),
       },
@@ -446,7 +446,7 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
                   Type.Literal('low'),
                   Type.Literal('medium'),
                   Type.Literal('high'),
-                ]),
+                ], { description: 'LLM reasoning effort: "minimal" for simple tasks, "low"/"medium" for moderate complexity, "high" for complex multi-step reasoning.' }),
               ),
             }),
             { minItems: 1 },
@@ -603,6 +603,9 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
         await writeCoordinationState(statePath, latest);
 
         const failedCount = settled.filter((entry) => entry.status === 'failed').length;
+        const failedNodeIds = settled
+          .filter((entry) => entry.status === 'failed')
+          .map((entry) => entry.nodeId ?? entry.id);
         const summary = {
           total: settled.length,
           concurrency,
@@ -612,6 +615,7 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
           windows: batchRun.windows,
           completed: settled.length - failedCount,
           failed: failedCount,
+          failedNodeIds,
           usage: usageTotals,
           decomposition: {
             totalPromptChars,
@@ -732,8 +736,9 @@ function normalizeSubAgentContextPacket(value: unknown): SubAgentContextPacket |
   const boundariesRecord = isRecord(value.boundaries) ? value.boundaries : undefined;
   type WritePolicy = NonNullable<NonNullable<SubAgentContextPacket['boundaries']>['writePolicy']>;
   const writePolicy = boundariesRecord?.writePolicy;
-  const normalizedWritePolicy: WritePolicy | undefined = writePolicy === 'none' || writePolicy === 'scoped' || writePolicy === 'full'
-    ? writePolicy
+  const normalizedWritePolicy: WritePolicy | undefined =
+    writePolicy === 'read_only' ? 'none'
+    : writePolicy === 'none' || writePolicy === 'scoped' || writePolicy === 'full' ? writePolicy
     : undefined;
 
   const boundaries = (normalizedWritePolicy

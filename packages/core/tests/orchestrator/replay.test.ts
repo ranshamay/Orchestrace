@@ -256,12 +256,13 @@ describe('orchestrate replay capture', () => {
       expect(output?.error).toContain('todo_set');
       expect(output?.error).toContain('agent_graph_set');
       expect(output?.error).toContain('subagent_spawn');
-      expect(output?.replay?.attempts.length).toBe(1);
-      expect(output?.replay?.attempts[0]?.failureType).toBe('validation');
+      // Planning now retries up to 3 times before giving up
+      expect(output?.replay?.attempts.length).toBe(3);
+      expect(output?.replay?.attempts.at(-1)?.failureType).toBe('validation');
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }
-  });
+  }, 15_000);
 
   it('includes granular planning contract guidance in planning prompt', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'orchestrace-replay-plan-prompt-'));

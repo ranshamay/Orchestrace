@@ -14,6 +14,7 @@ type Params = {
   actions: {
     handleAddTodo: (todoInput: string, setTodoInput: (value: string) => void) => Promise<void>;
     handleToggleTodo: AppMainContentProps['onToggleTodo'];
+    handleCopyTrace: () => Promise<'idle' | 'copied' | 'failed'>;
     hasComposerContent: boolean;
     handleComposerPaste: AppMainContentProps['onComposerPaste'];
     handleRun: AppMainContentProps['onRun'];
@@ -44,6 +45,8 @@ type Params = {
   activeWorkspaceId: string;
   onSetExecutionContext: AppMainContentProps['onSetExecutionContext'];
   onSetSelectedWorktreePath: AppMainContentProps['onSetSelectedWorktreePath'];
+  copyTraceState: 'idle' | 'copied' | 'failed';
+  setCopyTraceState: (state: 'idle' | 'copied' | 'failed') => void;
 };
 
 export function buildMainContentProps(params: Params): AppMainContentProps {
@@ -90,6 +93,10 @@ export function buildMainContentProps(params: Params): AppMainContentProps {
     onComposerPaste: params.actions.handleComposerPaste,
     onRun: params.actions.handleRun,
     onStop: params.actions.handleStop,
+    copyTraceState: params.copyTraceState,
+    onCopyTrace: () => {
+      void params.actions.handleCopyTrace().then((state) => params.setCopyTraceState(state));
+    },
     providers: params.providers,
     providerStatuses: params.providerStatuses,
     activeWorkspaceId: params.activeWorkspaceId,

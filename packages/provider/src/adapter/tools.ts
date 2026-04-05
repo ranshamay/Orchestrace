@@ -8,6 +8,7 @@ import {
 import type { LlmCompletionOptions, LlmToolset } from '../types.js';
 import { consumeStream, getUsage } from './stream.js';
 import { formatToolPayload, toErrorMessage } from './utils.js';
+import { createTimeoutSignal } from './timeout.js';
 
 const MAX_TOOL_ROUNDS = resolveMaxToolRounds();
 
@@ -18,6 +19,7 @@ export async function executeWithOptionalTools(params: {
   completionOptions?: LlmCompletionOptions;
   toolset?: LlmToolset;
   signal?: AbortSignal;
+  timeoutMs?: number;
   onUsage: (usage: { input: number; output: number; cost: number }) => void;
 }): Promise<AssistantMessage> {
   const {
@@ -27,6 +29,7 @@ export async function executeWithOptionalTools(params: {
     completionOptions,
     toolset,
     signal,
+    timeoutMs,
     onUsage,
   } = params;
 
@@ -39,7 +42,7 @@ export async function executeWithOptionalTools(params: {
       throw new Error(`Model exceeded ${MAX_TOOL_ROUNDS} tool rounds without producing a final response.`);
     }
 
-    const response = await consumeStream(model, context, options, completionOptions);
+    const response = await consumeStreamWithTimeout(model, context, options, completionOptions, signal, timeoutMs);
     onUsage(getUsage(response));
 
     if (!toolset) {
@@ -136,6 +139,7 @@ async function executeToolCalls(
     });
 
     try {
+      coerceStringifiedArrayArgs(toolCall);
       const validatedArgs = validateToolCall(tools, toolCall) as Record<string, unknown>;
       const toolResult = await toolset.executeTool(
         {
@@ -156,6 +160,7 @@ async function executeToolCalls(
         type: 'result',
         toolCallId: toolCall.id,
         toolName: toolCall.name,
+        arguments: formatToolPayload(toolCall.arguments),
         result: formatToolPayload(toolResult.content),
         isError: toolResult.isError ?? false,
       });
@@ -171,6 +176,7 @@ async function executeToolCalls(
         type: 'result',
         toolCallId: toolCall.id,
         toolName: toolCall.name,
+        arguments: formatToolPayload(toolCall.arguments),
         result: formatToolPayload(payload.content),
         isError: true,
       });
@@ -213,4 +219,53 @@ function getToolCalls(message: AssistantMessage): ToolCall[] {
   }
 
   return calls;
+}
+
+/**
+ * LLMs sometimes emit array arguments as JSON strings (e.g. `"[{...}]"` instead of `[{...}]`).
+ * Detect and coerce these before schema validation to avoid preventable failures.
+ */
+function coerceStringifiedArrayArgs(toolCall: ToolCall): void {
+  const args = toolCall.arguments;
+  if (!args || typeof args !== 'object') return;
+
+  for (const [key, value] of Object.entries(args)) {
+    if (typeof value !== 'string') continue;
+    const trimmed = value.trim();
+    if (!trimmed.startsWith('[') || !trimmed.endsWith(']')) continue;
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (Array.isArray(parsed)) {
+        (args as Record<string, unknown>)[key] = parsed;
+      }
+    } catch {
+      // Not valid JSON — leave as-is for schema validation to report
+    }
+  }
+}
+
+async function consumeStreamWithTimeout(
+  model: ReturnType<typeof import('@mariozechner/pi-ai').getModel>,
+  context: import('@mariozechner/pi-ai').Context,
+  options: Record<string, unknown>,
+  completionOptions: LlmCompletionOptions | undefined,
+  baseSignal: AbortSignal | undefined,
+  timeoutMs: number | undefined,
+): Promise<AssistantMessage> {
+  if (!timeoutMs || timeoutMs <= 0) {
+    if (baseSignal) {
+      options.signal = baseSignal;
+    }
+    return consumeStream(model, context, options, completionOptions);
+  }
+
+  const perCallTimeout = createTimeoutSignal(baseSignal, timeoutMs);
+  if (perCallTimeout.signal) {
+    options.signal = perCallTimeout.signal;
+  }
+  try {
+    return await consumeStream(model, context, options, completionOptions);
+  } finally {
+    perCallTimeout.cleanup();
+  }
 }

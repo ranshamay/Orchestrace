@@ -8,6 +8,7 @@ export interface UiServerOptions {
 
 export type WorkState = 'running' | 'completed' | 'failed' | 'cancelled';
 export type ExecutionContext = 'workspace' | 'git-worktree';
+export type SessionCreationReason = 'start' | 'retry';
 
 export type LlmSessionState =
   | 'queued'
@@ -135,6 +136,8 @@ export interface WorkSession {
   batchMinConcurrency: number;
   worktreePath?: string;
   worktreeBranch?: string;
+  creationReason: SessionCreationReason;
+  sourceSessionId?: string;
   createdAt: string;
   updatedAt: string;
   status: WorkState;
@@ -165,6 +168,8 @@ export interface PersistedWorkSession {
   batchMinConcurrency?: number;
   worktreePath?: string;
   worktreeBranch?: string;
+  creationReason?: SessionCreationReason;
+  sourceSessionId?: string;
   createdAt: string;
   updatedAt: string;
   status: WorkState;

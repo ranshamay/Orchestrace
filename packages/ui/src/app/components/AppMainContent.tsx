@@ -48,6 +48,8 @@ export type AppMainContentProps = {
   onComposerPaste: (event: React.ClipboardEvent<HTMLTextAreaElement>) => Promise<void>;
   onRun: () => Promise<void>;
   onStop: () => Promise<void>;
+  copyTraceState: 'idle' | 'copied' | 'failed';
+  onCopyTrace: () => void;
   providers: ProviderInfo[];
   providerStatuses: Array<{ provider: string; source: string }>;
   activeWorkspaceId: string;
@@ -104,6 +106,8 @@ export function AppMainContent(props: AppMainContentProps) {
           jumpToLatest={props.jumpToLatest}
           onTimelineScroll={props.onTimelineScroll}
           timelineItems={props.timelineItems}
+          copyTraceState={props.copyTraceState}
+          onCopyTrace={props.onCopyTrace}
           composer={(
             <ComposerPanel
               selectedSession={props.selectedSession}
