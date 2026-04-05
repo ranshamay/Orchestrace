@@ -185,7 +185,7 @@ function formatToolLabel(toolName: string): string {
   return toolName;
 }
 
-function toolInputSummary(toolName: string, payload: string): string {
+export function toolInputSummary(toolName: string, payload: string): string {
   const parsed = parseJsonObject(payload);
   if (toolName === 'read_file') {
     const path = parsed && typeof parsed.path === 'string' ? parsed.path : '';
@@ -235,7 +235,7 @@ function toolInputSummary(toolName: string, payload: string): string {
   return `Calling ${toolName}`;
 }
 
-function toolOutputSummary(toolName: string, payload: string, isError: boolean): string {
+export function toolOutputSummary(toolName: string, payload: string, isError: boolean): string {
   if (toolName === 'subagent_spawn_batch') {
     const summary = summarizeSubAgentBatchOutput(payload);
     if (summary) {
@@ -266,7 +266,7 @@ function toolOutputSummary(toolName: string, payload: string, isError: boolean):
   return compactInline(payload, 260);
 }
 
-function formatToolPayloadForDisplay(payload: string, maxChars = 6000): string {
+export function formatToolPayloadForDisplay(payload: string, maxChars = 6000): string {
   const raw = payload.trim();
   if (!raw) {
     return '(empty)';
@@ -304,6 +304,26 @@ function renderToolEventContent(params: {
   const codeLanguage = displayPayload.startsWith('{') || displayPayload.startsWith('[') ? 'json' : 'text';
 
   return `${summary}\n\n\`\`\`${codeLanguage}\n${displayPayload}\n\`\`\``;
+}
+
+export function parseToolCallEvent(event: { type: string; message: string }): {
+  taskId: string;
+  toolName: string;
+  direction: 'input' | 'output';
+  isError: boolean;
+  payload: string;
+} | undefined {
+  if (event.type !== 'task:tool-call') return undefined;
+  const clean = stripRunTag(event.message);
+  const match = clean.match(/^([^:]+):\s+tool\s+([a-zA-Z0-9_.-]+)\s+(input|output)(\s+\[error\])?\s*([\s\S]*)$/);
+  if (!match) return undefined;
+  return {
+    taskId: match[1],
+    toolName: match[2],
+    direction: match[3] as 'input' | 'output',
+    isError: Boolean(match[4]),
+    payload: match[5] ?? '',
+  };
 }
 
 export function formatTimelineEvent(event: { type: string; message: string; taskId?: string; failureType?: string }): Pick<TimelineItem, 'title' | 'subtitle' | 'content' | 'tone' | 'failureType'> {

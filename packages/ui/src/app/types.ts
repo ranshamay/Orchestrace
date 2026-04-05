@@ -16,7 +16,7 @@ export type GraphNodeView = {
 export type TimelineItem = {
   key: string;
   time: string;
-  kind: 'chat' | 'event';
+  kind: 'chat' | 'event' | 'tool-call';
   role?: string;
   title?: string;
   subtitle?: string;
@@ -24,6 +24,13 @@ export type TimelineItem = {
   tone?: 'neutral' | 'tool' | 'success' | 'error';
   content: string;
   contentParts?: ChatContentPart[];
+  toolName?: string;
+  inputSummary?: string;
+  outputSummary?: string;
+  inputPayload?: string;
+  outputPayload?: string;
+  toolStatus?: 'pending' | 'success' | 'error';
+  endTime?: string;
 };
 
 export type ComposerImageAttachment = {
