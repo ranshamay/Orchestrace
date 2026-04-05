@@ -2,6 +2,7 @@ import { getModel, type AssistantMessage } from '@mariozechner/pi-ai';
 import type {
   LlmAdapter,
   LlmAgent,
+  LlmModelInfo,
   LlmPromptInput,
   LlmRequest,
   LlmResult,
@@ -245,5 +246,13 @@ export class PiAiAdapter implements LlmAdapter {
       onUsage: request.onUsage,
       onToolCall: request.onToolCall,
     });
+  }
+
+  getModelInfo(provider: string, model: string): LlmModelInfo {
+    const resolved = normalizeModelEndpoint(getModel(provider as never, model as never));
+    return {
+      contextWindow: resolved.contextWindow ?? 128_000,
+      maxOutputTokens: resolved.maxTokens ?? 8_192,
+    };
   }
 }

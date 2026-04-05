@@ -46,8 +46,7 @@ export type AppMainContentProps = {
   removeComposerAttachment: (id: string) => void;
   hasComposerContent: boolean;
   onComposerPaste: (event: React.ClipboardEvent<HTMLTextAreaElement>) => Promise<void>;
-  onStartFromComposer: () => Promise<void>;
-  onSendChat: () => Promise<void>;
+  onRun: () => Promise<void>;
   onStop: () => Promise<void>;
   providers: ProviderInfo[];
   providerStatuses: Array<{ provider: string; source: string }>;
@@ -126,9 +125,8 @@ export function AppMainContent(props: AppMainContentProps) {
               removeComposerAttachment={props.removeComposerAttachment}
               hasComposerContent={props.hasComposerContent}
               onComposerPaste={props.onComposerPaste}
-              onStartFromComposer={props.onStartFromComposer}
+              onRun={props.onRun}
               onStop={props.onStop}
-              onSendChat={props.onSendChat}
             />
           )}
           isDark={props.isDark}

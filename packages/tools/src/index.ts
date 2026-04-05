@@ -3,9 +3,19 @@ import type { AgentToolPermissions, AgentToolPhase, AgentToolsetOptions, Registe
 import { createFilesystemTools } from './fs-tools.js';
 import { createCommandTools } from './command-tools.js';
 import { createCoordinationTools } from './coordination-tools.js';
+import { createSharedContextTools } from './shared-context-tools.js';
 import { DEFAULT_AGENT_TOOL_POLICY_VERSION, resolveAgentToolPermissions } from './policy.js';
 
-export type { AgentModeController, AgentToolPhase, AgentToolPermissions, AgentToolsetOptions } from './types.js';
+export type {
+  AgentModeController,
+  AgentToolPhase,
+  AgentToolPermissions,
+  AgentToolsetOptions,
+  SubAgentContextPacket,
+  SubAgentEvidenceItem,
+  SubAgentRequest,
+  SubAgentResult,
+} from './types.js';
 export { DEFAULT_AGENT_TOOL_POLICY_VERSION } from './policy.js';
 
 export interface AgentToolDescriptor {
@@ -45,6 +55,13 @@ export function createAgentToolset(options: AgentToolsetOptions): LlmToolset {
       ...options,
       includeSubAgentTool,
     }),
+    ...(options.sharedContextStore
+      ? createSharedContextTools({
+          store: options.sharedContextStore,
+          graphId: options.graphId,
+          agentId: options.agentId ?? options.taskId ?? 'agent',
+        })
+      : []),
   ];
 
   const registeredTools = allTools.filter((entry) => {

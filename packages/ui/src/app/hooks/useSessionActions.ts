@@ -101,7 +101,7 @@ export function useSessionActions(params: SessionActionsParams) {
     sessions,
   ]);
 
-  const handleStartFromComposer = useCallback(async () => {
+  const handleRun = useCallback(async () => {
     if (!hasComposerContent || !workProvider || !workWorkspaceId) return;
     setErrorMessage('');
     try {
@@ -156,26 +156,6 @@ export function useSessionActions(params: SessionActionsParams) {
     workModel,
     workProvider,
     workWorkspaceId,
-  ]);
-
-  const handleSendChat = useCallback(async () => {
-    if (!hasComposerContent) return;
-    if (!selectedSessionId) {
-      await handleStartFromComposer();
-      return;
-    }
-    setErrorMessage('');
-    try {
-      await continueSelectedSession(selectedSessionId);
-    } catch (error) {
-      setErrorMessage(toErrorMessage(error));
-    }
-  }, [
-    continueSelectedSession,
-    hasComposerContent,
-    handleStartFromComposer,
-    selectedSessionId,
-    setErrorMessage,
   ]);
 
   const handleDelete = useCallback(async (targetSessionId?: string) => {
@@ -278,8 +258,7 @@ export function useSessionActions(params: SessionActionsParams) {
 
   return {
     hasComposerContent,
-    handleStartFromComposer,
-    handleSendChat,
+    handleRun,
     handleDelete,
     handleStop,
     handleRetry,

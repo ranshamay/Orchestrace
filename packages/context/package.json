@@ -1,5 +1,5 @@
 {
-  "name": "@orchestrace/tools",
+  "name": "@orchestrace/context",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -12,9 +12,8 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@mariozechner/pi-ai": "^0.64.0",
-    "@orchestrace/context": "workspace:*",
-    "@orchestrace/provider": "workspace:*"
+    "@orchestrace/provider": "workspace:*",
+    "js-tiktoken": "^1.0.18"
   },
   "devDependencies": {
     "typescript": "^5.6.0",

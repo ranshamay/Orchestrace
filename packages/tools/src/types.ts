@@ -1,5 +1,6 @@
 import type { Tool } from '@mariozechner/pi-ai';
 import type { LlmToolResult } from '@orchestrace/provider';
+import type { SharedContextStore } from '@orchestrace/context';
 
 export type AgentToolPhase = 'planning' | 'implementation' | 'chat';
 
@@ -29,6 +30,8 @@ export interface AgentToolsetOptions {
   runSubAgent?: (request: SubAgentRequest, signal?: AbortSignal) => Promise<SubAgentResult>;
   modeController?: AgentModeController;
   resolveGithubToken?: () => Promise<string | undefined>;
+  sharedContextStore?: SharedContextStore;
+  agentId?: string;
 }
 
 export interface AgentModeController {
@@ -81,9 +84,34 @@ export interface SubAgentRequest {
   provider?: string;
   model?: string;
   reasoning?: 'minimal' | 'low' | 'medium' | 'high';
+  contextPacket?: SubAgentContextPacket;
+}
+
+export interface SubAgentContextPacket {
+  objective: string;
+  boundaries?: {
+    writePolicy?: 'none' | 'scoped' | 'full';
+    allowedTools?: string[];
+    timeoutMs?: number;
+  };
+  relevantContext?: string[];
+  requiredOutputSchema?: string;
+  evidenceRequirements?: string[];
+}
+
+export interface SubAgentEvidenceItem {
+  type: 'file' | 'command' | 'test' | 'log' | 'url' | 'other';
+  ref: string;
+  note?: string;
 }
 
 export interface SubAgentResult {
   text: string;
   usage?: { input: number; output: number; cost: number };
+  summary?: string;
+  actions?: string[];
+  evidence?: SubAgentEvidenceItem[];
+  risks?: string[];
+  openQuestions?: string[];
+  patchIntent?: string[];
 }

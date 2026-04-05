@@ -25,9 +25,8 @@ type Props = {
   removeComposerAttachment: (id: string) => void;
   hasComposerContent: boolean;
   onComposerPaste: (event: React.ClipboardEvent<HTMLTextAreaElement>) => Promise<void>;
-  onStartFromComposer: () => Promise<void>;
+  onRun: () => Promise<void>;
   onStop: () => Promise<void>;
-  onSendChat: () => Promise<void>;
 };
 
 export function ComposerPanel(props: Props) {
@@ -51,9 +50,8 @@ export function ComposerPanel(props: Props) {
     removeComposerAttachment,
     hasComposerContent,
     onComposerPaste,
-    onStartFromComposer,
+    onRun,
     onStop,
-    onSendChat,
   } = props;
 
   return (
@@ -98,22 +96,17 @@ export function ComposerPanel(props: Props) {
           onKeyDown={(event) => {
             if (event.key === 'Enter' && !event.shiftKey) {
               event.preventDefault();
-              if (selectedSessionId) {
-                void onSendChat();
-              } else {
-                void onStartFromComposer();
-              }
+              void onRun();
             }
           }}
-          placeholder={selectedSessionId ? 'Continue in this session context...' : 'Describe task and start autonomous execution...'}
+          placeholder={selectedSessionId ? 'Continue in this session context...' : 'Describe task and run...'}
           value={composerText}
         />
         <div className="flex flex-col gap-2">
           <div className="flex gap-2">
-            <button className="inline-flex items-center gap-1 rounded bg-blue-600 px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50" disabled={!hasComposerContent || !workWorkspaceId || !workProvider || !workModel} onClick={() => { void onStartFromComposer(); }} type="button"><Play className="h-3 w-3" /> {selectedSessionId ? 'Continue' : 'Run'}</button>
+            <button className="inline-flex items-center gap-1 rounded bg-blue-600 px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50" disabled={!hasComposerContent || !workWorkspaceId || !workProvider || !workModel} onClick={() => { void onRun(); }} type="button"><Play className="h-3 w-3" /> Run</button>
             <button className="rounded bg-red-600 px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50" disabled={!selectedSessionId || !selectedSession || normalizeSessionStatus(selectedSession.status) !== 'running'} onClick={() => { void onStop(); }} type="button">Stop</button>
           </div>
-          <button className="rounded bg-slate-800 px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50 dark:bg-slate-700" disabled={!hasComposerContent || !workWorkspaceId || !workProvider || !workModel} onClick={() => { void onSendChat(); }} type="button">Autonomous Run</button>
         </div>
       </div>
       {composerImages.length > 0 && (

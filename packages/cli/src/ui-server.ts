@@ -9,13 +9,22 @@ import { promisify } from 'node:util';
 import { orchestrate, PromptSectionName, renderPromptSections } from '@orchestrace/core';
 import type { DagEvent, PlanApprovalRequest, PromptSection, TaskGraph } from '@orchestrace/core';
 import { getModels } from '@mariozechner/pi-ai';
-import { PiAiAdapter, ProviderAuthManager, type LlmToolCallEvent } from '@orchestrace/provider';
+import { PiAiAdapter, ProviderAuthManager, type LlmPromptInput, type LlmToolCallEvent } from '@orchestrace/provider';
 import {
   DEFAULT_AGENT_TOOL_POLICY_VERSION,
   createAgentToolset,
   listAgentTools,
   type AgentToolPhase,
+  type SubAgentRequest,
+  type SubAgentResult,
 } from '@orchestrace/tools';
+import {
+  InMemorySharedContextStore,
+  ContextEngine,
+  countTokens,
+  type ConversationTurn,
+  type ModelInfo,
+} from '@orchestrace/context';
 import { now } from './ui-server/clock.js';
 import {
   buildChatContinuationInput,
@@ -67,6 +76,13 @@ const SUBAGENT_RETRY_MAX_ATTEMPTS = 2;
 const SUBAGENT_RETRY_BASE_DELAY_MS = 300;
 const CHAT_RETRY_MAX_ATTEMPTS = 2;
 const CHAT_RETRY_BASE_DELAY_MS = 300;
+const DEFAULT_CONTEXT_COMPACTION_MODEL = 'gpt-4.1-mini';
+const CONTEXT_COMPACTION_PROVIDER_ENV = 'ORCHESTRACE_CONTEXT_COMPACTION_PROVIDER';
+const CONTEXT_COMPACTION_MODEL_ENV = 'ORCHESTRACE_CONTEXT_COMPACTION_MODEL';
+const PERSIST_RAW_DEBUG_ENV = 'ORCHESTRACE_PERSIST_RAW_DEBUG';
+const PERSIST_TEXT_MAX_CHARS = 3_000;
+const PERSIST_EVENT_MESSAGE_MAX_CHARS = 1_200;
+const PERSIST_CHAT_MESSAGE_MAX_CHARS = 2_400;
 const PHASE_PROGRESS_PLAN_WEIGHT_DEFAULT = 30;
 const PHASE_PROGRESS_IMPLEMENTATION_WEIGHT_DEFAULT = 70;
 const execFileAsync = promisify(execFile);
@@ -95,6 +111,11 @@ interface GithubDeviceAuthSession {
   error?: string;
 }
 
+interface SessionContextState {
+  turnsSinceLastCompaction: number;
+  previousCompressedHistory?: string;
+}
+
 function createInheritedSubAgentToolset(
   cwd: string,
   options: {
@@ -109,6 +130,8 @@ function createInheritedSubAgentToolset(
     batchConcurrency?: number;
     batchMinConcurrency?: number;
     resolveGithubToken: () => Promise<string | undefined>;
+    sharedContextStore?: import('@orchestrace/context').SharedContextStore;
+    agentId?: string;
   },
 ) {
   return createAgentToolset({
@@ -124,6 +147,8 @@ function createInheritedSubAgentToolset(
     batchConcurrency: options?.batchConcurrency,
     batchMinConcurrency: options?.batchMinConcurrency,
     resolveGithubToken: options.resolveGithubToken,
+    sharedContextStore: options.sharedContextStore,
+    agentId: options.agentId,
   });
 }
 
@@ -144,6 +169,9 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
   const githubDeviceAuthSessions = new Map<string, GithubDeviceAuthSession>();
   const sessionChats = new Map<string, SessionChatThread>();
   const sessionTodos = new Map<string, AgentTodoItem[]>();
+  const sessionSharedContextStores = new Map<string, InMemorySharedContextStore>();
+  const sessionContextEngines = new Map<string, ContextEngine>();
+  const sessionContextStates = new Map<string, SessionContextState>();
   const pendingSubagentNodeIdsBySession = new Map<string, Map<string, string[]>>();
   const chatStreams = new Map<string, ChatTokenStream>();
   let uiPreferences = resolveUiPreferencesDefaults();
@@ -155,6 +183,12 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
   const restoredUiPreferences = await restoreUiState(uiStatePath, workSessions, sessionChats, sessionTodos);
   uiPreferences = normalizeUiPreferences(restoredUiPreferences, resolveUiPreferencesDefaults());
 
+  for (const [sessionId, restoredSession] of workSessions.entries()) {
+    sessionSharedContextStores.set(sessionId, new InMemorySharedContextStore());
+    sessionContextEngines.set(sessionId, createSessionContextEngine(restoredSession.provider, restoredSession.model));
+    sessionContextStates.set(sessionId, { turnsSinceLastCompaction: 0 });
+  }
+
   const uiStatePersistence = createUiStatePersistence(
     uiStatePath,
     workSessions,
@@ -162,6 +196,61 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     sessionTodos,
     () => ({ ...uiPreferences }),
   );
+
+  function createCompactionDelegate(defaultProvider: string, defaultModel: string) {
+    return {
+      summarize: async (text: string, maxTokens: number, signal?: AbortSignal): Promise<string> => {
+        const preferredProvider = asString(process.env[CONTEXT_COMPACTION_PROVIDER_ENV]) || defaultProvider;
+        const preferredModel = asString(process.env[CONTEXT_COMPACTION_MODEL_ENV]) || DEFAULT_CONTEXT_COMPACTION_MODEL;
+
+        const candidates: Array<{ provider: string; model: string }> = [];
+        const addCandidate = (provider: string, model: string): void => {
+          if (!provider || !model) {
+            return;
+          }
+          if (candidates.some((entry) => entry.provider === provider && entry.model === model)) {
+            return;
+          }
+          candidates.push({ provider, model });
+        };
+
+        addCandidate(preferredProvider, preferredModel);
+        addCandidate(defaultProvider, defaultModel);
+
+        for (const candidate of candidates) {
+          try {
+            const result = await llm.complete({
+              provider: candidate.provider,
+              model: candidate.model,
+              systemPrompt: 'You compress conversation history into structured technical summaries while preserving decisions, blockers, and key details.',
+              prompt: text,
+              timeoutMs: Math.min(resolveLongTurnTimeoutMs(), 20_000),
+              signal,
+              apiKey: await authManager.resolveApiKey(candidate.provider),
+              refreshApiKey: () => authManager.resolveApiKey(candidate.provider),
+            });
+
+            const trimmed = trimCompactionSummary(result.text, maxTokens);
+            if (trimmed) {
+              return trimmed;
+            }
+          } catch {
+            // Try next candidate before degrading to heuristic-only fallback.
+          }
+        }
+
+        return buildCompactionFallbackSummary(text, maxTokens);
+      },
+    };
+  }
+
+  function createSessionContextEngine(provider: string, model: string): ContextEngine {
+    const modelInfo: ModelInfo = llm.getModelInfo(provider, model);
+    return new ContextEngine({
+      modelInfo,
+      compactionDelegate: createCompactionDelegate(provider, model),
+    });
+  }
 
   function deleteWorkSession(id: string): boolean {
     const session = workSessions.get(id);
@@ -182,6 +271,9 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     workSessions.delete(id);
     sessionChats.delete(id);
     sessionTodos.delete(id);
+    sessionSharedContextStores.delete(id);
+    sessionContextEngines.delete(id);
+    sessionContextStates.delete(id);
     pendingSubagentNodeIdsBySession.delete(id);
 
     for (const [streamId, streamState] of [...chatStreams.entries()]) {
@@ -308,6 +400,9 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     workSessions.set(id, session);
     sessionChats.set(id, createSessionChatThread(session, promptParts));
     sessionTodos.set(id, []);
+    sessionSharedContextStores.set(id, new InMemorySharedContextStore());
+    sessionContextEngines.set(id, createSessionContextEngine(request.provider, request.model));
+    sessionContextStates.set(id, { turnsSinceLastCompaction: 0 });
     uiStatePersistence.schedule();
     broadcastTodoUpdate(workStreamClients, id, sessionTodos.get(id) ?? []);
 
@@ -340,6 +435,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         batchConcurrency: session.batchConcurrency,
         batchMinConcurrency: session.batchMinConcurrency,
         resolveGithubToken: () => githubAuthManager.resolveApiKey(GITHUB_PROVIDER_ID),
+        sharedContextStore: sessionSharedContextStores.get(id),
+        agentId: `orchestrator::${task.id}`,
         runSubAgent: async (runSubAgentRequest, _signal) => {
           const subProvider = runSubAgentRequest.provider ?? activeProvider;
           const subModel = runSubAgentRequest.model ?? activeModel;
@@ -374,6 +471,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
             batchConcurrency: session.batchConcurrency,
             batchMinConcurrency: session.batchMinConcurrency,
             resolveGithubToken: () => githubAuthManager.resolveApiKey(GITHUB_PROVIDER_ID),
+            sharedContextStore: sessionSharedContextStores.get(id),
+            agentId: `subagent::${subAgentTaskId}`,
           });
           try {
             const subAgent = await llm.spawnAgent({
@@ -381,8 +480,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
               model: subModel,
               reasoning: runSubAgentRequest.reasoning ?? reasoning,
               timeoutMs: resolveSubAgentTimeoutMs(),
-              systemPrompt: runSubAgentRequest.systemPrompt
-                ?? 'You are a focused sub-agent. Use only the provided task-relevant context, avoid unrelated history, and return concise actionable output.',
+              systemPrompt: resolveSubAgentSystemPrompt(runSubAgentRequest),
               signal: subAgentSignal,
               toolset: subAgentToolset,
               apiKey: await authManager.resolveApiKey(subProvider),
@@ -394,6 +492,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
               runSubAgentRequest.prompt,
               subAgentSignal,
             );
+            const structuredResult = buildStructuredSubAgentResult(result);
             emitSubAgentWorkerEvent({
               session,
               uiStatePersistence,
@@ -406,13 +505,10 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
               reasoning: runSubAgentRequest.reasoning ?? reasoning,
               nodeId: runSubAgentRequest.nodeId,
               prompt: runSubAgentRequest.prompt,
-              outputText: result.text,
+              outputText: structuredResult.summary ?? result.text,
               usage: result.usage,
             });
-            return {
-              text: result.text,
-              usage: result.usage,
-            };
+            return structuredResult;
           } catch (error) {
             emitSubAgentWorkerEvent({
               session,
@@ -1611,15 +1707,35 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
 
         void (async () => {
           try {
+            const systemPrompt = continuationPhase === 'planning'
+              ? buildPlanningSystemPrompt(session)
+              : continuationPhase === 'implementation'
+                ? buildImplementationSystemPrompt(session)
+                : buildChatSystemPrompt(session);
+            const sharedContextStore = sessionSharedContextStores.get(session.id)
+              ?? new InMemorySharedContextStore();
+            sessionSharedContextStores.set(session.id, sharedContextStore);
+            const contextEngine = sessionContextEngines.get(session.id)
+              ?? createSessionContextEngine(session.provider, session.model);
+            sessionContextEngines.set(session.id, contextEngine);
+            const contextState = sessionContextStates.get(session.id) ?? { turnsSinceLastCompaction: 0 };
+
+            const managedContext = await buildManagedChatContinuationInput({
+              session,
+              thread,
+              systemPrompt,
+              todos: sessionTodos.get(session.id) ?? [],
+              contextEngine,
+              contextState,
+              sharedContextStore,
+            });
+            sessionContextStates.set(session.id, managedContext.nextState);
+
             const chatAgent = await llm.spawnAgent({
               provider: session.provider,
               model: session.model,
               timeoutMs: resolveLongTurnTimeoutMs(),
-              systemPrompt: continuationPhase === 'planning'
-                ? buildPlanningSystemPrompt(session)
-                : continuationPhase === 'implementation'
-                  ? buildImplementationSystemPrompt(session)
-                  : buildChatSystemPrompt(session),
+              systemPrompt,
               toolset: createAgentToolset({
                 cwd: session.workspacePath,
                 phase: continuationPhase,
@@ -1627,6 +1743,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                 batchConcurrency: session.batchConcurrency,
                 batchMinConcurrency: session.batchMinConcurrency,
                 resolveGithubToken: () => githubAuthManager.resolveApiKey(GITHUB_PROVIDER_ID),
+                sharedContextStore: sessionSharedContextStores.get(session.id),
+                agentId: `chat::${session.id}`,
                 runSubAgent: async (runSubAgentRequest, _signal) => {
                   const subProvider = runSubAgentRequest.provider ?? session.provider;
                   const subModel = runSubAgentRequest.model ?? session.model;
@@ -1659,6 +1777,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                     batchConcurrency: session.batchConcurrency,
                     batchMinConcurrency: session.batchMinConcurrency,
                     resolveGithubToken: () => githubAuthManager.resolveApiKey(GITHUB_PROVIDER_ID),
+                    sharedContextStore: sessionSharedContextStores.get(session.id),
+                    agentId: `subagent::${subAgentTaskId}`,
                   });
                   try {
                     const subAgent = await llm.spawnAgent({
@@ -1666,8 +1786,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                       model: subModel,
                       reasoning: runSubAgentRequest.reasoning,
                       timeoutMs: resolveSubAgentTimeoutMs(),
-                      systemPrompt: runSubAgentRequest.systemPrompt
-                        ?? 'You are a focused sub-agent. Use only the provided task-relevant context, avoid unrelated history, and return concise actionable output.',
+                      systemPrompt: resolveSubAgentSystemPrompt(runSubAgentRequest),
                       signal: subAgentSignal,
                       toolset: subAgentToolset,
                       apiKey: await authManager.resolveApiKey(subProvider),
@@ -1679,6 +1798,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                       runSubAgentRequest.prompt,
                       subAgentSignal,
                     );
+                    const structuredResult = buildStructuredSubAgentResult(result);
                     emitSubAgentWorkerEvent({
                       session,
                       uiStatePersistence,
@@ -1691,13 +1811,10 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                       reasoning: runSubAgentRequest.reasoning,
                       nodeId: runSubAgentRequest.nodeId,
                       prompt: runSubAgentRequest.prompt,
-                      outputText: result.text,
+                      outputText: structuredResult.summary ?? result.text,
                       usage: result.usage,
                     });
-                    return {
-                      text: result.text,
-                      usage: result.usage,
-                    };
+                    return structuredResult;
                   } catch (error) {
                     emitSubAgentWorkerEvent({
                       session,
@@ -1721,7 +1838,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                 refreshApiKey: () => authManager.resolveApiKey(session.provider),
             });
 
-            const chatPrompt = buildChatContinuationInput(thread);
+            const chatPrompt = managedContext.prompt;
             let response: Awaited<ReturnType<typeof chatAgent.complete>> | undefined;
             let receivedTextDelta = false;
             for (let attempt = 1; attempt <= CHAT_RETRY_MAX_ATTEMPTS; attempt += 1) {
@@ -1938,15 +2055,35 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         uiStatePersistence.schedule();
 
         try {
+          const systemPrompt = continuationPhase === 'planning'
+            ? buildPlanningSystemPrompt(session)
+            : continuationPhase === 'implementation'
+              ? buildImplementationSystemPrompt(session)
+              : buildChatSystemPrompt(session);
+          const sharedContextStore = sessionSharedContextStores.get(session.id)
+            ?? new InMemorySharedContextStore();
+          sessionSharedContextStores.set(session.id, sharedContextStore);
+          const contextEngine = sessionContextEngines.get(session.id)
+            ?? createSessionContextEngine(session.provider, session.model);
+          sessionContextEngines.set(session.id, contextEngine);
+          const contextState = sessionContextStates.get(session.id) ?? { turnsSinceLastCompaction: 0 };
+
+          const managedContext = await buildManagedChatContinuationInput({
+            session,
+            thread,
+            systemPrompt,
+            todos: sessionTodos.get(session.id) ?? [],
+            contextEngine,
+            contextState,
+            sharedContextStore,
+          });
+          sessionContextStates.set(session.id, managedContext.nextState);
+
           const chatAgent = await llm.spawnAgent({
             provider: session.provider,
             model: session.model,
             timeoutMs: resolveLongTurnTimeoutMs(),
-            systemPrompt: continuationPhase === 'planning'
-              ? buildPlanningSystemPrompt(session)
-              : continuationPhase === 'implementation'
-                ? buildImplementationSystemPrompt(session)
-                : buildChatSystemPrompt(session),
+            systemPrompt,
             toolset: createAgentToolset({
               cwd: session.workspacePath,
               phase: continuationPhase,
@@ -1954,6 +2091,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
               batchConcurrency: session.batchConcurrency,
               batchMinConcurrency: session.batchMinConcurrency,
               resolveGithubToken: () => githubAuthManager.resolveApiKey(GITHUB_PROVIDER_ID),
+              sharedContextStore: sessionSharedContextStores.get(session.id),
+              agentId: `chat::${session.id}`,
               runSubAgent: async (runSubAgentRequest, _signal) => {
                 const subProvider = runSubAgentRequest.provider ?? session.provider;
                 const subModel = runSubAgentRequest.model ?? session.model;
@@ -1986,6 +2125,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                   batchConcurrency: session.batchConcurrency,
                   batchMinConcurrency: session.batchMinConcurrency,
                   resolveGithubToken: () => githubAuthManager.resolveApiKey(GITHUB_PROVIDER_ID),
+                  sharedContextStore: sessionSharedContextStores.get(session.id),
+                  agentId: `subagent::${subAgentTaskId}`,
                 });
                 try {
                   const subAgent = await llm.spawnAgent({
@@ -1993,8 +2134,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                     model: subModel,
                     reasoning: runSubAgentRequest.reasoning,
                     timeoutMs: resolveSubAgentTimeoutMs(),
-                    systemPrompt: runSubAgentRequest.systemPrompt
-                      ?? 'You are a focused sub-agent. Use only the provided task-relevant context, avoid unrelated history, and return concise actionable output.',
+                    systemPrompt: resolveSubAgentSystemPrompt(runSubAgentRequest),
                     signal: subAgentSignal,
                     toolset: subAgentToolset,
                     apiKey: await authManager.resolveApiKey(subProvider),
@@ -2006,6 +2146,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                     runSubAgentRequest.prompt,
                     subAgentSignal,
                   );
+                  const structuredResult = buildStructuredSubAgentResult(result);
                   emitSubAgentWorkerEvent({
                     session,
                     uiStatePersistence,
@@ -2018,13 +2159,10 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                     reasoning: runSubAgentRequest.reasoning,
                     nodeId: runSubAgentRequest.nodeId,
                     prompt: runSubAgentRequest.prompt,
-                    outputText: result.text,
+                    outputText: structuredResult.summary ?? result.text,
                     usage: result.usage,
                   });
-                  return {
-                    text: result.text,
-                    usage: result.usage,
-                  };
+                  return structuredResult;
                 } catch (error) {
                   emitSubAgentWorkerEvent({
                     session,
@@ -2048,7 +2186,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
             refreshApiKey: () => authManager.resolveApiKey(session.provider),
           });
 
-          const chatPrompt = buildChatContinuationInput(thread);
+          const chatPrompt = managedContext.prompt;
           let response: Awaited<ReturnType<typeof chatAgent.complete>> | undefined;
           for (let attempt = 1; attempt <= CHAT_RETRY_MAX_ATTEMPTS; attempt += 1) {
             try {
@@ -2424,18 +2562,23 @@ async function persistUiState(
   sessionTodos: Map<string, AgentTodoItem[]>,
   preferences: UiPreferences,
 ): Promise<void> {
-  const payload: PersistedUiState = {
+  const persistRawDebug = shouldPersistRawDebugArtifacts();
+  const rawSessions = [...workSessions.values()]
+    .map(toPersistedSession)
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+
+  const rawChats = [...sessionChats.values()]
+    .map((thread) => ({
+      ...thread,
+      messages: [...thread.messages],
+    }))
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+
+  const safePayload: PersistedUiState = {
     version: 1,
     updatedAt: now(),
-    sessions: [...workSessions.values()]
-      .map(toPersistedSession)
-      .sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
-    chats: [...sessionChats.values()]
-      .map((thread) => ({
-        ...thread,
-        messages: [...thread.messages],
-      }))
-      .sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
+    sessions: rawSessions.map((session) => sanitizePersistedSession(session)),
+    chats: rawChats.map((thread) => sanitizePersistedChatThread(thread)),
     todos: [...sessionTodos.entries()]
       .map(([sessionId, items]) => ({
         sessionId,
@@ -2445,8 +2588,20 @@ async function persistUiState(
     preferences: { ...preferences },
   };
 
+  const rawPayload: PersistedUiState | undefined = persistRawDebug
+    ? {
+      ...safePayload,
+      sessions: rawSessions,
+      chats: rawChats,
+    }
+    : undefined;
+
   await mkdir(dirname(path), { recursive: true });
-  await writeFile(path, JSON.stringify(payload, null, 2), 'utf-8');
+  await writeFile(path, JSON.stringify(safePayload, null, 2), 'utf-8');
+
+  if (rawPayload) {
+    await writeFile(resolveRawArtifactPath(path), JSON.stringify(rawPayload, null, 2), 'utf-8');
+  }
 }
 
 async function readPersistedUiState(path: string): Promise<PersistedUiState | undefined> {
@@ -2471,6 +2626,95 @@ async function readPersistedUiState(path: string): Promise<PersistedUiState | un
   } catch {
     return undefined;
   }
+}
+
+function shouldPersistRawDebugArtifacts(): boolean {
+  return parseBooleanSetting(process.env[PERSIST_RAW_DEBUG_ENV]) ?? false;
+}
+
+function resolveRawArtifactPath(path: string): string {
+  if (path.endsWith('.json')) {
+    return `${path.slice(0, -5)}.raw.json`;
+  }
+
+  return `${path}.raw.json`;
+}
+
+function sanitizePersistedSession(session: PersistedWorkSession): PersistedWorkSession {
+  return {
+    ...session,
+    prompt: sanitizePersistedText(session.prompt, PERSIST_TEXT_MAX_CHARS),
+    promptParts: sanitizePersistedContentParts(session.promptParts),
+    events: session.events.map((event) => ({
+      ...event,
+      message: sanitizePersistedText(event.message, PERSIST_EVENT_MESSAGE_MAX_CHARS),
+    })),
+    error: session.error ? sanitizePersistedText(session.error, PERSIST_TEXT_MAX_CHARS) : undefined,
+    output: session.output
+      ? {
+        ...session.output,
+        text: session.output.text
+          ? sanitizePersistedText(session.output.text, PERSIST_TEXT_MAX_CHARS)
+          : session.output.text,
+      }
+      : session.output,
+  };
+}
+
+function sanitizePersistedChatThread(thread: SessionChatThread): SessionChatThread {
+  return {
+    ...thread,
+    taskPrompt: sanitizePersistedText(thread.taskPrompt, PERSIST_TEXT_MAX_CHARS),
+    messages: thread.messages.map((message) => ({
+      ...message,
+      content: sanitizePersistedText(message.content, PERSIST_CHAT_MESSAGE_MAX_CHARS),
+      contentParts: sanitizePersistedContentParts(message.contentParts),
+    })),
+  };
+}
+
+function sanitizePersistedContentParts(parts: SessionChatContentPart[] | undefined): SessionChatContentPart[] | undefined {
+  if (!parts || parts.length === 0) {
+    return undefined;
+  }
+
+  const sanitized = parts.map((part): SessionChatContentPart => {
+    if (part.type === 'text') {
+      return {
+        type: 'text',
+        text: sanitizePersistedText(part.text, PERSIST_CHAT_MESSAGE_MAX_CHARS),
+      };
+    }
+
+    return {
+      type: 'text',
+      text: `[image omitted${part.name ? `: ${part.name}` : ''}]`,
+    };
+  });
+
+  return sanitized.length > 0 ? sanitized : undefined;
+}
+
+function sanitizePersistedText(text: string, maxChars: number): string {
+  const redacted = redactSensitiveText(asString(text));
+  if (redacted.length <= maxChars) {
+    return redacted;
+  }
+
+  return `${redacted.slice(0, maxChars)}... [truncated]`;
+}
+
+function redactSensitiveText(text: string): string {
+  if (!text) {
+    return text;
+  }
+
+  return text
+    .replace(/\bgh[pousr]_[A-Za-z0-9]{30,}\b/g, '[REDACTED_GITHUB_TOKEN]')
+    .replace(/\bsk-[A-Za-z0-9_-]{16,}\b/g, '[REDACTED_API_KEY]')
+    .replace(/\b(?:api[_-]?key|token|secret|password)\s*[:=]\s*[^\s"',;]+/gi, '$1=[REDACTED]')
+    .replace(/\bBearer\s+[A-Za-z0-9._-]{16,}\b/gi, 'Bearer [REDACTED]')
+    .replace(/data:image\/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=\s]+/g, '[REDACTED_IMAGE_DATA]');
 }
 
 function toPersistedSession(session: WorkSession): PersistedWorkSession {
@@ -3487,7 +3731,7 @@ function previewToolLog(value: string | undefined, maxChars = 600): string {
     return '(empty)';
   }
 
-  const compact = value.replace(/\s+/g, ' ').trim();
+  const compact = redactSensitiveText(value).replace(/\s+/g, ' ').trim();
   if (!compact) {
     return '(blank)';
   }
@@ -4835,6 +5079,121 @@ function isRetryableSubAgentError(error: unknown): boolean {
     || message.includes('network');
 }
 
+function resolveSubAgentSystemPrompt(request: SubAgentRequest): string {
+  if (request.systemPrompt) {
+    return request.systemPrompt;
+  }
+
+  if (request.contextPacket) {
+    return [
+      'You are a focused sub-agent. Use only delegated context and avoid unrelated history.',
+      'Respect boundaries in the provided SubAgentContextPacket.',
+      'Respond concisely with machine-readable structure when possible.',
+      'Preferred output contract: JSON object with keys summary, actions[], evidence[{type,ref,note?}], risks[], openQuestions[], patchIntent[].',
+    ].join('\n');
+  }
+
+  return 'You are a focused sub-agent. Use only the provided task-relevant context, avoid unrelated history, and return concise actionable output.';
+}
+
+function buildStructuredSubAgentResult(result: {
+  text: string;
+  usage?: { input: number; output: number; cost: number };
+}): SubAgentResult {
+  const parsed = parseSubAgentResultJson(result.text);
+  const summary = normalizeSubAgentSummary(parsed?.summary, result.text);
+
+  return {
+    text: result.text,
+    usage: result.usage,
+    summary,
+    actions: normalizeStringList(parsed?.actions),
+    evidence: normalizeSubAgentEvidence(parsed?.evidence),
+    risks: normalizeStringList(parsed?.risks),
+    openQuestions: normalizeStringList(parsed?.openQuestions),
+    patchIntent: normalizeStringList(parsed?.patchIntent),
+  };
+}
+
+function parseSubAgentResultJson(text: string): Record<string, unknown> | undefined {
+  const trimmed = text.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+
+  const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1];
+  const candidates = [trimmed, fenced].filter((entry): entry is string => Boolean(entry));
+
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(candidate);
+      if (parsed && typeof parsed === 'object') {
+        return parsed as Record<string, unknown>;
+      }
+    } catch {
+      // Try next candidate.
+    }
+  }
+
+  return undefined;
+}
+
+function normalizeSubAgentSummary(summary: unknown, fallbackText: string): string {
+  if (typeof summary === 'string' && summary.trim()) {
+    return summary.trim().slice(0, 900);
+  }
+
+  const compact = fallbackText.replace(/\s+/g, ' ').trim();
+  return compact.length > 900 ? `${compact.slice(0, 900)}...` : compact;
+}
+
+function normalizeStringList(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .map((entry) => (typeof entry === 'string' ? entry.trim() : ''))
+    .filter((entry) => entry.length > 0)
+    .slice(0, 12);
+}
+
+function normalizeSubAgentEvidence(value: unknown): NonNullable<SubAgentResult['evidence']> {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const entries: NonNullable<SubAgentResult['evidence']> = [];
+  for (const item of value) {
+    if (!item || typeof item !== 'object') {
+      continue;
+    }
+
+    const record = item as Record<string, unknown>;
+    const type = record.type;
+    if (
+      type !== 'file'
+      && type !== 'command'
+      && type !== 'test'
+      && type !== 'log'
+      && type !== 'url'
+      && type !== 'other'
+    ) {
+      continue;
+    }
+
+    const ref = typeof record.ref === 'string' ? record.ref.trim() : '';
+    if (!ref) {
+      continue;
+    }
+
+    const note = typeof record.note === 'string' && record.note.trim() ? record.note.trim() : undefined;
+    entries.push({ type, ref, note });
+  }
+
+  return entries.slice(0, 16);
+}
+
 async function completeSubAgentWithRetry(
   subAgent: {
     complete: (
@@ -4937,6 +5296,167 @@ function buildRetryFollowUpParts(params: {
   }
 
   return [...merged, ...cloneChatContentParts(params.followUpParts)];
+}
+
+function trimCompactionSummary(text: string, maxTokens: number): string {
+  const trimmed = text.trim();
+  if (!trimmed) {
+    return '';
+  }
+
+  const maxChars = Math.max(1_200, Math.floor(maxTokens * 4));
+  if (trimmed.length <= maxChars) {
+    return trimmed;
+  }
+
+  return `${trimmed.slice(0, maxChars)}\n... [summary truncated for budget]`;
+}
+
+function buildCompactionFallbackSummary(text: string, maxTokens: number): string {
+  const excerpt = trimCompactionSummary(text, maxTokens);
+  if (!excerpt) {
+    return '';
+  }
+
+  return [
+    '## Decisions',
+    '- Compaction fallback used due summarization-model unavailability.',
+    '',
+    '## Errors & Blockers',
+    '- Verify provider auth/model availability for compaction path if this repeats.',
+    '',
+    '## Progress',
+    '- Preserved a bounded raw excerpt from prior context.',
+    '',
+    '## Key Technical Details',
+    `- Excerpt:\n${excerpt}`,
+  ].join('\n');
+}
+
+async function buildManagedChatContinuationInput(params: {
+  session: WorkSession;
+  thread: SessionChatThread;
+  systemPrompt: string;
+  todos: AgentTodoItem[];
+  contextEngine: ContextEngine;
+  contextState: SessionContextState;
+  sharedContextStore: InMemorySharedContextStore;
+}): Promise<{ prompt: LlmPromptInput; nextState: SessionContextState }> {
+  try {
+    const relevantMessages = params.thread.messages
+      .filter((message) => message.role === 'user' || message.role === 'assistant');
+
+    let latestMultimodalUser: SessionChatMessage | undefined;
+    for (let index = relevantMessages.length - 1; index >= 0; index -= 1) {
+      const candidate = relevantMessages[index];
+      if (candidate.role === 'user' && candidate.contentParts?.some((part) => part.type === 'image')) {
+        latestMultimodalUser = candidate;
+        break;
+      }
+    }
+
+    const historyMessages = latestMultimodalUser
+      ? relevantMessages.filter((message) => message !== latestMultimodalUser)
+      : relevantMessages;
+
+    const turns: ConversationTurn[] = historyMessages.map((message, index) => {
+      const content = message.contentParts?.length
+        ? summarizeChatContentParts(message.contentParts)
+        : message.content;
+      return {
+        role: message.role === 'user' ? 'user' : 'assistant',
+        content,
+        turnIndex: index,
+        tokens: countTokens(content),
+      };
+    });
+
+    const contextResult = await params.contextEngine.buildContext({
+      systemPrompt: params.systemPrompt,
+      turns,
+      executionState: buildContextExecutionStateSummary(params.session, params.todos),
+      sharedFacts: params.sharedContextStore.list(params.session.id),
+      turnsSinceLastCompaction: params.contextState.turnsSinceLastCompaction,
+      previousCompressedHistory: params.contextState.previousCompressedHistory,
+    });
+
+    const nextState: SessionContextState = {
+      turnsSinceLastCompaction: contextResult.compactionPerformed
+        ? 0
+        : params.contextState.turnsSinceLastCompaction + 1,
+      previousCompressedHistory: contextResult.compactionPerformed
+        ? contextResult.envelope.compressedHistory.content
+        : params.contextState.previousCompressedHistory,
+    };
+
+    if (!latestMultimodalUser) {
+      return {
+        prompt: contextResult.userPrompt,
+        nextState,
+      };
+    }
+
+    const multimodalParts = (latestMultimodalUser.contentParts ?? [{ type: 'text', text: latestMultimodalUser.content }]).map((part) => {
+      if (part.type === 'text') {
+        return { type: 'text' as const, text: part.text };
+      }
+      return { type: 'image' as const, data: part.data, mimeType: part.mimeType };
+    });
+
+    const basePromptText = typeof contextResult.userPrompt === 'string'
+      ? contextResult.userPrompt
+      : 'Continue from the conversation context and respond to the latest multimodal user message.';
+
+    return {
+      prompt: [
+        {
+          type: 'text',
+          text: [
+            basePromptText,
+            '',
+            'The latest user message follows as multimodal content (text + image attachments).',
+            'Reply as ASSISTANT and continue from that latest user message.',
+          ].join('\n'),
+        },
+        ...multimodalParts,
+      ],
+      nextState,
+    };
+  } catch {
+    return {
+      prompt: buildChatContinuationInput(params.thread),
+      nextState: {
+        turnsSinceLastCompaction: params.contextState.turnsSinceLastCompaction + 1,
+        previousCompressedHistory: params.contextState.previousCompressedHistory,
+      },
+    };
+  }
+}
+
+function buildContextExecutionStateSummary(session: WorkSession, todos: AgentTodoItem[]): string {
+  const doneCount = todos.filter((todo) => todo.done || todo.status === 'done').length;
+  const pendingTodos = todos
+    .filter((todo) => !(todo.done || todo.status === 'done'))
+    .slice(0, 12)
+    .map((todo) => {
+      const status = todo.status ?? (todo.done ? 'done' : 'todo');
+      const weight = Number.isFinite(todo.weight) ? ` (${todo.weight}%)` : '';
+      return `- ${todo.id}: ${todo.text} [${status}]${weight}`;
+    });
+
+  const lines = [
+    `Session status: ${session.status}`,
+    `LLM status: ${session.llmStatus.state}${session.llmStatus.phase ? ` (${session.llmStatus.phase})` : ''}`,
+    session.llmStatus.detail ? `LLM detail: ${session.llmStatus.detail}` : '',
+    `Todo progress: ${doneCount}/${todos.length} completed`,
+  ].filter(Boolean);
+
+  if (pendingTodos.length > 0) {
+    lines.push('Pending todo items:');
+    lines.push(...pendingTodos);
+  }
+
+  return lines.join('\n');
 }
 
 function buildSessionSystemPrompt(session: WorkSession, phase: SessionPromptPhase): string {

@@ -6,7 +6,10 @@ import type {
   AgentGraphNode,
   AgentToolsetOptions,
   RegisteredAgentTool,
+  SubAgentContextPacket,
+  SubAgentEvidenceItem,
   SubAgentRequest,
+  SubAgentResult,
   TodoItem,
 } from './types.js';
 import { sanitizeForPathSegment } from './path-utils.js';
@@ -45,7 +48,24 @@ const SUBAGENT_BATCH_MAX_CONCURRENCY = 64;
 const SUBAGENT_BATCH_MIN_CONCURRENCY = 1;
 const SUBAGENT_PROMPT_SOFT_LIMIT_CHARS = 2200;
 const SUBAGENT_PROMPT_PREVIEW_MAX_CHARS = 220;
+const SUBAGENT_OUTPUT_PREVIEW_MAX_CHARS = 900;
+const SUBAGENT_MERGE_OUTPUT_PREVIEW_MAX_CHARS = 600;
+const COORDINATION_PERSIST_RAW_DEBUG_ENV = 'ORCHESTRACE_PERSIST_RAW_DEBUG';
+const COORDINATION_PERSIST_PROMPT_MAX_CHARS = 1_600;
+const COORDINATION_PERSIST_OUTPUT_MAX_CHARS = 1_000;
 const PROMPT_FILE_PATH_PATTERN = /(?:^|[\s`"'])((?:\.?\.?\/)?[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)+\.[A-Za-z0-9._-]+)(?=$|[\s`"':),])/g;
+
+const subAgentContextPacketSchema = Type.Object({
+  objective: Type.String({ minLength: 1 }),
+  boundaries: Type.Optional(Type.Object({
+    writePolicy: Type.Optional(Type.Union([Type.Literal('none'), Type.Literal('scoped'), Type.Literal('full')])),
+    allowedTools: Type.Optional(Type.Array(Type.String())),
+    timeoutMs: Type.Optional(Type.Number({ minimum: 1 })),
+  })),
+  relevantContext: Type.Optional(Type.Array(Type.String())),
+  requiredOutputSchema: Type.Optional(Type.String()),
+  evidenceRequirements: Type.Optional(Type.Array(Type.String())),
+});
 
 interface CoordinationToolsOptions extends AgentToolsetOptions {
   includeSubAgentTool: boolean;
@@ -304,7 +324,8 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
         description: 'Spawn a focused sub-agent for a dependent sub-task and return a concise result.',
         parameters: Type.Object({
           nodeId: Type.Optional(Type.String()),
-          prompt: Type.String({ minLength: 1 }),
+          prompt: Type.Optional(Type.String({ minLength: 1 })),
+          contextPacket: Type.Optional(subAgentContextPacketSchema),
           systemPrompt: Type.Optional(Type.String()),
           provider: Type.Optional(Type.String()),
           model: Type.Optional(Type.String()),
@@ -326,14 +347,15 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
           };
         }
 
-        const request: SubAgentRequest = {
-          nodeId: optionalString(toolArgs.nodeId),
-          prompt: await enrichDelegationPromptWithFileSnippets(options.cwd, asString(toolArgs.prompt, 'prompt')),
-          systemPrompt: optionalString(toolArgs.systemPrompt),
-          provider: optionalString(toolArgs.provider),
-          model: optionalString(toolArgs.model),
-          reasoning: normalizeReasoning(toolArgs.reasoning),
-        };
+        let request: SubAgentRequest;
+        try {
+          request = await buildSubAgentRequestFromToolArgs(options.cwd, toolArgs);
+        } catch (error) {
+          return {
+            content: error instanceof Error ? error.message : String(error),
+            isError: true,
+          };
+        }
 
         const state = await readCoordinationState(statePath);
         const id = `sub-${state.subAgents.length + 1}`;
@@ -355,7 +377,8 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
           const result = await options.runSubAgent(request, signal);
           const latest = await readCoordinationState(statePath);
           const current = latest.subAgents.find((entry) => entry.id === id);
-          const preview = trimText(result.text, 1800);
+          const mergePayload = buildSubAgentMergePayload(result, id, request);
+          const preview = mergePayload.summary;
           const usage = usageOrZero(result.usage);
           if (current) {
             current.status = 'completed';
@@ -374,8 +397,9 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
               usage,
               usageReported: Boolean(result.usage),
               outputPreview: preview,
+              mergePayload,
             }, null, 2),
-            details: { usage: result.usage },
+            details: { usage: result.usage, mergePayload },
           };
         } catch (error) {
           const latest = await readCoordinationState(statePath);
@@ -411,7 +435,8 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
           agents: Type.Array(
             Type.Object({
               nodeId: Type.Optional(Type.String()),
-              prompt: Type.String({ minLength: 1 }),
+              prompt: Type.Optional(Type.String({ minLength: 1 })),
+              contextPacket: Type.Optional(subAgentContextPacketSchema),
               systemPrompt: Type.Optional(Type.String()),
               provider: Type.Optional(Type.String()),
               model: Type.Optional(Type.String()),
@@ -469,14 +494,19 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
           };
         }
 
-        const requests = await mapWithConcurrency(requestInputs, concurrency, async (entry) => ({
-          nodeId: optionalString(entry.nodeId),
-          prompt: await enrichDelegationPromptWithFileSnippets(options.cwd, asString(entry.prompt, 'prompt')),
-          systemPrompt: optionalString(entry.systemPrompt),
-          provider: optionalString(entry.provider),
-          model: optionalString(entry.model),
-          reasoning: normalizeReasoning(entry.reasoning),
-        }));
+        let requests: SubAgentRequest[];
+        try {
+          requests = await mapWithConcurrency(
+            requestInputs,
+            concurrency,
+            async (entry) => buildSubAgentRequestFromToolArgs(options.cwd, entry),
+          );
+        } catch (error) {
+          return {
+            content: error instanceof Error ? error.message : String(error),
+            isError: true,
+          };
+        }
 
         const state = await readCoordinationState(statePath);
         const startIndex = state.subAgents.length;
@@ -499,13 +529,15 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
           const request = requests[index];
           try {
             const result = await options.runSubAgent?.(request, signal);
+            const mergePayload = buildSubAgentMergePayload(result ?? { text: '' }, record.id, request);
             return {
               id: record.id,
               nodeId: record.nodeId,
               status: 'completed' as const,
               promptChars: request.prompt.length,
               promptPreview: compactPromptPreview(request.prompt),
-              outputPreview: trimText(result?.text ?? '', 1800),
+              outputPreview: mergePayload.summary,
+              mergePayload,
               usage: usageOrZero(result?.usage),
               usageReported: Boolean(result?.usage),
             };
@@ -660,6 +692,203 @@ function usageOrZero(usage: { input: number; output: number; cost: number } | un
   };
 }
 
+async function buildSubAgentRequestFromToolArgs(
+  cwd: string,
+  toolArgs: Record<string, unknown>,
+): Promise<SubAgentRequest> {
+  const packet = normalizeSubAgentContextPacket(toolArgs.contextPacket);
+  const legacyPrompt = optionalString(toolArgs.prompt) ?? '';
+
+  if (!legacyPrompt && !packet?.objective) {
+    throw new Error('Missing prompt. Provide prompt or contextPacket.objective.');
+  }
+
+  const prompt = await enrichDelegationPromptWithFileSnippets(
+    cwd,
+    buildSubAgentPrompt(legacyPrompt, packet),
+  );
+
+  return {
+    nodeId: optionalString(toolArgs.nodeId),
+    prompt,
+    contextPacket: packet,
+    systemPrompt: optionalString(toolArgs.systemPrompt),
+    provider: optionalString(toolArgs.provider),
+    model: optionalString(toolArgs.model),
+    reasoning: normalizeReasoning(toolArgs.reasoning),
+  };
+}
+
+function normalizeSubAgentContextPacket(value: unknown): SubAgentContextPacket | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+
+  const objective = optionalString(value.objective);
+  if (!objective) {
+    return undefined;
+  }
+
+  const boundariesRecord = isRecord(value.boundaries) ? value.boundaries : undefined;
+  type WritePolicy = NonNullable<NonNullable<SubAgentContextPacket['boundaries']>['writePolicy']>;
+  const writePolicy = boundariesRecord?.writePolicy;
+  const normalizedWritePolicy: WritePolicy | undefined = writePolicy === 'none' || writePolicy === 'scoped' || writePolicy === 'full'
+    ? writePolicy
+    : undefined;
+
+  const boundaries = (normalizedWritePolicy
+    || optionalStringArray(boundariesRecord?.allowedTools)
+    || asPositiveInteger(boundariesRecord?.timeoutMs))
+    ? {
+      writePolicy: normalizedWritePolicy,
+      allowedTools: optionalStringArray(boundariesRecord?.allowedTools),
+      timeoutMs: asPositiveInteger(boundariesRecord?.timeoutMs),
+    }
+    : undefined;
+
+  return {
+    objective,
+    boundaries,
+    relevantContext: optionalStringArray(value.relevantContext),
+    requiredOutputSchema: optionalString(value.requiredOutputSchema),
+    evidenceRequirements: optionalStringArray(value.evidenceRequirements),
+  };
+}
+
+function buildSubAgentPrompt(prompt: string, packet?: SubAgentContextPacket): string {
+  if (!packet) {
+    return prompt;
+  }
+
+  const lines: string[] = [
+    '[SubAgentContextPacket]',
+    `Objective: ${packet.objective}`,
+  ];
+
+  if (packet.boundaries) {
+    lines.push('Boundaries:');
+    if (packet.boundaries.writePolicy) {
+      lines.push(`- writePolicy: ${packet.boundaries.writePolicy}`);
+    }
+    if ((packet.boundaries.allowedTools?.length ?? 0) > 0) {
+      lines.push(`- allowedTools: ${packet.boundaries.allowedTools?.join(', ')}`);
+    }
+    if (packet.boundaries.timeoutMs) {
+      lines.push(`- timeoutMs: ${packet.boundaries.timeoutMs}`);
+    }
+  }
+
+  if ((packet.relevantContext?.length ?? 0) > 0) {
+    lines.push('Relevant context:');
+    for (const item of packet.relevantContext ?? []) {
+      lines.push(`- ${item}`);
+    }
+  }
+
+  if ((packet.evidenceRequirements?.length ?? 0) > 0) {
+    lines.push('Evidence requirements:');
+    for (const item of packet.evidenceRequirements ?? []) {
+      lines.push(`- ${item}`);
+    }
+  }
+
+  lines.push('Required output contract:');
+  if (packet.requiredOutputSchema) {
+    lines.push(packet.requiredOutputSchema);
+  } else {
+    lines.push(
+      'Return concise JSON with keys: summary, actions[], evidence[{type,ref,note?}], risks[], openQuestions[], patchIntent[].',
+    );
+  }
+
+  if (prompt.trim()) {
+    lines.push('Legacy prompt:');
+    lines.push(prompt.trim());
+  }
+
+  return lines.join('\n');
+}
+
+function buildSubAgentMergePayload(result: SubAgentResult, id: string, request: SubAgentRequest): {
+  id: string;
+  nodeId?: string;
+  summary: string;
+  actions: string[];
+  evidence: SubAgentEvidenceItem[];
+  risks: string[];
+  openQuestions: string[];
+  patchIntent: string[];
+  artifact: { outputPreview: string; outputChars: number; promptChars: number };
+} {
+  const summary = optionalString(result.summary)
+    ?? trimText(result.text.replace(/\s+/g, ' ').trim(), SUBAGENT_OUTPUT_PREVIEW_MAX_CHARS);
+
+  return {
+    id,
+    nodeId: request.nodeId,
+    summary,
+    actions: normalizeStringList(result.actions),
+    evidence: normalizeSubAgentEvidence(result.evidence),
+    risks: normalizeStringList(result.risks),
+    openQuestions: normalizeStringList(result.openQuestions),
+    patchIntent: normalizeStringList(result.patchIntent),
+    artifact: {
+      outputPreview: trimText(result.text, SUBAGENT_MERGE_OUTPUT_PREVIEW_MAX_CHARS),
+      outputChars: result.text.length,
+      promptChars: request.prompt.length,
+    },
+  };
+}
+
+function normalizeStringList(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .map((entry) => optionalString(entry))
+    .filter((entry): entry is string => Boolean(entry))
+    .slice(0, 12);
+}
+
+function normalizeSubAgentEvidence(value: unknown): SubAgentEvidenceItem[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const entries: SubAgentEvidenceItem[] = [];
+  for (const item of value) {
+    if (!isRecord(item)) {
+      continue;
+    }
+
+    const type = item.type;
+    if (
+      type !== 'file'
+      && type !== 'command'
+      && type !== 'test'
+      && type !== 'log'
+      && type !== 'url'
+      && type !== 'other'
+    ) {
+      continue;
+    }
+
+    const ref = optionalString(item.ref);
+    if (!ref) {
+      continue;
+    }
+
+    entries.push({
+      type,
+      ref,
+      note: optionalString(item.note),
+    });
+  }
+
+  return entries.slice(0, 16);
+}
+
 function compactPromptPreview(prompt: string): string {
   const compact = prompt.replace(/\s+/g, ' ').trim();
   if (compact.length <= SUBAGENT_PROMPT_PREVIEW_MAX_CHARS) {
@@ -702,8 +931,75 @@ async function readCoordinationState(path: string): Promise<CoordinationState> {
 }
 
 async function writeCoordinationState(path: string, state: CoordinationState): Promise<void> {
+  const persistRawDebug = shouldPersistRawDebugArtifacts();
+  const payload = sanitizeCoordinationStateForPersistence(state);
+
   await mkdir(dirname(path), { recursive: true });
-  await writeFile(path, JSON.stringify(state, null, 2), 'utf-8');
+  await writeFile(path, JSON.stringify(payload, null, 2), 'utf-8');
+
+  if (persistRawDebug) {
+    await writeFile(resolveRawArtifactPath(path), JSON.stringify(state, null, 2), 'utf-8');
+  }
+}
+
+function shouldPersistRawDebugArtifacts(): boolean {
+  return asBoolean(process.env[COORDINATION_PERSIST_RAW_DEBUG_ENV]) ?? false;
+}
+
+function resolveRawArtifactPath(path: string): string {
+  if (path.endsWith('.json')) {
+    return `${path.slice(0, -5)}.raw.json`;
+  }
+
+  return `${path}.raw.json`;
+}
+
+function sanitizeCoordinationStateForPersistence(state: CoordinationState): CoordinationState {
+  return {
+    ...state,
+    todos: state.todos.map((todo) => ({
+      ...todo,
+      title: sanitizePersistedText(todo.title, COORDINATION_PERSIST_PROMPT_MAX_CHARS),
+      details: todo.details
+        ? sanitizePersistedText(todo.details, COORDINATION_PERSIST_OUTPUT_MAX_CHARS)
+        : todo.details,
+    })),
+    agentGraph: {
+      nodes: state.agentGraph.nodes.map((node) => ({
+        ...node,
+        name: node.name ? sanitizePersistedText(node.name, 240) : node.name,
+        prompt: sanitizePersistedText(node.prompt, COORDINATION_PERSIST_PROMPT_MAX_CHARS),
+      })),
+    },
+    subAgents: state.subAgents.map((record) => ({
+      ...record,
+      prompt: sanitizePersistedText(record.prompt, COORDINATION_PERSIST_PROMPT_MAX_CHARS),
+      outputPreview: record.outputPreview
+        ? sanitizePersistedText(record.outputPreview, COORDINATION_PERSIST_OUTPUT_MAX_CHARS)
+        : record.outputPreview,
+      error: record.error
+        ? sanitizePersistedText(record.error, COORDINATION_PERSIST_OUTPUT_MAX_CHARS)
+        : record.error,
+    })),
+  };
+}
+
+function sanitizePersistedText(value: string, maxChars: number): string {
+  const redacted = redactSensitiveText(value.replace(/\s+/g, ' ').trim());
+  if (redacted.length <= maxChars) {
+    return redacted;
+  }
+
+  return `${redacted.slice(0, maxChars)}... [truncated]`;
+}
+
+function redactSensitiveText(text: string): string {
+  return text
+    .replace(/\bgh[pousr]_[A-Za-z0-9]{30,}\b/g, '[REDACTED_GITHUB_TOKEN]')
+    .replace(/\bsk-[A-Za-z0-9_-]{16,}\b/g, '[REDACTED_API_KEY]')
+    .replace(/\b(?:api[_-]?key|token|secret|password)\s*[:=]\s*[^\s"',;]+/gi, '$1=[REDACTED]')
+    .replace(/\bBearer\s+[A-Za-z0-9._-]{16,}\b/gi, 'Bearer [REDACTED]')
+    .replace(/data:image\/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=\s]+/g, '[REDACTED_IMAGE_DATA]');
 }
 
 function normalizeTodoItems(value: unknown): TodoItem[] {
