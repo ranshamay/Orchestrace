@@ -44,7 +44,7 @@ export function SessionSidebar(props: SessionSidebarProps) {
   const isDark = theme === 'dark';
 
   return (
-    <aside className="w-full border-b border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900 md:w-64 md:border-b-0 md:border-l">
+    <aside className="w-full border-b border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900 md:w-full md:border-b-0 md:border-l">
       <div className="border-b border-slate-100 px-4 py-3 dark:border-slate-800">
         <div className="flex items-center gap-2">
           <Activity className="h-5 w-5 text-blue-600" />

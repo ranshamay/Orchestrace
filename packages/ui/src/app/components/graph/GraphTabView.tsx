@@ -1,4 +1,7 @@
+import { useMemo } from 'react';
 import type { AgentTodo, WorkSession } from '../../../lib/api';
+import { ResizeHandle } from '../layout/ResizeHandle';
+import { useHorizontalResize } from '../../hooks/useHorizontalResize';
 import type { FailureType, LlmSessionStatus } from '../../types';
 import { EntityGraphCard } from './EntityGraphCard';
 import { TodoChecklistCard } from './TodoChecklistCard';
@@ -19,6 +22,10 @@ type Props = {
   rightPane: React.ReactNode;
 };
 
+const TIMELINE_DEFAULT_WIDTH = 420;
+const TIMELINE_MIN_WIDTH = 320;
+const TIMELINE_MAX_WIDTH = 720;
+
 export function GraphTabView({
   selectedSession,
   selectedSessionRunning,
@@ -34,9 +41,42 @@ export function GraphTabView({
   onOpenLlmControls,
   rightPane,
 }: Props) {
+  const computedTimelineMax = useMemo(() => {
+    if (typeof window === 'undefined') return TIMELINE_MAX_WIDTH;
+    return Math.min(TIMELINE_MAX_WIDTH, Math.floor(window.innerWidth * 0.55));
+  }, []);
+
+  const timelineResize = useHorizontalResize({
+    initialSize: TIMELINE_DEFAULT_WIDTH,
+    minSize: TIMELINE_MIN_WIDTH,
+    maxSize: computedTimelineMax,
+    direction: 'normal',
+  });
+
   return (
     <div className="flex h-full flex-col lg:flex-row">
-      <aside className="flex w-full flex-col bg-white dark:bg-slate-900 lg:w-[420px]">{rightPane}</aside>
+      <aside
+        className="flex w-full flex-col bg-white dark:bg-slate-900 lg:shrink-0 lg:w-[var(--timeline-panel-width)]"
+        id="timeline-panel"
+        style={{ '--timeline-panel-width': `${timelineResize.size}px` } as React.CSSProperties}
+      >
+        {rightPane}
+      </aside>
+
+      <ResizeHandle
+        ariaLabel="Resize timeline panel"
+        hiddenOnMobileClassName="hidden lg:block"
+        id="timeline-panel"
+        onKeyDown={timelineResize.handleKeyDown}
+        onLostPointerCapture={timelineResize.handleLostPointerCapture}
+        onPointerCancel={timelineResize.handlePointerCancel}
+        onPointerDown={timelineResize.handlePointerDown}
+        onPointerMove={timelineResize.handlePointerMove}
+        onPointerUp={timelineResize.handlePointerUp}
+        valueMax={timelineResize.maxSize}
+        valueMin={timelineResize.minSize}
+        valueNow={timelineResize.size}
+      />
 
       <section className="flex min-w-0 flex-1 flex-col border-b border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900 lg:border-b-0 lg:border-l">
         <header className="border-b border-slate-200 p-4 dark:border-slate-800">
