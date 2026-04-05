@@ -3002,7 +3002,7 @@ async function ensureNativeGitWorktree(request: NativeGitWorktreeRequest): Promi
   const worktreePath = join(worktreesRoot, `${sessionToken}-${taskToken}`);
   const targetBranch = `orchestrace/${graphToken}/${taskToken}-${sessionToken.slice(0, 8)}`;
 
-  const existing = await listNativeGitWorktrees(request.repoRoot);
+  const existing = await listNativeGitWorktreesForProvisioning(request.repoRoot);
   const existingEntry = existing.find((entry) => entry.path === worktreePath);
   if (existingEntry) {
     return {
@@ -3032,7 +3032,7 @@ async function ensureNativeGitWorktree(request: NativeGitWorktreeRequest): Promi
   };
 }
 
-async function listNativeGitWorktrees(repoRoot: string): Promise<Array<{ path: string; branch?: string }>> {
+async function listNativeGitWorktreesForProvisioning(repoRoot: string): Promise<Array<{ path: string; branch?: string }>> {
   const output = await runGit(repoRoot, ['worktree', 'list', '--porcelain']);
   const lines = output.split(/\r?\n/);
   const entries: Array<{ path: string; branch?: string }> = [];
