@@ -10,12 +10,18 @@ export type LlmControlsModalProps = {
   workModel: string;
   autoApprove: boolean;
   useWorktree: boolean;
+  adaptiveConcurrency: boolean;
+  batchConcurrency: number;
+  batchMinConcurrency: number;
   onClose: () => void;
   onChangeWorkspace: (workspaceId: string) => void;
   onChangeProvider: (provider: string) => void;
   onChangeModel: (model: string) => void;
   onChangeAutoApprove: (next: boolean) => void;
   onChangeUseWorktree: (next: boolean) => void;
+  onChangeAdaptiveConcurrency: (next: boolean) => void;
+  onChangeBatchConcurrency: (next: number) => void;
+  onChangeBatchMinConcurrency: (next: number) => void;
 };
 
 export function LlmControlsModal(props: LlmControlsModalProps) {
@@ -29,12 +35,18 @@ export function LlmControlsModal(props: LlmControlsModalProps) {
     workModel,
     autoApprove,
     useWorktree,
+    adaptiveConcurrency,
+    batchConcurrency,
+    batchMinConcurrency,
     onClose,
     onChangeWorkspace,
     onChangeProvider,
     onChangeModel,
     onChangeAutoApprove,
     onChangeUseWorktree,
+    onChangeAdaptiveConcurrency,
+    onChangeBatchConcurrency,
+    onChangeBatchMinConcurrency,
   } = props;
 
   if (!isOpen) {
@@ -77,6 +89,43 @@ export function LlmControlsModal(props: LlmControlsModalProps) {
           <label className="md:col-span-2 flex items-center gap-2 rounded border border-slate-200 bg-white px-2 py-1.5 text-sm text-slate-600 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300">
             <input checked={useWorktree} className="h-4 w-4" onChange={(event) => onChangeUseWorktree(event.target.checked)} type="checkbox" />
             Use worktree for new runs
+          </label>
+
+          <label className="md:col-span-2 flex items-center gap-2 rounded border border-slate-200 bg-white px-2 py-1.5 text-sm text-slate-600 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300">
+            <input checked={adaptiveConcurrency} className="h-4 w-4" onChange={(event) => onChangeAdaptiveConcurrency(event.target.checked)} type="checkbox" />
+            Adaptive tool concurrency
+          </label>
+
+          <label className="flex flex-col gap-1 rounded border border-slate-200 bg-white px-2 py-1.5 text-xs text-slate-600 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300">
+            <span>Tool batch concurrency</span>
+            <input
+              className="rounded border border-slate-200 px-2 py-1 text-sm dark:border-slate-700 dark:bg-slate-950"
+              min={1}
+              onChange={(event) => {
+                const value = Number.parseInt(event.target.value, 10);
+                if (Number.isFinite(value) && value > 0) {
+                  onChangeBatchConcurrency(value);
+                }
+              }}
+              type="number"
+              value={batchConcurrency}
+            />
+          </label>
+
+          <label className="flex flex-col gap-1 rounded border border-slate-200 bg-white px-2 py-1.5 text-xs text-slate-600 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300">
+            <span>Tool min concurrency</span>
+            <input
+              className="rounded border border-slate-200 px-2 py-1 text-sm dark:border-slate-700 dark:bg-slate-950"
+              min={1}
+              onChange={(event) => {
+                const value = Number.parseInt(event.target.value, 10);
+                if (Number.isFinite(value) && value > 0) {
+                  onChangeBatchMinConcurrency(value);
+                }
+              }}
+              type="number"
+              value={batchMinConcurrency}
+            />
           </label>
         </div>
 

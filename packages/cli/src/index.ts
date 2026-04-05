@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
 import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
+import { homedir } from 'node:os';
 import { resolve } from 'node:path';
 import { config as loadDotEnv } from 'dotenv';
 import { orchestrate } from '@orchestrace/core';
@@ -21,6 +22,8 @@ const SUB_AGENT_READ_ONLY_TOOL_ALLOWLIST = [
   'git_status',
 ];
 
+const GITHUB_PROVIDER_ID = 'github';
+
 function createReadOnlySubAgentToolset(cwd: string) {
   return createAgentToolset({
     cwd,
@@ -30,6 +33,12 @@ function createReadOnlySubAgentToolset(cwd: string) {
       allowRunCommand: false,
       toolAllowlist: [...SUB_AGENT_READ_ONLY_TOOL_ALLOWLIST],
     },
+  });
+}
+
+function createGithubAuthManager(): ProviderAuthManager {
+  return new ProviderAuthManager({
+    authFilePath: resolve(homedir(), '.orchestrace', 'github-auth.json'),
   });
 }
 
@@ -374,6 +383,7 @@ async function runGraph(
 
   const llm = new PiAiAdapter();
   const authManager = new ProviderAuthManager();
+  const githubAuthManager = createGithubAuthManager();
   const cwd = options.workspace.path;
 
   const outputs = await orchestrate(graph, {
@@ -397,6 +407,7 @@ async function runGraph(
       provider: activeProvider,
       model: activeModel,
       reasoning,
+      resolveGithubToken: () => githubAuthManager.resolveApiKey(GITHUB_PROVIDER_ID),
       runSubAgent: async (request, _signal) => {
         const subProvider = request.provider ?? activeProvider;
         const subModel = request.model ?? activeModel;

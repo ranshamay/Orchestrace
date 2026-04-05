@@ -33,6 +33,9 @@ export interface WorkSession {
   model: string;
   autoApprove: boolean;
   useWorktree?: boolean;
+  adaptiveConcurrency?: boolean;
+  batchConcurrency?: number;
+  batchMinConcurrency?: number;
   worktreePath?: string;
   worktreeBranch?: string;
   createdAt: string;
@@ -96,6 +99,33 @@ export interface WorkToolsResponse {
   tools: Array<{ name: string; description: string }>;
 }
 
+export interface GithubAuthStatus {
+  connected: boolean;
+  source: string;
+  storedApiKeyConfigured: boolean;
+  login?: string;
+  name?: string;
+  scopes: string[];
+  error?: string;
+}
+
+export interface GithubAuthStatusResponse {
+  status: GithubAuthStatus;
+}
+
+export interface GithubDeviceAuthSession {
+  id: string;
+  state: 'awaiting-user' | 'polling' | 'completed' | 'failed';
+  userCode: string;
+  verificationUri: string;
+  verificationUriComplete?: string;
+  scopes: string[];
+  expiresAt: string;
+  createdAt: string;
+  updatedAt: string;
+  error?: string;
+}
+
 async function readJson<T>(res: Response): Promise<T> {
   if (!res.ok) {
     const body = await res.text();
@@ -106,6 +136,26 @@ async function readJson<T>(res: Response): Promise<T> {
 
 export async function fetchProviders(): Promise<ProvidersResponse> {
   return readJson(await fetch(`${API_BASE}/providers`));
+}
+
+export async function fetchGithubAuthStatus(): Promise<GithubAuthStatusResponse> {
+  return readJson(await fetch(`${API_BASE}/github/auth/status`));
+}
+
+export async function startGithubDeviceAuth(payload?: {
+  clientId?: string;
+  scopes?: string[];
+}): Promise<{ sessionId: string; session: GithubDeviceAuthSession }> {
+  const res = await fetch(`${API_BASE}/github/auth/start`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload ?? {}),
+  });
+  return readJson(res);
+}
+
+export async function fetchGithubDeviceAuthSession(id: string): Promise<{ session: GithubDeviceAuthSession }> {
+  return readJson(await fetch(`${API_BASE}/github/auth/session?id=${encodeURIComponent(id)}`));
 }
 
 export async function fetchModels(provider: string): Promise<{ provider: string; models: string[] }> {
@@ -142,6 +192,9 @@ export async function startWork(payload: {
   model: string;
   autoApprove: boolean;
   useWorktree?: boolean;
+  adaptiveConcurrency?: boolean;
+  batchConcurrency?: number;
+  batchMinConcurrency?: number;
   promptParts?: ChatContentPart[];
 }): Promise<{ id: string }> {
   const res = await fetch(`${API_BASE}/work/start`, {

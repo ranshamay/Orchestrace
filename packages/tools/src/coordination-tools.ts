@@ -39,6 +39,10 @@ const modeSchema = Type.Union([
 const SUBAGENT_CONTEXT_MAX_FILES = 3;
 const SUBAGENT_CONTEXT_MAX_CHARS_PER_FILE = 1200;
 const SUBAGENT_CONTEXT_MARKER = 'Auto-included file snippets';
+const SUBAGENT_SNIPPET_READ_CONCURRENCY = 8;
+const SUBAGENT_BATCH_DEFAULT_CONCURRENCY = 8;
+const SUBAGENT_BATCH_MAX_CONCURRENCY = 64;
+const SUBAGENT_BATCH_MIN_CONCURRENCY = 1;
 const PROMPT_FILE_PATH_PATTERN = /(?:^|[\s`"'])((?:\.?\.?\/)?[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)+\.[A-Za-z0-9._-]+)(?=$|[\s`"':),])/g;
 
 interface CoordinationToolsOptions extends AgentToolsetOptions {
@@ -392,6 +396,9 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
             }),
             { minItems: 1 },
           ),
+          concurrency: Type.Optional(Type.Number({ minimum: 1, maximum: SUBAGENT_BATCH_MAX_CONCURRENCY })),
+          adaptiveConcurrency: Type.Optional(Type.Boolean({ description: 'Automatically tune concurrency based on sub-agent failures while processing the batch.' })),
+          minConcurrency: Type.Optional(Type.Number({ minimum: 1, maximum: SUBAGENT_BATCH_MAX_CONCURRENCY })),
         }),
       },
       execute: async (toolArgs, signal) => {
@@ -410,21 +417,36 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
           };
         }
 
-        const requests: SubAgentRequest[] = [];
-        for (const entry of rawAgents) {
-          if (!isRecord(entry)) {
-            continue;
-          }
+        const requestedConcurrency = asPositiveInteger(toolArgs.concurrency)
+          ?? options.batchConcurrency
+          ?? SUBAGENT_BATCH_DEFAULT_CONCURRENCY;
+        const concurrency = clampWithMax(requestedConcurrency, SUBAGENT_BATCH_MAX_CONCURRENCY);
+        const adaptiveConcurrency = asBoolean(toolArgs.adaptiveConcurrency)
+          ?? options.adaptiveConcurrency
+          ?? false;
+        const minConcurrency = clampWithMax(
+          asPositiveInteger(toolArgs.minConcurrency)
+            ?? options.batchMinConcurrency
+            ?? SUBAGENT_BATCH_MIN_CONCURRENCY,
+          SUBAGENT_BATCH_MAX_CONCURRENCY,
+        );
 
-          requests.push({
-            nodeId: optionalString(entry.nodeId),
-            prompt: await enrichDelegationPromptWithFileSnippets(options.cwd, asString(entry.prompt, 'prompt')),
-            systemPrompt: optionalString(entry.systemPrompt),
-            provider: optionalString(entry.provider),
-            model: optionalString(entry.model),
-            reasoning: normalizeReasoning(entry.reasoning),
-          });
+        const requestInputs = rawAgents.filter((entry): entry is Record<string, unknown> => isRecord(entry));
+        if (requestInputs.length === 0) {
+          return {
+            content: 'Missing agents. Provide at least one valid sub-agent request.',
+            isError: true,
+          };
         }
+
+        const requests = await mapWithConcurrency(requestInputs, concurrency, async (entry) => ({
+          nodeId: optionalString(entry.nodeId),
+          prompt: await enrichDelegationPromptWithFileSnippets(options.cwd, asString(entry.prompt, 'prompt')),
+          systemPrompt: optionalString(entry.systemPrompt),
+          provider: optionalString(entry.provider),
+          model: optionalString(entry.model),
+          reasoning: normalizeReasoning(entry.reasoning),
+        }));
 
         const state = await readCoordinationState(statePath);
         const startIndex = state.subAgents.length;
@@ -443,7 +465,7 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
         state.updatedAt = now();
         await writeCoordinationState(statePath, state);
 
-        const settled = await Promise.all(records.map(async (record, index) => {
+        const mapper = async (record: SubAgentRunRecord, index: number) => {
           const request = requests[index];
           try {
             const result = await options.runSubAgent?.(request, signal);
@@ -462,7 +484,21 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
               error: error instanceof Error ? error.message : String(error),
             };
           }
-        }));
+        };
+
+        const batchRun = adaptiveConcurrency
+          ? await mapWithAdaptiveConcurrency(records, {
+              initialConcurrency: concurrency,
+              minConcurrency,
+              maxConcurrency: SUBAGENT_BATCH_MAX_CONCURRENCY,
+            }, mapper, (result) => result.status === 'failed')
+          : {
+              results: await mapWithConcurrency(records, concurrency, mapper),
+              finalConcurrency: concurrency,
+              windows: 1,
+            };
+
+        const settled = batchRun.results;
 
         const latest = await readCoordinationState(statePath);
         for (const result of settled) {
@@ -487,6 +523,11 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
         const failedCount = settled.filter((entry) => entry.status === 'failed').length;
         const summary = {
           total: settled.length,
+          concurrency,
+          adaptiveConcurrency,
+          minConcurrency,
+          finalConcurrency: batchRun.finalConcurrency,
+          windows: batchRun.windows,
           completed: settled.length - failedCount,
           failed: failedCount,
           runs: settled,
@@ -830,34 +871,34 @@ function extractCandidateFilePaths(prompt: string): string[] {
 }
 
 async function collectFileSnippets(cwd: string, filePaths: string[]): Promise<Array<{ path: string; content: string }>> {
-  const snippets: Array<{ path: string; content: string }> = [];
-
-  for (const filePath of filePaths) {
-    if (snippets.length >= SUBAGENT_CONTEXT_MAX_FILES) {
-      break;
-    }
-
-    const absolutePath = resolve(cwd, filePath);
+  const candidates = filePaths.map((filePath, index) => ({ filePath, index }));
+  const results = await mapWithConcurrency(candidates, SUBAGENT_SNIPPET_READ_CONCURRENCY, async (candidate) => {
+    const absolutePath = resolve(cwd, candidate.filePath);
     if (!isWithinDirectory(absolutePath, cwd)) {
-      continue;
+      return undefined;
     }
 
     try {
       const content = await readFile(absolutePath, 'utf-8');
       if (content.includes('\u0000')) {
-        continue;
+        return undefined;
       }
 
-      snippets.push({
+      return {
+        index: candidate.index,
         path: toPosixPath(relative(cwd, absolutePath)),
         content: trimText(content.trim(), SUBAGENT_CONTEXT_MAX_CHARS_PER_FILE),
-      });
+      };
     } catch {
-      continue;
+      return undefined;
     }
-  }
+  });
 
-  return snippets;
+  return results
+    .filter((entry): entry is { index: number; path: string; content: string } => Boolean(entry))
+    .sort((a, b) => a.index - b.index)
+    .slice(0, SUBAGENT_CONTEXT_MAX_FILES)
+    .map((entry) => ({ path: entry.path, content: entry.content }));
 }
 
 function isWithinDirectory(path: string, cwd: string): boolean {
@@ -868,6 +909,117 @@ function isWithinDirectory(path: string, cwd: string): boolean {
 
 function toPosixPath(path: string): string {
   return path.split(sep).join('/');
+}
+
+function asPositiveInteger(value: unknown): number | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return undefined;
+  }
+
+  const normalized = Math.floor(value);
+  return normalized > 0 ? normalized : undefined;
+}
+
+function asBoolean(value: unknown): boolean | undefined {
+  if (typeof value === 'boolean') {
+    return value;
+  }
+
+  if (typeof value !== 'string') {
+    return undefined;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  if (!normalized) {
+    return undefined;
+  }
+
+  if (normalized === 'true' || normalized === '1' || normalized === 'yes' || normalized === 'on') {
+    return true;
+  }
+
+  if (normalized === 'false' || normalized === '0' || normalized === 'no' || normalized === 'off') {
+    return false;
+  }
+
+  return undefined;
+}
+
+function clampWithMax(value: number, max: number): number {
+  return Math.max(1, Math.min(max, value));
+}
+
+async function mapWithConcurrency<T, U>(
+  values: readonly T[],
+  concurrency: number,
+  mapper: (value: T, index: number) => Promise<U>,
+): Promise<U[]> {
+  if (values.length === 0) {
+    return [];
+  }
+
+  const results = new Array<U>(values.length);
+  const workerCount = Math.min(concurrency, values.length);
+  let nextIndex = 0;
+
+  const workers = Array.from({ length: workerCount }, async () => {
+    while (nextIndex < values.length) {
+      const currentIndex = nextIndex;
+      nextIndex += 1;
+      results[currentIndex] = await mapper(values[currentIndex], currentIndex);
+    }
+  });
+
+  await Promise.all(workers);
+  return results;
+}
+
+async function mapWithAdaptiveConcurrency<T, U>(
+  values: readonly T[],
+  options: {
+    initialConcurrency: number;
+    minConcurrency: number;
+    maxConcurrency: number;
+  },
+  mapper: (value: T, index: number) => Promise<U>,
+  isFailure: (result: U) => boolean,
+): Promise<{ results: U[]; finalConcurrency: number; windows: number }> {
+  if (values.length === 0) {
+    return { results: [], finalConcurrency: options.initialConcurrency, windows: 0 };
+  }
+
+  const results = new Array<U>(values.length);
+  let nextIndex = 0;
+  let currentConcurrency = clampWithMax(options.initialConcurrency, options.maxConcurrency);
+  const minConcurrency = Math.max(1, Math.min(options.maxConcurrency, options.minConcurrency));
+  let windows = 0;
+
+  while (nextIndex < values.length) {
+    const start = nextIndex;
+    const end = Math.min(values.length, start + currentConcurrency);
+    const indexes = [] as number[];
+    for (let index = start; index < end; index += 1) {
+      indexes.push(index);
+    }
+
+    const batchResults = await Promise.all(indexes.map(async (index) => mapper(values[index], index)));
+    for (let offset = 0; offset < batchResults.length; offset += 1) {
+      results[indexes[offset]] = batchResults[offset];
+    }
+
+    windows += 1;
+    const failures = batchResults.reduce((count, result) => (isFailure(result) ? count + 1 : count), 0);
+    currentConcurrency = failures === 0
+      ? Math.min(options.maxConcurrency, currentConcurrency * 2)
+      : Math.max(minConcurrency, Math.floor(currentConcurrency / 2));
+    nextIndex = end;
+  }
+
+  return {
+    results,
+    finalConcurrency: currentConcurrency,
+    windows,
+  };
 }
 
 function now(): string {

@@ -17,6 +17,12 @@ type Params = {
   setAutoApprove: (value: boolean) => void;
   useWorktree: boolean;
   setUseWorktree: (value: boolean) => void;
+  adaptiveConcurrency: boolean;
+  setAdaptiveConcurrency: (value: boolean) => void;
+  batchConcurrency: number;
+  setBatchConcurrency: (value: number) => void;
+  batchMinConcurrency: number;
+  setBatchMinConcurrency: (value: number) => void;
 };
 
 export function useLlmControls(params: Params) {
@@ -35,6 +41,12 @@ export function useLlmControls(params: Params) {
     setAutoApprove,
     useWorktree,
     setUseWorktree,
+    adaptiveConcurrency,
+    setAdaptiveConcurrency,
+    batchConcurrency,
+    setBatchConcurrency,
+    batchMinConcurrency,
+    setBatchMinConcurrency,
   } = params;
 
   const [llmControlsBySessionId, setLlmControlsBySessionId] = useState<Record<string, SessionLlmControls>>({});
@@ -45,7 +57,27 @@ export function useLlmControls(params: Params) {
     if (workWorkspaceId !== controls.workspaceId) setWorkWorkspaceId(controls.workspaceId);
     if (autoApprove !== controls.autoApprove) setAutoApprove(controls.autoApprove);
     if (useWorktree !== controls.useWorktree) setUseWorktree(controls.useWorktree);
-  }, [autoApprove, setAutoApprove, setUseWorktree, setWorkModel, setWorkProvider, setWorkWorkspaceId, useWorktree, workModel, workProvider, workWorkspaceId]);
+    if (adaptiveConcurrency !== controls.adaptiveConcurrency) setAdaptiveConcurrency(controls.adaptiveConcurrency);
+    if (batchConcurrency !== controls.batchConcurrency) setBatchConcurrency(controls.batchConcurrency);
+    if (batchMinConcurrency !== controls.batchMinConcurrency) setBatchMinConcurrency(controls.batchMinConcurrency);
+  }, [
+    adaptiveConcurrency,
+    autoApprove,
+    batchConcurrency,
+    batchMinConcurrency,
+    setAdaptiveConcurrency,
+    setAutoApprove,
+    setBatchConcurrency,
+    setBatchMinConcurrency,
+    setUseWorktree,
+    setWorkModel,
+    setWorkProvider,
+    setWorkWorkspaceId,
+    useWorktree,
+    workModel,
+    workProvider,
+    workWorkspaceId,
+  ]);
 
   const updateActiveLlmControls = useCallback((patch: Partial<SessionLlmControls>) => {
     const next: SessionLlmControls = {
@@ -54,6 +86,9 @@ export function useLlmControls(params: Params) {
       workspaceId: patch.workspaceId ?? workWorkspaceId,
       autoApprove: patch.autoApprove ?? autoApprove,
       useWorktree: patch.useWorktree ?? useWorktree,
+      adaptiveConcurrency: patch.adaptiveConcurrency ?? adaptiveConcurrency,
+      batchConcurrency: patch.batchConcurrency ?? batchConcurrency,
+      batchMinConcurrency: patch.batchMinConcurrency ?? batchMinConcurrency,
     };
 
     applyWorkingControls(next);
@@ -62,7 +97,19 @@ export function useLlmControls(params: Params) {
       return;
     }
     setDefaultLlmControls(next);
-  }, [applyWorkingControls, autoApprove, selectedSessionId, setDefaultLlmControls, useWorktree, workModel, workProvider, workWorkspaceId]);
+  }, [
+    adaptiveConcurrency,
+    applyWorkingControls,
+    autoApprove,
+    batchConcurrency,
+    batchMinConcurrency,
+    selectedSessionId,
+    setDefaultLlmControls,
+    useWorktree,
+    workModel,
+    workProvider,
+    workWorkspaceId,
+  ]);
 
   useEffect(() => {
     if (!selectedSessionId) {
@@ -84,6 +131,9 @@ export function useLlmControls(params: Params) {
       workspaceId: selectedSession.workspaceId || defaultLlmControls.workspaceId,
       autoApprove: selectedSession.autoApprove,
       useWorktree: selectedSession.useWorktree ?? defaultLlmControls.useWorktree,
+      adaptiveConcurrency: selectedSession.adaptiveConcurrency ?? defaultLlmControls.adaptiveConcurrency,
+      batchConcurrency: selectedSession.batchConcurrency ?? defaultLlmControls.batchConcurrency,
+      batchMinConcurrency: selectedSession.batchMinConcurrency ?? defaultLlmControls.batchMinConcurrency,
     };
 
     applyWorkingControls(sessionControls);

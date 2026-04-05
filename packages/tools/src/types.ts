@@ -22,9 +22,13 @@ export interface AgentToolsetOptions {
   reasoning?: 'minimal' | 'low' | 'medium' | 'high';
   commandTimeoutMs?: number;
   maxOutputChars?: number;
+  batchConcurrency?: number;
+  batchMinConcurrency?: number;
+  adaptiveConcurrency?: boolean;
   permissions?: Partial<AgentToolPermissions>;
   runSubAgent?: (request: SubAgentRequest, signal?: AbortSignal) => Promise<SubAgentResult>;
   modeController?: AgentModeController;
+  resolveGithubToken?: () => Promise<string | undefined>;
 }
 
 export interface AgentModeController {

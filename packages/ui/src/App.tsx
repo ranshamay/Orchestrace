@@ -37,6 +37,9 @@ export default function App() {
     workProvider, setWorkProvider, workModel, setWorkModel,
     workWorkspaceId, setWorkWorkspaceId, autoApprove, setAutoApprove,
     useWorktree, setUseWorktree, errorMessage, setErrorMessage,
+    adaptiveConcurrency, setAdaptiveConcurrency,
+    batchConcurrency, setBatchConcurrency,
+    batchMinConcurrency, setBatchMinConcurrency,
   } = bootstrap;
 
   const { theme, setTheme, isDark } = useThemePreference();
@@ -56,6 +59,9 @@ export default function App() {
     selectedSessionId, selectedSession, defaultLlmControls, setDefaultLlmControls,
     workProvider, setWorkProvider, workModel, setWorkModel, workWorkspaceId, setWorkWorkspaceId,
     autoApprove, setAutoApprove, useWorktree, setUseWorktree,
+    adaptiveConcurrency, setAdaptiveConcurrency,
+    batchConcurrency, setBatchConcurrency,
+    batchMinConcurrency, setBatchMinConcurrency,
   });
   const { currentModels } = useProviderModels(workProvider, workModel, setWorkModel);
 
@@ -67,6 +73,7 @@ export default function App() {
   const actions = useSessionActions({
     selectedSessionId, selectedSession, sessions, chatMessages, todos, composerText, composerImages,
     workWorkspaceId, workProvider, workModel, autoApprove, useWorktree,
+    adaptiveConcurrency, batchConcurrency, batchMinConcurrency,
     setErrorMessage, setSessions, setSelectedSessionId, setChatMessages, setTodos,
     setComposerText, setComposerImages, setLlmControlsBySessionId,
   });
@@ -142,12 +149,18 @@ export default function App() {
     workModel,
     autoApprove,
     useWorktree,
+    adaptiveConcurrency,
+    batchConcurrency,
+    batchMinConcurrency,
     closeLlmControlsModal,
     onChangeWorkspace: (workspaceId) => updateActiveLlmControls({ workspaceId }),
     onChangeProvider: (provider) => updateActiveLlmControls({ provider, model: '' }),
     onChangeModel: (model) => updateActiveLlmControls({ model }),
     onChangeAutoApprove: (next) => updateActiveLlmControls({ autoApprove: next }),
     onChangeUseWorktree: (next) => updateActiveLlmControls({ useWorktree: next }),
+    onChangeAdaptiveConcurrency: (next) => updateActiveLlmControls({ adaptiveConcurrency: next }),
+    onChangeBatchConcurrency: (next) => updateActiveLlmControls({ batchConcurrency: next }),
+    onChangeBatchMinConcurrency: (next) => updateActiveLlmControls({ batchMinConcurrency: next }),
   });
 
   return (

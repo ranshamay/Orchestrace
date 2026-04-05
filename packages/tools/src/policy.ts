@@ -26,6 +26,7 @@ function getDefaultPermissions(phase: string, taskType: string): AgentToolPermis
       toolAllowlist: [
         'list_directory',
         'read_file',
+        'read_files',
         'search_files',
         'git_diff',
         'git_status',
@@ -51,6 +52,7 @@ function getDefaultPermissions(phase: string, taskType: string): AgentToolPermis
       toolAllowlist: [
         'list_directory',
         'read_file',
+        'read_files',
         'search_files',
         'git_diff',
         'git_status',
@@ -75,12 +77,17 @@ function getDefaultPermissions(phase: string, taskType: string): AgentToolPermis
     toolAllowlist: [
       'list_directory',
       'read_file',
+      'read_files',
       'search_files',
       'git_diff',
       'git_status',
       'write_file',
+      'write_files',
       'edit_file',
+      'edit_files',
       'run_command',
+      'run_command_batch',
+      'github_api',
       'todo_get',
       'todo_set',
       'todo_add',

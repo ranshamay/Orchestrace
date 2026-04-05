@@ -22,6 +22,9 @@ export type SessionActionsParams = {
   workModel: string;
   autoApprove: boolean;
   useWorktree: boolean;
+  adaptiveConcurrency: boolean;
+  batchConcurrency: number;
+  batchMinConcurrency: number;
   setErrorMessage: (message: string) => void;
   setSessions: (sessions: WorkSession[]) => void;
   setSelectedSessionId: (id: string) => void;

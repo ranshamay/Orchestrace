@@ -27,6 +27,9 @@ export function useSessionActions(params: SessionActionsParams) {
     workModel,
     autoApprove,
     useWorktree,
+    adaptiveConcurrency,
+    batchConcurrency,
+    batchMinConcurrency,
     setErrorMessage,
     setSessions,
     setSelectedSessionId,
@@ -53,6 +56,9 @@ export function useSessionActions(params: SessionActionsParams) {
         model: workModel,
         autoApprove,
         useWorktree,
+        adaptiveConcurrency,
+        batchConcurrency,
+        batchMinConcurrency,
         promptParts: composerImages.length > 0 ? contentParts : undefined,
       });
       await refreshSessionsOnly({ setSessions });
@@ -64,8 +70,11 @@ export function useSessionActions(params: SessionActionsParams) {
     }
   }, [
     autoApprove,
+    batchConcurrency,
+    batchMinConcurrency,
     composerImages,
     composerText,
+    adaptiveConcurrency,
     hasComposerContent,
     selectedSession,
     setComposerImages,

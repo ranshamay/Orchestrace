@@ -98,11 +98,17 @@ function isToolAllowed(toolName: string, permissions: AgentToolPermissions): boo
     return false;
   }
 
-  if ((toolName === 'write_file' || toolName === 'edit_file') && !permissions.allowWriteTools) {
+  if (
+    (toolName === 'write_file'
+      || toolName === 'write_files'
+      || toolName === 'edit_file'
+      || toolName === 'edit_files')
+    && !permissions.allowWriteTools
+  ) {
     return false;
   }
 
-  if (toolName === 'run_command' && !permissions.allowRunCommand) {
+  if ((toolName === 'run_command' || toolName === 'run_command_batch') && !permissions.allowRunCommand) {
     return false;
   }
 

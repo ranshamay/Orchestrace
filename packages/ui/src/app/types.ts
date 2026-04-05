@@ -39,6 +39,9 @@ export type SessionLlmControls = {
   workspaceId: string;
   autoApprove: boolean;
   useWorktree: boolean;
+  adaptiveConcurrency: boolean;
+  batchConcurrency: number;
+  batchMinConcurrency: number;
 };
 
 export type SessionStatus = 'running' | 'completed' | 'failed' | 'cancelled' | 'pending' | 'unknown';
