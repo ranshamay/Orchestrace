@@ -11,8 +11,8 @@ export function selectCurrentSession(sessions: WorkSession[], selectedSessionId:
 
 export function selectSessionViewState(selectedSession?: WorkSession) {
   const selectedLlmStatus = resolveLlmStatus(selectedSession);
-  const selectedFailureType = resolveSessionFailureType(selectedSession);
   const selectedSessionRunning = selectedSession ? normalizeSessionStatus(selectedSession.status) === 'running' : false;
+  const selectedFailureType = selectedSessionRunning ? undefined : resolveSessionFailureType(selectedSession);
   const composerMode: ComposerMode = selectedSession
     ? (selectedSession.mode ?? fallbackComposerModeFromLlmState(selectedLlmStatus.state))
     : 'run';

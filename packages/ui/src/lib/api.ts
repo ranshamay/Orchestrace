@@ -308,6 +308,18 @@ export async function sendChatMessage(
   return readJson(res);
 }
 
+export async function sendChatMessageStream(
+  id: string,
+  payload: { message: string; messageParts?: ChatContentPart[] },
+): Promise<{ ok: boolean; streamId: string; sessionId: string }> {
+  const res = await fetch(`${API_BASE}/work/chat/send-stream`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id, message: payload.message, messageParts: payload.messageParts }),
+  });
+  return readJson(res);
+}
+
 export async function addTodo(id: string, text: string): Promise<{ ok: boolean; todos: AgentTodo[] }> {
   const res = await fetch(`${API_BASE}/work/todos/add`, {
     method: 'POST',

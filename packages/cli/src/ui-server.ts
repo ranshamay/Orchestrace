@@ -51,14 +51,6 @@ import type {
 } from './ui-server/types.js';
 import { WorkspaceManager } from './workspace-manager.js';
 
-const SUB_AGENT_READ_ONLY_TOOL_ALLOWLIST = [
-  'list_directory',
-  'read_file',
-  'search_files',
-  'git_diff',
-  'git_status',
-];
-
 const GITHUB_PROVIDER_ID = 'github';
 const GITHUB_API_BASE_URL = 'https://api.github.com';
 const GITHUB_DEVICE_AUTH_SCOPES_DEFAULT = ['repo', 'workflow', 'read:org'];
@@ -67,6 +59,8 @@ const GITHUB_DEVICE_AUTH_CLIENT_ID_DEFAULT = '178c6fc778ccc68e1d6a';
 const DEFAULT_UI_ADAPTIVE_CONCURRENCY = false;
 const DEFAULT_UI_BATCH_CONCURRENCY = 8;
 const DEFAULT_UI_BATCH_MIN_CONCURRENCY = 1;
+const SUBAGENT_WORKER_PROMPT_PREVIEW_MAX_CHARS = 220;
+const SUBAGENT_WORKER_OUTPUT_PREVIEW_MAX_CHARS = 420;
 
 type GithubDeviceAuthSessionState = 'awaiting-user' | 'polling' | 'completed' | 'failed';
 
@@ -86,21 +80,35 @@ interface GithubDeviceAuthSession {
   error?: string;
 }
 
-function createReadOnlySubAgentToolset(
+function createInheritedSubAgentToolset(
   cwd: string,
-  options?: { adaptiveConcurrency?: boolean; batchConcurrency?: number; batchMinConcurrency?: number },
+  options: {
+    phase: AgentToolPhase;
+    taskId: string;
+    taskType?: string;
+    graphId?: string;
+    provider?: string;
+    model?: string;
+    reasoning?: 'minimal' | 'low' | 'medium' | 'high';
+    adaptiveConcurrency?: boolean;
+    batchConcurrency?: number;
+    batchMinConcurrency?: number;
+    resolveGithubToken: () => Promise<string | undefined>;
+  },
 ) {
   return createAgentToolset({
     cwd,
-    phase: 'planning',
+    phase: options.phase,
+    taskId: options.taskId,
+    taskType: options.taskType,
+    graphId: options.graphId,
+    provider: options.provider,
+    model: options.model,
+    reasoning: options.reasoning,
     adaptiveConcurrency: options?.adaptiveConcurrency,
     batchConcurrency: options?.batchConcurrency,
     batchMinConcurrency: options?.batchMinConcurrency,
-    permissions: {
-      allowWriteTools: false,
-      allowRunCommand: false,
-      toolAllowlist: [...SUB_AGENT_READ_ONLY_TOOL_ALLOWLIST],
-    },
+    resolveGithubToken: options.resolveGithubToken,
   });
 }
 
@@ -308,29 +316,88 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           const subProvider = runSubAgentRequest.provider ?? activeProvider;
           const subModel = runSubAgentRequest.model ?? activeModel;
           const subAgentSignal = session.controller.signal;
-          const subAgentToolset = createReadOnlySubAgentToolset(session.workspacePath, {
-            adaptiveConcurrency: session.adaptiveConcurrency,
-            batchConcurrency: session.batchConcurrency,
-            batchMinConcurrency: session.batchMinConcurrency,
-          });
-          const subAgent = await llm.spawnAgent({
+          const toolCallId = `subagent-worker-${randomUUID()}`;
+          const subAgentTaskId = `${task.id}::subagent::${runSubAgentRequest.nodeId ?? toolCallId}`;
+          const subAgentPhase: 'planning' | 'implementation' = phase === 'planning'
+            ? 'planning'
+            : 'implementation';
+          emitSubAgentWorkerEvent({
+            session,
+            uiStatePersistence,
+            taskId: task.id,
+            phase: subAgentPhase,
+            toolCallId,
+            status: 'started',
             provider: subProvider,
             model: subModel,
             reasoning: runSubAgentRequest.reasoning ?? reasoning,
-            timeoutMs: resolveSubAgentTimeoutMs(),
-            systemPrompt: runSubAgentRequest.systemPrompt
-              ?? 'You are a focused sub-agent. Use only the provided task-relevant context, avoid unrelated history, and return concise actionable output.',
-            signal: subAgentSignal,
-            toolset: subAgentToolset,
-            apiKey: await authManager.resolveApiKey(subProvider),
-                      refreshApiKey: () => authManager.resolveApiKey(subProvider),
+            nodeId: runSubAgentRequest.nodeId,
+            prompt: runSubAgentRequest.prompt,
           });
+          const subAgentToolset = createInheritedSubAgentToolset(session.workspacePath, {
+            phase,
+            taskId: subAgentTaskId,
+            taskType: task.type,
+            graphId,
+            provider: subProvider,
+            model: subModel,
+            reasoning: runSubAgentRequest.reasoning ?? reasoning,
+            adaptiveConcurrency: session.adaptiveConcurrency,
+            batchConcurrency: session.batchConcurrency,
+            batchMinConcurrency: session.batchMinConcurrency,
+            resolveGithubToken: () => githubAuthManager.resolveApiKey(GITHUB_PROVIDER_ID),
+          });
+          try {
+            const subAgent = await llm.spawnAgent({
+              provider: subProvider,
+              model: subModel,
+              reasoning: runSubAgentRequest.reasoning ?? reasoning,
+              timeoutMs: resolveSubAgentTimeoutMs(),
+              systemPrompt: runSubAgentRequest.systemPrompt
+                ?? 'You are a focused sub-agent. Use only the provided task-relevant context, avoid unrelated history, and return concise actionable output.',
+              signal: subAgentSignal,
+              toolset: subAgentToolset,
+              apiKey: await authManager.resolveApiKey(subProvider),
+              refreshApiKey: () => authManager.resolveApiKey(subProvider),
+            });
 
-          const result = await subAgent.complete(runSubAgentRequest.prompt, subAgentSignal);
-          return {
-            text: result.text,
-            usage: result.usage,
-          };
+            const result = await subAgent.complete(runSubAgentRequest.prompt, subAgentSignal);
+            emitSubAgentWorkerEvent({
+              session,
+              uiStatePersistence,
+              taskId: task.id,
+              phase: subAgentPhase,
+              toolCallId,
+              status: 'completed',
+              provider: subProvider,
+              model: subModel,
+              reasoning: runSubAgentRequest.reasoning ?? reasoning,
+              nodeId: runSubAgentRequest.nodeId,
+              prompt: runSubAgentRequest.prompt,
+              outputText: result.text,
+              usage: result.usage,
+            });
+            return {
+              text: result.text,
+              usage: result.usage,
+            };
+          } catch (error) {
+            emitSubAgentWorkerEvent({
+              session,
+              uiStatePersistence,
+              taskId: task.id,
+              phase: subAgentPhase,
+              toolCallId,
+              status: 'failed',
+              provider: subProvider,
+              model: subModel,
+              reasoning: runSubAgentRequest.reasoning ?? reasoning,
+              nodeId: runSubAgentRequest.nodeId,
+              prompt: runSubAgentRequest.prompt,
+              error: toErrorMessage(error),
+            });
+            throw error;
+          }
         },
       }),
       onEvent: (event) => {
@@ -1106,6 +1173,17 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         const tools = listAgentTools({
           cwd: session.workspacePath,
           phase: mode,
+          modeController: {
+            getMode: () => mode,
+            setMode: async (nextMode, reason) => ({
+              mode: nextMode,
+              changed: nextMode !== mode,
+              detail: reason
+                ? `Mode switch preview: ${mode} -> ${nextMode} (${reason}).`
+                : `Mode switch preview: ${mode} -> ${nextMode}.`,
+            }),
+            availableModes: ['chat', 'planning', 'implementation'],
+          },
           adaptiveConcurrency: session.adaptiveConcurrency,
           batchConcurrency: session.batchConcurrency,
           batchMinConcurrency: session.batchMinConcurrency,
@@ -1478,29 +1556,86 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                   const subProvider = runSubAgentRequest.provider ?? session.provider;
                   const subModel = runSubAgentRequest.model ?? session.model;
                   const subAgentSignal = session.controller.signal;
-                  const subAgentToolset = createReadOnlySubAgentToolset(session.workspacePath, {
-                    adaptiveConcurrency: session.adaptiveConcurrency,
-                    batchConcurrency: session.batchConcurrency,
-                    batchMinConcurrency: session.batchMinConcurrency,
-                  });
-                  const subAgent = await llm.spawnAgent({
+                  const toolCallId = `subagent-worker-${randomUUID()}`;
+                  const subAgentTaskId = `chat::subagent::${runSubAgentRequest.nodeId ?? toolCallId}`;
+                  const subAgentPhase: 'planning' | 'implementation' = continuationPhase === 'planning'
+                    ? 'planning'
+                    : 'implementation';
+                  emitSubAgentWorkerEvent({
+                    session,
+                    uiStatePersistence,
+                    taskId: 'chat',
+                    phase: subAgentPhase,
+                    toolCallId,
+                    status: 'started',
                     provider: subProvider,
                     model: subModel,
                     reasoning: runSubAgentRequest.reasoning,
-                    timeoutMs: resolveSubAgentTimeoutMs(),
-                    systemPrompt: runSubAgentRequest.systemPrompt
-                      ?? 'You are a focused sub-agent. Use only the provided task-relevant context, avoid unrelated history, and return concise actionable output.',
-                    signal: subAgentSignal,
-                    toolset: subAgentToolset,
-                    apiKey: await authManager.resolveApiKey(subProvider),
-                      refreshApiKey: () => authManager.resolveApiKey(subProvider),
+                    nodeId: runSubAgentRequest.nodeId,
+                    prompt: runSubAgentRequest.prompt,
                   });
+                  const subAgentToolset = createInheritedSubAgentToolset(session.workspacePath, {
+                    phase: continuationPhase,
+                    taskId: subAgentTaskId,
+                    provider: subProvider,
+                    model: subModel,
+                    reasoning: runSubAgentRequest.reasoning,
+                    adaptiveConcurrency: session.adaptiveConcurrency,
+                    batchConcurrency: session.batchConcurrency,
+                    batchMinConcurrency: session.batchMinConcurrency,
+                    resolveGithubToken: () => githubAuthManager.resolveApiKey(GITHUB_PROVIDER_ID),
+                  });
+                  try {
+                    const subAgent = await llm.spawnAgent({
+                      provider: subProvider,
+                      model: subModel,
+                      reasoning: runSubAgentRequest.reasoning,
+                      timeoutMs: resolveSubAgentTimeoutMs(),
+                      systemPrompt: runSubAgentRequest.systemPrompt
+                        ?? 'You are a focused sub-agent. Use only the provided task-relevant context, avoid unrelated history, and return concise actionable output.',
+                      signal: subAgentSignal,
+                      toolset: subAgentToolset,
+                      apiKey: await authManager.resolveApiKey(subProvider),
+                      refreshApiKey: () => authManager.resolveApiKey(subProvider),
+                    });
 
-                  const result = await subAgent.complete(runSubAgentRequest.prompt, subAgentSignal);
-                  return {
-                    text: result.text,
-                    usage: result.usage,
-                  };
+                    const result = await subAgent.complete(runSubAgentRequest.prompt, subAgentSignal);
+                    emitSubAgentWorkerEvent({
+                      session,
+                      uiStatePersistence,
+                      taskId: 'chat',
+                      phase: subAgentPhase,
+                      toolCallId,
+                      status: 'completed',
+                      provider: subProvider,
+                      model: subModel,
+                      reasoning: runSubAgentRequest.reasoning,
+                      nodeId: runSubAgentRequest.nodeId,
+                      prompt: runSubAgentRequest.prompt,
+                      outputText: result.text,
+                      usage: result.usage,
+                    });
+                    return {
+                      text: result.text,
+                      usage: result.usage,
+                    };
+                  } catch (error) {
+                    emitSubAgentWorkerEvent({
+                      session,
+                      uiStatePersistence,
+                      taskId: 'chat',
+                      phase: subAgentPhase,
+                      toolCallId,
+                      status: 'failed',
+                      provider: subProvider,
+                      model: subModel,
+                      reasoning: runSubAgentRequest.reasoning,
+                      nodeId: runSubAgentRequest.nodeId,
+                      prompt: runSubAgentRequest.prompt,
+                      error: toErrorMessage(error),
+                    });
+                    throw error;
+                  }
                 },
               }),
               apiKey: await authManager.resolveApiKey(session.provider),
@@ -1710,29 +1845,86 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                 const subProvider = runSubAgentRequest.provider ?? session.provider;
                 const subModel = runSubAgentRequest.model ?? session.model;
                 const subAgentSignal = session.controller.signal;
-                const subAgentToolset = createReadOnlySubAgentToolset(session.workspacePath, {
-                  adaptiveConcurrency: session.adaptiveConcurrency,
-                  batchConcurrency: session.batchConcurrency,
-                  batchMinConcurrency: session.batchMinConcurrency,
-                });
-                const subAgent = await llm.spawnAgent({
+                const toolCallId = `subagent-worker-${randomUUID()}`;
+                const subAgentTaskId = `chat::subagent::${runSubAgentRequest.nodeId ?? toolCallId}`;
+                const subAgentPhase: 'planning' | 'implementation' = continuationPhase === 'planning'
+                  ? 'planning'
+                  : 'implementation';
+                emitSubAgentWorkerEvent({
+                  session,
+                  uiStatePersistence,
+                  taskId: 'chat',
+                  phase: subAgentPhase,
+                  toolCallId,
+                  status: 'started',
                   provider: subProvider,
                   model: subModel,
                   reasoning: runSubAgentRequest.reasoning,
-                  timeoutMs: resolveSubAgentTimeoutMs(),
-                  systemPrompt: runSubAgentRequest.systemPrompt
-                    ?? 'You are a focused sub-agent. Use only the provided task-relevant context, avoid unrelated history, and return concise actionable output.',
-                  signal: subAgentSignal,
-                  toolset: subAgentToolset,
-                  apiKey: await authManager.resolveApiKey(subProvider),
-                  refreshApiKey: () => authManager.resolveApiKey(subProvider),
+                  nodeId: runSubAgentRequest.nodeId,
+                  prompt: runSubAgentRequest.prompt,
                 });
+                const subAgentToolset = createInheritedSubAgentToolset(session.workspacePath, {
+                  phase: continuationPhase,
+                  taskId: subAgentTaskId,
+                  provider: subProvider,
+                  model: subModel,
+                  reasoning: runSubAgentRequest.reasoning,
+                  adaptiveConcurrency: session.adaptiveConcurrency,
+                  batchConcurrency: session.batchConcurrency,
+                  batchMinConcurrency: session.batchMinConcurrency,
+                  resolveGithubToken: () => githubAuthManager.resolveApiKey(GITHUB_PROVIDER_ID),
+                });
+                try {
+                  const subAgent = await llm.spawnAgent({
+                    provider: subProvider,
+                    model: subModel,
+                    reasoning: runSubAgentRequest.reasoning,
+                    timeoutMs: resolveSubAgentTimeoutMs(),
+                    systemPrompt: runSubAgentRequest.systemPrompt
+                      ?? 'You are a focused sub-agent. Use only the provided task-relevant context, avoid unrelated history, and return concise actionable output.',
+                    signal: subAgentSignal,
+                    toolset: subAgentToolset,
+                    apiKey: await authManager.resolveApiKey(subProvider),
+                    refreshApiKey: () => authManager.resolveApiKey(subProvider),
+                  });
 
-                const result = await subAgent.complete(runSubAgentRequest.prompt, subAgentSignal);
-                return {
-                  text: result.text,
-                  usage: result.usage,
-                };
+                  const result = await subAgent.complete(runSubAgentRequest.prompt, subAgentSignal);
+                  emitSubAgentWorkerEvent({
+                    session,
+                    uiStatePersistence,
+                    taskId: 'chat',
+                    phase: subAgentPhase,
+                    toolCallId,
+                    status: 'completed',
+                    provider: subProvider,
+                    model: subModel,
+                    reasoning: runSubAgentRequest.reasoning,
+                    nodeId: runSubAgentRequest.nodeId,
+                    prompt: runSubAgentRequest.prompt,
+                    outputText: result.text,
+                    usage: result.usage,
+                  });
+                  return {
+                    text: result.text,
+                    usage: result.usage,
+                  };
+                } catch (error) {
+                  emitSubAgentWorkerEvent({
+                    session,
+                    uiStatePersistence,
+                    taskId: 'chat',
+                    phase: subAgentPhase,
+                    toolCallId,
+                    status: 'failed',
+                    provider: subProvider,
+                    model: subModel,
+                    reasoning: runSubAgentRequest.reasoning,
+                    nodeId: runSubAgentRequest.nodeId,
+                    prompt: runSubAgentRequest.prompt,
+                    error: toErrorMessage(error),
+                  });
+                  throw error;
+                }
               },
             }),
             apiKey: await authManager.resolveApiKey(session.provider),
@@ -2994,11 +3186,99 @@ function resolveToolPreviewLimit(toolName: string, direction: 'input' | 'output'
     return direction === 'input' ? 12_000 : 20_000;
   }
 
+  if (toolName === 'subagent_worker') {
+    return direction === 'input' ? 8_000 : 16_000;
+  }
+
   if (toolName === 'subagent_spawn') {
     return direction === 'input' ? 4_000 : 12_000;
   }
 
   return 600;
+}
+
+function emitSubAgentWorkerEvent(params: {
+  session: WorkSession;
+  uiStatePersistence: { schedule: () => void; flush: () => Promise<void> };
+  taskId: string;
+  phase: 'planning' | 'implementation';
+  toolCallId: string;
+  status: 'started' | 'completed' | 'failed';
+  provider: string;
+  model: string;
+  nodeId?: string;
+  reasoning?: 'minimal' | 'low' | 'medium' | 'high';
+  prompt: string;
+  outputText?: string;
+  usage?: { input: number; output: number; cost: number };
+  error?: string;
+}): void {
+  const inputPayload = {
+    nodeId: params.nodeId,
+    provider: params.provider,
+    model: params.model,
+    reasoning: params.reasoning,
+    promptChars: params.prompt.length,
+    promptPreview: compactSubAgentWorkerText(params.prompt, SUBAGENT_WORKER_PROMPT_PREVIEW_MAX_CHARS),
+  };
+
+  const event: Extract<DagEvent, { type: 'task:tool-call' }> = {
+    type: 'task:tool-call',
+    taskId: params.taskId,
+    phase: params.phase,
+    attempt: 1,
+    toolCallId: params.toolCallId,
+    toolName: 'subagent_worker',
+    status: params.status === 'started' ? 'started' : 'result',
+    input: params.status === 'started' ? JSON.stringify(inputPayload) : undefined,
+    output: params.status === 'started'
+      ? undefined
+      : JSON.stringify({
+        status: params.status,
+        nodeId: params.nodeId,
+        provider: params.provider,
+        model: params.model,
+        promptChars: params.prompt.length,
+        usage: params.usage ?? { input: 0, output: 0, cost: 0 },
+        usageReported: Boolean(params.usage),
+        outputPreview: params.outputText
+          ? compactSubAgentWorkerText(params.outputText, SUBAGENT_WORKER_OUTPUT_PREVIEW_MAX_CHARS)
+          : undefined,
+        error: params.error,
+      }),
+    isError: params.status === 'failed',
+  };
+
+  const uiEvent = toUiEvent(params.session.id, event);
+  if (uiEvent) {
+    params.session.events.push(uiEvent);
+    if (params.session.events.length > 200) {
+      params.session.events.shift();
+    }
+  }
+
+  params.session.updatedAt = now();
+  if (params.status === 'started') {
+    params.session.llmStatus = createLlmStatus('using-tools', params.session.updatedAt, {
+      detail: params.nodeId ? `Running sub-agent ${params.nodeId}.` : 'Running sub-agent.',
+      taskId: params.taskId,
+      phase: params.phase,
+    });
+  }
+  params.uiStatePersistence.schedule();
+}
+
+function compactSubAgentWorkerText(value: string, maxChars: number): string {
+  const compact = value.replace(/\s+/g, ' ').trim();
+  if (!compact) {
+    return '(empty)';
+  }
+
+  if (compact.length <= maxChars) {
+    return compact;
+  }
+
+  return `${compact.slice(0, maxChars - 3)}...`;
 }
 
 function handleChatToolCallEvent(
@@ -3843,6 +4123,7 @@ function buildSessionSystemPrompt(session: WorkSession, phase: SessionPromptPhas
           'Planning requests must also use subagent_spawn or subagent_spawn_batch with focused, task-relevant context per sub-agent.',
           'Pass nodeId on each sub-agent request so graph progress stays visible and current.',
           'When asked to inspect or change todos/agent graph, call the corresponding tools instead of simulating success.',
+          'For reading multiple files, prefer read_files with concurrency over repeated one-by-one read_file calls.',
           'When calling todo tools, use canonical statuses only: todo, in_progress, done.',
           'If no tool was executed, explicitly state that no tool output is available.',
           'Always end your response with 1-3 numbered next follow-up suggestions.',
@@ -3857,6 +4138,7 @@ function buildSessionSystemPrompt(session: WorkSession, phase: SessionPromptPhas
             'Planning must produce and maintain todo_set and agent_graph_set state.',
             'Planning must use subagent_spawn or subagent_spawn_batch for focused parallel research and delegate only relevant context.',
             'For independent nodes, use subagent_spawn_batch so work runs in parallel.',
+            'For multi-file inspection, use read_files with concurrency to reduce latency; avoid repeated single-file reads when possible.',
             'Pass nodeId for each sub-agent request so graph status stays current.',
             'Keep todo and dependency graph state synchronized.',
             'Always end your response with 1-3 numbered next follow-up suggestions.',
@@ -3867,6 +4149,7 @@ function buildSessionSystemPrompt(session: WorkSession, phase: SessionPromptPhas
             'Read todo_get and agent_graph_get before coding, then keep todo_update current while implementing.',
             'Use subagent_spawn or subagent_spawn_batch to execute parallelizable slices with minimal relevant context per agent.',
             'For independent nodes, use subagent_spawn_batch so work runs in parallel.',
+            'For multi-file inspection, use read_files with concurrency to reduce latency; avoid repeated single-file reads when possible.',
             'Pass nodeId for each sub-agent request so graph status stays current.',
             'Use github_api for GitHub REST/GraphQL operations; do not use gh CLI.',
             'Iterate until validation passes or a true blocker is reached.',

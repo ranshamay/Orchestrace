@@ -142,7 +142,6 @@ export function buildChatContinuationInput(thread: SessionChatThread): LlmPrompt
 
   const history = relevant
     .filter((message) => message !== latestMultimodalUser)
-    .slice(-40)
     .map((message) => `${message.role.toUpperCase()}: ${message.contentParts?.length ? summarizeChatContentParts(message.contentParts) : message.content}`)
     .join('\n\n');
 
@@ -169,7 +168,11 @@ export function buildChatContinuationInput(thread: SessionChatThread): LlmPrompt
   ];
 }
 
-export function trimThreadMessages(thread: SessionChatThread, maxMessages = 80): void {
+export function trimThreadMessages(thread: SessionChatThread, maxMessages = Number.POSITIVE_INFINITY): void {
+  if (!Number.isFinite(maxMessages)) {
+    return;
+  }
+
   if (thread.messages.length > maxMessages) {
     thread.messages.splice(0, thread.messages.length - maxMessages);
   }

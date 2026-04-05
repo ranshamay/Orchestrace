@@ -128,6 +128,63 @@ function summarizeSubAgentOutput(payload: string, isError: boolean): string | un
   return `${prefix} completed`;
 }
 
+function summarizeSubAgentWorkerInput(payload: string): string | undefined {
+  const parsed = parseJsonObject(payload);
+  if (!parsed) {
+    return undefined;
+  }
+
+  const nodeId = typeof parsed.nodeId === 'string' && parsed.nodeId.trim() ? parsed.nodeId.trim() : undefined;
+  const promptChars = asNumber(parsed.promptChars);
+  const provider = typeof parsed.provider === 'string' && parsed.provider.trim() ? parsed.provider.trim() : undefined;
+  const model = typeof parsed.model === 'string' && parsed.model.trim() ? parsed.model.trim() : undefined;
+
+  const pieces: string[] = [];
+  pieces.push(nodeId ? `Sub-agent ${nodeId} started` : 'Sub-agent started');
+
+  if (typeof promptChars === 'number') {
+    pieces.push(`${promptChars} chars`);
+  }
+
+  if (provider && model) {
+    pieces.push(`${provider}/${model}`);
+  }
+
+  return pieces.join(' • ');
+}
+
+function summarizeSubAgentWorkerOutput(payload: string, isError: boolean): string | undefined {
+  const parsed = parseJsonObject(payload);
+  if (!parsed) {
+    return undefined;
+  }
+
+  const nodeId = typeof parsed.nodeId === 'string' && parsed.nodeId.trim() ? parsed.nodeId.trim() : undefined;
+  const status = typeof parsed.status === 'string' ? parsed.status : undefined;
+  const usage = parsed.usage && typeof parsed.usage === 'object' ? parsed.usage as Record<string, unknown> : undefined;
+  const usageInput = asNumber(usage?.input);
+  const usageOutput = asNumber(usage?.output);
+
+  const prefix = nodeId ? `Sub-agent ${nodeId}` : 'Sub-agent';
+  if (isError || status === 'failed') {
+    return `${prefix} failed`;
+  }
+
+  if (typeof usageInput === 'number' || typeof usageOutput === 'number') {
+    return `${prefix} completed • in ${formatTokenCount(usageInput ?? 0)}, out ${formatTokenCount(usageOutput ?? 0)}`;
+  }
+
+  return `${prefix} completed`;
+}
+
+function formatToolLabel(toolName: string): string {
+  if (toolName === 'subagent_worker') {
+    return 'sub-agent';
+  }
+
+  return toolName;
+}
+
 function toolInputSummary(toolName: string, payload: string): string {
   const parsed = parseJsonObject(payload);
   if (toolName === 'read_file') {
@@ -171,6 +228,10 @@ function toolInputSummary(toolName: string, payload: string): string {
     return summarizeSubAgentBatchInput(payload) ?? 'Spawning sub-agents in parallel';
   }
 
+  if (toolName === 'subagent_worker') {
+    return summarizeSubAgentWorkerInput(payload) ?? 'Running sub-agent';
+  }
+
   return `Calling ${toolName}`;
 }
 
@@ -184,6 +245,13 @@ function toolOutputSummary(toolName: string, payload: string, isError: boolean):
 
   if (toolName === 'subagent_spawn') {
     const summary = summarizeSubAgentOutput(payload, isError);
+    if (summary) {
+      return summary;
+    }
+  }
+
+  if (toolName === 'subagent_worker') {
+    const summary = summarizeSubAgentWorkerOutput(payload, isError);
     if (summary) {
       return summary;
     }
@@ -229,6 +297,8 @@ function renderToolEventContent(params: {
     ? 20_000
     : params.toolName === 'subagent_spawn'
       ? 12_000
+      : params.toolName === 'subagent_worker'
+        ? 16_000
       : 6000;
   const displayPayload = formatToolPayloadForDisplay(params.payload, payloadLimit);
   const codeLanguage = displayPayload.startsWith('{') || displayPayload.startsWith('[') ? 'json' : 'text';
@@ -245,10 +315,11 @@ export function formatTimelineEvent(event: { type: string; message: string; task
       const direction = toolMatch[3];
       const isError = Boolean(toolMatch[4]);
       const payload = toolMatch[5] ?? '';
+      const toolLabel = formatToolLabel(toolName);
       if (direction === 'input') {
-        return { title: `Using ${toolName}`, subtitle: 'Tool input', tone: 'tool', content: renderToolEventContent({ direction: 'input', toolName, payload, isError }) };
+        return { title: `Using ${toolLabel}`, subtitle: 'Tool input', tone: 'tool', content: renderToolEventContent({ direction: 'input', toolName, payload, isError }) };
       }
-      return { title: `${toolName} result`, subtitle: isError ? 'Tool error' : 'Tool output', tone: isError ? 'error' : 'tool', content: renderToolEventContent({ direction: 'output', toolName, payload, isError }) };
+      return { title: `${toolLabel} result`, subtitle: isError ? 'Tool error' : 'Tool output', tone: isError ? 'error' : 'tool', content: renderToolEventContent({ direction: 'output', toolName, payload, isError }) };
     }
   }
 

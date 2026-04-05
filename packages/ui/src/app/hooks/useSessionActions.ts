@@ -4,7 +4,7 @@ import {
   cancelWork,
   deleteWork,
   fetchWorkAgent,
-  sendChatMessage,
+  sendChatMessageStream,
   startWork,
 } from '../../lib/api';
 import type { ComposerImageAttachment } from '../types';
@@ -46,8 +46,37 @@ export function useSessionActions(params: SessionActionsParams) {
   const continueSelectedSession = useCallback(async (sessionId: string) => {
     const payload = composePrompt(composerText, composerImages);
     const contentParts = toComposerContentParts(composerText, composerImages);
+    const startedAt = new Date().toISOString();
 
-    await sendChatMessage(sessionId, {
+    setSessions(sessions.map((session) => {
+      if (session.id !== sessionId) {
+        return session;
+      }
+
+      return {
+        ...session,
+        status: 'running',
+        error: undefined,
+        llmStatus: {
+          state: 'analyzing',
+          label: 'Analyzing',
+          detail: 'Processing follow-up prompt.',
+          updatedAt: startedAt,
+        },
+      };
+    }));
+
+    setChatMessages([
+      ...chatMessages,
+      {
+        role: 'user',
+        content: payload.trim() || '(empty message)',
+        contentParts: composerImages.length > 0 ? contentParts : undefined,
+        time: startedAt,
+      },
+    ]);
+
+    await sendChatMessageStream(sessionId, {
       message: payload,
       messageParts: composerImages.length > 0 ? contentParts : undefined,
     });
@@ -59,6 +88,7 @@ export function useSessionActions(params: SessionActionsParams) {
     setComposerText('');
     setComposerImages([]);
   }, [
+    chatMessages,
     composerImages,
     composerText,
     setChatMessages,
@@ -66,6 +96,7 @@ export function useSessionActions(params: SessionActionsParams) {
     setComposerText,
     setSessions,
     setTodos,
+    sessions,
   ]);
 
   const handleStartFromComposer = useCallback(async () => {
