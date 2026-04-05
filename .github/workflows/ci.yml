@@ -13,6 +13,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
@@ -42,7 +44,11 @@ jobs:
           mkdir -p .orchestrace
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             git fetch --no-tags --depth=1 origin "${{ github.base_ref }}"
-            git diff --name-only "origin/${{ github.base_ref }}...HEAD" > .orchestrace/changed-files.txt
+            if git merge-base "origin/${{ github.base_ref }}" HEAD >/dev/null 2>&1; then
+              git diff --name-only "origin/${{ github.base_ref }}...HEAD" > .orchestrace/changed-files.txt
+            else
+              git diff --name-only "origin/${{ github.base_ref }}" HEAD > .orchestrace/changed-files.txt
+            fi
           else
             if git rev-parse --verify HEAD^ >/dev/null 2>&1; then
               git diff --name-only HEAD^ HEAD > .orchestrace/changed-files.txt
