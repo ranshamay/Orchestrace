@@ -313,6 +313,98 @@ describe('batch filesystem tools', () => {
   });
 });
 
+describe('search_files tool', () => {
+  it('treats metacharacters literally by default', async () => {
+    const cwd = await makeWorkspace();
+    await writeFile(join(cwd, 'src', 'patterns.txt'), 'literal (a)[b]{c}|d\n', 'utf-8');
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+
+    const result = await toolset.executeTool({
+      id: '1',
+      name: 'search_files',
+      arguments: {
+        query: '(a)[b]{c}|d',
+        path: 'src',
+      },
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.content).toContain('patterns.txt');
+    expect(result.content).toContain('literal (a)[b]{c}|d');
+  });
+
+  it('supports regex mode when explicitly enabled', async () => {
+    const cwd = await makeWorkspace();
+    await writeFile(join(cwd, 'src', 'regex.txt'), 'abc\naxc\n', 'utf-8');
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+
+    const literalResult = await toolset.executeTool({
+      id: '1',
+      name: 'search_files',
+      arguments: {
+        query: 'a.c',
+        path: 'src',
+      },
+    });
+
+    expect(literalResult.isError).toBeFalsy();
+    expect(literalResult.content).toBe('(no matches)');
+
+    const regexResult = await toolset.executeTool({
+      id: '2',
+      name: 'search_files',
+      arguments: {
+        query: 'a.c',
+        path: 'src',
+        regex: true,
+      },
+    });
+
+    expect(regexResult.isError).toBeFalsy();
+    expect(regexResult.content).toContain('regex.txt');
+    expect(regexResult.content).toContain('abc');
+    expect(regexResult.content).toContain('axc');
+  });
+
+  it('honors glob filtering with the new default literal mode', async () => {
+    const cwd = await makeWorkspace();
+    await writeFile(join(cwd, 'src', 'match.ts'), 'const needle = "match-me";\n', 'utf-8');
+    await writeFile(join(cwd, 'src', 'ignore.txt'), 'match-me\n', 'utf-8');
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+
+    const result = await toolset.executeTool({
+      id: '1',
+      name: 'search_files',
+      arguments: {
+        query: 'match-me',
+        path: 'src',
+        glob: '**/*.ts',
+      },
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.content).toContain('match.ts');
+    expect(result.content).not.toContain('ignore.txt');
+  });
+
+  it('returns no-match sentinel for missing literals', async () => {
+    const cwd = await makeWorkspace();
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+
+    const result = await toolset.executeTool({
+      id: '1',
+      name: 'search_files',
+      arguments: {
+        query: 'definitely-not-present',
+        path: 'src',
+      },
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.content).toBe('(no matches)');
+  });
+});
+
 describe('git_status tool', () => {
   it('returns status output in a git repository', async () => {
     const cwd = await makeWorkspace();

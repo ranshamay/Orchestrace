@@ -187,7 +187,7 @@ Create `@orchestrace/tools` package (or add to core) with tool definitions that 
 | `edit_file` | Apply a targeted string replacement in a file |
 | `run_command` | Execute a shell command in the task's working directory |
 | `list_directory` | List files/folders |
-| `search_files` | Grep/glob search across the codebase |
+| `search_files` | Search codebase with literal matching by default; set `regex: true` for regex patterns; supports `glob` filtering |
 | `git_diff` | Show current changes |
 | `git_commit` | Stage and commit changes |
 

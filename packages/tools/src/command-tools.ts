@@ -37,19 +37,25 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
         name: 'search_files',
         description: 'Search file contents using ripgrep within the workspace.',
         parameters: Type.Object({
-          query: Type.String({ description: 'Regex or plain-text search pattern passed to ripgrep.' }),
+          query: Type.String({ description: 'Search pattern passed to ripgrep. Treated as a literal string by default.' }),
           path: Type.Optional(Type.String({ description: 'Relative path to search inside. Defaults to workspace root.' })),
           glob: Type.Optional(Type.String({ description: 'Optional glob include filter, e.g. src/**/*.ts' })),
+          regex: Type.Optional(Type.Boolean({ description: 'Interpret query as a regular expression. Defaults to false (literal search).' })),
         }),
       },
       execute: async (toolArgs, signal) => {
         const query = asRequiredString(toolArgs.query, 'query');
         const path = asString(toolArgs.path) ?? '.';
         const glob = asString(toolArgs.glob);
+        const regex = Boolean(toolArgs.regex);
         const target = resolveWorkspacePath(options.cwd, path);
         const relTarget = toWorkspaceRelative(options.cwd, target);
 
-        const args = ['-n', '--no-heading', '--color', 'never', query, relTarget];
+        const args = ['-n', '--no-heading', '--color', 'never'];
+        if (!regex) {
+          args.push('--fixed-strings');
+        }
+        args.push(query, relTarget);
         if (glob) {
           args.push('--glob', glob);
         }
