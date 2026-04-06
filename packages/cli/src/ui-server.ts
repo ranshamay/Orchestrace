@@ -22,6 +22,12 @@ import {
 } from '@orchestrace/tools';
 import { now } from './ui-server/clock.js';
 import {
+  llmStatusIdentityKey,
+  parseTimestamp,
+  shouldEmitLlmStatus,
+  type LlmStatusEmissionState,
+} from './ui-server/llm-status-emission.js';
+import {
   buildChatContinuationInput,
   cloneChatContentParts,
   compactInlineImageMarkdown,
@@ -74,12 +80,7 @@ const DEFAULT_UI_BATCH_CONCURRENCY = 8;
 const DEFAULT_UI_BATCH_MIN_CONCURRENCY = 1;
 const SUBAGENT_WORKER_PROMPT_PREVIEW_MAX_CHARS = 2_000;
 const SUBAGENT_WORKER_OUTPUT_PREVIEW_MAX_CHARS = 4_000;
-const LLM_STATUS_MIN_EMIT_INTERVAL_MS = 1_500;
-
-type LlmStatusEmissionState = {
-  key: string;
-  emittedAt: number;
-};
+// LLM status emission config/types are centralized in ui-server/llm-status-emission.ts.
 
 type WorkStartModelResolutionFailureCode =
   | 'MODEL_LIST_FETCH_FAILED'
@@ -965,7 +966,22 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         const prompt = asString(body.prompt);
         const promptParts = parseChatContentParts(body.promptParts);
         const provider = asString(body.provider) || process.env.ORCHESTRACE_DEFAULT_PROVIDER || 'anthropic';
-        const model = asString(body.model) || process.env.ORCHESTRACE_DEFAULT_MODEL || 'claude-sonnet-4-20250514';
+        const requestedModel = asString(body.model);
+        const modelResolution = resolveWorkStartModel({
+          provider,
+          requestedModel,
+          envFallbackModel: resolveDefaultModelFromEnv(),
+        });
+
+        if (modelResolution.ok === false) {
+          sendJson(res, modelResolution.statusCode, {
+            error: modelResolution.error,
+            code: modelResolution.code,
+            details: modelResolution.details,
+          });
+          return;
+        }
+
         const autoApprove = Boolean(body.autoApprove);
         const adaptiveConcurrency = parseBooleanSetting(body.adaptiveConcurrency)
           ?? parseBooleanSetting(body.adaptiveToolConcurrency);
@@ -978,7 +994,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           prompt,
           promptParts,
           provider,
-          model,
+          model: modelResolution.model,
           autoApprove,
           adaptiveConcurrency,
           batchConcurrency,

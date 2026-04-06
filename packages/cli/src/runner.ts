@@ -19,12 +19,19 @@ import { PiAiAdapter, ProviderAuthManager } from '@orchestrace/provider';
 import {
   DEFAULT_AGENT_TOOL_POLICY_VERSION,
   createAgentToolset,
+  createSessionFileSnippetCache,
   type SubAgentRequest,
   type SubAgentResult,
 } from '@orchestrace/tools';
 import { InMemorySharedContextStore } from '@orchestrace/context';
 import { FileEventStore, materializeSession } from '@orchestrace/store';
 import type { SessionEventInput, SessionConfig, SessionLlmStatus, LlmSessionState, SessionAgentGraphNode } from '@orchestrace/store';
+import {
+  llmStatusIdentityKey,
+  parseTimestamp,
+  shouldEmitLlmStatus,
+  type LlmStatusEmissionState,
+} from './ui-server/llm-status-emission.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -89,12 +96,19 @@ async function main(): Promise<void> {
   process.on('SIGTERM', () => {
     cancelled = true;
     controller.abort();
-    void emit({ time: iso(), type: 'session:llm-status-change', payload: { llmStatus: makeLlmStatus('cancelled', 'Cancelled by user.') } });
+    const llmStatus = makeLlmStatus('cancelled', 'Cancelled by user.');
+    lastLlmStatusEmission = {
+      key: llmStatusIdentityKey(llmStatus),
+      emittedAt: parseTimestamp(llmStatus.updatedAt),
+    };
+    void emit({ time: iso(), type: 'session:llm-status-change', payload: { llmStatus } });
     void emit({ time: iso(), type: 'session:status-change', payload: { status: 'cancelled' } });
   });
 
   // Shared context store for this session
   const sharedContextStore = new InMemorySharedContextStore();
+  const sharedFileSnippetCache = createSessionFileSnippetCache();
+  let lastLlmStatusEmission: LlmStatusEmissionState | undefined;
 
   // Local state for graph progress tracking
   const agentGraph: SessionAgentGraphNode[] = [];
@@ -142,6 +156,7 @@ async function main(): Promise<void> {
         batchMinConcurrency: config.batchMinConcurrency,
         resolveGithubToken: () => githubAuthManager.resolveApiKey('github'),
         sharedContextStore,
+        sharedFileSnippetCache,
         agentId: `orchestrator::${task.id}`,
         runSubAgent: async (request, _signal) => {
           const subProvider = request.provider ?? activeProvider;
@@ -177,6 +192,7 @@ async function main(): Promise<void> {
             batchMinConcurrency: config.batchMinConcurrency,
             resolveGithubToken: () => githubAuthManager.resolveApiKey('github'),
             sharedContextStore,
+            sharedFileSnippetCache,
             agentId: `subagent::${task.id}::subagent::${request.nodeId ?? toolCallId}`,
           });
 
@@ -233,7 +249,11 @@ async function main(): Promise<void> {
 
         // LLM status
         const llmStatus = deriveLlmStatus(event, t);
-        if (llmStatus) {
+        if (llmStatus && shouldEmitLlmStatus(llmStatus, lastLlmStatusEmission, t)) {
+          lastLlmStatusEmission = {
+            key: llmStatusIdentityKey(llmStatus),
+            emittedAt: parseTimestamp(t),
+          };
           void emit({ time: t, type: 'session:llm-status-change', payload: { llmStatus } });
         }
 
@@ -290,14 +310,22 @@ async function main(): Promise<void> {
     if (failed) {
       const error = failedOutput?.error ?? 'Execution failed';
       await emit({ time: t, type: 'session:error-change', payload: { error } });
-      await emit({ time: t, type: 'session:llm-status-change', payload: {
-        llmStatus: makeLlmStatus('failed', failedOutput?.failureType
-          ? `${failedOutput.failureType}: ${failedOutput.error || 'Execution failed.'}`
-          : (failedOutput?.error || 'Execution failed.'), failedOutput?.failureType),
-      } });
+      const llmStatus = makeLlmStatus('failed', failedOutput?.failureType
+        ? `${failedOutput.failureType}: ${failedOutput.error || 'Execution failed.'}`
+        : (failedOutput?.error || 'Execution failed.'), failedOutput?.failureType);
+      lastLlmStatusEmission = {
+        key: llmStatusIdentityKey(llmStatus),
+        emittedAt: parseTimestamp(llmStatus.updatedAt),
+      };
+      await emit({ time: t, type: 'session:llm-status-change', payload: { llmStatus } });
       await emit({ time: t, type: 'session:status-change', payload: { status: 'failed' } });
     } else {
-      await emit({ time: t, type: 'session:llm-status-change', payload: { llmStatus: makeLlmStatus('completed', 'Run completed successfully.') } });
+      const llmStatus = makeLlmStatus('completed', 'Run completed successfully.');
+      lastLlmStatusEmission = {
+        key: llmStatusIdentityKey(llmStatus),
+        emittedAt: parseTimestamp(llmStatus.updatedAt),
+      };
+      await emit({ time: t, type: 'session:llm-status-change', payload: { llmStatus } });
       await emit({ time: t, type: 'session:status-change', payload: { status: 'completed' } });
     }
 
@@ -317,7 +345,12 @@ async function main(): Promise<void> {
     const t = iso();
     const errorText = errorMsg(error);
     await emit({ time: t, type: 'session:error-change', payload: { error: errorText } });
-    await emit({ time: t, type: 'session:llm-status-change', payload: { llmStatus: makeLlmStatus('failed', errorText) } });
+    const llmStatus = makeLlmStatus('failed', errorText);
+    lastLlmStatusEmission = {
+      key: llmStatusIdentityKey(llmStatus),
+      emittedAt: parseTimestamp(llmStatus.updatedAt),
+    };
+    await emit({ time: t, type: 'session:llm-status-change', payload: { llmStatus } });
     await emit({ time: t, type: 'session:status-change', payload: { status: 'failed' } });
 
     clearInterval(heartbeatInterval);
@@ -375,7 +408,14 @@ async function main(): Promise<void> {
       : status === 'failed'
         ? (opts.nodeId ? `Sub-agent ${opts.nodeId} failed.` : 'Sub-agent failed.')
         : (opts.nodeId ? `Sub-agent ${opts.nodeId} completed.` : 'Sub-agent completed.');
-    void emit({ time: iso(), type: 'session:llm-status-change', payload: { llmStatus: makeLlmStatus('using-tools', detail, undefined, taskId, phase) } });
+    const llmStatus = makeLlmStatus('using-tools', detail, undefined, taskId, phase);
+    if (shouldEmitLlmStatus(llmStatus, lastLlmStatusEmission, llmStatus.updatedAt)) {
+      lastLlmStatusEmission = {
+        key: llmStatusIdentityKey(llmStatus),
+        emittedAt: parseTimestamp(llmStatus.updatedAt),
+      };
+      void emit({ time: iso(), type: 'session:llm-status-change', payload: { llmStatus } });
+    }
   }
 
   // ---- Checklist from tool events ----
