@@ -16,6 +16,7 @@ export type {
   SubAgentRequest,
   SubAgentResult,
 } from './types.js';
+export type { SessionFileReadCache, FileReadCacheEntry } from './file-read-cache.js';
 export { DEFAULT_AGENT_TOOL_POLICY_VERSION } from './policy.js';
 
 export interface AgentToolDescriptor {

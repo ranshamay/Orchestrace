@@ -1,6 +1,7 @@
 import type { Tool } from '@mariozechner/pi-ai';
 import type { LlmToolResult } from '@orchestrace/provider';
 import type { SharedContextStore } from '@orchestrace/context';
+import type { SessionFileReadCache } from './file-read-cache.js';
 
 export type AgentToolPhase = 'planning' | 'implementation' | 'chat';
 
@@ -31,6 +32,7 @@ export interface AgentToolsetOptions {
   modeController?: AgentModeController;
   resolveGithubToken?: () => Promise<string | undefined>;
   sharedContextStore?: SharedContextStore;
+  fileReadCache?: SessionFileReadCache;
   agentId?: string;
 }
 

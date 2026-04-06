@@ -13,6 +13,7 @@ import type {
   TodoItem,
 } from './types.js';
 import { sanitizeForPathSegment } from './path-utils.js';
+import { readFullFileWithCache } from './file-read-cache.js';
 
 const todoStatusSchema = Type.Union([
   Type.Literal('todo'),
@@ -349,7 +350,7 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
 
         let request: SubAgentRequest;
         try {
-          request = await buildSubAgentRequestFromToolArgs(options.cwd, toolArgs);
+          request = await buildSubAgentRequestFromToolArgs(options.cwd, toolArgs, options.fileReadCache);
         } catch (error) {
           return {
             content: error instanceof Error ? error.message : String(error),
@@ -499,7 +500,7 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
           requests = await mapWithConcurrency(
             requestInputs,
             concurrency,
-            async (entry) => buildSubAgentRequestFromToolArgs(options.cwd, entry),
+            async (entry) => buildSubAgentRequestFromToolArgs(options.cwd, entry, options.fileReadCache),
           );
         } catch (error) {
           return {
@@ -699,6 +700,7 @@ function usageOrZero(usage: { input: number; output: number; cost: number } | un
 async function buildSubAgentRequestFromToolArgs(
   cwd: string,
   toolArgs: Record<string, unknown>,
+  fileReadCache?: import('./file-read-cache.js').SessionFileReadCache,
 ): Promise<SubAgentRequest> {
   const packet = normalizeSubAgentContextPacket(toolArgs.contextPacket);
   const legacyPrompt = optionalString(toolArgs.prompt) ?? '';
@@ -710,6 +712,7 @@ async function buildSubAgentRequestFromToolArgs(
   const prompt = await enrichDelegationPromptWithFileSnippets(
     cwd,
     buildSubAgentPrompt(legacyPrompt, packet),
+    fileReadCache,
   );
 
   return {
@@ -1205,7 +1208,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
 
-async function enrichDelegationPromptWithFileSnippets(cwd: string, prompt: string): Promise<string> {
+async function enrichDelegationPromptWithFileSnippets(
+  cwd: string,
+  prompt: string,
+  fileReadCache?: import('./file-read-cache.js').SessionFileReadCache,
+): Promise<string> {
   const trimmed = prompt.trim();
   if (!trimmed || trimmed.includes(SUBAGENT_CONTEXT_MARKER)) {
     return prompt;
@@ -1216,7 +1223,7 @@ async function enrichDelegationPromptWithFileSnippets(cwd: string, prompt: strin
     return prompt;
   }
 
-  const snippets = await collectFileSnippets(cwd, filePaths);
+  const snippets = await collectFileSnippets(cwd, filePaths, fileReadCache);
   if (snippets.length === 0) {
     return prompt;
   }
@@ -1256,7 +1263,11 @@ function extractCandidateFilePaths(prompt: string): string[] {
   return [...unique];
 }
 
-async function collectFileSnippets(cwd: string, filePaths: string[]): Promise<Array<{ path: string; content: string }>> {
+async function collectFileSnippets(
+  cwd: string,
+  filePaths: string[],
+  fileReadCache?: import('./file-read-cache.js').SessionFileReadCache,
+): Promise<Array<{ path: string; content: string }>> {
   const candidates = filePaths.map((filePath, index) => ({ filePath, index }));
   const results = await mapWithConcurrency(candidates, SUBAGENT_SNIPPET_READ_CONCURRENCY, async (candidate) => {
     const absolutePath = resolve(cwd, candidate.filePath);
@@ -1265,7 +1276,7 @@ async function collectFileSnippets(cwd: string, filePaths: string[]): Promise<Ar
     }
 
     try {
-      const content = await readFile(absolutePath, 'utf-8');
+      const content = await readFullFileWithCache(absolutePath, { cache: fileReadCache });
       if (content.includes('\u0000')) {
         return undefined;
       }

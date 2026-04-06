@@ -3,6 +3,7 @@ import { dirname } from 'node:path';
 import { Type } from '@mariozechner/pi-ai';
 import type { AgentToolsetOptions, RegisteredAgentTool } from './types.js';
 import { resolveWorkspacePath, toWorkspaceRelative } from './path-utils.js';
+import { readFullFileWithCache } from './file-read-cache.js';
 
 interface FilesystemToolOptions extends AgentToolsetOptions {
   includeWriteTools: boolean;
@@ -63,7 +64,7 @@ export function createFilesystemTools(options: FilesystemToolOptions): Registere
         const startLine = asPositiveInteger(toolArgs.startLine) ?? 1;
         const endLine = asPositiveInteger(toolArgs.endLine);
         const maxChars = asPositiveInteger(toolArgs.maxChars) ?? DEFAULT_READ_MAX_CHARS;
-        const trimmed = await readWorkspaceFileSlice(target, { startLine, endLine, maxChars });
+        const trimmed = await readWorkspaceFileSlice(target, { startLine, endLine, maxChars, cache: options.fileReadCache });
 
         return {
           content: trimmed,
@@ -111,6 +112,7 @@ export function createFilesystemTools(options: FilesystemToolOptions): Registere
               startLine: request.startLine,
               endLine: request.endLine,
               maxChars: request.maxChars,
+              cache: options.fileReadCache,
             });
             return {
               path: request.path,
@@ -451,9 +453,10 @@ async function readWorkspaceFileSlice(
     startLine: number;
     endLine?: number;
     maxChars: number;
+    cache?: import('./file-read-cache.js').SessionFileReadCache;
   },
 ): Promise<string> {
-  const content = await readFile(target, 'utf-8');
+  const content = await readFullFileWithCache(target, { cache: options.cache });
   const lines = content.split(/\r?\n/);
   const from = Math.max(1, options.startLine);
   const to = options.endLine ? Math.min(options.endLine, lines.length) : lines.length;
