@@ -5,7 +5,6 @@ import { GraphTabView } from './graph/GraphTabView';
 import { TimelinePanel } from './work/TimelinePanel';
 import { ComposerPanel } from './work/ComposerPanel';
 import { SettingsTabView } from './settings/SettingsTabView';
-import { LogsTabView } from './logs/LogsTabView';
 import { FloatingChatOverlay } from './layout/FloatingChatOverlay';
 
 export type AppMainContentProps = {
@@ -65,7 +64,13 @@ export type AppMainContentProps = {
 
 export function AppMainContent(props: AppMainContentProps) {
   if (props.activeTab === 'logs') {
-    return <LogsTabView />;
+    return (
+      <div className="p-6">
+        <div className="rounded-lg border border-slate-200 bg-white p-4 text-sm text-slate-600 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300">
+          Logs view is not available in this build.
+        </div>
+      </div>
+    );
   }
 
   if (props.activeTab === 'settings') {
