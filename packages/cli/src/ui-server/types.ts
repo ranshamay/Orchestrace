@@ -118,6 +118,40 @@ export interface ChatTokenStream {
   updatedAt: string;
 }
 
+export interface SessionCheckpointInfo {
+  status: 'committed' | 'skipped' | 'failed';
+  reason: 'edit-threshold' | 'todo-completed' | 'terminal';
+  message: string;
+  trigger?: {
+    threshold?: number;
+    editCountSinceLast?: number;
+    todoId?: string;
+    todoTitle?: string;
+  };
+  commit?: {
+    hash?: string;
+    summary?: string;
+  };
+  error?: string;
+  time: string;
+}
+
+export interface SessionRecoveryInfo {
+  reason: 'restore-dead-runner' | 'runner-exit-fallback';
+  runnerPid?: number;
+  exitCode?: number | null;
+  git: {
+    cwd: string;
+    branch?: string;
+    head?: string;
+    detached?: boolean;
+    dirty: boolean;
+    changedFiles?: string[];
+    diffSummary?: string;
+  };
+  time: string;
+}
+
 export interface WorkSession {
   id: string;
   workspaceId: string;
@@ -148,6 +182,8 @@ export interface WorkSession {
   agentGraph: SessionAgentGraphNode[];
   error?: string;
   output?: { text?: string; planPath?: string; failureType?: string };
+  lastCheckpoint?: SessionCheckpointInfo;
+  lastRecovery?: SessionRecoveryInfo;
   controller: AbortController;
   /** Clean up an auto-created per-session worktree on session delete. Not persisted. */
   cleanupWorktree?: () => Promise<void>;

@@ -58,7 +58,9 @@ import type {
   SessionChatContentPart,
   SessionChatMessage,
   SessionChatThread,
+  SessionCheckpointInfo,
   SessionLlmStatus,
+  SessionRecoveryInfo,
   UiDagEvent,
   UiPreferences,
   UiServerOptions,
@@ -71,7 +73,7 @@ import type {
 import { WorkspaceManager } from './workspace-manager.js';
 import { FileEventStore } from '@orchestrace/store';
 import { materializeSession as materializeFromEvents } from '@orchestrace/store';
-import type { SessionEventInput } from '@orchestrace/store';
+import type { SessionCheckpointPayload, SessionEventInput, SessionRecoveryDetectedPayload } from '@orchestrace/store';
 import { ObserverDaemon, SessionObserver, BackendLogger, LogWatcher } from './observer/index.js';
 
 const GITHUB_PROVIDER_ID = 'github';
@@ -289,6 +291,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           agentGraph: materialized.agentGraph,
           error: materialized.error,
           output: materialized.output,
+          lastCheckpoint: materialized.lastCheckpoint as SessionCheckpointInfo | undefined,
+          lastRecovery: materialized.lastRecovery as SessionRecoveryInfo | undefined,
           controller: new AbortController(),
         };
 
@@ -378,6 +382,20 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                   session.agentGraph = (event.payload as { graph: SessionAgentGraphNode[] }).graph;
                   break;
                 }
+                case 'session:checkpoint': {
+                  session.lastCheckpoint = {
+                    ...(event.payload as SessionCheckpointPayload),
+                    time: event.time,
+                  };
+                  break;
+                }
+                case 'session:recovery-detected': {
+                  session.lastRecovery = {
+                    ...(event.payload as SessionRecoveryDetectedPayload),
+                    time: event.time,
+                  };
+                  break;
+                }
                 case 'session:chat-message': {
                   const msg = (event.payload as { message: SessionChatMessage }).message;
                   const thread = sessionChats.get(sessionId);
@@ -398,13 +416,32 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
               uiStatePersistence.schedule();
             });
           } else {
-            // Runner is dead — mark session as failed
+            // Runner is dead — mark session as failed with recovery guidance
             const failedAt = now();
+            const recoveryGit = await inspectGitRecoveryState(session.worktreePath ?? session.workspacePath);
+            session.lastRecovery = {
+              reason: 'restore-dead-runner',
+              runnerPid: meta?.pid,
+              git: recoveryGit,
+              time: failedAt,
+            };
+            const recoveryHint = recoveryGit.dirty
+              ? 'Uncommitted changes were detected; review git diff/status to recover work from the crash.'
+              : 'No uncommitted changes were detected; resume from the latest checkpoint commit.';
             session.status = 'failed';
-            session.error = 'Session interrupted because the runner process exited.';
+            session.error = `Session interrupted because the runner process exited. ${recoveryHint}`;
             session.updatedAt = failedAt;
             session.llmStatus = createLlmStatus('failed', failedAt, {
               detail: session.error,
+            });
+            emitSessionEvent(sessionId, {
+              time: failedAt,
+              type: 'session:recovery-detected',
+              payload: {
+                reason: 'restore-dead-runner',
+                runnerPid: meta?.pid,
+                git: recoveryGit,
+              },
             });
             emitSessionEvent(sessionId, { time: failedAt, type: 'session:error-change', payload: { error: session.error } });
             emitSessionEvent(sessionId, { time: failedAt, type: 'session:llm-status-change', payload: { llmStatus: session.llmStatus } });
@@ -1196,6 +1233,22 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           break;
         }
 
+        case 'session:checkpoint': {
+          session.lastCheckpoint = {
+            ...(event.payload as SessionCheckpointPayload),
+            time: event.time,
+          };
+          break;
+        }
+
+        case 'session:recovery-detected': {
+          session.lastRecovery = {
+            ...(event.payload as SessionRecoveryDetectedPayload),
+            time: event.time,
+          };
+          break;
+        }
+
         case 'session:chat-message': {
           const msg = (event.payload as { message: SessionChatMessage }).message;
           const thread = sessionChats.get(id);
@@ -1265,15 +1318,34 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       eventStore.triggerPoll(id);
 
       // Give event store watcher time to deliver final events
-      setTimeout(() => {
+      setTimeout(async () => {
         if (session.status === 'running') {
-          // Runner exited without writing terminal event — mark as failed
+          // Runner exited without writing terminal event — mark as failed with recovery guidance
           const t = now();
+          const recoveryGit = await inspectGitRecoveryState(session.worktreePath ?? session.workspacePath);
+          session.lastRecovery = {
+            reason: 'runner-exit-fallback',
+            exitCode: code,
+            git: recoveryGit,
+            time: t,
+          };
+          const recoveryHint = recoveryGit.dirty
+            ? 'Uncommitted changes were detected; review git diff/status to recover work from the crash.'
+            : 'No uncommitted changes were detected; resume from the latest checkpoint commit.';
           session.status = 'failed';
-          session.error = `Runner process exited unexpectedly (code ${code}).`;
+          session.error = `Runner process exited unexpectedly (code ${code}). ${recoveryHint}`;
           session.llmStatus = createLlmStatus('failed', t, { detail: session.error });
           session.updatedAt = t;
 
+          emitSessionEvent(id, {
+            time: t,
+            type: 'session:recovery-detected',
+            payload: {
+              reason: 'runner-exit-fallback',
+              exitCode: code,
+              git: recoveryGit,
+            },
+          });
           emitSessionEvent(id, { time: t, type: 'session:error-change', payload: { error: session.error } });
           emitSessionEvent(id, { time: t, type: 'session:llm-status-change', payload: { llmStatus: session.llmStatus } });
           emitSessionEvent(id, { time: t, type: 'session:status-change', payload: { status: 'failed' } });
@@ -5849,6 +5921,8 @@ function serializeWorkSession(session: WorkSession, todos: AgentTodoItem[] = [])
     progress,
     error: session.error,
     output: session.output,
+    lastCheckpoint: session.lastCheckpoint,
+    lastRecovery: session.lastRecovery,
   };
 }
 
@@ -5975,6 +6049,59 @@ async function gitExec(repoRoot: string, args: string[]): Promise<string> {
     maxBuffer: 1024 * 1024,
   });
   return stdout;
+}
+
+async function inspectGitRecoveryState(workspacePath: string): Promise<SessionRecoveryInfo['git']> {
+  const fallback: SessionRecoveryInfo['git'] = {
+    cwd: workspacePath,
+    dirty: false,
+  };
+
+  try {
+    const statusRaw = await gitExec(workspacePath, ['status', '--porcelain', '--branch']);
+    const lines = statusRaw.split('\n').map((line) => line.trimEnd()).filter(Boolean);
+    const branchLine = lines.find((line) => line.startsWith('## '));
+    const changeLines = lines.filter((line) => !line.startsWith('## '));
+    const changedFiles = changeLines
+      .map((line) => line.slice(3).trim())
+      .filter(Boolean)
+      .slice(0, 200);
+
+    const branchInfo = parseGitBranchLine(branchLine);
+    let diffSummary: string | undefined;
+    if (changeLines.length > 0) {
+      try {
+        diffSummary = (await gitExec(workspacePath, ['diff', '--stat'])).trim() || undefined;
+      } catch {
+        diffSummary = undefined;
+      }
+    }
+
+    return {
+      cwd: workspacePath,
+      branch: branchInfo.branch,
+      head: branchInfo.head,
+      detached: branchInfo.detached,
+      dirty: changeLines.length > 0,
+      changedFiles: changedFiles.length > 0 ? changedFiles : undefined,
+      diffSummary,
+    };
+  } catch {
+    return fallback;
+  }
+}
+
+function parseGitBranchLine(line: string | undefined): { branch?: string; head?: string; detached?: boolean } {
+  if (!line) return {};
+  const payload = line.replace(/^##\s*/, '').trim();
+  if (!payload) return {};
+  if (payload.startsWith('HEAD ')) {
+    return { detached: true, head: payload.slice('HEAD '.length).trim() || undefined };
+  }
+
+  const dotIdx = payload.indexOf('...');
+  const branch = (dotIdx >= 0 ? payload.slice(0, dotIdx) : payload).trim();
+  return { branch: branch || undefined, detached: false };
 }
 
 async function listNativeGitWorktrees(repoRoot: string): Promise<NativeGitWorktree[]> {

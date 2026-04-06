@@ -12,7 +12,9 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { execFile } from 'node:child_process';
 import { join } from 'node:path';
+import { promisify } from 'node:util';
 import { orchestrate, PromptSectionName, renderPromptSections } from '@orchestrace/core';
 import type { DagEvent, TaskGraph } from '@orchestrace/core';
 import { PiAiAdapter, ProviderAuthManager } from '@orchestrace/provider';
@@ -45,6 +47,10 @@ const TOOL_EVENT_PREVIEW_MAX_CHARS = resolvePositiveIntEnv(
   32_000,
 );
 const TRACE_LOG_STREAM_DELTAS = resolveBooleanEnv(process.env.ORCHESTRACE_TRACE_LOG_STREAM_DELTAS, true);
+const AUTO_CHECKPOINT_ENABLED = resolveBooleanEnv(process.env.ORCHESTRACE_AUTO_CHECKPOINT, true);
+const AUTO_CHECKPOINT_EVERY_N_EDITS = resolvePositiveIntEnv(process.env.ORCHESTRACE_AUTO_CHECKPOINT_EVERY_N_EDITS, 3);
+const AUTO_CHECKPOINT_GIT_TIMEOUT_MS = resolvePositiveIntEnv(process.env.ORCHESTRACE_AUTO_CHECKPOINT_GIT_TIMEOUT_MS, 15_000);
+const execFileAsync = promisify(execFile);
 
 // ---------------------------------------------------------------------------
 // Main
@@ -117,6 +123,11 @@ async function main(): Promise<void> {
   const agentGraph: SessionAgentGraphNode[] = [];
   const pendingNodeIds = new Map<string, string[]>();
 
+  // Local state for auto-checkpointing
+  let successfulEditFileResultsSinceCheckpoint = 0;
+  const todoDoneCheckpointed = new Set<string>();
+  let checkpointInFlight = false;
+
   // Build single-task graph
   const graph = buildSingleTaskGraph(sessionId, config.prompt);
 
@@ -126,6 +137,119 @@ async function main(): Promise<void> {
       await eventStore.append(sessionId, event);
     } catch (err) {
       console.error(`[runner] Failed to emit event:`, err);
+    }
+  }
+
+  async function runGit(args: string[]): Promise<{ ok: boolean; stdout: string; stderr: string; error?: string }> {
+    try {
+      const { stdout, stderr } = await execFileAsync('git', args, {
+        cwd: config.workspacePath,
+        timeout: AUTO_CHECKPOINT_GIT_TIMEOUT_MS,
+      });
+      return { ok: true, stdout, stderr };
+    } catch (err) {
+      return { ok: false, stdout: '', stderr: '', error: errorMsg(err) };
+    }
+  }
+
+  async function maybeCheckpoint(reason: 'edit-threshold' | 'todo-completed' | 'terminal', opts?: {
+    todoId?: string;
+    todoTitle?: string;
+  }): Promise<void> {
+    if (!AUTO_CHECKPOINT_ENABLED) return;
+    if (checkpointInFlight) return;
+    checkpointInFlight = true;
+
+    const messageContext = opts?.todoTitle?.trim() || opts?.todoId?.trim() || reason;
+    const commitMessage = `checkpoint: ${compact(messageContext, 120)}`;
+
+    try {
+      const add = await runGit(['add', '-A']);
+      if (!add.ok) {
+        await emit({
+          time: iso(),
+          type: 'session:checkpoint',
+          payload: {
+            status: 'failed',
+            reason,
+            message: commitMessage,
+            trigger: {
+              threshold: AUTO_CHECKPOINT_EVERY_N_EDITS,
+              editCountSinceLast: successfulEditFileResultsSinceCheckpoint,
+              todoId: opts?.todoId,
+              todoTitle: opts?.todoTitle,
+            },
+            error: add.error ?? add.stderr || 'git add failed',
+          },
+        });
+        return;
+      }
+
+      const hasStaged = await runGit(['diff', '--cached', '--quiet']);
+      if (hasStaged.ok) {
+        await emit({
+          time: iso(),
+          type: 'session:checkpoint',
+          payload: {
+            status: 'skipped',
+            reason,
+            message: commitMessage,
+            trigger: {
+              threshold: AUTO_CHECKPOINT_EVERY_N_EDITS,
+              editCountSinceLast: successfulEditFileResultsSinceCheckpoint,
+              todoId: opts?.todoId,
+              todoTitle: opts?.todoTitle,
+            },
+          },
+        });
+        successfulEditFileResultsSinceCheckpoint = 0;
+        return;
+      }
+
+      const commit = await runGit(['commit', '-m', commitMessage]);
+      if (!commit.ok) {
+        await emit({
+          time: iso(),
+          type: 'session:checkpoint',
+          payload: {
+            status: 'failed',
+            reason,
+            message: commitMessage,
+            trigger: {
+              threshold: AUTO_CHECKPOINT_EVERY_N_EDITS,
+              editCountSinceLast: successfulEditFileResultsSinceCheckpoint,
+              todoId: opts?.todoId,
+              todoTitle: opts?.todoTitle,
+            },
+            error: commit.error ?? commit.stderr || 'git commit failed',
+          },
+        });
+        return;
+      }
+
+      const head = await runGit(['rev-parse', '--short', 'HEAD']);
+      await emit({
+        time: iso(),
+        type: 'session:checkpoint',
+        payload: {
+          status: 'committed',
+          reason,
+          message: commitMessage,
+          trigger: {
+            threshold: AUTO_CHECKPOINT_EVERY_N_EDITS,
+            editCountSinceLast: successfulEditFileResultsSinceCheckpoint,
+            todoId: opts?.todoId,
+            todoTitle: opts?.todoTitle,
+          },
+          commit: {
+            hash: head.ok ? head.stdout.trim() : undefined,
+            summary: commit.stdout.trim() || commit.stderr.trim() || undefined,
+          },
+        },
+      });
+      successfulEditFileResultsSinceCheckpoint = 0;
+    } finally {
+      checkpointInFlight = false;
     }
   }
 
@@ -284,6 +408,14 @@ async function main(): Promise<void> {
         // Graph progress from sub-agent tool calls
         if (event.type === 'task:tool-call') {
           handleGraphProgress(event);
+
+          // Auto-checkpoint on successful edit_file tool results
+          if (event.status === 'result' && !event.isError && event.toolName === 'edit_file') {
+            successfulEditFileResultsSinceCheckpoint += 1;
+            if (successfulEditFileResultsSinceCheckpoint >= AUTO_CHECKPOINT_EVERY_N_EDITS) {
+              void maybeCheckpoint('edit-threshold');
+            }
+          }
         }
 
         // Task status
@@ -312,6 +444,8 @@ async function main(): Promise<void> {
     };
 
     await emit({ time: t, type: 'session:output-set', payload: { output } });
+
+    await maybeCheckpoint('terminal');
 
     if (failed) {
       const error = failedOutput?.error ?? 'Execution failed';
@@ -351,6 +485,7 @@ async function main(): Promise<void> {
     const t = iso();
     const errorText = errorMsg(error);
     await emit({ time: t, type: 'session:error-change', payload: { error: errorText } });
+    await maybeCheckpoint('terminal');
     const llmStatus = makeLlmStatus('failed', errorText);
     lastLlmStatusEmission = {
       key: llmStatusIdentityKey(llmStatus),
@@ -467,6 +602,14 @@ async function main(): Promise<void> {
         const status = normalizeTodoStatus(args.status);
         if (status) {
           void emit({ time: iso(), type: 'session:todo-item-toggled', payload: { itemId: id, done: status === 'done', status } });
+          if (status === 'done') {
+            if (!todoDoneCheckpointed.has(id)) {
+              todoDoneCheckpointed.add(id);
+              void maybeCheckpoint('todo-completed', { todoId: id, todoTitle: str(args.title) || undefined });
+            }
+          } else {
+            todoDoneCheckpointed.delete(id);
+          }
         }
       }
     } catch {
