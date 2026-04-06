@@ -47,12 +47,8 @@ export function buildSessionTraceExport(
   lines.push(`Created: ${session.createdAt}`);
   lines.push(`Updated: ${session.updatedAt}`);
   lines.push('Worktree mode: native git worktree');
-  if (session.worktreePath) {
-    lines.push(`Worktree path: ${session.worktreePath}`);
-  }
-  if (session.worktreeBranch) {
-    lines.push(`Worktree branch: ${session.worktreeBranch}`);
-  }
+  lines.push(`Worktree path: ${session.worktreePath}`);
+  lines.push(`Worktree branch: ${session.worktreeBranch}`);
   lines.push('');
 
   lines.push('Prompt:');

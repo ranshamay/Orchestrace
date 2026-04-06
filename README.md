@@ -14,7 +14,7 @@ Vendor-agnostic agent orchestration system. Define task graphs (or a single prom
 ├──────────────────┬──────────────────────────────────────┤
 │ @orchestrace/    │         @orchestrace/sandbox          │
 │    provider      │  Git Worktrees │ Runtime Helpers      │
-│  (pi-ai BYOK)   │  Parallel Isolation │ Cloud Runtime   │
+│  (pi-ai BYOK)   │  Parallel Isolation │ Native Local Runtime │
 └──────────────────┴──────────────────────────────────────┘
 ```
 
@@ -135,8 +135,8 @@ export ANTHROPIC_API_KEY=sk-...
 - **Approval gate** — Plans are persisted under `.orchestrace/plans/...` and require user approval before implementation
 - **Git finalize** — Optional stage/commit/push after success (`--push`)
 - **Git worktree isolation** — Parallel tasks get their own worktree to avoid conflicts
-- **Sandbox helpers** — Runtime helper primitives for isolated/cloud execution workflows
-- **Sub-agent support** — Parallel/isolated runs execute in dedicated git worktrees
+- **Sandbox helpers** — Runtime helper primitives for native local execution workflows
+- **Sub-agent support** — Parallel runs execute in dedicated git worktrees
 
 ## Supported Providers (via pi-ai)
 

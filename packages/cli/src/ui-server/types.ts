@@ -126,8 +126,8 @@ export interface WorkSession {
   adaptiveConcurrency: boolean;
   batchConcurrency: number;
   batchMinConcurrency: number;
-  worktreePath?: string;
-  worktreeBranch?: string;
+  worktreePath: string;
+  worktreeBranch: string;
   createdAt: string;
   updatedAt: string;
   status: WorkState;
@@ -154,8 +154,8 @@ export interface PersistedWorkSession {
   adaptiveConcurrency?: boolean;
   batchConcurrency?: number;
   batchMinConcurrency?: number;
-  worktreePath?: string;
-  worktreeBranch?: string;
+  worktreePath: string;
+  worktreeBranch: string;
   createdAt: string;
   updatedAt: string;
   status: WorkState;
