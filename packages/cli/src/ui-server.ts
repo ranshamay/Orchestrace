@@ -2861,7 +2861,141 @@ function previewToolLog(value: string | undefined): string {
     return '(blank)';
   }
 
-  return compact.length > 600 ? `${compact.slice(0, 597)}...` : compact;
+if (compact.length <= maxChars) {
+    return compact;
+  }
+
+  return `${compact.slice(0, Math.max(0, maxChars - 3))}...`;
+}
+
+function resolveToolPreviewLimit(toolName: string, direction: 'input' | 'output'): number {
+  if (toolName === 'subagent_spawn_batch') {
+    return direction === 'input' ? 12_000 : 20_000;
+  }
+
+  if (toolName === 'subagent_worker') {
+    return direction === 'input' ? 8_000 : 16_000;
+  }
+
+  if (toolName === 'subagent_spawn') {
+    return direction === 'input' ? 4_000 : 12_000;
+  }
+
+  return 600;
+}
+
+function emitSubAgentWorkerEvent(params: {
+  session: WorkSession;
+  uiStatePersistence: { schedule: () => void; flush: () => Promise<void> };
+  taskId: string;
+  phase: 'planning' | 'implementation';
+  toolCallId: string;
+  status: 'started' | 'completed' | 'failed';
+  provider: string;
+  model: string;
+  nodeId?: string;
+  reasoning?: 'minimal' | 'low' | 'medium' | 'high';
+  prompt: string;
+  outputText?: string;
+  usage?: { input: number; output: number; cost: number };
+  error?: string;
+}): void {
+  const inputPayload = {
+    nodeId: params.nodeId,
+    provider: params.provider,
+    model: params.model,
+    reasoning: params.reasoning,
+    promptChars: params.prompt.length,
+    promptPreview: compactSubAgentWorkerText(params.prompt, SUBAGENT_WORKER_PROMPT_PREVIEW_MAX_CHARS),
+  };
+
+  const event: Extract<DagEvent, { type: 'task:tool-call' }> = {
+    type: 'task:tool-call',
+    taskId: params.taskId,
+    phase: params.phase,
+    attempt: 1,
+    toolCallId: params.toolCallId,
+    toolName: 'subagent_worker',
+    status: params.status === 'started' ? 'started' : 'result',
+    input: params.status === 'started' ? JSON.stringify(inputPayload) : undefined,
+    output: params.status === 'started'
+      ? undefined
+      : JSON.stringify({
+        status: params.status,
+        nodeId: params.nodeId,
+        provider: params.provider,
+        model: params.model,
+        promptChars: params.prompt.length,
+        usage: params.usage ?? { input: 0, output: 0, cost: 0 },
+        usageReported: Boolean(params.usage),
+        outputPreview: params.outputText
+          ? compactSubAgentWorkerText(params.outputText, SUBAGENT_WORKER_OUTPUT_PREVIEW_MAX_CHARS)
+          : undefined,
+        error: params.error,
+      }),
+    isError: params.status === 'failed',
+  };
+
+  const uiEvent = toUiEvent(params.session.id, event);
+  if (uiEvent) {
+    params.session.events.push(uiEvent);
+    if (params.session.events.length > 200) {
+      params.session.events.shift();
+    }
+  }
+
+  // Note: emitSubAgentWorkerEvent is a standalone function without access to emitSessionEvent.
+  // Sub-agent events are captured indirectly via the onEvent callback's dag-event dual-writes
+  // during orchestration, and via handleChatToolCallEvent during chat. No separate dual-write
+  // needed here — the UiDagEvent push + llmStatus mutation are already covered by the callers.
+
+  params.session.updatedAt = now();
+  if (params.status === 'started') {
+    params.session.llmStatus = createLlmStatus('using-tools', params.session.updatedAt, {
+      detail: params.nodeId ? `Running sub-agent ${params.nodeId}.` : 'Running sub-agent.',
+      taskId: params.taskId,
+      phase: params.phase,
+    });
+  } else {
+    const detail = params.status === 'failed'
+      ? (params.nodeId ? `Sub-agent ${params.nodeId} failed.` : 'Sub-agent failed.')
+      : (params.nodeId ? `Sub-agent ${params.nodeId} completed.` : 'Sub-agent completed.');
+    params.session.llmStatus = createLlmStatus('using-tools', params.session.updatedAt, {
+      detail,
+      taskId: params.taskId,
+      phase: params.phase,
+    });
+  }
+  params.uiStatePersistence.schedule();
+
+  // Update agent graph node status directly (bypasses truncated DagEvent output)
+  if (params.nodeId && params.session.agentGraph.length > 0) {
+    const graphStatus: 'running' | 'completed' | 'failed' | undefined =
+      params.status === 'started' ? 'running' :
+        params.status === 'completed' ? 'completed' :
+          params.status === 'failed' ? 'failed' : undefined;
+    if (graphStatus) {
+      setAgentGraphNodeStatus(params.session, [params.nodeId], graphStatus);
+    }
+  }
+
+  // Note: emitSubAgentWorkerEvent is a standalone function without access to emitSessionEvent.
+  // Sub-agent events are captured indirectly via the onEvent callback's dag-event dual-writes
+  // during orchestration, and via handleChatToolCallEvent during chat. No separate dual-write
+  // needed here — the UiDagEvent push + llmStatus mutation are already covered by the callers.
+}
+
+function compactSubAgentWorkerText(value: string, maxChars: number): string {
+  const compact = value.replace(/\s+/g, ' ').trim();
+  if (!compact) {
+    return '(empty)';
+  }
+
+  if (compact.length <= maxChars) {
+    return compact;
+  }
+
+  return `${compact.slice(0, maxChars - 3)}...`;
 }
 
 function handleChatToolCallEvent(
