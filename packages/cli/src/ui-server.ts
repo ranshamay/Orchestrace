@@ -8,7 +8,12 @@ import { orchestrate, PromptSectionName, renderPromptSections } from '@orchestra
 import type { DagEvent, PlanApprovalRequest, PromptSection, TaskGraph } from '@orchestrace/core';
 import { getModels } from '@mariozechner/pi-ai';
 import { PiAiAdapter, ProviderAuthManager, type LlmToolCallEvent } from '@orchestrace/provider';
-import { createWorktree, type WorktreeHandle } from '@orchestrace/sandbox';
+import {
+  createWorktree,
+  WorktreeLockError,
+  type WorktreeHandle,
+  type WorktreeStartupWarning,
+} from '@orchestrace/sandbox';
 import {
   DEFAULT_AGENT_TOOL_POLICY_VERSION,
   createAgentToolset,
@@ -69,6 +74,27 @@ const DEFAULT_UI_BATCH_CONCURRENCY = 8;
 const DEFAULT_UI_BATCH_MIN_CONCURRENCY = 1;
 const SUBAGENT_WORKER_PROMPT_PREVIEW_MAX_CHARS = 2_000;
 const SUBAGENT_WORKER_OUTPUT_PREVIEW_MAX_CHARS = 4_000;
+const LLM_STATUS_MIN_EMIT_INTERVAL_MS = 1_500;
+
+type LlmStatusEmissionState = {
+  key: string;
+  emittedAt: number;
+};
+
+type WorkStartModelResolutionFailureCode =
+  | 'MODEL_LIST_FETCH_FAILED'
+  | 'MODEL_NOT_FOUND'
+  | 'MODEL_UNAVAILABLE';
+
+type WorkStartModelResolutionResult =
+  | { ok: true; model: string }
+  | {
+      ok: false;
+      statusCode: number;
+      code: WorkStartModelResolutionFailureCode;
+      error: string;
+      details: Record<string, unknown>;
+    };
 
 type GithubDeviceAuthSessionState = 'awaiting-user' | 'polling' | 'completed' | 'failed';
 
@@ -191,7 +217,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     adaptiveConcurrency?: boolean;
     batchConcurrency?: number;
     batchMinConcurrency?: number;
-  }): Promise<{ id: string } | { error: string; statusCode: number }> {
+  }): Promise<{ id: string; warnings?: WorktreeStartupWarning[] } | { error: string; statusCode: number }> {
     const promptParts = cloneChatContentParts(request.promptParts ?? []);
     const prompt = asString(request.prompt);
 
@@ -226,10 +252,18 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
 
     let worktreeHandle: WorktreeHandle;
     let executionPath = workspace.path;
+    let startupWarnings: WorktreeStartupWarning[] | undefined;
     try {
       worktreeHandle = await createWorktree(workspace.path, `session-${id}`);
       executionPath = worktreeHandle.path;
+      startupWarnings = worktreeHandle.warnings;
     } catch (error) {
+      if (error instanceof WorktreeLockError) {
+        return {
+          error: `Worktree is currently in use by another session (${error.metadata?.host ?? 'unknown host'} pid ${error.metadata?.pid ?? 'unknown'}).`,
+          statusCode: 409,
+        };
+      }
       return {
         error: `Failed to create worktree: ${toErrorMessage(error)}`,
         statusCode: 500,
@@ -238,6 +272,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
 
     const controller = new AbortController();
     const createdAt = now();
+    let lastLlmStatusEmission: LlmStatusEmissionState | undefined;
+
     const session: WorkSession = {
       id,
       workspaceId: workspace.id,
@@ -333,8 +369,12 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       onEvent: (event) => {
         session.updatedAt = now();
         const llmStatus = deriveLlmStatusFromDagEvent(event, session.updatedAt);
-        if (llmStatus) {
+        if (llmStatus && shouldEmitLlmStatus(llmStatus, lastLlmStatusEmission, session.updatedAt)) {
           session.llmStatus = llmStatus;
+          lastLlmStatusEmission = {
+            key: llmStatusIdentityKey(llmStatus),
+            emittedAt: parseTimestamp(session.updatedAt),
+          };
         }
 
         if (event.type === 'task:stream-delta') {
@@ -416,6 +456,10 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         : createLlmStatus('completed', session.updatedAt, {
           detail: 'Run completed successfully.',
         });
+      lastLlmStatusEmission = {
+        key: llmStatusIdentityKey(session.llmStatus),
+        emittedAt: parseTimestamp(session.updatedAt),
+      };
       session.output = {
         text: primaryOutput?.response,
         planPath: primaryOutput?.planPath,
@@ -461,7 +505,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       }
     });
 
-    return { id };
+    return { id, warnings: startupWarnings && startupWarnings.length > 0 ? startupWarnings : undefined };
   }
 
   let hmrWatcher: FSWatcher | undefined;
@@ -946,7 +990,10 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           return;
         }
 
-        sendJson(res, 200, { id: result.id });
+        sendJson(res, 200, {
+          id: result.id,
+          warnings: result.warnings,
+        });
         return;
       }
 
@@ -1000,7 +1047,11 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           return;
         }
 
-        sendJson(res, 200, { id: result.id, sourceId: id });
+        sendJson(res, 200, {
+          id: result.id,
+          sourceId: id,
+          warnings: result.warnings,
+        });
         return;
       }
 
@@ -2397,6 +2448,101 @@ function parseGithubScopes(scopes: string | undefined): string[] {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
+}
+
+function resolveDefaultModelFromEnv(): string | undefined {
+  const value = asString(process.env.ORCHESTRACE_DEFAULT_MODEL)?.trim();
+  return value || undefined;
+}
+
+function listProviderModelIds(provider: string): string[] {
+  return getModels(provider as never)
+    .map((model) => asString(model.id)?.trim())
+    .filter((modelId): modelId is string => Boolean(modelId));
+}
+
+function resolveWorkStartModel(params: {
+  provider: string;
+  requestedModel?: string;
+  envFallbackModel?: string;
+}): WorkStartModelResolutionResult {
+  const provider = params.provider;
+  const requestedModel = asString(params.requestedModel)?.trim();
+  const envFallbackModel = asString(params.envFallbackModel)?.trim();
+
+  let availableModels: string[];
+  try {
+    availableModels = listProviderModelIds(provider);
+  } catch (error) {
+    if (requestedModel) {
+      return { ok: true, model: requestedModel };
+    }
+
+    if (envFallbackModel) {
+      console.warn(
+        `[ui-server] /api/work/start model discovery failed for provider "${provider}"; falling back to ORCHESTRACE_DEFAULT_MODEL="${envFallbackModel}". Error: ${toErrorMessage(error)}`,
+      );
+      return { ok: true, model: envFallbackModel };
+    }
+
+    return {
+      ok: false,
+      statusCode: 502,
+      code: 'MODEL_LIST_FETCH_FAILED',
+      error: `Failed to load models for provider ${provider}.`,
+      details: {
+        provider,
+        requestedModel: null,
+        reason: 'provider_model_fetch_failed',
+        retryable: true,
+        cause: toErrorMessage(error),
+      },
+    };
+  }
+
+  if (requestedModel) {
+    if (availableModels.includes(requestedModel)) {
+      return { ok: true, model: requestedModel };
+    }
+
+    return {
+      ok: false,
+      statusCode: 400,
+      code: 'MODEL_NOT_FOUND',
+      error: `Requested model "${requestedModel}" is not available for provider ${provider}.`,
+      details: {
+        provider,
+        requestedModel,
+        availableModels,
+      },
+    };
+  }
+
+  const firstAvailableModel = availableModels[0];
+  if (firstAvailableModel) {
+    return { ok: true, model: firstAvailableModel };
+  }
+
+  if (envFallbackModel) {
+    console.warn(
+      `[ui-server] /api/work/start no models available for provider "${provider}"; falling back to ORCHESTRACE_DEFAULT_MODEL="${envFallbackModel}".`,
+    );
+    return { ok: true, model: envFallbackModel };
+  }
+
+  return {
+    ok: false,
+    statusCode: 400,
+    code: 'MODEL_UNAVAILABLE',
+    error: `No models are available for provider ${provider}, and no model was specified.`,
+    details: {
+      provider,
+      requestedModel: null,
+      availableModels,
+      reason: 'no_model_available',
+      retryable: false,
+    },
+  };
 }
 
 function buildSingleTaskGraph(id: string, prompt: string): TaskGraph {
