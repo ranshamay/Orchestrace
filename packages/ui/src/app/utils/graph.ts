@@ -29,7 +29,19 @@ export function buildGraphLayout(session?: WorkSession): { nodes: GraphNodeView[
   const statusById = new Map(baseNodes.map((node) => [node.id, node.status ?? normalizeTaskStatus(session.taskStatus[node.id])]));
   const sessionNormalized = normalizeSessionStatus(session.status);
   const isRunning = sessionNormalized === 'running';
+  const isCompleted = sessionNormalized === 'completed';
   const isTerminal = sessionNormalized === 'failed' || sessionNormalized === 'cancelled';
+
+  // When the session completed, any unfinished node should be treated as completed.
+  // This prevents stale running/pending node badges after the run is done.
+  if (isCompleted) {
+    for (const node of baseNodes) {
+      const status = statusById.get(node.id) ?? 'pending';
+      if (status === 'running' || status === 'pending') {
+        statusById.set(node.id, 'completed');
+      }
+    }
+  }
 
   // When the session is terminal, demote any still-running nodes to failed
   // and leave pending nodes as pending (they never started).
