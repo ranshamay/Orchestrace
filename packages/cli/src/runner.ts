@@ -179,7 +179,7 @@ async function main(): Promise<void> {
               todoId: opts?.todoId,
               todoTitle: opts?.todoTitle,
             },
-            error: add.error ?? add.stderr || 'git add failed',
+            error: (add.error ?? add.stderr) || 'git add failed',
           },
         });
         return;
@@ -221,7 +221,7 @@ async function main(): Promise<void> {
               todoId: opts?.todoId,
               todoTitle: opts?.todoTitle,
             },
-            error: commit.error ?? commit.stderr || 'git commit failed',
+            error: (commit.error ?? commit.stderr) || 'git commit failed',
           },
         });
         return;
