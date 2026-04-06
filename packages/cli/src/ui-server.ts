@@ -2,8 +2,9 @@ import { randomUUID } from 'node:crypto';
 import { execFile, spawn } from 'node:child_process';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { existsSync, watch, type FSWatcher } from 'node:fs';
+import { constants as fsConstants } from 'node:fs';
 import { homedir } from 'node:os';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { access, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
@@ -185,6 +186,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
   const llm = new PiAiAdapter();
 
   const workSessions = new Map<string, WorkSession>();
+  const worktreePathLocks = new Map<string, string>();
   const authSessions = new Map<string, AuthSession>();
   const githubDeviceAuthSessions = new Map<string, GithubDeviceAuthSession>();
   const sessionChats = new Map<string, SessionChatThread>();
@@ -575,6 +577,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
   }
   uiPreferences = normalizeUiPreferences(restoredUiPreferences, resolveUiPreferencesDefaults());
 
+  registerRestoredWorkspacePathLocks();
+
   for (const [sessionId, restoredSession] of workSessions.entries()) {
     sessionSharedContextStores.set(sessionId, new InMemorySharedContextStore());
     sessionContextEngines.set(sessionId, createSessionContextEngine(restoredSession.provider, restoredSession.model));
@@ -644,6 +648,52 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     });
   }
 
+  function normalizeWorkspacePathForLock(path: string | undefined): string | undefined {
+    const value = asString(path).trim();
+    if (!value) {
+      return undefined;
+    }
+    return resolve(value);
+  }
+
+  function acquireWorkspacePathLock(path: string | undefined, sessionId: string): { ok: true } | { ok: false; ownerSessionId: string } {
+    const lockKey = normalizeWorkspacePathForLock(path);
+    if (!lockKey) {
+      return { ok: true };
+    }
+
+    const ownerSessionId = worktreePathLocks.get(lockKey);
+    if (ownerSessionId && ownerSessionId !== sessionId) {
+      return { ok: false, ownerSessionId };
+    }
+
+    worktreePathLocks.set(lockKey, sessionId);
+    return { ok: true };
+  }
+
+  function releaseWorkspacePathLock(path: string | undefined, sessionId: string): void {
+    const lockKey = normalizeWorkspacePathForLock(path);
+    if (!lockKey) {
+      return;
+    }
+
+    const ownerSessionId = worktreePathLocks.get(lockKey);
+    if (ownerSessionId === sessionId) {
+      worktreePathLocks.delete(lockKey);
+    }
+  }
+
+  function registerRestoredWorkspacePathLocks(): void {
+    for (const [sessionId, session] of workSessions.entries()) {
+      const acquired = acquireWorkspacePathLock(session.workspacePath, sessionId);
+      if (!acquired.ok) {
+        console.warn(
+          `[ui-server] Duplicate restored workspace path lock detected for session ${sessionId}; path already owned by ${acquired.ownerSessionId}.`,
+        );
+      }
+    }
+  }
+
   function deleteWorkSession(id: string): boolean {
     const session = workSessions.get(id);
     if (!session) {
@@ -669,6 +719,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         payload: { status: 'cancelled' },
       });
     }
+
+    releaseWorkspacePathLock(session.workspacePath, id);
 
     closeWorkStream(workStreamClients, id);
     workSessions.delete(id);
@@ -726,6 +778,21 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       };
     }
 
+    try {
+      const apiKey = await authManager.resolveApiKey(request.provider);
+      if (!apiKey) {
+        return {
+          error: `Provider ${request.provider} is missing an API key. Connect it in Settings first.`,
+          statusCode: 400,
+        };
+      }
+    } catch {
+      return {
+        error: `Provider ${request.provider} is missing an API key. Connect it in Settings first.`,
+        statusCode: 400,
+      };
+    }
+
     const workspace = request.workspaceId
       ? await workspaceManager.selectWorkspace(request.workspaceId)
       : await workspaceManager.getActiveWorkspace();
@@ -774,6 +841,37 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           statusCode: 400,
         };
       }
+
+      try {
+        await ensureWorktreeDependenciesInstalled(workspacePath);
+      } catch (error) {
+        return {
+          error: toErrorMessage(error),
+          statusCode: 500,
+        };
+      }
+    }
+
+    const lockResult = acquireWorkspacePathLock(workspacePath, id);
+    if (!lockResult.ok) {
+      return {
+        error: `Workspace path is currently in use by another session (${lockResult.ownerSessionId}). Select a different worktree path or wait for the session to be deleted.`,
+        statusCode: 409,
+      };
+    }
+
+    const duplicateSession = [...workSessions.values()].find((candidate) => {
+      const candidatePath = normalizeWorkspacePathForLock(candidate.workspacePath);
+      const requestedPath = normalizeWorkspacePathForLock(workspacePath);
+      return Boolean(candidatePath && requestedPath && candidatePath === requestedPath);
+    });
+
+    if (duplicateSession) {
+      releaseWorkspacePathLock(workspacePath, id);
+      return {
+        error: `Workspace path is already assigned to active session ${duplicateSession.id}. Select a different worktree path.`,
+        statusCode: 409,
+      };
     }
 
     const controller = new AbortController();
@@ -5722,6 +5820,40 @@ async function listNativeGitWorktrees(repoRoot: string): Promise<NativeGitWorktr
   }
 }
 
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await access(path, fsConstants.F_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function ensureWorktreeDependenciesInstalled(workspacePath: string): Promise<void> {
+  const lockfilePath = join(workspacePath, 'pnpm-lock.yaml');
+  const nodeModulesPath = join(workspacePath, 'node_modules');
+
+  if (!(await pathExists(lockfilePath))) {
+    return;
+  }
+
+  if (await pathExists(nodeModulesPath)) {
+    return;
+  }
+
+  try {
+    await execFileAsync('pnpm', ['install', '--frozen-lockfile'], {
+      cwd: workspacePath,
+      timeout: 180_000,
+      maxBuffer: 10 * 1024 * 1024,
+    });
+  } catch (error) {
+    throw new Error(
+      `Failed to initialize worktree dependencies: ${toErrorMessage(error)}. Tried: pnpm install --frozen-lockfile`,
+    );
+  }
+}
+
 async function resolveSessionWorkspacePath(request: {
   workspaceRoot: string;
   executionContext: ExecutionContext;
@@ -5786,7 +5918,17 @@ async function ensureSessionWorkspaceReady(
     return;
   }
 
+  const previousWorkspacePath = session.workspacePath;
   const workspace = await workspaceManager.selectWorkspace(session.workspaceId);
+
+  releaseWorkspacePathLock(previousWorkspacePath, session.id);
+  const acquired = acquireWorkspacePathLock(workspace.path, session.id);
+  if (!acquired.ok) {
+    throw new Error(
+      `Workspace path ${workspace.path} is currently in use by session ${acquired.ownerSessionId}; cannot recover session workspace path.`,
+    );
+  }
+
   session.workspacePath = workspace.path;
   session.workspaceName = workspace.name;
   session.executionContext = 'workspace';
