@@ -66,10 +66,24 @@ export interface OrchestratorConfig extends RunnerConfig {
 
 type OrchestratorPhase = 'planning' | 'implementation';
 
+type DirectExecutionDecision = {
+  mode: 'direct' | 'planned';
+  reasonCode:
+    | 'allow_single_command'
+    | 'allow_single_file_read'
+    | 'deny_dependencies'
+    | 'deny_task_type'
+    | 'deny_prompt_too_long'
+    | 'deny_multi_step_intent'
+    | 'deny_edit_intent'
+    | 'deny_no_simple_intent';
+};
+
 const DEFAULT_ORCHESTRATOR_PROMPT_VERSION = 'orchestrator-prompts-v2';
 const MAX_PLANNING_ATTEMPTS = 3;
 const PLANNING_RETRY_BASE_DELAY_MS = 2_000;
 const RETRY_CONTEXT_MAX_CHARS = 2_000;
+const DIRECT_EXECUTION_MAX_PROMPT_WORDS = 22;
 
 /**
  * High-level orchestrator that wires the DAG scheduler to the LLM provider
@@ -158,6 +172,251 @@ export async function orchestrate(
     );
     const planningTokenDumpPath = join(taskTokenDumpDir, 'planning.jsonl');
     const implementationTokenDumpPath = join(taskTokenDumpDir, 'implementation.jsonl');
+    const executionDecision = classifyTaskExecutionMode(node);
+
+    if (executionDecision.mode === 'direct') {
+      const implAgent = await llm.spawnAgent({
+        provider: model.provider,
+        model: model.model,
+        reasoning: model.reasoning,
+        systemPrompt:
+          implementationSystemPrompt
+          ?? systemPrompt
+          ?? buildPhaseSystemPrompt({
+            phase: 'implementation',
+            task: node,
+            graphId: graph.id,
+            cwd,
+            provider: model.provider,
+            model: model.model,
+            reasoning: model.reasoning,
+          }),
+        signal: context.signal,
+        toolset: createToolset?.({
+          phase: 'implementation',
+          task: node,
+          graphId: graph.id,
+          cwd,
+          provider: model.provider,
+          model: model.model,
+          reasoning: model.reasoning,
+        }),
+        apiKey,
+        refreshApiKey,
+      });
+
+      const taskRetryBudget = Math.max(0, node.validation?.maxRetries ?? 0);
+      const maxAttempts = Math.max(
+        1,
+        maxImplementationAttempts ?? taskRetryBudget + 1,
+      );
+
+      let lastResponse = '';
+      let lastFailureType: ReplayFailureType | undefined;
+      let lastValidationError = '';
+      let lastValidationResults = undefined as TaskOutput['validationResults'];
+
+      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        emit({
+          type: 'task:implementation-attempt',
+          taskId: node.id,
+          attempt,
+          maxAttempts,
+        });
+
+        const implementationPrompt = buildDirectImplementationPrompt({
+          node,
+          depOutputs: context.depOutputs,
+          attempt,
+          previousResponse: lastResponse,
+          previousFailureType: lastFailureType,
+          previousValidationError: lastValidationError,
+        });
+
+        const implementationToolCalls: ReplayToolCallRecord[] = [];
+        const implementationAttemptStart = new Date().toISOString();
+        let implResult;
+        try {
+          implResult = await implAgent.complete(implementationPrompt, context.signal, {
+            onTextDelta: (delta: string) => {
+              emit({
+                type: 'task:stream-delta',
+                taskId: node.id,
+                phase: 'implementation',
+                attempt,
+                delta,
+              });
+            },
+            onToolCall: (event: LlmToolCallEvent) => {
+              implementationToolCalls.push(toReplayToolCallRecord(event));
+              emit({
+                type: 'task:tool-call',
+                taskId: node.id,
+                phase: 'implementation',
+                attempt,
+                toolCallId: event.toolCallId,
+                toolName: event.toolName,
+                status: event.type,
+                input: event.arguments,
+                output: event.result,
+                isError: event.isError,
+              });
+            },
+          });
+        } catch (error) {
+          const failureType = resolveReplayFailureType(error);
+          const implementationError = error instanceof Error ? error.message : String(error);
+          const failedImplementationAttempt: ReplayAttemptRecord = {
+            phase: 'implementation',
+            attempt,
+            startedAt: implementationAttemptStart,
+            completedAt: new Date().toISOString(),
+            provider: model.provider,
+            model: model.model,
+            reasoning: model.reasoning,
+            error: implementationError,
+            failureType,
+            toolCalls: implementationToolCalls,
+            textPreview: `direct_execution_reason=${executionDecision.reasonCode}`,
+          };
+          replay.attempts.push(failedImplementationAttempt);
+          emit({
+            type: 'task:replay-attempt',
+            taskId: node.id,
+            phase: 'implementation',
+            attempt,
+            record: failedImplementationAttempt,
+          });
+
+          if (attempt < maxAttempts && shouldRetryAfterCompletionFailure(failureType)) {
+            lastFailureType = failureType;
+            lastValidationError = buildCompletionFailureRetryHint({
+              failureType,
+              errorMessage: implementationError,
+            });
+            emit({
+              type: 'task:verification-failed',
+              taskId: node.id,
+              attempt,
+              error: `Retrying after ${failureType} failure: ${implementationError}`,
+            });
+            await delay(PLANNING_RETRY_BASE_DELAY_MS * (2 ** (attempt - 1)));
+            continue;
+          }
+
+          return {
+            taskId: node.id,
+            status: 'failed',
+            tokenDumpDir: taskTokenDumpDir,
+            response: lastResponse,
+            error: implementationError,
+            failureType,
+            durationMs: Date.now() - start,
+            retries: attempt - 1,
+            usage,
+            replay,
+          };
+        }
+
+        const completedImplementationAttempt: ReplayAttemptRecord = {
+          phase: 'implementation',
+          attempt,
+          startedAt: implementationAttemptStart,
+          completedAt: new Date().toISOString(),
+          provider: model.provider,
+          model: model.model,
+          reasoning: model.reasoning,
+          stopReason: implResult.metadata?.stopReason,
+          endpoint: implResult.metadata?.endpoint,
+          usage: implResult.usage,
+          textPreview: `direct_execution_reason=${executionDecision.reasonCode}; ${createTextPreview(implResult.text)}`,
+          toolCalls: implementationToolCalls,
+        };
+        replay.attempts.push(completedImplementationAttempt);
+        emit({
+          type: 'task:replay-attempt',
+          taskId: node.id,
+          phase: 'implementation',
+          attempt,
+          record: completedImplementationAttempt,
+        });
+
+        mergeUsage(usage, implResult.usage);
+        await appendTokenDump(implementationTokenDumpPath, {
+          graphId: graph.id,
+          taskId: node.id,
+          agent: 'implementation',
+          attempt,
+          provider: model.provider,
+          model: model.model,
+          usage: implResult.usage,
+        });
+        lastResponse = implResult.text;
+
+        const output: TaskOutput = {
+          taskId: node.id,
+          status: 'completed',
+          tokenDumpDir: taskTokenDumpDir,
+          response: implResult.text,
+          filesChanged: implResult.filesChanged,
+          durationMs: Date.now() - start,
+          retries: attempt - 1,
+          usage,
+          replay,
+        };
+
+        if (!node.validation) {
+          return output;
+        }
+
+        emit({ type: 'task:validating', taskId: node.id });
+        const validationResults = await validate(output, node.validation, cwd);
+        output.validationResults = validationResults;
+        lastValidationResults = validationResults;
+        const allPassed = validationResults.every((result) => result.passed);
+        completedImplementationAttempt.validation = {
+          passed: allPassed,
+          commandResults: validationResults.map((result) => ({
+            command: result.command,
+            passed: result.passed,
+            output: result.output,
+            durationMs: result.durationMs,
+          })),
+        };
+
+        if (allPassed) {
+          return output;
+        }
+
+        lastFailureType = 'validation';
+        completedImplementationAttempt.failureType = 'validation';
+        lastValidationError = validationResults
+          .filter((result) => !result.passed)
+          .map((result) => `${result.command}: ${result.output}`)
+          .join('\n');
+
+        emit({
+          type: 'task:verification-failed',
+          taskId: node.id,
+          attempt,
+          error: lastValidationError,
+        });
+      }
+
+      return {
+        taskId: node.id,
+        status: 'failed',
+        tokenDumpDir: taskTokenDumpDir,
+        response: lastResponse,
+        validationResults: lastValidationResults,
+        error: lastValidationError || 'Implementation did not satisfy validation criteria.',
+        failureType: lastFailureType ?? 'validation',
+        durationMs: Date.now() - start,
+        retries: maxAttempts - 1,
+        usage,
+        replay,
+      };
+    }
 
     const planningAgent = await llm.spawnAgent({
       provider: model.provider,
@@ -202,7 +461,7 @@ export async function orchestrate(
 
       try {
         planningResult = await planningAgent.complete(planningPrompt, context.signal, {
-          onTextDelta: (delta) => {
+          onTextDelta: (delta: string) => {
             emit({
               type: 'task:stream-delta',
               taskId: node.id,
@@ -211,7 +470,7 @@ export async function orchestrate(
               delta,
             });
           },
-          onToolCall: (event) => {
+          onToolCall: (event: LlmToolCallEvent) => {
             planningToolCalls.push(toReplayToolCallRecord(event));
             emit({
               type: 'task:tool-call',
@@ -480,7 +739,7 @@ export async function orchestrate(
       let implResult;
       try {
         implResult = await implAgent.complete(implementationPrompt, context.signal, {
-          onTextDelta: (delta) => {
+          onTextDelta: (delta: string) => {
             emit({
               type: 'task:stream-delta',
               taskId: node.id,
@@ -489,7 +748,7 @@ export async function orchestrate(
               delta,
             });
           },
-          onToolCall: (event) => {
+          onToolCall: (event: LlmToolCallEvent) => {
             implementationToolCalls.push(toReplayToolCallRecord(event));
             emit({
               type: 'task:tool-call',
@@ -772,6 +1031,89 @@ function buildPlanningPrompt(node: TaskNode, depOutputs: Map<string, TaskOutput>
   ]);
 }
 
+function buildDirectImplementationPrompt(params: {
+  node: TaskNode;
+  depOutputs: Map<string, TaskOutput>;
+  attempt: number;
+  previousResponse: string;
+  previousFailureType?: ReplayFailureType;
+  previousValidationError: string;
+}): string {
+  const {
+    node,
+    depOutputs,
+    attempt,
+    previousResponse,
+    previousFailureType,
+    previousValidationError,
+  } = params;
+
+  const depContext = buildDependencyContext(depOutputs);
+  const retryContext =
+    attempt > 1
+      ? [
+          '',
+          'Previous attempt failure type:',
+          previousFailureType ?? '(unknown)',
+          '',
+          'Previous attempt response:',
+          truncateForRetry(previousResponse) || '(no response)',
+          '',
+          'Validation failures to fix:',
+          truncateForRetry(previousValidationError) || '(missing validation details)',
+        ].join('\n')
+      : '';
+
+  const sections: PromptSection[] = [
+    {
+      name: PromptSectionName.Goal,
+      lines: [
+        'Execute this task directly in one concise implementation pass when possible.',
+        'Do not create a planning decomposition for this task.',
+        'Complete only the requested single-step outcome and report clearly.',
+      ],
+    },
+    {
+      name: PromptSectionName.Autonomy,
+      lines: [
+        'Keep execution minimal and deterministic.',
+        'If a tool call fails, fix arguments and retry.',
+        'Avoid unrelated edits or extra workflow setup unless explicitly requested.',
+      ],
+    },
+    {
+      name: PromptSectionName.TaskContext,
+      lines: [
+        `Attempt: ${attempt}`,
+        `Task ID: ${node.id}`,
+        `Task Name: ${node.name}`,
+        '',
+        'Original task prompt:',
+        node.prompt,
+      ],
+    },
+    {
+      name: PromptSectionName.DependencyContext,
+      lines: [depContext],
+    },
+    {
+      name: PromptSectionName.OutputContract,
+      lines: [
+        'Return the direct result succinctly and include any tool output needed to verify completion.',
+      ],
+    },
+  ];
+
+  if (retryContext) {
+    sections.push({
+      name: PromptSectionName.RetryContext,
+      lines: [retryContext],
+    });
+  }
+
+  return renderPromptSections(sections);
+}
+
 function buildImplementationPrompt(params: {
   node: TaskNode;
   depOutputs: Map<string, TaskOutput>;
@@ -1046,6 +1388,94 @@ function createTextPreview(text: string, maxChars = 600): string {
   }
 
   return compact.length > maxChars ? `${compact.slice(0, maxChars - 3)}...` : compact;
+}
+
+function classifyTaskExecutionMode(node: TaskNode): DirectExecutionDecision {
+  if (node.dependencies.length > 0) {
+    return { mode: 'planned', reasonCode: 'deny_dependencies' };
+  }
+
+  if (node.type !== 'custom') {
+    return { mode: 'planned', reasonCode: 'deny_task_type' };
+  }
+
+  const prompt = node.prompt.trim();
+  if (countWords(prompt) > DIRECT_EXECUTION_MAX_PROMPT_WORDS) {
+    return { mode: 'planned', reasonCode: 'deny_prompt_too_long' };
+  }
+
+  if (hasEditIntent(prompt)) {
+    return { mode: 'planned', reasonCode: 'deny_edit_intent' };
+  }
+
+  if (hasMultiStepIntent(prompt)) {
+    return { mode: 'planned', reasonCode: 'deny_multi_step_intent' };
+  }
+
+  const singleShellCommand = extractSingleShellCommandIntent(prompt);
+  if (singleShellCommand) {
+    return { mode: 'direct', reasonCode: 'allow_single_command' };
+  }
+
+  if (hasSingleFileReadIntent(prompt)) {
+    return { mode: 'direct', reasonCode: 'allow_single_file_read' };
+  }
+
+  return { mode: 'planned', reasonCode: 'deny_no_simple_intent' };
+}
+
+function countWords(text: string): number {
+  const matches = text.match(/\S+/g);
+  return matches ? matches.length : 0;
+}
+
+function hasEditIntent(prompt: string): boolean {
+  return /(implement|modify|edit|change|update|refactor|fix|write|create|add|delete|remove|patch|commit|push|pr)\b/i.test(prompt);
+}
+
+function hasMultiStepIntent(prompt: string): boolean {
+  const normalized = prompt.toLowerCase();
+  if (/\b(and then|then|after that|afterwards|next|finally|step\s*\d+)\b/.test(normalized)) {
+    return true;
+  }
+
+  if (/[;&]{1,2}/.test(normalized)) {
+    return true;
+  }
+
+  return false;
+}
+
+function extractSingleShellCommandIntent(prompt: string): string | undefined {
+  const normalized = prompt.trim();
+  const commandMatch = normalized.match(/^(?:run|execute)\s+(.+)$/i);
+  if (!commandMatch) {
+    return undefined;
+  }
+
+  const command = commandMatch[1]?.trim() ?? '';
+  if (!command || /[;&|]{1,2}/.test(command)) {
+    return undefined;
+  }
+
+  if (/`/.test(command)) {
+    return command.replace(/`/g, '').trim();
+  }
+
+  return command;
+}
+
+function hasSingleFileReadIntent(prompt: string): boolean {
+  const normalized = prompt.trim().toLowerCase();
+  if (!/^(read|show|print|display)\b/.test(normalized)) {
+    return false;
+  }
+
+  if (!/\b(file|contents?)\b/.test(normalized)) {
+    return false;
+  }
+
+  return !hasMultiStepIntent(normalized);
 }
 
 function resolveReplayFailureType(error: unknown): ReplayFailureType {

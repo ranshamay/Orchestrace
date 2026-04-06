@@ -6,7 +6,10 @@ import type { LlmAdapter, LlmAgent, LlmCompletionOptions, LlmPromptInput, LlmReq
 import { orchestrate } from '../../src/orchestrator/orchestrator.js';
 import type { DagEvent, TaskGraph } from '../../src/dag/types.js';
 
-function makeSingleNodeGraph(): TaskGraph {
+function makeSingleNodeGraph(params?: {
+  type?: 'code' | 'review' | 'test' | 'plan' | 'refactor' | 'custom';
+  prompt?: string;
+}): TaskGraph {
   return {
     id: 'graph-1',
     name: 'Replay Test Graph',
@@ -14,8 +17,8 @@ function makeSingleNodeGraph(): TaskGraph {
       {
         id: 'task-1',
         name: 'Task 1',
-        type: 'code',
-        prompt: 'Implement a tiny change.',
+        type: params?.type ?? 'code',
+        prompt: params?.prompt ?? 'Implement a tiny change.',
         dependencies: [],
       },
     ],
@@ -31,7 +34,9 @@ function createAdapter(params: {
   let implementationCalls = 0;
 
   async function spawnAgent(request: SpawnAgentRequest): Promise<LlmAgent> {
-    const phase = request.systemPrompt === 'planning' ? 'planning' : 'implementation';
+    const phase = typeof request.systemPrompt === 'string' && request.systemPrompt.toLowerCase().includes('planning')
+      ? 'planning'
+      : 'implementation';
 
     return {
       complete: async (
@@ -147,6 +152,67 @@ function createAdapter(params: {
 }
 
 describe('orchestrate replay capture', () => {
+  it('bypasses planning for trivial direct-execution tasks', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'orchestrace-replay-direct-path-'));
+    const events: DagEvent[] = [];
+
+    try {
+      const outputs = await orchestrate(makeSingleNodeGraph({
+        type: 'custom',
+        prompt: 'Run `echo hello world` and report back.',
+      }), {
+        llm: createAdapter({}),
+        cwd,
+        requirePlanApproval: true,
+        implementationSystemPrompt: 'implementation',
+        onEvent: (event) => events.push(event),
+      });
+
+      const output = outputs.get('task-1');
+      expect(output).toBeDefined();
+      expect(output?.status).toBe('completed');
+      expect(output?.plan).toBeUndefined();
+      expect(output?.planPath).toBeUndefined();
+      expect(output?.replay?.attempts.length).toBe(1);
+      expect(output?.replay?.attempts[0]?.phase).toBe('implementation');
+      expect(output?.replay?.attempts[0]?.textPreview).toContain('direct_execution_reason=allow_single_command');
+      expect(events.some((event) => event.type === 'task:planning')).toBe(false);
+      expect(events.some((event) => event.type === 'task:approval-requested')).toBe(false);
+      expect(events.filter((event) => event.type === 'task:implementation-attempt').length).toBe(1);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('uses normal planning flow for non-trivial tasks', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'orchestrace-replay-nontrivial-path-'));
+    const events: DagEvent[] = [];
+
+    try {
+      const outputs = await orchestrate(makeSingleNodeGraph({
+        type: 'code',
+        prompt: 'Implement a tiny change.',
+      }), {
+        llm: createAdapter({}),
+        cwd,
+        requirePlanApproval: false,
+        planningSystemPrompt: 'planning',
+        implementationSystemPrompt: 'implementation',
+        onEvent: (event) => events.push(event),
+      });
+
+      const output = outputs.get('task-1');
+      expect(output?.status).toBe('completed');
+      expect(output?.replay?.attempts.length).toBe(2);
+      expect(output?.replay?.attempts[0]?.phase).toBe('planning');
+      expect(output?.replay?.attempts[1]?.phase).toBe('implementation');
+      expect(output?.replay?.attempts[0]?.toolCalls.length).toBe(6);
+      expect(events.some((event) => event.type === 'task:planning')).toBe(true);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
   it('captures planning + implementation replay attempts on success', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'orchestrace-replay-success-'));
     const events: DagEvent[] = [];
@@ -239,7 +305,10 @@ describe('orchestrate replay capture', () => {
     const cwd = await mkdtemp(join(tmpdir(), 'orchestrace-replay-plan-contract-'));
 
     try {
-      const outputs = await orchestrate(makeSingleNodeGraph(), {
+      const outputs = await orchestrate(makeSingleNodeGraph({
+        type: 'code',
+        prompt: 'Implement a tiny change in source files and run checks.',
+      }), {
         llm: createAdapter({ omitPlanningCoordination: true }),
         cwd,
         requirePlanApproval: false,
