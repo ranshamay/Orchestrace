@@ -6,7 +6,7 @@ import type { LlmAdapter, LlmAgent, LlmCompletionOptions, LlmPromptInput, LlmReq
 import { orchestrate } from '../../src/orchestrator/orchestrator.js';
 import type { DagEvent, TaskGraph } from '../../src/dag/types.js';
 
-function makeSingleNodeGraph(): TaskGraph {
+function makeSingleNodeGraph(prompt = 'Implement a tiny change.'): TaskGraph {
   return {
     id: 'graph-1',
     name: 'Replay Test Graph',
@@ -15,7 +15,7 @@ function makeSingleNodeGraph(): TaskGraph {
         id: 'task-1',
         name: 'Task 1',
         type: 'code',
-        prompt: 'Implement a tiny change.',
+        prompt,
         dependencies: [],
       },
     ],
@@ -235,18 +235,52 @@ describe('orchestrate replay capture', () => {
     }
   });
 
-  it('fails planning when required coordination tool calls are missing', async () => {
-    const cwd = await mkdtemp(join(tmpdir(), 'orchestrace-replay-plan-contract-'));
+  it('does not require sub-agent delegation for simple single-file planning tasks', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'orchestrace-replay-plan-simple-'));
 
     try {
-      const outputs = await orchestrate(makeSingleNodeGraph(), {
-        llm: createAdapter({ omitPlanningCoordination: true }),
-        cwd,
-        requirePlanApproval: false,
-        planningSystemPrompt: 'planning',
-        implementationSystemPrompt: 'implementation',
-        createToolset: () => ({ tools: [], executeTool: async () => ({ content: 'noop' }) }),
-      });
+      const outputs = await orchestrate(
+        makeSingleNodeGraph('Apply a small single-file policy update.\n\nRelevant Files\n- packages/cli/src/ui-server.ts'),
+        {
+          llm: createAdapter({ omitPlanningCoordination: true }),
+          cwd,
+          requirePlanApproval: false,
+          planningSystemPrompt: 'planning',
+          implementationSystemPrompt: 'implementation',
+          createToolset: () => ({ tools: [], executeTool: async () => ({ content: 'noop' }) }),
+        },
+      );
+
+      const output = outputs.get('task-1');
+      expect(output).toBeDefined();
+      expect(output?.status).toBe('failed');
+      expect(output?.failureType).toBe('validation');
+      expect(output?.error).toContain('Planning contract not satisfied');
+      expect(output?.error).toContain('todo_set');
+      expect(output?.error).toContain('agent_graph_set');
+      expect(output?.error).not.toContain('subagent_spawn');
+      expect(output?.replay?.attempts.length).toBe(3);
+      expect(output?.replay?.attempts.at(-1)?.failureType).toBe('validation');
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  }, 15_000);
+
+  it('still requires sub-agent delegation for broader non-simple planning tasks', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'orchestrace-replay-plan-complex-'));
+
+    try {
+      const outputs = await orchestrate(
+        makeSingleNodeGraph('Perform a multi-file refactor across packages/core and packages/cli to redesign orchestration behavior.'),
+        {
+          llm: createAdapter({ omitPlanningCoordination: true }),
+          cwd,
+          requirePlanApproval: false,
+          planningSystemPrompt: 'planning',
+          implementationSystemPrompt: 'implementation',
+          createToolset: () => ({ tools: [], executeTool: async () => ({ content: 'noop' }) }),
+        },
+      );
 
       const output = outputs.get('task-1');
       expect(output).toBeDefined();
@@ -256,7 +290,6 @@ describe('orchestrate replay capture', () => {
       expect(output?.error).toContain('todo_set');
       expect(output?.error).toContain('agent_graph_set');
       expect(output?.error).toContain('subagent_spawn');
-      // Planning now retries up to 3 times before giving up
       expect(output?.replay?.attempts.length).toBe(3);
       expect(output?.replay?.attempts.at(-1)?.failureType).toBe('validation');
     } finally {

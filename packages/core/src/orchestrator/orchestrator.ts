@@ -311,7 +311,7 @@ export async function orchestrate(
       });
 
       if (createToolset) {
-        const planningContractError = buildPlanningContractError(planningToolCalls);
+        const planningContractError = buildPlanningContractError(node, planningToolCalls);
         if (planningContractError) {
           completedPlanningAttempt.failureType = 'validation';
           completedPlanningAttempt.error = planningContractError;
@@ -733,9 +733,10 @@ function buildPlanningPrompt(node: TaskNode, depOutputs: Map<string, TaskOutput>
         '- agent_graph_set node ids must be unique, and dependency ids can only reference nodes from the same payload',
         '- in agent_graph_set, provide descriptive node ids/names (avoid generic n1/n2 labels)',
         '- agent_graph_set nodes must map to atomic execution units with explicit dependency ids',
-        '- subagent_spawn/subagent_spawn_batch (required) to delegate focused planning research with only relevant context per sub-agent',
+        '- subagent_spawn/subagent_spawn_batch for focused planning research with only relevant context per sub-agent when task scope is not simple',
+        '- for simple single-file tasks, skip sub-agent delegation and proceed with a direct implementation plan',
         '- ALWAYS use subagent_spawn_batch (not individual subagent_spawn calls) when multiple independent sub-agents can run concurrently',
-        '- subagent_spawn/subagent_spawn_batch calls must include nodeId values that map back to agent_graph_set node ids',
+        '- subagent_spawn/subagent_spawn_batch calls must include nodeId values that map back to agent_graph_set node ids when delegation is used',
         '- pass nodeId on each sub-agent request so graph progress can be tracked per node',
       ],
     },
@@ -898,9 +899,10 @@ function buildPhaseSystemPrompt(params: {
           'todo_set status values must be exactly todo, in_progress, or done.',
           'agent_graph_set must define weighted implementation breakdown where node weights sum to 100.',
           'agent_graph_set ids must be unique and dependency ids must resolve within the same payload.',
-          'subagent delegation must include nodeId values that map to agent_graph_set node ids.',
+          'subagent delegation must include nodeId values that map to agent_graph_set node ids when delegation is used.',
           'Planning must include successful todo_set and agent_graph_set tool calls.',
-          'Planning must include successful subagent_spawn or subagent_spawn_batch calls with focused context per sub-agent.',
+          'Planning must include successful subagent_spawn or subagent_spawn_batch calls with focused context per sub-agent when task scope is not simple.',
+          'For simple single-file tasks, skip sub-agent delegation and proceed directly to implementation planning.',
           'Prefer smallest safe units for parallelism; independent atomic tasks should be separated into parallelizable nodes.',
           'Planning responses must end with 1-3 concrete next follow-up suggestions.',
           'Return a plan that another agent could execute deterministically.',
@@ -1137,12 +1139,13 @@ function buildCompletionFailureRetryHint(params: {
   }
 }
 
-function buildPlanningContractError(toolCalls: ReplayToolCallRecord[]): string | undefined {
+function buildPlanningContractError(task: TaskNode, toolCalls: ReplayToolCallRecord[]): string | undefined {
   const hasSubAgentDelegation = hasSuccessfulToolCall(toolCalls, 'subagent_spawn')
     || hasSuccessfulToolCall(toolCalls, 'subagent_spawn_batch');
+  const requiresSubAgentDelegation = !isSimplePlanningTask(task);
   const requiredTools = ['todo_set', 'agent_graph_set'];
   const missing = requiredTools.filter((toolName) => !hasSuccessfulToolCall(toolCalls, toolName));
-  if (!hasSubAgentDelegation) {
+  if (requiresSubAgentDelegation && !hasSubAgentDelegation) {
     missing.push('subagent_spawn or subagent_spawn_batch');
   }
 
@@ -1181,7 +1184,7 @@ function buildPlanningContractError(toolCalls: ReplayToolCallRecord[]): string |
     }
   }
 
-  if (graphNodeIds.size > 0 && hasSubAgentDelegation) {
+  if (requiresSubAgentDelegation && graphNodeIds.size > 0 && hasSubAgentDelegation) {
     const delegatedNodeIds = collectSubAgentNodeIds(toolCalls);
     const mappedNodes = [...graphNodeIds].filter((nodeId) => delegatedNodeIds.has(nodeId));
     if (mappedNodes.length === 0) {
@@ -1193,11 +1196,30 @@ function buildPlanningContractError(toolCalls: ReplayToolCallRecord[]): string |
     return undefined;
   }
 
+  const finalRule = requiresSubAgentDelegation
+    ? 'Planning must publish todo_set + agent_graph_set and delegate focused work via subagent_spawn before implementation can begin.'
+    : 'Planning must publish todo_set + agent_graph_set before implementation can begin.';
+
   return [
     'Planning contract not satisfied.',
     ...contractIssues,
-    'Planning must publish todo_set + agent_graph_set and delegate focused work via subagent_spawn before implementation can begin.',
+    finalRule,
   ].join(' ');
+}
+
+function isSimplePlanningTask(task: TaskNode): boolean {
+  const normalizedPrompt = task.prompt.toLowerCase();
+  const referencesSingleFile = /relevant files?:\s*-\s*[^\n]+/i.test(task.prompt)
+    && !/relevant files?:[\s\S]*\n\s*-\s*[^\n]+\n\s*-\s*[^\n]+/i.test(task.prompt);
+  const explicitlySingleFile = /single-file|single file|one file|one-file/.test(normalizedPrompt);
+  const focusedChange = /(one|single|small|minimal)\s+(change|edit|fix|policy)/.test(normalizedPrompt);
+  const broadScope = /(multi-file|multiple files|across\s+\d+\s+files|repo-wide|cross-cutting|refactor|migration|architecture)/.test(normalizedPrompt);
+
+  if (broadScope) {
+    return false;
+  }
+
+  return task.type === 'code' && (referencesSingleFile || explicitlySingleFile || focusedChange);
 }
 
 function hasSuccessfulToolCall(toolCalls: ReplayToolCallRecord[], toolName: string): boolean {
