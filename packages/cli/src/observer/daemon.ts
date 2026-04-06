@@ -73,6 +73,7 @@ export class ObserverDaemon {
   /** Initialize: load config & findings from disk, start the loop if enabled. */
   async start(): Promise<void> {
     await this.loadConfig();
+    await this.loadState();
     await this.registry.load();
 
     // Seed observer session IDs from registry so we skip them
@@ -270,6 +271,7 @@ export class ObserverDaemon {
 
         rateLimited = true;
         const cooldownMs = this.applyRateLimitCooldown();
+        await this.saveState();
         console.warn(
           `[orchestrace][observer] Rate limit hit; pausing analysis for ${Math.round(cooldownMs / 1000)}s.`,
         );
@@ -298,6 +300,7 @@ export class ObserverDaemon {
 
     await this.registry.save();
     this.state.lastAnalysisAt = new Date().toISOString();
+    await this.saveState();
 
     console.log(
       `[orchestrace][observer] Cycle complete: analyzed=${analyzedCount} findings=${newFindings} spawned=${spawned}`,
@@ -332,6 +335,56 @@ export class ObserverDaemon {
     const configPath = join(this.observerDir, 'config.json');
     await mkdir(this.observerDir, { recursive: true });
     await writeFile(configPath, JSON.stringify(this.config, null, 2), 'utf-8');
+  }
+
+  /**
+   * Load durable daemon state (analyzed sessions + rate-limit backoff) from disk
+   * so that restarts do not re-analyze sessions or reset cooldown windows.
+   */
+  private async loadState(): Promise<void> {
+    const statePath = join(this.observerDir, 'state.json');
+    try {
+      const raw = await readFile(statePath, 'utf-8');
+      const parsed = JSON.parse(raw) as {
+        analyzedSessions?: string[];
+        rateLimitBlockedUntilMs?: number;
+        consecutiveRateLimitFailures?: number;
+        lastAnalysisAt?: string | null;
+      };
+
+      if (Array.isArray(parsed.analyzedSessions)) {
+        for (const sid of parsed.analyzedSessions) {
+          if (typeof sid === 'string') {
+            this.state.analyzedSessions.add(sid);
+          }
+        }
+      }
+
+      if (typeof parsed.rateLimitBlockedUntilMs === 'number' && Number.isFinite(parsed.rateLimitBlockedUntilMs)) {
+        this.rateLimitBlockedUntilMs = parsed.rateLimitBlockedUntilMs;
+      }
+      if (typeof parsed.consecutiveRateLimitFailures === 'number' && Number.isFinite(parsed.consecutiveRateLimitFailures)) {
+        this.consecutiveRateLimitFailures = Math.max(0, Math.round(parsed.consecutiveRateLimitFailures));
+      }
+      if (typeof parsed.lastAnalysisAt === 'string') {
+        this.state.lastAnalysisAt = parsed.lastAnalysisAt;
+      }
+    } catch {
+      // No state file yet — start fresh
+    }
+  }
+
+  /** Persist durable daemon state to disk. */
+  private async saveState(): Promise<void> {
+    const statePath = join(this.observerDir, 'state.json');
+    await mkdir(this.observerDir, { recursive: true });
+    const payload = {
+      analyzedSessions: [...this.state.analyzedSessions],
+      rateLimitBlockedUntilMs: this.rateLimitBlockedUntilMs,
+      consecutiveRateLimitFailures: this.consecutiveRateLimitFailures,
+      lastAnalysisAt: this.state.lastAnalysisAt,
+    };
+    await writeFile(statePath, JSON.stringify(payload, null, 2), 'utf-8');
   }
 }
 
