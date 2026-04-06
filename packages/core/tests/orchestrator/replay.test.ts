@@ -27,7 +27,18 @@ function createAdapter(params: {
   failImplementationOnceWithType?: 'timeout' | 'rate_limit' | 'tool_runtime' | 'empty_response';
   omitPlanningCoordination?: boolean;
   onPrompt?: (phase: 'planning' | 'implementation', prompt: LlmPromptInput) => void;
+  planningBehavior?: (args: {
+    prompt: LlmPromptInput;
+    signal?: AbortSignal;
+    options?: LlmCompletionOptions;
+    planningCall: number;
+  }) => Promise<{
+    text: string;
+    usage?: { input: number; output: number; cost: number };
+    metadata?: { stopReason?: string; endpoint?: string };
+  }>;
 }): LlmAdapter {
+  let planningCalls = 0;
   let implementationCalls = 0;
 
   async function spawnAgent(request: SpawnAgentRequest): Promise<LlmAgent> {
@@ -41,6 +52,17 @@ function createAdapter(params: {
       ) => {
         params.onPrompt?.(phase, _prompt);
         if (phase === 'planning') {
+          planningCalls += 1;
+
+          if (params.planningBehavior) {
+            return params.planningBehavior({
+              prompt: _prompt,
+              signal: _signal,
+              options,
+              planningCall: planningCalls,
+            });
+          }
+
           if (!params.omitPlanningCoordination) {
             options?.onToolCall?.({
               type: 'started',
@@ -259,6 +281,156 @@ describe('orchestrate replay capture', () => {
       // Planning now retries up to 3 times before giving up
       expect(output?.replay?.attempts.length).toBe(3);
       expect(output?.replay?.attempts.at(-1)?.failureType).toBe('validation');
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  }, 15_000);
+
+  it('retries planning with a stall nudge after >5 consecutive planning deltas', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'orchestrace-replay-planning-stall-retry-'));
+    const planningPrompts: string[] = [];
+
+    try {
+      const outputs = await orchestrate(makeSingleNodeGraph(), {
+        llm: createAdapter({
+          onPrompt: (phase, prompt) => {
+            if (phase === 'planning' && typeof prompt === 'string') {
+              planningPrompts.push(prompt);
+            }
+          },
+          planningBehavior: async ({ options, signal, planningCall }) => {
+            if (planningCall === 1) {
+              for (let i = 0; i < 6; i += 1) {
+                if (signal?.aborted) {
+                  throw signal.reason;
+                }
+                options?.onTextDelta?.(`thinking-${i}`);
+              }
+              throw new Error('expected stall abort');
+            }
+
+            options?.onToolCall?.({
+              type: 'result',
+              toolCallId: 'plan-todo-1',
+              toolName: 'todo_set',
+              result: 'Stored 1 todo item(s).',
+              isError: false,
+              arguments: '{"items":[{"id":"p1","title":"Plan","status":"completed"}]}'
+            });
+            options?.onToolCall?.({
+              type: 'result',
+              toolCallId: 'plan-graph-1',
+              toolName: 'agent_graph_set',
+              result: 'Stored agent dependency graph with 1 node(s).',
+              isError: false,
+              arguments: '{"nodes":[{"id":"a1","prompt":"Inspect docs"}]}'
+            });
+            options?.onToolCall?.({
+              type: 'result',
+              toolCallId: 'plan-sub-1',
+              toolName: 'subagent_spawn',
+              result: 'Sub-agent sub-1 completed.',
+              isError: false,
+              arguments: '{"prompt":"Summarize planner constraints"}'
+            });
+
+            return {
+              text: 'Recovered plan after nudge.',
+              usage: { input: 12, output: 7, cost: 0 },
+              metadata: { stopReason: 'end_turn', endpoint: 'https://example.test' },
+            };
+          },
+        }),
+        cwd,
+        requirePlanApproval: false,
+        planningSystemPrompt: 'planning',
+        implementationSystemPrompt: 'implementation',
+      });
+
+      const output = outputs.get('task-1');
+      expect(output?.status).toBe('completed');
+      expect(output?.replay?.attempts[0]?.phase).toBe('planning');
+      expect(output?.replay?.attempts[0]?.error).toContain('Planning appeared stuck');
+      expect(output?.replay?.attempts[1]?.phase).toBe('planning');
+      expect(planningPrompts.length).toBeGreaterThanOrEqual(2);
+      expect(planningPrompts[0]).not.toContain('You appear to be stuck in planning');
+      expect(planningPrompts[1]).toContain('You appear to be stuck in planning. Please proceed with a concrete tool call or finalize your output.');
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('does not trigger planning stall retry when tool calls reset the streak', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'orchestrace-replay-planning-stall-reset-'));
+
+    try {
+      const outputs = await orchestrate(makeSingleNodeGraph(), {
+        llm: createAdapter({
+          planningBehavior: async ({ options }) => {
+            for (let i = 0; i < 12; i += 1) {
+              options?.onTextDelta?.(`thinking-${i}`);
+              if (i % 3 === 2) {
+                options?.onToolCall?.({
+                  type: 'result',
+                  toolCallId: `plan-tool-${i}`,
+                  toolName: i === 2 ? 'todo_set' : i === 5 ? 'agent_graph_set' : 'subagent_spawn',
+                  result: 'ok',
+                  isError: false,
+                  arguments: '{}',
+                });
+              }
+            }
+
+            return {
+              text: 'Plan completed with periodic tool progress.',
+              usage: { input: 10, output: 4, cost: 0 },
+              metadata: { stopReason: 'end_turn', endpoint: 'https://example.test' },
+            };
+          },
+        }),
+        cwd,
+        requirePlanApproval: false,
+        planningSystemPrompt: 'planning',
+        implementationSystemPrompt: 'implementation',
+      });
+
+      const output = outputs.get('task-1');
+      expect(output?.status).toBe('completed');
+      const planningAttempts = output?.replay?.attempts.filter((attempt) => attempt.phase === 'planning') ?? [];
+      expect(planningAttempts.length).toBe(1);
+      expect(planningAttempts[0]?.error).toBeUndefined();
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('fails after repeated planning stalls within retry budget', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'orchestrace-replay-planning-stall-fail-'));
+
+    try {
+      const outputs = await orchestrate(makeSingleNodeGraph(), {
+        llm: createAdapter({
+          planningBehavior: async ({ options, signal }) => {
+            for (let i = 0; i < 6; i += 1) {
+              if (signal?.aborted) {
+                throw signal.reason;
+              }
+              options?.onTextDelta?.(`thinking-${i}`);
+            }
+            throw new Error('expected stall abort');
+          },
+        }),
+        cwd,
+        requirePlanApproval: false,
+        planningSystemPrompt: 'planning',
+        implementationSystemPrompt: 'implementation',
+      });
+
+      const output = outputs.get('task-1');
+      expect(output?.status).toBe('failed');
+      expect(output?.error).toContain('Planning appeared stuck');
+      expect(output?.replay?.attempts.length).toBe(3);
+      expect(output?.replay?.attempts.every((attempt) => attempt.phase === 'planning')).toBe(true);
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }
