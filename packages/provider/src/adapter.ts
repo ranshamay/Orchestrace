@@ -2,6 +2,7 @@ import { getModel, type AssistantMessage } from '@mariozechner/pi-ai';
 import type {
   LlmAdapter,
   LlmAgent,
+  LlmModelInfo,
   LlmPromptInput,
   LlmRequest,
   LlmResult,
@@ -10,7 +11,7 @@ import type {
 } from './types.js';
 import { createContext, normalizeModelEndpoint } from './adapter/context.js';
 import { executeWithOptionalTools } from './adapter/tools.js';
-import { resolveTimeoutMs, createTimeoutSignal, mapTimeoutError } from './adapter/timeout.js';
+import { resolveTimeoutMs, mapTimeoutError } from './adapter/timeout.js';
 import { resolveEmptyResponseRetries } from './adapter/retry.js';
 import { summarizePromptInput, logFailureDump } from './adapter/failure.js';
 import { mergeUsage } from './adapter/usage.js';
@@ -45,10 +46,6 @@ export class PiAiAdapter implements LlmAdapter {
             options.reasoning = request.reasoning;
           }
           const timeoutMs = resolveTimeoutMs(request.timeoutMs);
-          const timeoutSignal = createTimeoutSignal(signal ?? request.signal, timeoutMs);
-          if (timeoutSignal.signal) {
-            options.signal = timeoutSignal.signal;
-          }
           if (activeApiKey) {
             options.apiKey = activeApiKey;
           }
@@ -60,7 +57,8 @@ export class PiAiAdapter implements LlmAdapter {
               options,
               completionOptions,
               toolset: request.toolset,
-              signal: timeoutSignal.signal,
+              signal: signal ?? request.signal,
+              timeoutMs,
               onUsage: (value) => {
                 hasUsage = true;
                 mergeUsage(usage, value);
@@ -88,8 +86,6 @@ export class PiAiAdapter implements LlmAdapter {
               message: mapped.message,
               cause: error,
             });
-          } finally {
-            timeoutSignal.cleanup();
           }
 
           let text = '';
@@ -126,6 +122,18 @@ export class PiAiAdapter implements LlmAdapter {
               blockTypes,
               prompt: summarizePromptInput(prompt),
             });
+
+            if (failureType === 'auth' && request.refreshApiKey && !authRetryUsed) {
+              authRetryUsed = true;
+              try {
+                activeApiKey = await request.refreshApiKey();
+              } catch {
+                // Ignore refresh errors and fall through to throw.
+              }
+              attempt -= 1;
+              continue;
+            }
+
             throw createLlmFailureError({
               provider: request.provider,
               model: request.model,
@@ -245,5 +253,13 @@ export class PiAiAdapter implements LlmAdapter {
       onUsage: request.onUsage,
       onToolCall: request.onToolCall,
     });
+  }
+
+  getModelInfo(provider: string, model: string): LlmModelInfo {
+    const resolved = normalizeModelEndpoint(getModel(provider as never, model as never));
+    return {
+      contextWindow: resolved.contextWindow ?? 128_000,
+      maxOutputTokens: resolved.maxTokens ?? 8_192,
+    };
   }
 }

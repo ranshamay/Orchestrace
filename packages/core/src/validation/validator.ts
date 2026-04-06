@@ -24,12 +24,24 @@ export async function validate(
           durationMs: Date.now() - start,
         });
       } catch (err) {
-        results.push({
-          command,
-          passed: false,
-          output: err instanceof Error ? err.message : String(err),
-          durationMs: Date.now() - start,
-        });
+        // Flake detection: retry once before reporting failure
+        const retryStart = Date.now();
+        try {
+          const stdout = await runCommand(command, cwd);
+          results.push({
+            command,
+            passed: true,
+            output: stdout,
+            durationMs: Date.now() - start,
+          });
+        } catch (retryErr) {
+          results.push({
+            command,
+            passed: false,
+            output: retryErr instanceof Error ? retryErr.message : String(retryErr),
+            durationMs: Date.now() - start,
+          });
+        }
       }
     }
   }

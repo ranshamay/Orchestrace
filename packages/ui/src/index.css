@@ -7,3 +7,57 @@ body.is-horizontal-resizing {
   user-select: none;
   -webkit-user-select: none;
 }
+
+/* ── Graph node animations ── */
+@keyframes graph-pulse-ring {
+  0% { opacity: 0.6; transform: scale(1); }
+  50% { opacity: 0; transform: scale(1.25); }
+  100% { opacity: 0; transform: scale(1.25); }
+}
+
+@keyframes graph-glow-breathe {
+  0%, 100% { opacity: 0.35; }
+  50% { opacity: 0.7; }
+}
+
+@keyframes graph-dash-flow {
+  to { stroke-dashoffset: -20; }
+}
+
+@keyframes graph-particle-flow {
+  0% { offset-distance: 0%; opacity: 0; }
+  10% { opacity: 1; }
+  90% { opacity: 1; }
+  100% { offset-distance: 100%; opacity: 0; }
+}
+
+@keyframes graph-spin {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes graph-node-enter {
+  from { opacity: 0; transform: scale(0.85); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+.graph-node-enter {
+  animation: graph-node-enter 0.4s ease-out both;
+}
+
+.graph-pulse-ring {
+  animation: graph-pulse-ring 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  transform-origin: center;
+}
+
+.graph-glow-breathe {
+  animation: graph-glow-breathe 2.5s ease-in-out infinite;
+}
+
+.graph-dash-flow {
+  animation: graph-dash-flow 0.8s linear infinite;
+}
+
+.graph-spin {
+  animation: graph-spin 1.5s linear infinite;
+  transform-origin: center;
+}

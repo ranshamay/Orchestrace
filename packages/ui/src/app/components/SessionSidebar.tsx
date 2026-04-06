@@ -86,8 +86,22 @@ export function SessionSidebar(props: SessionSidebarProps) {
 
         {sessions.map((session) => {
           const isSelected = selectedSessionId === session.id;
+          const lineageLabel = formatSessionLineageLabel(session);
           const llmStatus = resolveLlmStatus(session);
           const sessionFailureType = resolveSessionFailureType(session);
+          const statusFallbackPercent = normalizeSessionStatus(session.status) === 'completed' ? 100 : 0;
+          const planningPercent = clampPercent(session.progress?.planningPercent ?? statusFallbackPercent);
+          const implementationPercent = clampPercent(session.progress?.implementationPercent ?? statusFallbackPercent);
+          const overallPercent = clampPercent(
+            session.progress?.weightedOverallPercent
+              ?? session.progress?.percent
+              ?? statusFallbackPercent,
+          );
+          const planningWeight = clampPercent(session.progress?.weights?.planning ?? 50);
+          const implementationWeight = clampPercent(session.progress?.weights?.implementation ?? 50);
+          const progressTitle = session.progress
+            ? `Progress plan ${planningPercent}%, implementation ${implementationPercent}%, overall ${overallPercent}% (weights ${planningWeight}/${implementationWeight})`
+            : `Progress ${overallPercent}%`;
           const copyState = copyTraceState.sessionId === session.id ? copyTraceState.state : 'idle';
           return (
             <div key={session.id} className="mb-1 flex items-start gap-1">
@@ -99,10 +113,14 @@ export function SessionSidebar(props: SessionSidebarProps) {
                 <div className="flex items-center gap-2">
                   {normalizeSessionStatus(session.status) === 'running' && <Loader2 className={`h-3.5 w-3.5 shrink-0 animate-spin ${isSelected ? 'text-blue-100' : 'text-blue-500 dark:text-blue-300'}`} />}
                   <span className="min-w-0 flex-1 truncate">{compactPromptDisplay(session.prompt)}</span>
+                  <span className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${progressBadgeClass(overallPercent, isSelected)}`} title={progressTitle}>{overallPercent}%</span>
                   <span className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${sessionStatusBadgeClass(session.status, isSelected)}`}>{formatSessionStatus(session.status)}</span>
                 </div>
                 <div className={`mt-1 flex items-center justify-between gap-2 font-mono text-[10px] ${isSelected ? 'text-blue-100' : 'text-slate-500 dark:text-slate-400'}`}>
-                  <span>run {compactRunId(session.id)}</span>
+                  <div className="min-w-0">
+                    <div>run {compactRunId(session.id)}</div>
+                    {lineageLabel && <div className="truncate font-sans text-[9px] uppercase tracking-wide">{lineageLabel}</div>}
+                  </div>
                   <div className="flex items-center gap-1">
                     {sessionFailureType && <span className={`rounded px-1.5 py-0.5 font-sans font-semibold uppercase tracking-wide ${failureTypeBadgeClass(sessionFailureType, isSelected)}`}>{formatFailureTypeLabel(sessionFailureType)}</span>}
                     {llmStatus.phase && <span className={`rounded px-1.5 py-0.5 font-sans font-semibold uppercase tracking-wide ${llmPhaseBadgeClass(llmStatus.phase, isSelected)}`}>{llmPhaseLabel(llmStatus.phase)}</span>}
@@ -110,6 +128,11 @@ export function SessionSidebar(props: SessionSidebarProps) {
                   </div>
                 </div>
                 {llmStatus.detail && <div className={`mt-1 truncate text-[10px] ${isSelected ? 'text-blue-100/90' : 'text-slate-500 dark:text-slate-400'}`}>{llmStatus.detail}</div>}
+                <div className="mt-1.5 space-y-1" title={progressTitle}>
+                  <ProgressMiniBar label="Plan" percent={planningPercent} selected={isSelected} />
+                  <ProgressMiniBar label="Impl" percent={implementationPercent} selected={isSelected} />
+                  <ProgressMiniBar label="Overall" percent={overallPercent} selected={isSelected} emphasize />
+                </div>
               </button>
               <button
                 aria-label={`Retry session ${compactRunId(session.id)}`}
@@ -155,4 +178,83 @@ export function SessionSidebar(props: SessionSidebarProps) {
       </div>
     </aside>
   );
+}
+
+type ProgressMiniBarProps = {
+  label: string;
+  percent: number;
+  selected: boolean;
+  emphasize?: boolean;
+};
+
+function ProgressMiniBar(props: ProgressMiniBarProps) {
+  const { label, percent, selected, emphasize } = props;
+  const trackClass = selected
+    ? 'bg-white/20'
+    : 'bg-slate-200 dark:bg-slate-800';
+  const fillClass = selected
+    ? 'bg-white/80'
+    : emphasize
+      ? 'bg-blue-500 dark:bg-blue-400'
+      : percent >= 100
+        ? 'bg-emerald-500 dark:bg-emerald-400'
+        : 'bg-blue-400 dark:bg-blue-500';
+  const textClass = selected
+    ? 'text-blue-100'
+    : 'text-slate-500 dark:text-slate-400';
+
+  return (
+    <div className="flex items-center gap-1.5 text-[9px]">
+      <span className={`w-10 shrink-0 font-semibold uppercase tracking-wide ${textClass}`}>{label}</span>
+      <div className={`h-1.5 min-w-0 flex-1 overflow-hidden rounded ${trackClass}`}>
+        <div className={`h-full rounded ${fillClass}`} style={{ width: `${clampPercent(percent)}%` }} />
+      </div>
+      <span className={`w-8 shrink-0 text-right font-mono ${textClass}`}>{clampPercent(percent)}%</span>
+    </div>
+  );
+}
+
+function clampPercent(value: number): number {
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+
+  return Math.max(0, Math.min(100, Math.floor(value)));
+}
+
+function progressBadgeClass(percent: number, selected: boolean): string {
+  if (selected) {
+    return 'bg-white/20 text-white';
+  }
+
+  if (percent >= 100) {
+    return 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300';
+  }
+
+  if (percent >= 70) {
+    return 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300';
+  }
+
+  if (percent > 0) {
+    return 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300';
+  }
+
+  return 'bg-slate-200 text-slate-600 dark:bg-slate-800 dark:text-slate-300';
+}
+
+function formatSessionLineageLabel(session: WorkSession): string | undefined {
+  const sourceSessionId = session.sourceSessionId?.trim();
+  if (sourceSessionId) {
+    return `retry of ${compactRunId(sourceSessionId)}`;
+  }
+
+  if (session.creationReason === 'retry') {
+    return 'retry';
+  }
+
+  if (session.creationReason === 'start') {
+    return 'started';
+  }
+
+  return undefined;
 }

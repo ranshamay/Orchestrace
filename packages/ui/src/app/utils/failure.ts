@@ -1,5 +1,6 @@
 import type { WorkSession } from '../../lib/api';
 import type { FailureType } from '../types';
+import { normalizeSessionStatus } from './status';
 
 export function normalizeFailureType(raw?: string): FailureType | undefined {
   const value = (raw ?? '').trim().toLowerCase();
@@ -60,6 +61,16 @@ export function failureTypeBadgeClass(failureType?: string, selected = false): s
 
 export function resolveSessionFailureType(session?: WorkSession): FailureType | undefined {
   if (!session) {
+    return undefined;
+  }
+
+  const sessionStatus = normalizeSessionStatus(session.status);
+  const llmState = (session.llmStatus?.state ?? '').trim().toLowerCase();
+  const currentlyFailed = sessionStatus === 'failed' || llmState === 'failed';
+
+  // Keep failure badges tied to an active failed state only.
+  // Historical failed events remain in the timeline, but should not mark resumed sessions.
+  if (!currentlyFailed) {
     return undefined;
   }
 

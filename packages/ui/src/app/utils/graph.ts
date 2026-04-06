@@ -6,15 +6,15 @@ import { normalizeSessionStatus, normalizeTaskStatus } from './status';
 function graphNodeLabel(node: { id: string; name?: string; prompt: string }): string {
   const name = (node.name ?? '').trim();
   if (name) {
-    return compactInline(name, 32);
+    return compactInline(name, 42);
   }
 
   const compactId = node.id.trim();
   if (compactId && !/^n\d+$/i.test(compactId)) {
-    return compactInline(compactId, 32);
+    return compactInline(compactId, 42);
   }
 
-  return compactInline(node.prompt, 32);
+  return compactInline(node.prompt, 42);
 }
 
 export function buildGraphLayout(session?: WorkSession): { nodes: GraphNodeView[]; width: number; height: number } {
@@ -27,31 +27,46 @@ export function buildGraphLayout(session?: WorkSession): { nodes: GraphNodeView[
     : [{ id: session.id, prompt: session.prompt, dependencies: [] }];
 
   const statusById = new Map(baseNodes.map((node) => [node.id, node.status ?? normalizeTaskStatus(session.taskStatus[node.id])]));
-  const isRunning = normalizeSessionStatus(session.status) === 'running';
-  const hasRunningNode = [...statusById.values()].some((status) => status === 'running');
-  if (isRunning && !hasRunningNode) {
-    const readyPending = baseNodes.find((node) => {
-      const status = statusById.get(node.id) ?? 'pending';
-      if (status === 'completed' || status === 'failed') {
-        return false;
-      }
-      return (node.dependencies ?? []).every((dep) => (statusById.get(dep) ?? 'pending') === 'completed');
-    });
+  const sessionNormalized = normalizeSessionStatus(session.status);
+  const isRunning = sessionNormalized === 'running';
+  const isTerminal = sessionNormalized === 'failed' || sessionNormalized === 'cancelled';
 
-    if (readyPending) {
-      statusById.set(readyPending.id, 'running');
-    } else if (baseNodes.length > 0) {
-      const syntheticId = '__orchestrator__';
-      if (!baseNodes.find((node) => node.id === syntheticId)) {
-        baseNodes = [...baseNodes, {
-          id: syntheticId,
-          name: 'orchestrator',
-          prompt: session.llmStatus?.detail || 'Coordinating remaining workflow tasks.',
-          dependencies: baseNodes.map((node) => node.id),
-          status: 'running' as const,
-        }];
+  // When the session is terminal, demote any still-running nodes to failed
+  // and leave pending nodes as pending (they never started).
+  if (isTerminal) {
+    for (const node of baseNodes) {
+      const status = statusById.get(node.id) ?? 'pending';
+      if (status === 'running') {
+        statusById.set(node.id, 'failed');
       }
-      statusById.set(syntheticId, 'running');
+    }
+  }
+
+  if (isRunning) {
+    // Promote all pending nodes whose dependencies are met to running.
+    let promoted = false;
+    for (const node of baseNodes) {
+      const status = statusById.get(node.id) ?? 'pending';
+      if (status === 'completed' || status === 'failed' || status === 'running') {
+        continue;
+      }
+      const depsReady = (node.dependencies ?? []).every((dep) => (statusById.get(dep) ?? 'pending') === 'completed');
+      if (depsReady) {
+        statusById.set(node.id, 'running');
+        promoted = true;
+      }
+    }
+
+    // Fallback: if nothing was promoted but session is running, mark first non-terminal node.
+    if (!promoted && ![...statusById.values()].some((s) => s === 'running')) {
+      const nonTerminal = baseNodes.find((node) => {
+        const status = statusById.get(node.id) ?? 'pending';
+        return status !== 'completed' && status !== 'failed';
+      });
+      const fallback = nonTerminal ?? baseNodes[0];
+      if (fallback) {
+        statusById.set(fallback.id, 'running');
+      }
     }
   }
 
@@ -78,7 +93,7 @@ export function buildGraphLayout(session?: WorkSession): { nodes: GraphNodeView[
 
   const levels = [...levelGroups.keys()].sort((a, b) => a - b);
   const maxPerLevel = Math.max(1, ...[...levelGroups.values()].map((group) => group.length));
-  const width = Math.max(900, levels.length * 280 + 180);
+  const width = Math.max(900, levels.length * 360 + 240);
   const height = Math.max(520, maxPerLevel * 140 + 180);
 
   const nodes: GraphNodeView[] = [];
@@ -87,7 +102,7 @@ export function buildGraphLayout(session?: WorkSession): { nodes: GraphNodeView[
     const stepY = height / (group.length + 1);
     group.forEach((node, index) => {
       const status = statusById.get(node.id) ?? normalizeTaskStatus(session.taskStatus[node.id]);
-      nodes.push({ id: node.id, label: graphNodeLabel(node), prompt: node.prompt, x: 130 + level * 260, y: stepY * (index + 1), status: node.status ?? status, dependencies: node.dependencies });
+      nodes.push({ id: node.id, label: graphNodeLabel(node), prompt: node.prompt, x: 170 + level * 340, y: stepY * (index + 1), status, dependencies: node.dependencies });
     });
   }
 

@@ -81,6 +81,7 @@ describe('createAgentToolset phase policy', () => {
       'git_diff',
       'git_status',
       'list_directory',
+      'playwright_run',
       'read_file',
       'read_files',
       'run_command',
@@ -720,7 +721,10 @@ describe('subagent prompt enrichment', () => {
           throw new Error('simulated failure');
         }
 
-        return { text: `ok:${request.nodeId ?? 'none'}` };
+        return {
+          text: `ok:${request.nodeId ?? 'none'}`,
+          usage: { input: 12, output: 6, cost: 0.012 },
+        };
       },
     });
 
@@ -747,15 +751,36 @@ describe('subagent prompt enrichment', () => {
       finalConcurrency: number;
       windows: number;
       failed: number;
-      runs: Array<{ nodeId?: string; status: 'completed' | 'failed' }>;
+      usage: { input: number; output: number; cost: number };
+      decomposition: {
+        averagePromptChars: number;
+        maxPromptChars: number;
+        promptSoftLimitChars: number;
+        oversizedTasks: string[];
+      };
+      runs: Array<{
+        nodeId?: string;
+        status: 'completed' | 'failed';
+        promptChars: number;
+        promptPreview: string;
+        usage?: { input: number; output: number; cost: number };
+      }>;
     };
 
     expect(parsed.total).toBe(3);
     expect(parsed.adaptiveConcurrency).toBe(true);
     expect(parsed.minConcurrency).toBe(1);
     expect(parsed.failed).toBe(1);
+    expect(parsed.usage.input).toBe(24);
+    expect(parsed.usage.output).toBe(12);
     expect(parsed.finalConcurrency).toBeGreaterThanOrEqual(1);
     expect(parsed.windows).toBeGreaterThanOrEqual(1);
+    expect(parsed.decomposition.averagePromptChars).toBeGreaterThan(0);
+    expect(parsed.decomposition.maxPromptChars).toBeGreaterThanOrEqual(parsed.decomposition.averagePromptChars);
+    expect(parsed.decomposition.promptSoftLimitChars).toBeGreaterThan(0);
+    expect(Array.isArray(parsed.decomposition.oversizedTasks)).toBe(true);
+    expect(parsed.runs.every((entry) => entry.promptChars > 0)).toBe(true);
     expect(parsed.runs.some((entry) => entry.nodeId === 'n2' && entry.status === 'failed')).toBe(true);
+    expect(parsed.runs.some((entry) => entry.nodeId === 'n1' && entry.status === 'completed' && entry.usage?.input === 12)).toBe(true);
   });
 });

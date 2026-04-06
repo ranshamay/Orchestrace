@@ -6,7 +6,10 @@ import type {
   AgentGraphNode,
   AgentToolsetOptions,
   RegisteredAgentTool,
+  SubAgentContextPacket,
+  SubAgentEvidenceItem,
   SubAgentRequest,
+  SubAgentResult,
   TodoItem,
 } from './types.js';
 import { sanitizeForPathSegment } from './path-utils.js';
@@ -28,13 +31,13 @@ const todoStatusSchema = Type.Union([
   Type.Literal('finished'),
   Type.Literal('closed'),
   Type.Literal('resolved'),
-]);
+], { description: 'Task status. Use "todo"/"pending"/"backlog"/"open" for not-started, "in_progress"/"doing"/"active"/"wip" for in-progress, or "done"/"completed"/"finished"/"closed"/"resolved" for complete.' });
 
 const modeSchema = Type.Union([
   Type.Literal('chat'),
   Type.Literal('planning'),
   Type.Literal('implementation'),
-]);
+], { description: 'Session mode: "chat" for conversational responses, "planning" for creating an execution plan, or "implementation" for executing the plan.' });
 
 const SUBAGENT_CONTEXT_MAX_FILES = 3;
 const SUBAGENT_CONTEXT_MAX_CHARS_PER_FILE = 1200;
@@ -43,7 +46,26 @@ const SUBAGENT_SNIPPET_READ_CONCURRENCY = 8;
 const SUBAGENT_BATCH_DEFAULT_CONCURRENCY = 8;
 const SUBAGENT_BATCH_MAX_CONCURRENCY = 64;
 const SUBAGENT_BATCH_MIN_CONCURRENCY = 1;
+const SUBAGENT_PROMPT_SOFT_LIMIT_CHARS = 2200;
+const SUBAGENT_PROMPT_PREVIEW_MAX_CHARS = 220;
+const SUBAGENT_OUTPUT_PREVIEW_MAX_CHARS = 900;
+const SUBAGENT_MERGE_OUTPUT_PREVIEW_MAX_CHARS = 600;
+const COORDINATION_PERSIST_RAW_DEBUG_ENV = 'ORCHESTRACE_PERSIST_RAW_DEBUG';
+const COORDINATION_PERSIST_PROMPT_MAX_CHARS = 1_600;
+const COORDINATION_PERSIST_OUTPUT_MAX_CHARS = 1_000;
 const PROMPT_FILE_PATH_PATTERN = /(?:^|[\s`"'])((?:\.?\.?\/)?[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)+\.[A-Za-z0-9._-]+)(?=$|[\s`"':),])/g;
+
+const subAgentContextPacketSchema = Type.Object({
+  objective: Type.String({ minLength: 1 }),
+  boundaries: Type.Optional(Type.Object({
+    writePolicy: Type.Optional(Type.Union([Type.Literal('none'), Type.Literal('read_only'), Type.Literal('scoped'), Type.Literal('full')], { description: 'File write policy: "none" or "read_only" (no writes), "scoped" (write within cwd), or "full" (unrestricted). Defaults to scoped if omitted.' })),
+    allowedTools: Type.Optional(Type.Array(Type.String())),
+    timeoutMs: Type.Optional(Type.Number({ minimum: 1 })),
+  })),
+  relevantContext: Type.Optional(Type.Array(Type.String())),
+  requiredOutputSchema: Type.Optional(Type.String()),
+  evidenceRequirements: Type.Optional(Type.Array(Type.String())),
+});
 
 interface CoordinationToolsOptions extends AgentToolsetOptions {
   includeSubAgentTool: boolean;
@@ -61,6 +83,12 @@ interface SubAgentRunRecord {
   finishedAt?: string;
   outputPreview?: string;
   error?: string;
+}
+
+interface UsageTotals {
+  input: number;
+  output: number;
+  cost: number;
 }
 
 interface CoordinationState {
@@ -104,6 +132,7 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
               id: Type.String({ minLength: 1 }),
               title: Type.String({ minLength: 1 }),
               status: todoStatusSchema,
+              weight: Type.Optional(Type.Number({ minimum: 0 })),
               details: Type.Optional(Type.String()),
               dependsOn: Type.Optional(Type.Array(Type.String())),
             }),
@@ -131,6 +160,7 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
           id: Type.String({ minLength: 1 }),
           title: Type.String({ minLength: 1 }),
           status: Type.Optional(todoStatusSchema),
+          weight: Type.Optional(Type.Number({ minimum: 0 })),
           details: Type.Optional(Type.String()),
           dependsOn: Type.Optional(Type.Array(Type.String())),
         }),
@@ -141,6 +171,7 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
           id: asString(toolArgs.id, 'id'),
           title: asString(toolArgs.title, 'title'),
           status: normalizeTodoStatus(toolArgs.status) ?? 'todo',
+          weight: optionalWeight(toolArgs.weight),
           details: optionalString(toolArgs.details),
           dependsOn: optionalStringArray(toolArgs.dependsOn),
         };
@@ -162,6 +193,7 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
         parameters: Type.Object({
           id: Type.String({ minLength: 1 }),
           status: Type.Optional(todoStatusSchema),
+          weight: Type.Optional(Type.Number({ minimum: 0 })),
           title: Type.Optional(Type.String()),
           details: Type.Optional(Type.String()),
           appendDetails: Type.Optional(Type.String()),
@@ -183,6 +215,10 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
         const status = normalizeTodoStatus(toolArgs.status);
         if (status) {
           existing.status = status;
+        }
+
+        if (toolArgs.weight !== undefined) {
+          existing.weight = optionalWeight(toolArgs.weight);
         }
 
         const title = optionalString(toolArgs.title);
@@ -238,6 +274,7 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
               id: Type.String({ minLength: 1 }),
               name: Type.Optional(Type.String()),
               prompt: Type.String({ minLength: 1 }),
+              weight: Type.Optional(Type.Number({ minimum: 0 })),
               dependencies: Type.Optional(Type.Array(Type.String())),
               provider: Type.Optional(Type.String()),
               model: Type.Optional(Type.String()),
@@ -247,7 +284,7 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
                   Type.Literal('low'),
                   Type.Literal('medium'),
                   Type.Literal('high'),
-                ]),
+                ], { description: 'LLM reasoning effort: "minimal" for simple tasks, "low"/"medium" for moderate complexity, "high" for complex multi-step reasoning.' }),
               ),
             }),
           ),
@@ -287,7 +324,8 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
         description: 'Spawn a focused sub-agent for a dependent sub-task and return a concise result.',
         parameters: Type.Object({
           nodeId: Type.Optional(Type.String()),
-          prompt: Type.String({ minLength: 1 }),
+          prompt: Type.Optional(Type.String({ minLength: 1 })),
+          contextPacket: Type.Optional(subAgentContextPacketSchema),
           systemPrompt: Type.Optional(Type.String()),
           provider: Type.Optional(Type.String()),
           model: Type.Optional(Type.String()),
@@ -297,7 +335,7 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
               Type.Literal('low'),
               Type.Literal('medium'),
               Type.Literal('high'),
-            ]),
+            ], { description: 'LLM reasoning effort: "minimal" for simple tasks, "low"/"medium" for moderate complexity, "high" for complex multi-step reasoning.' }),
           ),
         }),
       },
@@ -309,14 +347,15 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
           };
         }
 
-        const request: SubAgentRequest = {
-          nodeId: optionalString(toolArgs.nodeId),
-          prompt: await enrichDelegationPromptWithFileSnippets(options.cwd, asString(toolArgs.prompt, 'prompt')),
-          systemPrompt: optionalString(toolArgs.systemPrompt),
-          provider: optionalString(toolArgs.provider),
-          model: optionalString(toolArgs.model),
-          reasoning: normalizeReasoning(toolArgs.reasoning),
-        };
+        let request: SubAgentRequest;
+        try {
+          request = await buildSubAgentRequestFromToolArgs(options.cwd, toolArgs);
+        } catch (error) {
+          return {
+            content: error instanceof Error ? error.message : String(error),
+            isError: true,
+          };
+        }
 
         const state = await readCoordinationState(statePath);
         const id = `sub-${state.subAgents.length + 1}`;
@@ -338,7 +377,9 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
           const result = await options.runSubAgent(request, signal);
           const latest = await readCoordinationState(statePath);
           const current = latest.subAgents.find((entry) => entry.id === id);
-          const preview = trimText(result.text, 1800);
+          const mergePayload = buildSubAgentMergePayload(result, id, request);
+          const preview = mergePayload.summary;
+          const usage = usageOrZero(result.usage);
           if (current) {
             current.status = 'completed';
             current.finishedAt = now();
@@ -348,10 +389,17 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
           await writeCoordinationState(statePath, latest);
 
           return {
-            content: `Sub-agent ${id} completed.\n\n${preview}`,
-            details: {
-              usage: result.usage,
-            },
+            content: JSON.stringify({
+              id,
+              nodeId: request.nodeId,
+              status: 'completed',
+              promptChars: request.prompt.length,
+              usage,
+              usageReported: Boolean(result.usage),
+              outputPreview: preview,
+              mergePayload,
+            }, null, 2),
+            details: { usage: result.usage, mergePayload },
           };
         } catch (error) {
           const latest = await readCoordinationState(statePath);
@@ -366,7 +414,13 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
           await writeCoordinationState(statePath, latest);
 
           return {
-            content: `Sub-agent ${id} failed: ${message}`,
+            content: JSON.stringify({
+              id,
+              nodeId: request.nodeId,
+              status: 'failed',
+              promptChars: request.prompt.length,
+              error: message,
+            }, null, 2),
             isError: true,
           };
         }
@@ -381,7 +435,8 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
           agents: Type.Array(
             Type.Object({
               nodeId: Type.Optional(Type.String()),
-              prompt: Type.String({ minLength: 1 }),
+              prompt: Type.Optional(Type.String({ minLength: 1 })),
+              contextPacket: Type.Optional(subAgentContextPacketSchema),
               systemPrompt: Type.Optional(Type.String()),
               provider: Type.Optional(Type.String()),
               model: Type.Optional(Type.String()),
@@ -391,7 +446,7 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
                   Type.Literal('low'),
                   Type.Literal('medium'),
                   Type.Literal('high'),
-                ]),
+                ], { description: 'LLM reasoning effort: "minimal" for simple tasks, "low"/"medium" for moderate complexity, "high" for complex multi-step reasoning.' }),
               ),
             }),
             { minItems: 1 },
@@ -439,14 +494,19 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
           };
         }
 
-        const requests = await mapWithConcurrency(requestInputs, concurrency, async (entry) => ({
-          nodeId: optionalString(entry.nodeId),
-          prompt: await enrichDelegationPromptWithFileSnippets(options.cwd, asString(entry.prompt, 'prompt')),
-          systemPrompt: optionalString(entry.systemPrompt),
-          provider: optionalString(entry.provider),
-          model: optionalString(entry.model),
-          reasoning: normalizeReasoning(entry.reasoning),
-        }));
+        let requests: SubAgentRequest[];
+        try {
+          requests = await mapWithConcurrency(
+            requestInputs,
+            concurrency,
+            async (entry) => buildSubAgentRequestFromToolArgs(options.cwd, entry),
+          );
+        } catch (error) {
+          return {
+            content: error instanceof Error ? error.message : String(error),
+            isError: true,
+          };
+        }
 
         const state = await readCoordinationState(statePath);
         const startIndex = state.subAgents.length;
@@ -469,18 +529,25 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
           const request = requests[index];
           try {
             const result = await options.runSubAgent?.(request, signal);
+            const mergePayload = buildSubAgentMergePayload(result ?? { text: '' }, record.id, request);
             return {
               id: record.id,
               nodeId: record.nodeId,
               status: 'completed' as const,
-              outputPreview: trimText(result?.text ?? '', 1800),
-              usage: result?.usage,
+              promptChars: request.prompt.length,
+              promptPreview: compactPromptPreview(request.prompt),
+              outputPreview: mergePayload.summary,
+              mergePayload,
+              usage: usageOrZero(result?.usage),
+              usageReported: Boolean(result?.usage),
             };
           } catch (error) {
             return {
               id: record.id,
               nodeId: record.nodeId,
               status: 'failed' as const,
+              promptChars: request.prompt.length,
+              promptPreview: compactPromptPreview(request.prompt),
               error: error instanceof Error ? error.message : String(error),
             };
           }
@@ -499,6 +566,21 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
             };
 
         const settled = batchRun.results;
+        const usageTotals = settled.reduce<UsageTotals>((totals, entry) => {
+          if (entry.status !== 'completed' || !entry.usage) {
+            return totals;
+          }
+
+          totals.input += entry.usage.input;
+          totals.output += entry.usage.output;
+          totals.cost += entry.usage.cost;
+          return totals;
+        }, { input: 0, output: 0, cost: 0 });
+
+        const promptSizes = settled.map((entry) => entry.promptChars ?? 0);
+        const totalPromptChars = promptSizes.reduce((sum, value) => sum + value, 0);
+        const maxPromptChars = promptSizes.length > 0 ? Math.max(...promptSizes) : 0;
+        const oversized = settled.filter((entry) => (entry.promptChars ?? 0) > SUBAGENT_PROMPT_SOFT_LIMIT_CHARS);
 
         const latest = await readCoordinationState(statePath);
         for (const result of settled) {
@@ -521,6 +603,9 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
         await writeCoordinationState(statePath, latest);
 
         const failedCount = settled.filter((entry) => entry.status === 'failed').length;
+        const failedNodeIds = settled
+          .filter((entry) => entry.status === 'failed')
+          .map((entry) => entry.nodeId ?? entry.id);
         const summary = {
           total: settled.length,
           concurrency,
@@ -530,6 +615,15 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
           windows: batchRun.windows,
           completed: settled.length - failedCount,
           failed: failedCount,
+          failedNodeIds,
+          usage: usageTotals,
+          decomposition: {
+            totalPromptChars,
+            averagePromptChars: settled.length > 0 ? Math.round(totalPromptChars / settled.length) : 0,
+            maxPromptChars,
+            promptSoftLimitChars: SUBAGENT_PROMPT_SOFT_LIMIT_CHARS,
+            oversizedTasks: oversized.map((entry) => entry.nodeId ?? entry.id),
+          },
           runs: settled,
         };
 
@@ -594,6 +688,221 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
   return tools;
 }
 
+function usageOrZero(usage: { input: number; output: number; cost: number } | undefined): UsageTotals {
+  return {
+    input: usage?.input ?? 0,
+    output: usage?.output ?? 0,
+    cost: usage?.cost ?? 0,
+  };
+}
+
+async function buildSubAgentRequestFromToolArgs(
+  cwd: string,
+  toolArgs: Record<string, unknown>,
+): Promise<SubAgentRequest> {
+  const packet = normalizeSubAgentContextPacket(toolArgs.contextPacket);
+  const legacyPrompt = optionalString(toolArgs.prompt) ?? '';
+
+  if (!legacyPrompt && !packet?.objective) {
+    throw new Error('Missing prompt. Provide prompt or contextPacket.objective.');
+  }
+
+  const prompt = await enrichDelegationPromptWithFileSnippets(
+    cwd,
+    buildSubAgentPrompt(legacyPrompt, packet),
+  );
+
+  return {
+    nodeId: optionalString(toolArgs.nodeId),
+    prompt,
+    contextPacket: packet,
+    systemPrompt: optionalString(toolArgs.systemPrompt),
+    provider: optionalString(toolArgs.provider),
+    model: optionalString(toolArgs.model),
+    reasoning: normalizeReasoning(toolArgs.reasoning),
+  };
+}
+
+function normalizeSubAgentContextPacket(value: unknown): SubAgentContextPacket | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+
+  const objective = optionalString(value.objective);
+  if (!objective) {
+    return undefined;
+  }
+
+  const boundariesRecord = isRecord(value.boundaries) ? value.boundaries : undefined;
+  type WritePolicy = NonNullable<NonNullable<SubAgentContextPacket['boundaries']>['writePolicy']>;
+  const writePolicy = boundariesRecord?.writePolicy;
+  const normalizedWritePolicy: WritePolicy | undefined =
+    writePolicy === 'read_only' ? 'none'
+    : writePolicy === 'none' || writePolicy === 'scoped' || writePolicy === 'full' ? writePolicy
+    : undefined;
+
+  const boundaries = (normalizedWritePolicy
+    || optionalStringArray(boundariesRecord?.allowedTools)
+    || asPositiveInteger(boundariesRecord?.timeoutMs))
+    ? {
+      writePolicy: normalizedWritePolicy,
+      allowedTools: optionalStringArray(boundariesRecord?.allowedTools),
+      timeoutMs: asPositiveInteger(boundariesRecord?.timeoutMs),
+    }
+    : undefined;
+
+  return {
+    objective,
+    boundaries,
+    relevantContext: optionalStringArray(value.relevantContext),
+    requiredOutputSchema: optionalString(value.requiredOutputSchema),
+    evidenceRequirements: optionalStringArray(value.evidenceRequirements),
+  };
+}
+
+function buildSubAgentPrompt(prompt: string, packet?: SubAgentContextPacket): string {
+  if (!packet) {
+    return prompt;
+  }
+
+  const lines: string[] = [
+    '[SubAgentContextPacket]',
+    `Objective: ${packet.objective}`,
+  ];
+
+  if (packet.boundaries) {
+    lines.push('Boundaries:');
+    if (packet.boundaries.writePolicy) {
+      lines.push(`- writePolicy: ${packet.boundaries.writePolicy}`);
+    }
+    if ((packet.boundaries.allowedTools?.length ?? 0) > 0) {
+      lines.push(`- allowedTools: ${packet.boundaries.allowedTools?.join(', ')}`);
+    }
+    if (packet.boundaries.timeoutMs) {
+      lines.push(`- timeoutMs: ${packet.boundaries.timeoutMs}`);
+    }
+  }
+
+  if ((packet.relevantContext?.length ?? 0) > 0) {
+    lines.push('Relevant context:');
+    for (const item of packet.relevantContext ?? []) {
+      lines.push(`- ${item}`);
+    }
+  }
+
+  if ((packet.evidenceRequirements?.length ?? 0) > 0) {
+    lines.push('Evidence requirements:');
+    for (const item of packet.evidenceRequirements ?? []) {
+      lines.push(`- ${item}`);
+    }
+  }
+
+  lines.push('Required output contract:');
+  if (packet.requiredOutputSchema) {
+    lines.push(packet.requiredOutputSchema);
+  } else {
+    lines.push(
+      'Return concise JSON with keys: summary, actions[], evidence[{type,ref,note?}], risks[], openQuestions[], patchIntent[].',
+    );
+  }
+
+  if (prompt.trim()) {
+    lines.push('Legacy prompt:');
+    lines.push(prompt.trim());
+  }
+
+  return lines.join('\n');
+}
+
+function buildSubAgentMergePayload(result: SubAgentResult, id: string, request: SubAgentRequest): {
+  id: string;
+  nodeId?: string;
+  summary: string;
+  actions: string[];
+  evidence: SubAgentEvidenceItem[];
+  risks: string[];
+  openQuestions: string[];
+  patchIntent: string[];
+  artifact: { outputPreview: string; outputChars: number; promptChars: number };
+} {
+  const summary = optionalString(result.summary)
+    ?? trimText(result.text.replace(/\s+/g, ' ').trim(), SUBAGENT_OUTPUT_PREVIEW_MAX_CHARS);
+
+  return {
+    id,
+    nodeId: request.nodeId,
+    summary,
+    actions: normalizeStringList(result.actions),
+    evidence: normalizeSubAgentEvidence(result.evidence),
+    risks: normalizeStringList(result.risks),
+    openQuestions: normalizeStringList(result.openQuestions),
+    patchIntent: normalizeStringList(result.patchIntent),
+    artifact: {
+      outputPreview: trimText(result.text, SUBAGENT_MERGE_OUTPUT_PREVIEW_MAX_CHARS),
+      outputChars: result.text.length,
+      promptChars: request.prompt.length,
+    },
+  };
+}
+
+function normalizeStringList(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .map((entry) => optionalString(entry))
+    .filter((entry): entry is string => Boolean(entry))
+    .slice(0, 12);
+}
+
+function normalizeSubAgentEvidence(value: unknown): SubAgentEvidenceItem[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const entries: SubAgentEvidenceItem[] = [];
+  for (const item of value) {
+    if (!isRecord(item)) {
+      continue;
+    }
+
+    const type = item.type;
+    if (
+      type !== 'file'
+      && type !== 'command'
+      && type !== 'test'
+      && type !== 'log'
+      && type !== 'url'
+      && type !== 'other'
+    ) {
+      continue;
+    }
+
+    const ref = optionalString(item.ref);
+    if (!ref) {
+      continue;
+    }
+
+    entries.push({
+      type,
+      ref,
+      note: optionalString(item.note),
+    });
+  }
+
+  return entries.slice(0, 16);
+}
+
+function compactPromptPreview(prompt: string): string {
+  const compact = prompt.replace(/\s+/g, ' ').trim();
+  if (compact.length <= SUBAGENT_PROMPT_PREVIEW_MAX_CHARS) {
+    return compact;
+  }
+
+  return `${compact.slice(0, SUBAGENT_PROMPT_PREVIEW_MAX_CHARS - 3)}...`;
+}
+
 function normalizeAgentToolPhase(value: unknown): AgentToolPhase | undefined {
   if (value !== 'chat' && value !== 'planning' && value !== 'implementation') {
     return undefined;
@@ -627,8 +936,75 @@ async function readCoordinationState(path: string): Promise<CoordinationState> {
 }
 
 async function writeCoordinationState(path: string, state: CoordinationState): Promise<void> {
+  const persistRawDebug = shouldPersistRawDebugArtifacts();
+  const payload = sanitizeCoordinationStateForPersistence(state);
+
   await mkdir(dirname(path), { recursive: true });
-  await writeFile(path, JSON.stringify(state, null, 2), 'utf-8');
+  await writeFile(path, JSON.stringify(payload, null, 2), 'utf-8');
+
+  if (persistRawDebug) {
+    await writeFile(resolveRawArtifactPath(path), JSON.stringify(state, null, 2), 'utf-8');
+  }
+}
+
+function shouldPersistRawDebugArtifacts(): boolean {
+  return asBoolean(process.env[COORDINATION_PERSIST_RAW_DEBUG_ENV]) ?? false;
+}
+
+function resolveRawArtifactPath(path: string): string {
+  if (path.endsWith('.json')) {
+    return `${path.slice(0, -5)}.raw.json`;
+  }
+
+  return `${path}.raw.json`;
+}
+
+function sanitizeCoordinationStateForPersistence(state: CoordinationState): CoordinationState {
+  return {
+    ...state,
+    todos: state.todos.map((todo) => ({
+      ...todo,
+      title: sanitizePersistedText(todo.title, COORDINATION_PERSIST_PROMPT_MAX_CHARS),
+      details: todo.details
+        ? sanitizePersistedText(todo.details, COORDINATION_PERSIST_OUTPUT_MAX_CHARS)
+        : todo.details,
+    })),
+    agentGraph: {
+      nodes: state.agentGraph.nodes.map((node) => ({
+        ...node,
+        name: node.name ? sanitizePersistedText(node.name, 240) : node.name,
+        prompt: sanitizePersistedText(node.prompt, COORDINATION_PERSIST_PROMPT_MAX_CHARS),
+      })),
+    },
+    subAgents: state.subAgents.map((record) => ({
+      ...record,
+      prompt: sanitizePersistedText(record.prompt, COORDINATION_PERSIST_PROMPT_MAX_CHARS),
+      outputPreview: record.outputPreview
+        ? sanitizePersistedText(record.outputPreview, COORDINATION_PERSIST_OUTPUT_MAX_CHARS)
+        : record.outputPreview,
+      error: record.error
+        ? sanitizePersistedText(record.error, COORDINATION_PERSIST_OUTPUT_MAX_CHARS)
+        : record.error,
+    })),
+  };
+}
+
+function sanitizePersistedText(value: string, maxChars: number): string {
+  const redacted = redactSensitiveText(value.replace(/\s+/g, ' ').trim());
+  if (redacted.length <= maxChars) {
+    return redacted;
+  }
+
+  return `${redacted.slice(0, maxChars)}... [truncated]`;
+}
+
+function redactSensitiveText(text: string): string {
+  return text
+    .replace(/\bgh[pousr]_[A-Za-z0-9]{30,}\b/g, '[REDACTED_GITHUB_TOKEN]')
+    .replace(/\bsk-[A-Za-z0-9_-]{16,}\b/g, '[REDACTED_API_KEY]')
+    .replace(/\b(?:api[_-]?key|token|secret|password)\s*[:=]\s*[^\s"',;]+/gi, '$1=[REDACTED]')
+    .replace(/\bBearer\s+[A-Za-z0-9._-]{16,}\b/gi, 'Bearer [REDACTED]')
+    .replace(/data:image\/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=\s]+/g, '[REDACTED_IMAGE_DATA]');
 }
 
 function normalizeTodoItems(value: unknown): TodoItem[] {
@@ -652,6 +1028,7 @@ function normalizeTodoItems(value: unknown): TodoItem[] {
       id,
       title,
       status: normalizeTodoStatus(entry.status) ?? 'todo',
+      weight: optionalWeight(entry.weight),
       details: optionalString(entry.details),
       dependsOn: optionalStringArray(entry.dependsOn),
     });
@@ -681,6 +1058,7 @@ function normalizeAgentGraphNodes(value: unknown): AgentGraphNode[] {
       id,
       name: optionalString(entry.name),
       prompt,
+      weight: optionalWeight(entry.weight),
       dependencies: optionalStringArray(entry.dependencies),
       provider: optionalString(entry.provider),
       model: optionalString(entry.model),
@@ -805,6 +1183,14 @@ function optionalStringArray(value: unknown): string[] | undefined {
     .filter((entry): entry is string => Boolean(entry));
 
   return result.length > 0 ? result : undefined;
+}
+
+function optionalWeight(value: unknown): number | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
+    return undefined;
+  }
+
+  return Math.round(value * 100) / 100;
 }
 
 function trimText(text: string, maxChars: number): string {

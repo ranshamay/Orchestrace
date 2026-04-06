@@ -5,6 +5,7 @@ export type {
 	LlmAdapter,
 	LlmAgent,
 	LlmImagePart,
+	LlmModelInfo,
 	LlmPromptInput,
 	LlmPromptPart,
 	LlmToolCall,

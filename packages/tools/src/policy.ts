@@ -87,6 +87,7 @@ function getDefaultPermissions(phase: string, taskType: string): AgentToolPermis
       'edit_files',
       'run_command',
       'run_command_batch',
+      'playwright_run',
       'github_api',
       'todo_get',
       'todo_set',

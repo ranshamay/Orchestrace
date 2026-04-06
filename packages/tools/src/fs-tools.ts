@@ -49,7 +49,7 @@ export function createFilesystemTools(options: FilesystemToolOptions): Registere
     {
       tool: {
         name: 'read_file',
-        description: 'Read text from a file inside the workspace with optional line slicing.',
+        description: 'Read text from one file inside the workspace with optional line slicing. Prefer read_files for multi-file reads.',
         parameters: Type.Object({
           path: Type.String({ description: 'Relative path to file.' }),
           startLine: Type.Optional(Type.Number({ minimum: 1 })),
@@ -73,7 +73,7 @@ export function createFilesystemTools(options: FilesystemToolOptions): Registere
     {
       tool: {
         name: 'read_files',
-        description: 'Read multiple files in parallel with optional line slicing per file.',
+        description: 'Read multiple files in parallel with optional line slicing per file. Use this for multi-file analysis to reduce latency.',
         parameters: Type.Object({
           files: Type.Array(
             Type.Object({

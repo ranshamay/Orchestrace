@@ -111,6 +111,12 @@ export interface LlmAgent {
   complete(prompt: LlmPromptInput, signal?: AbortSignal, options?: LlmCompletionOptions): Promise<LlmResult>;
 }
 
+/** Model capability info returned by the adapter. */
+export interface LlmModelInfo {
+  contextWindow: number;
+  maxOutputTokens: number;
+}
+
 /** Options for spawning a dedicated agent. */
 export interface SpawnAgentRequest extends AgentModelConfig {
   systemPrompt: string;
@@ -131,4 +137,5 @@ export interface SpawnAgentRequest extends AgentModelConfig {
 export interface LlmAdapter {
   spawnAgent(request: SpawnAgentRequest): Promise<LlmAgent>;
   complete(request: LlmRequest): Promise<LlmResult>;
+  getModelInfo(provider: string, model: string): LlmModelInfo;
 }
