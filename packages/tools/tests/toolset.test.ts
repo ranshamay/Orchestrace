@@ -783,4 +783,133 @@ describe('subagent prompt enrichment', () => {
     expect(parsed.runs.some((entry) => entry.nodeId === 'n2' && entry.status === 'failed')).toBe(true);
     expect(parsed.runs.some((entry) => entry.nodeId === 'n1' && entry.status === 'completed' && entry.usage?.input === 12)).toBe(true);
   });
+
+  it('subagent_spawn_batch reuses cached completed results when all nodeIds are cache hits', async () => {
+    const cwd = await makeWorkspace();
+    const runSubAgent = vi.fn(async () => ({ text: 'unexpected dispatch' }));
+
+    const toolset = createAgentToolset({
+      cwd,
+      phase: 'planning',
+      taskType: 'code',
+      graphId: 'g1',
+      taskId: 't-cache-all-hit',
+      runSubAgent,
+    });
+
+    const first = await toolset.executeTool({
+      id: '1',
+      name: 'subagent_spawn_batch',
+      arguments: {
+        agents: [
+          { nodeId: 'n1', prompt: 'Inspect src/file.ts for exports' },
+          { nodeId: 'n2', prompt: 'Inspect src/file.ts for imports' },
+        ],
+      },
+    });
+    expect(first.isError).toBeFalsy();
+    expect(runSubAgent).toHaveBeenCalledTimes(2);
+
+    runSubAgent.mockClear();
+
+    const second = await toolset.executeTool({
+      id: '2',
+      name: 'subagent_spawn_batch',
+      arguments: {
+        agents: [
+          { nodeId: 'n1', prompt: 'Inspect src/file.ts for exports' },
+          { nodeId: 'n2', prompt: 'Inspect src/file.ts for imports' },
+        ],
+      },
+    });
+
+    expect(second.isError).toBeFalsy();
+    expect(runSubAgent).toHaveBeenCalledTimes(0);
+
+    const parsed = JSON.parse(second.content) as {
+      total: number;
+      failed: number;
+      cacheHitCount: number;
+      cacheMissCount: number;
+      cachedNodeIds: string[];
+      dispatchedNodeIds: string[];
+      runs: Array<{ nodeId?: string; status: 'completed' | 'failed'; cacheHit?: boolean }>;
+    };
+
+    expect(parsed.total).toBe(2);
+    expect(parsed.failed).toBe(0);
+    expect(parsed.cacheHitCount).toBe(2);
+    expect(parsed.cacheMissCount).toBe(0);
+    expect(parsed.cachedNodeIds).toEqual(['n1', 'n2']);
+    expect(parsed.dispatchedNodeIds).toEqual([]);
+    expect(parsed.runs).toHaveLength(2);
+    expect(parsed.runs.every((run) => run.status === 'completed')).toBe(true);
+    expect(parsed.runs.every((run) => run.cacheHit === true)).toBe(true);
+  });
+
+  it('subagent_spawn_batch dispatches only cache misses in mixed cache-hit and miss batches', async () => {
+    const cwd = await makeWorkspace();
+    const runSubAgent = vi.fn(async (request: { nodeId?: string }) => ({
+      text: `ok:${request.nodeId ?? 'none'}`,
+      usage: { input: 5, output: 2, cost: 0.001 },
+    }));
+
+    const toolset = createAgentToolset({
+      cwd,
+      phase: 'planning',
+      taskType: 'code',
+      graphId: 'g1',
+      taskId: 't-cache-mixed',
+      runSubAgent,
+    });
+
+    const seed = await toolset.executeTool({
+      id: '1',
+      name: 'subagent_spawn_batch',
+      arguments: {
+        agents: [{ nodeId: 'cached-node', prompt: 'Seed cached node result from src/file.ts' }],
+      },
+    });
+    expect(seed.isError).toBeFalsy();
+    expect(runSubAgent).toHaveBeenCalledTimes(1);
+
+    runSubAgent.mockClear();
+
+    const mixed = await toolset.executeTool({
+      id: '2',
+      name: 'subagent_spawn_batch',
+      arguments: {
+        agents: [
+          { nodeId: 'cached-node', prompt: 'Reuse cached node result from src/file.ts' },
+          { nodeId: 'fresh-node', prompt: 'Need a fresh run for src/file.ts' },
+          { prompt: 'No nodeId should always dispatch for src/file.ts' },
+        ],
+      },
+    });
+
+    expect(mixed.isError).toBeFalsy();
+    expect(runSubAgent).toHaveBeenCalledTimes(2);
+    expect(runSubAgent.mock.calls[0]?.[0]?.nodeId).toBe('fresh-node');
+    expect(runSubAgent.mock.calls[1]?.[0]?.nodeId).toBeUndefined();
+
+    const parsed = JSON.parse(mixed.content) as {
+      total: number;
+      failed: number;
+      cacheHitCount: number;
+      cacheMissCount: number;
+      cachedNodeIds: string[];
+      dispatchedNodeIds: string[];
+      runs: Array<{ nodeId?: string; status: 'completed' | 'failed'; cacheHit?: boolean }>;
+    };
+
+    expect(parsed.total).toBe(3);
+    expect(parsed.failed).toBe(0);
+    expect(parsed.cacheHitCount).toBe(1);
+    expect(parsed.cacheMissCount).toBe(2);
+    expect(parsed.cachedNodeIds).toEqual(['cached-node']);
+    expect(parsed.dispatchedNodeIds).toContain('fresh-node');
+    expect(parsed.runs[0]).toMatchObject({ nodeId: 'cached-node', status: 'completed', cacheHit: true });
+    expect(parsed.runs[1]).toMatchObject({ nodeId: 'fresh-node', status: 'completed', cacheHit: false });
+    expect(parsed.runs[2]).toMatchObject({ status: 'completed', cacheHit: false });
+  });
 });
