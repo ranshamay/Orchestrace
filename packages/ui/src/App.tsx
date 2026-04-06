@@ -184,7 +184,12 @@ export default function App() {
   const preferredModelForProvider = workProvider === defaultLlmControls.provider
     ? defaultLlmControls.model
     : '';
-  const { currentModels } = useProviderModels(
+  const {
+    currentModels,
+    missingModelWarning,
+    confirmMissingModelSwitch,
+    dismissMissingModelWarning,
+  } = useProviderModels(
     workProvider,
     workModel,
     setWorkModel,
@@ -350,12 +355,23 @@ export default function App() {
     onChangeBatchMinConcurrency: (next) => updateActiveLlmControls({ batchMinConcurrency: next }),
   });
 
+  const warningMessage = missingModelWarning
+    ? `Model "${missingModelWarning.missingModel}" is not currently available for provider "${missingModelWarning.provider}".`
+    : '';
+  const warningActionLabel = missingModelWarning?.fallbackModel
+    ? `Switch to "${missingModelWarning.fallbackModel}"`
+    : '';
+
   return (
     <AppShell
       sessionSidebarProps={sessionSidebarProps}
       mainContentProps={mainContentProps}
       llmModalProps={llmModalProps}
       errorMessage={errorMessage}
+      warningMessage={warningMessage}
+      warningActionLabel={warningActionLabel}
+      onWarningConfirm={confirmMissingModelSwitch}
+      onWarningDismiss={dismissMissingModelWarning}
       settingsSaveToastState={settingsSaveToastState}
       settingsSaveToastMessage={settingsSaveToastMessage}
     />
