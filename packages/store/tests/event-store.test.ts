@@ -538,7 +538,7 @@ describe('materializeSession', () => {
     expect(session.lastSeq).toBe(2);
   });
 
-  it('trims events beyond MAX_EVENTS (200)', () => {
+  it('trims events beyond MAX_EVENTS (2000)', () => {
     const t = now();
     const config = makeConfig();
     const events: SessionEvent[] = [
@@ -556,7 +556,7 @@ describe('materializeSession', () => {
     }
 
     const session = materializeSession(events)!;
-    expect(session.events.length).toBeLessThanOrEqual(200);
+    expect(session.events.length).toBeLessThanOrEqual(2000);
   });
 });
 

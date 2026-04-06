@@ -76,10 +76,13 @@ export class ObserverDaemon {
     await this.loadState();
     await this.registry.load();
 
-    // Seed observer session IDs from registry so we skip them
+    // Seed observer session IDs and already-analyzed sessions from registry
     for (const finding of this.registry.getAll()) {
       if (finding.fixSessionId) {
         this.state.observerSessionIds.add(finding.fixSessionId);
+      }
+      for (const sid of finding.observedInSessions ?? []) {
+        this.state.analyzedSessions.add(sid);
       }
     }
 

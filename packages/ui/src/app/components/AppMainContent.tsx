@@ -45,7 +45,6 @@ export type AppMainContentProps = {
   removeComposerAttachment: (id: string) => void;
   hasComposerContent: boolean;
   onComposerPaste: (event: React.ClipboardEvent<HTMLTextAreaElement>) => Promise<void>;
-  onStartFromComposer: () => Promise<void>;
   onSendChat: () => Promise<void>;
   onStop: () => Promise<void>;
   providers: ProviderInfo[];
@@ -123,7 +122,6 @@ export function AppMainContent(props: AppMainContentProps) {
             removeComposerAttachment={props.removeComposerAttachment}
             hasComposerContent={props.hasComposerContent}
             onComposerPaste={props.onComposerPaste}
-            onStartFromComposer={props.onStartFromComposer}
             onStop={props.onStop}
             onSendChat={props.onSendChat}
           />

@@ -17,7 +17,6 @@ type Params = {
     handleToggleTodo: AppMainContentProps['onToggleTodo'];
     hasComposerContent: boolean;
     handleComposerPaste: AppMainContentProps['onComposerPaste'];
-    handleStartFromComposer: AppMainContentProps['onStartFromComposer'];
     handleSendChat: AppMainContentProps['onSendChat'];
     handleStop: AppMainContentProps['onStop'];
   };
@@ -91,7 +90,6 @@ export function buildMainContentProps(params: Params): AppMainContentProps {
     removeComposerAttachment: (id) => params.setComposerImages((current) => current.filter((item) => item.id !== id)),
     hasComposerContent: params.actions.hasComposerContent,
     onComposerPaste: params.actions.handleComposerPaste,
-    onStartFromComposer: params.actions.handleStartFromComposer,
     onSendChat: params.actions.handleSendChat,
     onStop: params.actions.handleStop,
     providers: params.providers,

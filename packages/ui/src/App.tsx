@@ -323,7 +323,6 @@ export default function App() {
     },
     hasComposerContent: actions.hasComposerContent,
     onComposerPaste: actions.handleComposerPaste,
-    onStartFromComposer: actions.handleStartFromComposer,
     onSendChat: actions.handleSendChat,
     onStop: actions.handleStop,
     providers,

@@ -1,4 +1,4 @@
-import { Play } from 'lucide-react';
+import { Play, Square } from 'lucide-react';
 import type { ComposerImageAttachment, ComposerMode } from '../../types';
 import type { WorkSession, Workspace } from '../../../lib/api';
 import { normalizeSessionStatus } from '../../utils/status';
@@ -19,7 +19,6 @@ type Props = {
   removeComposerAttachment: (id: string) => void;
   hasComposerContent: boolean;
   onComposerPaste: (event: React.ClipboardEvent<HTMLTextAreaElement>) => Promise<void>;
-  onStartFromComposer: () => Promise<void>;
   onStop: () => Promise<void>;
   onSendChat: () => Promise<void>;
 };
@@ -37,7 +36,6 @@ export function ComposerPanel(props: Props) {
     removeComposerAttachment,
     hasComposerContent,
     onComposerPaste,
-    onStartFromComposer,
     onStop,
     onSendChat,
   } = props;
@@ -54,11 +52,7 @@ export function ComposerPanel(props: Props) {
           onKeyDown={(event) => {
             if (event.key === 'Enter' && !event.shiftKey) {
               event.preventDefault();
-              if (selectedSessionId) {
-                void onSendChat();
-              } else {
-                void onStartFromComposer();
-              }
+              void onSendChat();
             }
           }}
           placeholder={selectedSessionId ? 'Continue autonomously from this run context and start a new execution...' : 'Describe task and start autonomous execution...'}
@@ -66,10 +60,31 @@ export function ComposerPanel(props: Props) {
         />
         <div className="flex flex-col gap-2">
           <div className="flex gap-2">
-            <button className="inline-flex items-center gap-1 rounded bg-blue-600 px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50" disabled={!hasComposerContent || !workWorkspaceId || !workProvider || !workModel} onClick={() => { void onStartFromComposer(); }} type="button"><Play className="h-3 w-3" /> Run</button>
-            <button className="rounded bg-red-600 px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50" disabled={!selectedSessionId || !selectedSession || normalizeSessionStatus(selectedSession.status) !== 'running'} onClick={() => { void onStop(); }} type="button">Stop</button>
+            <button
+              aria-label="Run"
+              className="inline-flex items-center rounded bg-blue-600 p-2 text-white disabled:opacity-50"
+              disabled={!hasComposerContent || !workWorkspaceId || !workProvider || !workModel}
+              onClick={() => {
+                void onSendChat();
+              }}
+              title="Run"
+              type="button"
+            >
+              <Play className="h-4 w-4" />
+            </button>
+            <button
+              aria-label="Stop"
+              className="inline-flex items-center rounded bg-red-600 p-2 text-white disabled:opacity-50"
+              disabled={!selectedSessionId || !selectedSession || normalizeSessionStatus(selectedSession.status) !== 'running'}
+              onClick={() => {
+                void onStop();
+              }}
+              title="Stop"
+              type="button"
+            >
+              <Square className="h-4 w-4" />
+            </button>
           </div>
-          <button className="rounded bg-slate-800 px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50 dark:bg-slate-700" disabled={!hasComposerContent || !workWorkspaceId || !workProvider || !workModel} onClick={() => { void onSendChat(); }} type="button">Autonomous Run</button>
         </div>
       </div>
       {composerImages.length > 0 && (

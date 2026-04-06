@@ -263,9 +263,29 @@ async function consumeStreamWithTimeout(
   if (perCallTimeout.signal) {
     options.signal = perCallTimeout.signal;
   }
+
+  let timedOut = false;
+  const timeoutError = new Error(`LLM request timed out after ${timeoutMs}ms`);
+  let hardTimeoutId: ReturnType<typeof setTimeout> | undefined;
+  const streamPromise = consumeStream(model, context, options, completionOptions);
+  const hardTimeoutPromise = new Promise<AssistantMessage>((_, reject) => {
+    hardTimeoutId = setTimeout(() => {
+      timedOut = true;
+      reject(timeoutError);
+    }, timeoutMs);
+  });
+
   try {
-    return await consumeStream(model, context, options, completionOptions);
+    return await Promise.race([streamPromise, hardTimeoutPromise]);
   } finally {
+    if (hardTimeoutId) {
+      clearTimeout(hardTimeoutId);
+    }
+    // If we hit the hard timeout path, the underlying stream promise may
+    // resolve/reject later; swallow it to avoid unhandled rejections.
+    if (timedOut) {
+      void streamPromise.catch(() => undefined);
+    }
     perCallTimeout.cleanup();
   }
 }

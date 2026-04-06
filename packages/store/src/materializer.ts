@@ -13,7 +13,7 @@ import type {
   SessionOutput,
 } from './types.js';
 
-const MAX_EVENTS = 200; // Same trim limit as ui-server
+const MAX_EVENTS = 2_000; // Same trim limit as ui-server
 
 /**
  * Materialize a complete session state from an ordered list of events.

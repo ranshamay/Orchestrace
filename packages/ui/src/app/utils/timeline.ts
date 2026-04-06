@@ -266,7 +266,7 @@ export function toolOutputSummary(toolName: string, payload: string, isError: bo
   return compactInline(payload, 260);
 }
 
-export function formatToolPayloadForDisplay(payload: string, maxChars = 6000): string {
+export function formatToolPayloadForDisplay(payload: string, maxChars = 200_000): string {
   const raw = payload.trim();
   if (!raw) {
     return '(empty)';
@@ -294,12 +294,12 @@ function renderToolEventContent(params: {
     ? toolInputSummary(params.toolName, params.payload)
     : toolOutputSummary(params.toolName, params.payload, params.isError);
   const payloadLimit = params.toolName === 'subagent_spawn_batch'
-    ? 20_000
+    ? 200_000
     : params.toolName === 'subagent_spawn'
-      ? 12_000
+      ? 200_000
       : params.toolName === 'subagent_worker'
-        ? 16_000
-      : 6000;
+        ? 200_000
+      : 80_000;
   const displayPayload = formatToolPayloadForDisplay(params.payload, payloadLimit);
   const codeLanguage = displayPayload.startsWith('{') || displayPayload.startsWith('[') ? 'json' : 'text';
 

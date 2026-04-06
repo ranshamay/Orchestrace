@@ -136,18 +136,23 @@ export class FileEventStore implements EventStore {
 
     // Also start a filesystem watcher as a safety net for cross-process writes
     this.ensureFsWatcher(sessionId);
+    // Polling fallback — ensures delivery even if the FS watcher fails to start
+    // (common race: watch() called before the events file is created by the first append)
+    this.ensurePollTimer(sessionId);
 
     return () => {
       set!.delete(entry);
       if (set!.size === 0) {
         this.watchers.delete(sessionId);
         this.stopFsWatcher(sessionId);
+        this.stopPollTimer(sessionId);
       }
     };
   }
 
   private fsWatchers = new Map<string, { ac: AbortController }>();
   private fsWatcherTails = new Map<string, number>(); // last seq delivered via fs watcher
+  private pollTimers = new Map<string, ReturnType<typeof setInterval>>(); // fallback polling
 
   private ensureFsWatcher(sessionId: string): void {
     if (this.fsWatchers.has(sessionId)) return;
@@ -168,9 +173,31 @@ export class FileEventStore implements EventStore {
         }
       } catch (err: unknown) {
         if (err instanceof Error && err.name === 'AbortError') return;
-        // File may not exist yet — retry silently on next watch call
+        // Watcher failed (e.g. ENOENT if file not yet created) — clear slot so
+        // ensureFsWatcher can be retried on the next poll cycle.
+        this.fsWatchers.delete(sessionId);
       }
     })();
+  }
+
+  /** Start a polling fallback timer that delivers cross-process writes even
+   * when the FS watcher fails to start (e.g. race before file exists). */
+  private ensurePollTimer(sessionId: string): void {
+    if (this.pollTimers.has(sessionId)) return;
+    const timer = setInterval(() => {
+      // Re-arm FS watcher if it died (ENOENT race on session creation)
+      this.ensureFsWatcher(sessionId);
+      void this.pollNewEvents(sessionId);
+    }, 3_000);
+    this.pollTimers.set(sessionId, timer);
+  }
+
+  private stopPollTimer(sessionId: string): void {
+    const t = this.pollTimers.get(sessionId);
+    if (t !== undefined) {
+      clearInterval(t);
+      this.pollTimers.delete(sessionId);
+    }
   }
 
   private async pollNewEvents(sessionId: string): Promise<void> {
@@ -194,6 +221,13 @@ export class FileEventStore implements EventStore {
       this.fsWatchers.delete(sessionId);
       this.fsWatcherTails.delete(sessionId);
     }
+  }
+
+  /** Force-poll a session's event log and deliver any new events to watchers.
+   * Useful when the caller knows the runner has written events (e.g. after
+   * receiving a process-exit notification). */
+  triggerPoll(sessionId: string): void {
+    void this.pollNewEvents(sessionId);
   }
 
   private notifyWatchers(sessionId: string, events: SessionEvent[]): void {

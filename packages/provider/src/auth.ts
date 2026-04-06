@@ -173,14 +173,18 @@ export class ProviderAuthManager {
     }
 
     if (store.oauth[providerId]) {
-      const result = await getOAuthApiKey(providerId as OAuthProviderId, store.oauth);
-      if (!result) {
+      try {
+        const result = await getOAuthApiKey(providerId as OAuthProviderId, store.oauth);
+        if (!result) {
+          return undefined;
+        }
+
+        store.oauth[providerId] = result.newCredentials;
+        await this.saveStore(store);
+        return result.apiKey;
+      } catch {
         return undefined;
       }
-
-      store.oauth[providerId] = result.newCredentials;
-      await this.saveStore(store);
-      return result.apiKey;
     }
 
     // Optional fallback for users who still prefer environment variables.

@@ -3,7 +3,7 @@ import type { TimelineItem } from '../types';
 import { formatTimelineEvent, parseToolCallEvent, toolInputSummary, toolOutputSummary } from './timeline';
 
 export function buildTimelineItems(selectedSession: WorkSession | undefined, chatMessages: ChatMessage[]): TimelineItem[] {
-  const rawEvents = (selectedSession?.events ?? []).slice(-120);
+  const rawEvents = (selectedSession?.events ?? []).slice(-1000);
   const items: TimelineItem[] = [];
   const pendingToolInputs = new Map<string, TimelineItem[]>();
 

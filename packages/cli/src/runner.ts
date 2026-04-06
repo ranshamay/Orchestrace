@@ -40,6 +40,11 @@ const SUBAGENT_RETRY_MAX_ATTEMPTS = 2;
 const SUBAGENT_RETRY_BASE_DELAY_MS = 300;
 const SUBAGENT_WORKER_PROMPT_PREVIEW_MAX_CHARS = 220;
 const SUBAGENT_WORKER_OUTPUT_PREVIEW_MAX_CHARS = 420;
+const TOOL_EVENT_PREVIEW_MAX_CHARS = resolvePositiveIntEnv(
+  process.env.ORCHESTRACE_TOOL_EVENT_PREVIEW_MAX_CHARS,
+  32_000,
+);
+const TRACE_LOG_STREAM_DELTAS = resolveBooleanEnv(process.env.ORCHESTRACE_TRACE_LOG_STREAM_DELTAS, true);
 
 // ---------------------------------------------------------------------------
 // Main
@@ -245,6 +250,8 @@ async function main(): Promise<void> {
 
       onEvent: (event) => {
         const t = iso();
+
+        logDagEventTrace(sessionId, event);
 
         // LLM status
         const llmStatus = deriveLlmStatus(event, t);
@@ -579,6 +586,79 @@ function compact(text: string, maxChars: number): string {
   return c.length <= maxChars ? c : `${c.slice(0, Math.max(0, maxChars - 3))}...`;
 }
 
+function previewToolPayload(value: string | undefined): string {
+  if (!value) {
+    return '(empty)';
+  }
+
+  const normalized = value.trim();
+  if (!normalized) {
+    return '(blank)';
+  }
+
+  if (normalized.length <= TOOL_EVENT_PREVIEW_MAX_CHARS) {
+    return normalized;
+  }
+
+  return `${normalized.slice(0, Math.max(0, TOOL_EVENT_PREVIEW_MAX_CHARS - 3))}...`;
+}
+
+function stringifyTracePayload(value: string): string {
+  return JSON.stringify(value);
+}
+
+function resolvePositiveIntEnv(raw: string | undefined, fallback: number): number {
+  const parsed = raw ? Number.parseInt(raw, 10) : Number.NaN;
+  if (Number.isFinite(parsed) && parsed > 0) {
+    return parsed;
+  }
+  return fallback;
+}
+
+function resolveBooleanEnv(raw: string | undefined, fallback: boolean): boolean {
+  if (!raw) {
+    return fallback;
+  }
+
+  const normalized = raw.trim().toLowerCase();
+  if (normalized === 'true' || normalized === '1' || normalized === 'yes' || normalized === 'on') {
+    return true;
+  }
+  if (normalized === 'false' || normalized === '0' || normalized === 'no' || normalized === 'off') {
+    return false;
+  }
+
+  return fallback;
+}
+
+function logDagEventTrace(sessionId: string, event: DagEvent): void {
+  const taskId = 'taskId' in event ? event.taskId : undefined;
+  const phase = 'phase' in event ? event.phase : undefined;
+  const taskPart = taskId ? ` task=${taskId}` : '';
+  const phasePart = phase ? ` phase=${phase}` : '';
+
+  if (event.type === 'task:stream-delta') {
+    if (TRACE_LOG_STREAM_DELTAS) {
+      console.info(
+        `[trace:${sessionId}] stream task=${event.taskId} phase=${event.phase} delta=${stringifyTracePayload(event.delta)}`,
+      );
+    }
+    return;
+  }
+
+  if (event.type === 'task:tool-call') {
+    const direction = event.status === 'started' ? 'input' : 'output';
+    const payload = event.status === 'started' ? event.input : event.output;
+    const errorSuffix = event.isError ? ' [error]' : '';
+    console.info(
+      `[trace:${sessionId}] tool task=${event.taskId} name=${event.toolName} direction=${direction}${errorSuffix} payload=${stringifyTracePayload(payload ?? '')}`,
+    );
+    return;
+  }
+
+  console.info(`[trace:${sessionId}] dag type=${event.type}${taskPart}${phasePart}`);
+}
+
 function makeLlmStatus(
   state: LlmSessionState,
   detail?: string,
@@ -647,10 +727,10 @@ function toUiEvent(runId: string, event: DagEvent, t: string): { time: string; r
     case 'task:implementation-attempt': return { ...base, message: tag(`${event.taskId}: implementation attempt ${event.attempt}/${event.maxAttempts}`) };
     case 'task:tool-call': {
       if (event.status === 'started') {
-        return { ...base, message: tag(`${event.taskId}: tool ${event.toolName} input ${compact(event.input ?? '(empty)', 600)}`) };
+        return { ...base, message: tag(`${event.taskId}: tool ${event.toolName} input ${previewToolPayload(event.input)}`) };
       }
       const err = event.isError ? ' [error]' : '';
-      return { ...base, message: tag(`${event.taskId}: tool ${event.toolName} output${err} ${compact(event.output ?? '(empty)', 600)}`) };
+      return { ...base, message: tag(`${event.taskId}: tool ${event.toolName} output${err} ${previewToolPayload(event.output)}`) };
     }
     case 'task:verification-failed': return { ...base, message: tag(`${event.taskId}: verification failed`) };
     case 'task:ready': return { ...base, message: tag(`${event.taskId}: ready`) };

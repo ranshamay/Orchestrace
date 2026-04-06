@@ -95,6 +95,8 @@ const PERSIST_RAW_DEBUG_ENV = 'ORCHESTRACE_PERSIST_RAW_DEBUG';
 const PERSIST_TEXT_MAX_CHARS = 3_000;
 const PERSIST_EVENT_MESSAGE_MAX_CHARS = 1_200;
 const PERSIST_CHAT_MESSAGE_MAX_CHARS = 2_400;
+const SESSION_EVENT_HISTORY_LIMIT = 2_000;
+const TOOL_EVENT_PREVIEW_MAX_CHARS = parsePositiveSetting(process.env.ORCHESTRACE_TOOL_EVENT_PREVIEW_MAX_CHARS) ?? 200_000;
 const PHASE_PROGRESS_PLAN_WEIGHT_DEFAULT = 30;
 const PHASE_PROGRESS_IMPLEMENTATION_WEIGHT_DEFAULT = 70;
 const execFileAsync = promisify(execFile);
@@ -333,7 +335,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                 case 'session:dag-event': {
                   const uiEvent = event.payload.event as UiDagEvent;
                   session.events.push(uiEvent);
-                  if (session.events.length > 200) session.events.shift();
+                  if (session.events.length > SESSION_EVENT_HISTORY_LIMIT) session.events.shift();
                   break;
                 }
                 case 'session:stream-delta': {
@@ -1125,7 +1127,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         case 'session:dag-event': {
           const uiEvent = event.payload.event as UiDagEvent;
           session.events.push(uiEvent);
-          if (session.events.length > 200) session.events.shift();
+          if (session.events.length > SESSION_EVENT_HISTORY_LIMIT) session.events.shift();
           break;
         }
 
@@ -1258,6 +1260,10 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
 
     // Monitor runner process exit (backup for missed events)
     runnerProcess.on('exit', (code) => {
+      // Immediately poll the event store so final runner events are delivered
+      // before the 3-second fallback check runs (important when FS watcher missed events).
+      eventStore.triggerPoll(id);
+
       // Give event store watcher time to deliver final events
       setTimeout(() => {
         if (session.status === 'running') {
@@ -1395,8 +1401,6 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           sendJson(res, 400, { error: 'Missing id' });
           return;
         }
-
-        await refreshSessionFromEventStore(id);
 
         const session = workSessions.get(id);
         if (!session) {
@@ -2016,12 +2020,6 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       }
 
       if (req.method === 'GET' && pathname === '/api/work') {
-        const runningSessionIds = [...workSessions.values()]
-          .filter((session) => session.status === 'running')
-          .map((session) => session.id);
-
-        await Promise.all(runningSessionIds.map((id) => refreshSessionFromEventStore(id)));
-
         const sessions = [...workSessions.values()]
           .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
           .map((session) => serializeWorkSession(session, sessionTodos.get(session.id) ?? []));
@@ -2075,8 +2073,6 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           sendJson(res, 400, { error: 'Missing id' });
           return;
         }
-
-        await refreshSessionFromEventStore(id);
 
         const session = workSessions.get(id);
         if (!session) {
@@ -2263,8 +2259,6 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           sendJson(res, 400, { error: 'Missing id' });
           return;
         }
-
-        await refreshSessionFromEventStore(id);
 
         const session = workSessions.get(id);
         if (!session) {
@@ -2609,6 +2603,10 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                     if (!delta) {
                       return;
                     }
+
+                    console.info(
+                      `[trace:${session.id}] stream task=chat phase=${continuationPhase === 'planning' ? 'planning' : 'implementation'} delta=${stringifyTracePayload(delta)}`,
+                    );
 
                     receivedTextDelta = true;
                     streamState.replyText += delta;
@@ -4670,12 +4668,12 @@ function toUiEvent(runId: string, event: DagEvent): UiDagEvent | undefined {
   }
 }
 
-function previewToolLog(value: string | undefined, maxChars = 600): string {
+function previewToolLog(value: string | undefined, maxChars = TOOL_EVENT_PREVIEW_MAX_CHARS): string {
   if (!value) {
     return '(empty)';
   }
 
-  const compact = redactSensitiveText(value).replace(/\s+/g, ' ').trim();
+  const compact = redactSensitiveText(value).trim();
   if (!compact) {
     return '(blank)';
   }
@@ -4687,20 +4685,24 @@ function previewToolLog(value: string | undefined, maxChars = 600): string {
   return `${compact.slice(0, Math.max(0, maxChars - 3))}...`;
 }
 
+function stringifyTracePayload(value: string): string {
+  return JSON.stringify(value);
+}
+
 function resolveToolPreviewLimit(toolName: string, direction: 'input' | 'output'): number {
   if (toolName === 'subagent_spawn_batch') {
-    return direction === 'input' ? 12_000 : 20_000;
+    return direction === 'input' ? Math.max(12_000, TOOL_EVENT_PREVIEW_MAX_CHARS) : Math.max(20_000, TOOL_EVENT_PREVIEW_MAX_CHARS);
   }
 
   if (toolName === 'subagent_worker') {
-    return direction === 'input' ? 8_000 : 16_000;
+    return direction === 'input' ? Math.max(8_000, TOOL_EVENT_PREVIEW_MAX_CHARS) : Math.max(16_000, TOOL_EVENT_PREVIEW_MAX_CHARS);
   }
 
   if (toolName === 'subagent_spawn') {
-    return direction === 'input' ? 4_000 : 12_000;
+    return direction === 'input' ? Math.max(4_000, TOOL_EVENT_PREVIEW_MAX_CHARS) : Math.max(12_000, TOOL_EVENT_PREVIEW_MAX_CHARS);
   }
 
-  return 600;
+  return TOOL_EVENT_PREVIEW_MAX_CHARS;
 }
 
 function emitSubAgentWorkerEvent(params: {
@@ -4759,7 +4761,7 @@ function emitSubAgentWorkerEvent(params: {
   const uiEvent = toUiEvent(params.session.id, event);
   if (uiEvent) {
     params.session.events.push(uiEvent);
-    if (params.session.events.length > 200) {
+    if (params.session.events.length > SESSION_EVENT_HISTORY_LIMIT) {
       params.session.events.shift();
     }
   }
@@ -4844,10 +4846,17 @@ function handleChatToolCallEvent(
   persistEvent: (sessionId: string, event: SessionEventInput) => void,
 ): void {
   const event = toChatToolDagEvent(toolEvent);
+  const direction = event.status === 'started' ? 'input' : 'output';
+  const payload = event.status === 'started' ? event.input : event.output;
+  const errorSuffix = event.isError ? ' [error]' : '';
+  console.info(
+    `[trace:${session.id}] tool task=${event.taskId} name=${event.toolName} direction=${direction}${errorSuffix} payload=${stringifyTracePayload(payload ?? '')}`,
+  );
+
   const uiEvent = toUiEvent(session.id, event);
   if (uiEvent) {
     session.events.push(uiEvent);
-    if (session.events.length > 200) {
+    if (session.events.length > SESSION_EVENT_HISTORY_LIMIT) {
       session.events.shift();
     }
   }

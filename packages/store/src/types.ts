@@ -352,6 +352,11 @@ export interface EventStore {
   /** Watch for new events. Returns an unsubscribe function. */
   watch(sessionId: string, fromSeq: number, cb: (event: SessionEvent) => void): () => void;
 
+  /** Force an immediate poll of the event log for a session, delivering any
+   *  new events to registered watchers. Useful when the caller has out-of-band
+   *  knowledge that the runner just wrote events (e.g. on process exit). */
+  triggerPoll(sessionId: string): void;
+
   /** List all session IDs that have event logs. */
   listSessions(): Promise<string[]>;
 
