@@ -734,6 +734,8 @@ function buildPlanningPrompt(node: TaskNode, depOutputs: Map<string, TaskOutput>
         '- in agent_graph_set, provide descriptive node ids/names (avoid generic n1/n2 labels)',
         '- agent_graph_set nodes must map to atomic execution units with explicit dependency ids',
         '- subagent_spawn/subagent_spawn_batch (required) to delegate focused planning research with only relevant context per sub-agent',
+        '- Quick-start planning mode for well-scoped tasks: keep parent pre-delegation orientation to at most 3-4 calls and delegate within the first 2-3 calls whenever possible',
+        '- Keep parent orientation lightweight (e.g., root list + manifest + git status) and push detailed file reading/search into sub-agent scopes',
         '- ALWAYS use subagent_spawn_batch (not individual subagent_spawn calls) when multiple independent sub-agents can run concurrently',
         '- subagent_spawn/subagent_spawn_batch calls must include nodeId values that map back to agent_graph_set node ids',
         '- pass nodeId on each sub-agent request so graph progress can be tracked per node',
@@ -901,6 +903,8 @@ function buildPhaseSystemPrompt(params: {
           'subagent delegation must include nodeId values that map to agent_graph_set node ids.',
           'Planning must include successful todo_set and agent_graph_set tool calls.',
           'Planning must include successful subagent_spawn or subagent_spawn_batch calls with focused context per sub-agent.',
+          'Quick-start mode for well-scoped tasks: keep parent pre-delegation orientation to at most 3-4 tool calls and delegate within the first 2-3 calls whenever possible.',
+          'Keep parent orientation lightweight and push detailed file reading/search into delegated sub-agent scopes.',
           'Prefer smallest safe units for parallelism; independent atomic tasks should be separated into parallelizable nodes.',
           'Planning responses must end with 1-3 concrete next follow-up suggestions.',
           'Return a plan that another agent could execute deterministically.',
@@ -1197,6 +1201,7 @@ function buildPlanningContractError(toolCalls: ReplayToolCallRecord[]): string |
     'Planning contract not satisfied.',
     ...contractIssues,
     'Planning must publish todo_set + agent_graph_set and delegate focused work via subagent_spawn before implementation can begin.',
+    'For well-scoped tasks, use quick-start behavior: keep parent orientation to 3-4 calls max, delegate within the first 2-3 calls when feasible, and push detailed discovery into sub-agents.',
   ].join(' ');
 }
 

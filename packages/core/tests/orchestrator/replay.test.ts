@@ -256,6 +256,8 @@ describe('orchestrate replay capture', () => {
       expect(output?.error).toContain('todo_set');
       expect(output?.error).toContain('agent_graph_set');
       expect(output?.error).toContain('subagent_spawn');
+      expect(output?.error).toContain('quick-start behavior');
+      expect(output?.error).toContain('delegate within the first 2-3 calls');
       // Planning now retries up to 3 times before giving up
       expect(output?.replay?.attempts.length).toBe(3);
       expect(output?.replay?.attempts.at(-1)?.failureType).toBe('validation');
@@ -291,6 +293,8 @@ describe('orchestrate replay capture', () => {
       expect(planningPrompt).toContain('Decompose planning work into atomic tasks: each todo should represent one action and one completion outcome.');
       expect(planningPrompt).toContain('Never bundle multiple actions in one task; split broad work into smaller tasks before finalizing the plan.');
       expect(planningPrompt).toContain('If a task would take more than ~15 minutes or touches multiple independent areas, split it further.');
+      expect(planningPrompt).toContain('Quick-start planning mode for well-scoped tasks: keep parent pre-delegation orientation to at most 3-4 calls and delegate within the first 2-3 calls whenever possible');
+      expect(planningPrompt).toContain('Keep parent orientation lightweight (e.g., root list + manifest + git status) and push detailed file reading/search into sub-agent scopes');
       expect(planningPrompt).toContain('3) per-stage atomic tasks with explicit dependencies and concurrency boundaries');
       expect(planningPrompt).toContain('8) atomic todo specification per task: {id, action, target, deps, verification, done_criteria}');
       expect(planningPrompt).toContain('9) Next Follow-up Suggestions section with 1-3 numbered, concrete next actions');

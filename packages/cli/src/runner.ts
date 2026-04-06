@@ -777,6 +777,8 @@ function buildSystemPrompt(config: SessionConfig, phase: 'planning' | 'implement
       'todo_set items must include numeric weight values and the total todo weight must sum to 100.',
       'agent_graph_set nodes must include numeric weight values and the total node weight must sum to 100.',
       'Planning must use subagent_spawn or subagent_spawn_batch for focused parallel research and delegate only relevant context.',
+      'Quick-start mode for well-scoped tasks: keep parent pre-delegation orientation to at most 3-4 calls and delegate within the first 2-3 calls whenever possible.',
+      'Keep parent orientation lightweight and push detailed file reading/search into sub-agent scopes.',
       'For independent nodes, use subagent_spawn_batch so work runs in parallel.',
       'For multi-file inspection, use read_files with concurrency to reduce latency; avoid repeated single-file reads when possible.',
       'Pass nodeId for each sub-agent request so graph status stays current.',
