@@ -127,6 +127,7 @@ async function executeToolCalls(
   const results: ToolResultMessage[] = [];
   const retryPrompts: string[] = [];
   let hadErrors = false;
+  let hasSuccessfulCall = false;
 
   for (const toolCall of toolCalls) {
     let payload: { content: string; isError: boolean; details?: unknown };
@@ -138,38 +139,11 @@ async function executeToolCalls(
       arguments: formatToolPayload(toolCall.arguments),
     });
 
-    try {
-      coerceStringifiedArrayArgs(toolCall);
-      const validatedArgs = validateToolCall(tools, toolCall) as Record<string, unknown>;
-      const toolResult = await toolset.executeTool(
-        {
-          id: toolCall.id,
-          name: toolCall.name,
-          arguments: validatedArgs,
-        },
-        signal,
-      );
-
+    if (hasSuccessfulCall) {
       payload = {
-        content: toolResult.content,
-        isError: toolResult.isError ?? false,
-        details: toolResult.details,
-      };
-
-      completionOptions?.onToolCall?.({
-        type: 'result',
-        toolCallId: toolCall.id,
-        toolName: toolCall.name,
-        arguments: formatToolPayload(toolCall.arguments),
-        result: formatToolPayload(toolResult.content),
-        isError: toolResult.isError ?? false,
-      });
-    } catch (error) {
-      payload = {
-        content:
-          `Tool execution failed: ${toErrorMessage(error)}\n`
-          + 'Inspect the error, correct the arguments, and retry this tool call.',
-        isError: true,
+        content: 'Skipped fallback tool call because a previous tool call in this chain succeeded.',
+        isError: false,
+        details: { skipped: true, reason: 'prior_tool_call_succeeded' },
       };
 
       completionOptions?.onToolCall?.({
@@ -178,11 +152,58 @@ async function executeToolCalls(
         toolName: toolCall.name,
         arguments: formatToolPayload(toolCall.arguments),
         result: formatToolPayload(payload.content),
-        isError: true,
+        isError: false,
       });
+    } else {
+      try {
+        coerceStringifiedArrayArgs(toolCall);
+        const validatedArgs = validateToolCall(tools, toolCall) as Record<string, unknown>;
+        const toolResult = await toolset.executeTool(
+          {
+            id: toolCall.id,
+            name: toolCall.name,
+            arguments: validatedArgs,
+          },
+          signal,
+        );
+
+        payload = {
+          content: toolResult.content,
+          isError: toolResult.isError ?? false,
+          details: toolResult.details,
+        };
+
+        completionOptions?.onToolCall?.({
+          type: 'result',
+          toolCallId: toolCall.id,
+          toolName: toolCall.name,
+          arguments: formatToolPayload(toolCall.arguments),
+          result: formatToolPayload(toolResult.content),
+          isError: toolResult.isError ?? false,
+        });
+      } catch (error) {
+        payload = {
+          content:
+            `Tool execution failed: ${toErrorMessage(error)}\n`
+            + 'Inspect the error, correct the arguments, and retry this tool call.',
+          isError: true,
+        };
+
+        completionOptions?.onToolCall?.({
+          type: 'result',
+          toolCallId: toolCall.id,
+          toolName: toolCall.name,
+          arguments: formatToolPayload(toolCall.arguments),
+          result: formatToolPayload(payload.content),
+          isError: true,
+        });
+      }
     }
 
     hadErrors = hadErrors || payload.isError;
+    if (!payload.isError) {
+      hasSuccessfulCall = true;
+    }
 
     results.push({
       role: 'toolResult',
