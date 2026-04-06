@@ -311,7 +311,10 @@ export async function orchestrate(
       });
 
       if (createToolset) {
-        const planningContractError = buildPlanningContractError(planningToolCalls);
+        const planningContractError = buildPlanningContractError({
+          toolCalls: planningToolCalls,
+          task: node,
+        });
         if (planningContractError) {
           completedPlanningAttempt.failureType = 'validation';
           completedPlanningAttempt.error = planningContractError;
@@ -733,9 +736,10 @@ function buildPlanningPrompt(node: TaskNode, depOutputs: Map<string, TaskOutput>
         '- agent_graph_set node ids must be unique, and dependency ids can only reference nodes from the same payload',
         '- in agent_graph_set, provide descriptive node ids/names (avoid generic n1/n2 labels)',
         '- agent_graph_set nodes must map to atomic execution units with explicit dependency ids',
-        '- subagent_spawn/subagent_spawn_batch (required) to delegate focused planning research with only relevant context per sub-agent',
-        '- ALWAYS use subagent_spawn_batch (not individual subagent_spawn calls) when multiple independent sub-agents can run concurrently',
-        '- subagent_spawn/subagent_spawn_batch calls must include nodeId values that map back to agent_graph_set node ids',
+        '- For focused tasks affecting fewer than 3 files with a specific known-module behavior change, cap planning sub-agent delegation to zero and proceed directly to file inspection/code-path identification planning.',
+        '- For all other tasks, use subagent_spawn/subagent_spawn_batch to delegate focused planning research with only relevant context per sub-agent.',
+        '- When multiple independent sub-agents are needed, use subagent_spawn_batch (not sequential subagent_spawn calls).',
+        '- Any subagent_spawn/subagent_spawn_batch calls must include nodeId values that map back to agent_graph_set node ids.',
         '- pass nodeId on each sub-agent request so graph progress can be tracked per node',
       ],
     },
@@ -1137,12 +1141,17 @@ function buildCompletionFailureRetryHint(params: {
   }
 }
 
-function buildPlanningContractError(toolCalls: ReplayToolCallRecord[]): string | undefined {
+function buildPlanningContractError(params: {
+  toolCalls: ReplayToolCallRecord[];
+  task: TaskNode;
+}): string | undefined {
+  const { toolCalls, task } = params;
   const hasSubAgentDelegation = hasSuccessfulToolCall(toolCalls, 'subagent_spawn')
     || hasSuccessfulToolCall(toolCalls, 'subagent_spawn_batch');
+  const allowsZeroPlanningSubagents = isFocusedTaskForZeroPlanningSubagents(task);
   const requiredTools = ['todo_set', 'agent_graph_set'];
   const missing = requiredTools.filter((toolName) => !hasSuccessfulToolCall(toolCalls, toolName));
-  if (!hasSubAgentDelegation) {
+  if (!allowsZeroPlanningSubagents && !hasSubAgentDelegation) {
     missing.push('subagent_spawn or subagent_spawn_batch');
   }
 
@@ -1193,11 +1202,70 @@ function buildPlanningContractError(toolCalls: ReplayToolCallRecord[]): string |
     return undefined;
   }
 
+  const delegationGuidance = allowsZeroPlanningSubagents
+    ? 'Planning must publish todo_set + agent_graph_set before implementation can begin; focused-task policy allows zero planning sub-agents for this task.'
+    : 'Planning must publish todo_set + agent_graph_set and delegate focused work via subagent_spawn before implementation can begin.';
+
   return [
     'Planning contract not satisfied.',
     ...contractIssues,
-    'Planning must publish todo_set + agent_graph_set and delegate focused work via subagent_spawn before implementation can begin.',
+    delegationGuidance,
   ].join(' ');
+}
+
+function isFocusedTaskForZeroPlanningSubagents(task: TaskNode): boolean {
+  const prompt = task.prompt ?? '';
+  const affectedFiles = extractPromptFilePaths(prompt);
+  if (affectedFiles.length === 0 || affectedFiles.length >= 3) {
+    return false;
+  }
+
+  const hasKnownModuleReference = affectedFiles.some((filePath) => /(^|\/)(packages\/|src\/|apps\/|services\/)/i.test(filePath))
+    || /\b(ui-server\.ts|runner\.ts|orchestrator\.ts)\b/i.test(prompt);
+  if (!hasKnownModuleReference) {
+    return false;
+  }
+
+  return /\b(behavior|change|fix|enforce|update|adjust|modify|regression|policy|logic)\b/i.test(prompt);
+}
+
+function extractPromptFilePaths(prompt: string): string[] {
+  const lines = prompt.split(/\r?\n/);
+  const paths = new Set<string>();
+  let inRelevantFilesSection = false;
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (/^#{1,6}\s+/.test(trimmed) && !/^#{1,6}\s+relevant files\b/i.test(trimmed)) {
+      inRelevantFilesSection = false;
+    }
+
+    if (/^(?:#{1,6}\s+)?relevant files\b:?/i.test(trimmed)) {
+      inRelevantFilesSection = true;
+      continue;
+    }
+
+    if (inRelevantFilesSection) {
+      const bulletMatch = trimmed.match(/^(?:[-*•]|\d+\.)\s+`?([A-Za-z0-9._/-]+\.[A-Za-z0-9_-]+)`?/);
+      if (bulletMatch?.[1]) {
+        paths.add(normalizePromptPath(bulletMatch[1]));
+      }
+    }
+  }
+
+  const inlinePathRegex = /(?:^|[\s`"'])([A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)+\.[A-Za-z0-9_-]+)(?=$|[\s`"',):;])/g;
+  for (const match of prompt.matchAll(inlinePathRegex)) {
+    const path = match[1]?.trim();
+    if (path) {
+      paths.add(normalizePromptPath(path));
+    }
+  }
+
+  return [...paths];
+}
+
+function normalizePromptPath(filePath: string): string {
+  return filePath.replace(/^\.\//, '').trim();
 }
 
 function hasSuccessfulToolCall(toolCalls: ReplayToolCallRecord[], toolName: string): boolean {

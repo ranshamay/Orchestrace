@@ -6,7 +6,7 @@ import type { LlmAdapter, LlmAgent, LlmCompletionOptions, LlmPromptInput, LlmReq
 import { orchestrate } from '../../src/orchestrator/orchestrator.js';
 import type { DagEvent, TaskGraph } from '../../src/dag/types.js';
 
-function makeSingleNodeGraph(): TaskGraph {
+function makeSingleNodeGraph(prompt = 'Implement a tiny change.'): TaskGraph {
   return {
     id: 'graph-1',
     name: 'Replay Test Graph',
@@ -15,17 +15,27 @@ function makeSingleNodeGraph(): TaskGraph {
         id: 'task-1',
         name: 'Task 1',
         type: 'code',
-        prompt: 'Implement a tiny change.',
+        prompt,
         dependencies: [],
       },
     ],
   };
 }
 
+function makeFocusedSingleNodeGraph(): TaskGraph {
+  return makeSingleNodeGraph([
+    'Enforce native git worktree usage behavior at session start in a known module.',
+    '',
+    '## Relevant Files',
+    '- packages/cli/src/ui-server.ts',
+  ].join('\n'));
+}
+
 function createAdapter(params: {
   planningThrows?: boolean;
   failImplementationOnceWithType?: 'timeout' | 'rate_limit' | 'tool_runtime' | 'empty_response';
   omitPlanningCoordination?: boolean;
+  omitPlanningSubagentOnly?: boolean;
   onPrompt?: (phase: 'planning' | 'implementation', prompt: LlmPromptInput) => void;
 }): LlmAdapter {
   let implementationCalls = 0;
@@ -46,12 +56,13 @@ function createAdapter(params: {
               type: 'started',
               toolCallId: 'plan-todo-1',
               toolName: 'todo_set',
-              arguments: '{"items":[{"id":"p1","title":"Plan","status":"in_progress"}]}',
+              arguments: '{"items":[{"id":"p1","title":"Plan","status":"in_progress","weight":100}]}',
             });
             options?.onToolCall?.({
               type: 'result',
               toolCallId: 'plan-todo-1',
               toolName: 'todo_set',
+              arguments: '{"items":[{"id":"p1","title":"Plan","status":"in_progress","weight":100}]}',
               result: 'Stored 1 todo item(s).',
               isError: false,
             });
@@ -59,28 +70,31 @@ function createAdapter(params: {
               type: 'started',
               toolCallId: 'plan-graph-1',
               toolName: 'agent_graph_set',
-              arguments: '{"nodes":[{"id":"a1","prompt":"Inspect docs"}]}',
+              arguments: '{"nodes":[{"id":"a1","prompt":"Inspect docs","weight":100}]}',
             });
             options?.onToolCall?.({
               type: 'result',
               toolCallId: 'plan-graph-1',
               toolName: 'agent_graph_set',
+              arguments: '{"nodes":[{"id":"a1","prompt":"Inspect docs","weight":100}]}',
               result: 'Stored agent dependency graph with 1 node(s).',
               isError: false,
             });
-            options?.onToolCall?.({
-              type: 'started',
-              toolCallId: 'plan-sub-1',
-              toolName: 'subagent_spawn',
-              arguments: '{"prompt":"Summarize only relevant planner constraints"}',
-            });
-            options?.onToolCall?.({
-              type: 'result',
-              toolCallId: 'plan-sub-1',
-              toolName: 'subagent_spawn',
-              result: 'Sub-agent sub-1 completed.',
-              isError: false,
-            });
+            if (!params.omitPlanningSubagentOnly) {
+              options?.onToolCall?.({
+                type: 'started',
+                toolCallId: 'plan-sub-1',
+                toolName: 'subagent_spawn',
+                arguments: '{"prompt":"Summarize only relevant planner constraints"}',
+              });
+              options?.onToolCall?.({
+                type: 'result',
+                toolCallId: 'plan-sub-1',
+                toolName: 'subagent_spawn',
+                result: 'Sub-agent sub-1 completed.',
+                isError: false,
+              });
+            }
           }
 
           if (params.planningThrows) {
@@ -264,6 +278,32 @@ describe('orchestrate replay capture', () => {
     }
   }, 15_000);
 
+  it('allows focused planning without subagent delegation when todo_set and agent_graph_set succeed', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'orchestrace-replay-plan-focused-'));
+
+    try {
+      const outputs = await orchestrate(makeFocusedSingleNodeGraph(), {
+        llm: createAdapter({ omitPlanningSubagentOnly: true }),
+        cwd,
+        requirePlanApproval: false,
+        planningSystemPrompt: 'planning',
+        implementationSystemPrompt: 'implementation',
+        createToolset: () => ({ tools: [], executeTool: async () => ({ content: 'noop' }) }),
+      });
+
+      const output = outputs.get('task-1');
+      expect(output).toBeDefined();
+      expect(output?.status).toBe('completed');
+      expect(output?.failureType).toBeUndefined();
+      expect(output?.replay?.attempts[0]?.phase).toBe('planning');
+      expect(output?.replay?.attempts[0]?.toolCalls.some((call) => call.toolName === 'todo_set')).toBe(true);
+      expect(output?.replay?.attempts[0]?.toolCalls.some((call) => call.toolName === 'agent_graph_set')).toBe(true);
+      expect(output?.replay?.attempts[0]?.toolCalls.some((call) => call.toolName === 'subagent_spawn')).toBe(false);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
   it('includes granular planning contract guidance in planning prompt', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'orchestrace-replay-plan-prompt-'));
     const capturedPlanningPrompts: string[] = [];
@@ -291,6 +331,8 @@ describe('orchestrate replay capture', () => {
       expect(planningPrompt).toContain('Decompose planning work into atomic tasks: each todo should represent one action and one completion outcome.');
       expect(planningPrompt).toContain('Never bundle multiple actions in one task; split broad work into smaller tasks before finalizing the plan.');
       expect(planningPrompt).toContain('If a task would take more than ~15 minutes or touches multiple independent areas, split it further.');
+      expect(planningPrompt).toContain('For focused tasks affecting fewer than 3 files with a specific known-module behavior change, cap planning sub-agent delegation to zero');
+      expect(planningPrompt).toContain('For all other tasks, use subagent_spawn/subagent_spawn_batch to delegate focused planning research');
       expect(planningPrompt).toContain('3) per-stage atomic tasks with explicit dependencies and concurrency boundaries');
       expect(planningPrompt).toContain('8) atomic todo specification per task: {id, action, target, deps, verification, done_criteria}');
       expect(planningPrompt).toContain('9) Next Follow-up Suggestions section with 1-3 numbered, concrete next actions');
