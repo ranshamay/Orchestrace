@@ -17,6 +17,7 @@
     "@orchestrace/context": "workspace:*",
     "@orchestrace/core": "workspace:*",
     "@orchestrace/provider": "workspace:*",
+    "@orchestrace/store": "workspace:*",
     "@orchestrace/tools": "workspace:*",
     "dotenv": "^17.4.0"
   },

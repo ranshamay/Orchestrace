@@ -27,7 +27,21 @@ export function buildGraphLayout(session?: WorkSession): { nodes: GraphNodeView[
     : [{ id: session.id, prompt: session.prompt, dependencies: [] }];
 
   const statusById = new Map(baseNodes.map((node) => [node.id, node.status ?? normalizeTaskStatus(session.taskStatus[node.id])]));
-  const isRunning = normalizeSessionStatus(session.status) === 'running';
+  const sessionNormalized = normalizeSessionStatus(session.status);
+  const isRunning = sessionNormalized === 'running';
+  const isTerminal = sessionNormalized === 'failed' || sessionNormalized === 'cancelled';
+
+  // When the session is terminal, demote any still-running nodes to failed
+  // and leave pending nodes as pending (they never started).
+  if (isTerminal) {
+    for (const node of baseNodes) {
+      const status = statusById.get(node.id) ?? 'pending';
+      if (status === 'running') {
+        statusById.set(node.id, 'failed');
+      }
+    }
+  }
+
   if (isRunning) {
     // Promote all pending nodes whose dependencies are met to running.
     let promoted = false;

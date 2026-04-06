@@ -1,0 +1,329 @@
+import { open, readdir, rm, watch } from 'node:fs/promises';
+import { existsSync, createReadStream } from 'node:fs';
+import { createInterface } from 'node:readline';
+import { join } from 'node:path';
+import type {
+  EventStore,
+  SessionEvent,
+  SessionEventInput,
+  SessionMetadata,
+} from './types.js';
+
+const EVENTS_FILE = 'events.jsonl';
+const META_FILE = 'meta.json';
+
+/**
+ * File-based event store.
+ *
+ * Layout:
+ *   <basePath>/
+ *     <sessionId>/
+ *       events.jsonl   — append-only event log (one JSON object per line)
+ *       meta.json      — session metadata (PID, timestamps)
+ *
+ * Sequence numbers are per-session, monotonically increasing, assigned on append.
+ * Concurrent appends to the same session are serialized via an in-memory queue
+ * to guarantee monotonic seq and atomic line writes.
+ */
+export class FileEventStore implements EventStore {
+  private readonly basePath: string;
+
+  /** Per-session seq counter: only populated after first read/append. */
+  private seqCounters = new Map<string, number>();
+
+  /** Per-session write lock to serialize appends. */
+  private writeLocks = new Map<string, Promise<void>>();
+
+  constructor(basePath: string) {
+    this.basePath = basePath;
+  }
+
+  // ------------------------------------------------------------------
+  // Write
+  // ------------------------------------------------------------------
+
+  async append(sessionId: string, event: SessionEventInput): Promise<number> {
+    return this.appendBatch(sessionId, [event]);
+  }
+
+  async appendBatch(sessionId: string, events: SessionEventInput[]): Promise<number> {
+    if (events.length === 0) return this.getSeq(sessionId);
+    return this.withWriteLock(sessionId, async () => {
+      const dir = this.sessionDir(sessionId);
+      await ensureDir(dir);
+      const filePath = join(dir, EVENTS_FILE);
+
+      let seq = await this.resolveSeq(sessionId, filePath);
+      const lines: string[] = [];
+      for (const evt of events) {
+        seq++;
+        const full: SessionEvent = { ...evt, seq } as SessionEvent;
+        lines.push(JSON.stringify(full));
+      }
+
+      // Atomic append — single write call with trailing newline
+      const fd = await open(filePath, 'a');
+      try {
+        await fd.write(lines.join('\n') + '\n');
+      } finally {
+        await fd.close();
+      }
+
+      this.seqCounters.set(sessionId, seq);
+      // Update fs watcher tail so it doesn't re-deliver these events
+      this.fsWatcherTails.set(sessionId, seq);
+      // Notify watchers
+      this.notifyWatchers(sessionId, events.map((e, i) => ({
+        ...e,
+        seq: seq - events.length + i + 1,
+      }) as SessionEvent));
+
+      return seq;
+    });
+  }
+
+  // ------------------------------------------------------------------
+  // Read
+  // ------------------------------------------------------------------
+
+  async read(sessionId: string, fromSeq = 0): Promise<SessionEvent[]> {
+    const filePath = join(this.sessionDir(sessionId), EVENTS_FILE);
+    if (!existsSync(filePath)) return [];
+
+    const events: SessionEvent[] = [];
+    const rl = createInterface({ input: createReadStream(filePath), crlfDelay: Infinity });
+
+    for await (const line of rl) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      try {
+        const evt = JSON.parse(trimmed) as SessionEvent;
+        if (evt.seq > fromSeq) events.push(evt);
+      } catch {
+        // Skip corrupted/partial lines
+      }
+    }
+
+    // Update seq counter from disk
+    if (events.length > 0) {
+      const maxSeq = events[events.length - 1].seq;
+      const current = this.seqCounters.get(sessionId) ?? 0;
+      if (maxSeq > current) this.seqCounters.set(sessionId, maxSeq);
+    }
+
+    return events;
+  }
+
+  // ------------------------------------------------------------------
+  // Watch
+  // ------------------------------------------------------------------
+
+  private watchers = new Map<string, Set<{ fromSeq: number; lastDeliveredSeq: number; cb: (event: SessionEvent) => void }>>();
+
+  watch(sessionId: string, fromSeq: number, cb: (event: SessionEvent) => void): () => void {
+    const entry = { fromSeq, lastDeliveredSeq: fromSeq, cb };
+    let set = this.watchers.get(sessionId);
+    if (!set) {
+      set = new Set();
+      this.watchers.set(sessionId, set);
+    }
+    set.add(entry);
+
+    // Also start a filesystem watcher as a safety net for cross-process writes
+    this.ensureFsWatcher(sessionId);
+
+    return () => {
+      set!.delete(entry);
+      if (set!.size === 0) {
+        this.watchers.delete(sessionId);
+        this.stopFsWatcher(sessionId);
+      }
+    };
+  }
+
+  private fsWatchers = new Map<string, { ac: AbortController }>();
+  private fsWatcherTails = new Map<string, number>(); // last seq delivered via fs watcher
+
+  private ensureFsWatcher(sessionId: string): void {
+    if (this.fsWatchers.has(sessionId)) return;
+
+    const filePath = join(this.sessionDir(sessionId), EVENTS_FILE);
+    const ac = new AbortController();
+    this.fsWatchers.set(sessionId, { ac });
+    this.fsWatcherTails.set(sessionId, this.seqCounters.get(sessionId) ?? 0);
+
+    // Fire-and-forget async watcher
+    void (async () => {
+      try {
+        const watcher = watch(filePath, { signal: ac.signal });
+        for await (const event of watcher) {
+          if (event.eventType === 'change') {
+            await this.pollNewEvents(sessionId);
+          }
+        }
+      } catch (err: unknown) {
+        if (err instanceof Error && err.name === 'AbortError') return;
+        // File may not exist yet — retry silently on next watch call
+      }
+    })();
+  }
+
+  private async pollNewEvents(sessionId: string): Promise<void> {
+    const lastDelivered = this.fsWatcherTails.get(sessionId) ?? 0;
+    // Use the in-memory seq counter to avoid re-delivering events that
+    // were already notified synchronously by appendBatch.
+    const alreadyNotified = this.seqCounters.get(sessionId) ?? 0;
+    const effectiveFrom = Math.max(lastDelivered, alreadyNotified);
+    const newEvents = await this.read(sessionId, effectiveFrom);
+    if (newEvents.length === 0) return;
+
+    const maxSeq = newEvents[newEvents.length - 1].seq;
+    this.fsWatcherTails.set(sessionId, maxSeq);
+    this.notifyWatchers(sessionId, newEvents);
+  }
+
+  private stopFsWatcher(sessionId: string): void {
+    const entry = this.fsWatchers.get(sessionId);
+    if (entry) {
+      entry.ac.abort();
+      this.fsWatchers.delete(sessionId);
+      this.fsWatcherTails.delete(sessionId);
+    }
+  }
+
+  private notifyWatchers(sessionId: string, events: SessionEvent[]): void {
+    const set = this.watchers.get(sessionId);
+    if (!set || set.size === 0) return;
+    for (const entry of set) {
+      for (const evt of events) {
+        if (evt.seq > entry.lastDeliveredSeq) {
+          entry.lastDeliveredSeq = evt.seq;
+          try { entry.cb(evt); } catch { /* watcher error is non-fatal */ }
+        }
+      }
+    }
+  }
+
+  // ------------------------------------------------------------------
+  // Metadata
+  // ------------------------------------------------------------------
+
+  async getMetadata(sessionId: string): Promise<SessionMetadata | null> {
+    const filePath = join(this.sessionDir(sessionId), META_FILE);
+    if (!existsSync(filePath)) return null;
+    const fd = await open(filePath, 'r');
+    try {
+      const content = await fd.readFile('utf-8');
+      return JSON.parse(content) as SessionMetadata;
+    } catch {
+      return null;
+    } finally {
+      await fd.close();
+    }
+  }
+
+  async setMetadata(sessionId: string, meta: SessionMetadata): Promise<void> {
+    const dir = this.sessionDir(sessionId);
+    await ensureDir(dir);
+    const filePath = join(dir, META_FILE);
+    const fd = await open(filePath, 'w');
+    try {
+      await fd.write(JSON.stringify(meta, null, 2));
+    } finally {
+      await fd.close();
+    }
+  }
+
+  // ------------------------------------------------------------------
+  // Session management
+  // ------------------------------------------------------------------
+
+  async listSessions(): Promise<string[]> {
+    if (!existsSync(this.basePath)) return [];
+    const entries = await readdir(this.basePath, { withFileTypes: true });
+    const sessions: string[] = [];
+    for (const entry of entries) {
+      if (entry.isDirectory()) {
+        const eventsPath = join(this.basePath, entry.name, EVENTS_FILE);
+        if (existsSync(eventsPath)) {
+          sessions.push(entry.name);
+        }
+      }
+    }
+    return sessions;
+  }
+
+  async deleteSession(sessionId: string): Promise<void> {
+    this.stopFsWatcher(sessionId);
+    this.watchers.delete(sessionId);
+    this.seqCounters.delete(sessionId);
+    this.writeLocks.delete(sessionId);
+    const dir = this.sessionDir(sessionId);
+    if (existsSync(dir)) {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }
+
+  // ------------------------------------------------------------------
+  // Internals
+  // ------------------------------------------------------------------
+
+  private sessionDir(sessionId: string): string {
+    return join(this.basePath, sessionId);
+  }
+
+  private getSeq(sessionId: string): number {
+    return this.seqCounters.get(sessionId) ?? 0;
+  }
+
+  /** Resolve the current seq from in-memory cache or disk scan. */
+  private async resolveSeq(sessionId: string, filePath: string): Promise<number> {
+    const cached = this.seqCounters.get(sessionId);
+    if (cached !== undefined) return cached;
+
+    // Scan existing file
+    if (existsSync(filePath)) {
+      let maxSeq = 0;
+      const rl = createInterface({ input: createReadStream(filePath), crlfDelay: Infinity });
+      for await (const line of rl) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        try {
+          const evt = JSON.parse(trimmed) as { seq?: number };
+          if (evt.seq && evt.seq > maxSeq) maxSeq = evt.seq;
+        } catch {
+          // skip corrupted lines
+        }
+      }
+      this.seqCounters.set(sessionId, maxSeq);
+      return maxSeq;
+    }
+
+    this.seqCounters.set(sessionId, 0);
+    return 0;
+  }
+
+  /** Serialize writes per session to ensure monotonic seq assignment. */
+  private async withWriteLock<T>(sessionId: string, fn: () => Promise<T>): Promise<T> {
+    const prev = this.writeLocks.get(sessionId) ?? Promise.resolve();
+    let resolve!: () => void;
+    const next = new Promise<void>((r) => { resolve = r; });
+    this.writeLocks.set(sessionId, next);
+
+    await prev;
+    try {
+      return await fn();
+    } finally {
+      resolve();
+    }
+  }
+}
+
+// ------------------------------------------------------------------
+// Helpers
+// ------------------------------------------------------------------
+
+async function ensureDir(dir: string): Promise<void> {
+  const { mkdir } = await import('node:fs/promises');
+  await mkdir(dir, { recursive: true });
+}
