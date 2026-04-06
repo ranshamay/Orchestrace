@@ -13,6 +13,12 @@ export type GraphNodeView = {
   dependencies: string[];
 };
 
+export type NodeTokenStream = {
+  phase: 'planning' | 'implementation';
+  text: string;
+  updatedAt: string;
+};
+
 export type TimelineItem = {
   key: string;
   time: string;

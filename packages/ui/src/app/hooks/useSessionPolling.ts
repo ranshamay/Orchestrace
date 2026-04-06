@@ -55,9 +55,11 @@ export function useSessionPolling({ selectedSessionId, setSelectedSessionId, set
     };
 
     void refreshSessionState();
+    // Polling is a fallback for SSE — reduced frequency since real-time
+    // updates arrive via EventSource in useSessionStream.
     const interval = setInterval(() => {
       void refreshSessionState();
-    }, 2500);
+    }, 30_000);
 
     return () => {
       cancelled = true;

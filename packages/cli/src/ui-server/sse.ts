@@ -46,6 +46,18 @@ export function closeWorkStream(streams: Map<string, Set<ServerResponse>>, id: s
   streams.delete(id);
 }
 
+export function broadcastSessionUpdate(
+  streams: Map<string, Set<ServerResponse>>,
+  id: string,
+  session: Record<string, unknown>,
+): void {
+  broadcastWorkStream(streams, id, 'session-update', {
+    id,
+    session,
+    time: now(),
+  });
+}
+
 export function broadcastTodoUpdate(
   streams: Map<string, Set<ServerResponse>>,
   id: string,

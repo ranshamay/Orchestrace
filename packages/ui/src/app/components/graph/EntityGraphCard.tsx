@@ -1,24 +1,45 @@
-import { Loader2 } from 'lucide-react';
+import { useMemo } from 'react';
+import { Loader2, Wrench } from 'lucide-react';
 import type { WorkSession } from '../../../lib/api';
-import type { FailureType, GraphNodeView, LlmSessionStatus } from '../../types';
+import type { FailureType, GraphNodeView, LlmSessionStatus, NodeTokenStream } from '../../types';
 import { compactPromptDisplay } from '../../utils/text';
 import { formatFailureTypeLabel, failureTypeBadgeClass } from '../../utils/failure';
 import { statusColor, formatSessionStatus, sessionStatusBadgeClass } from '../../utils/status';
 import { buildGraphLayout } from '../../utils/graph';
 import { isLlmStatusBusy, llmStatusBadgeClass } from '../../utils/llm';
+import { parseToolCallEvent } from '../../utils/timeline';
 
 type Props = {
   selectedSession?: WorkSession;
   selectedSessionRunning: boolean;
   selectedFailureType: FailureType | null;
   selectedLlmStatus: LlmSessionStatus;
+  nodeTokenStreams: Record<string, NodeTokenStream>;
   isDark: boolean;
 };
 
 /* ── colour helpers ── */
 const NODE_W = 260;
-const NODE_H = 72;
+const NODE_H = 86;
 const NODE_R = 14;
+
+type NodeActivity = {
+  toolUpdatedAt?: string;
+  streamUpdatedAt?: string;
+};
+
+function isNodeActivityHot(updatedAt: string): boolean {
+  const ts = Date.parse(updatedAt);
+  if (!Number.isFinite(ts)) {
+    return false;
+  }
+
+  return Date.now() - ts < 4_000;
+}
+
+function isHotTimestamp(updatedAt: string | undefined): boolean {
+  return Boolean(updatedAt && isNodeActivityHot(updatedAt));
+}
 
 function statusGlow(status: string): string {
   switch (status) {
@@ -70,13 +91,23 @@ function statusIcon(status: string, isDark: boolean) {
 }
 
 /* ── edge component ── */
-function GraphEdge({ from, to, isDark }: { from: GraphNodeView; to: GraphNodeView; isDark: boolean }) {
+function GraphEdge({
+  from,
+  to,
+  isDark,
+  activeByFlow,
+}: {
+  from: GraphNodeView;
+  to: GraphNodeView;
+  isDark: boolean;
+  activeByFlow: boolean;
+}) {
   const x1 = from.x + NODE_W / 2;
   const x2 = to.x - NODE_W / 2;
   const y1 = from.y;
   const y2 = to.y;
 
-  const active = from.status === 'completed' && to.status === 'running';
+  const active = activeByFlow || (from.status === 'completed' && to.status === 'running');
   const completed = from.status === 'completed' && to.status === 'completed';
   const midX1 = x1 + (x2 - x1) * 0.35;
   const midX2 = x1 + (x2 - x1) * 0.65;
@@ -115,11 +146,25 @@ function GraphEdge({ from, to, isDark }: { from: GraphNodeView; to: GraphNodeVie
 }
 
 /* ── node component ── */
-function GraphNode({ node, isDark, delay }: { node: GraphNodeView; isDark: boolean; delay: number }) {
+function GraphNode({
+  node,
+  isDark,
+  delay,
+  activity,
+}: {
+  node: GraphNodeView;
+  isDark: boolean;
+  delay: number;
+  activity?: NodeActivity;
+}) {
   const x = node.x - NODE_W / 2;
   const y = node.y - NODE_H / 2;
   const isRunning = node.status === 'running';
   const glowColor = statusGlow(node.status);
+  const toolActive = isHotTimestamp(activity?.toolUpdatedAt);
+  const streamActive = isHotTimestamp(activity?.streamUpdatedAt);
+  const hasToolActivity = Boolean(activity?.toolUpdatedAt);
+  const hasStreamActivity = Boolean(activity?.streamUpdatedAt);
 
   return (
     <g className="graph-node-enter" style={{ animationDelay: `${delay}ms` }}>
@@ -196,6 +241,41 @@ function GraphNode({ node, isDark, delay }: { node: GraphNodeView; isDark: boole
       >
         {node.status.toUpperCase()}
       </text>
+
+      {(hasToolActivity || hasStreamActivity) && (
+        <g>
+          <rect
+            fill={isDark ? '#0b1220' : '#f8fafc'}
+            height={16}
+            rx={8}
+            stroke={isDark ? '#1e293b' : '#e2e8f0'}
+            strokeWidth={1}
+            width={52}
+            x={x + 14}
+            y={y + NODE_H - 22}
+          />
+
+          {hasToolActivity && (
+            <g transform={`translate(${x + 20}, ${y + NODE_H - 19})`}>
+              <Wrench
+                className={toolActive ? 'graph-io-flow' : undefined}
+                color={toolActive ? '#3b82f6' : (isDark ? '#64748b' : '#94a3b8')}
+                size={10}
+              />
+            </g>
+          )}
+
+          {hasStreamActivity && (
+            <g transform={`translate(${x + 38}, ${y + NODE_H - 19})`}>
+              <Loader2
+                className={streamActive ? 'graph-spin' : undefined}
+                color={streamActive ? '#22c55e' : (isDark ? '#64748b' : '#94a3b8')}
+                size={10}
+              />
+            </g>
+          )}
+        </g>
+      )}
     </g>
   );
 }
@@ -220,7 +300,14 @@ function GraphDefs() {
   );
 }
 
-export function EntityGraphCard({ selectedSession, selectedSessionRunning, selectedFailureType, selectedLlmStatus, isDark }: Props) {
+export function EntityGraphCard({
+  selectedSession,
+  selectedSessionRunning,
+  selectedFailureType,
+  selectedLlmStatus,
+  nodeTokenStreams,
+  isDark,
+}: Props) {
   if (!selectedSession) {
     return (
       <div className="flex h-full items-center justify-center text-sm text-slate-400 dark:text-slate-500">
@@ -230,6 +317,44 @@ export function EntityGraphCard({ selectedSession, selectedSessionRunning, selec
   }
 
   const graphLayout = buildGraphLayout(selectedSession);
+
+  const nodeActivityById = useMemo(() => {
+    const activity: Record<string, NodeActivity> = {};
+
+    for (const event of selectedSession.events) {
+      if (!event.taskId) {
+        continue;
+      }
+
+        const current = activity[event.taskId] ?? {};
+
+      const toolEvent = parseToolCallEvent(event);
+      if (toolEvent) {
+          current.toolUpdatedAt = event.time;
+        activity[event.taskId] = current;
+        continue;
+      }
+
+      activity[event.taskId] = current;
+    }
+
+    for (const [taskId, stream] of Object.entries(nodeTokenStreams)) {
+        const current = activity[taskId] ?? {};
+        current.streamUpdatedAt = stream.updatedAt;
+      activity[taskId] = current;
+    }
+
+    return activity;
+  }, [nodeTokenStreams, selectedSession.events]);
+
+  const activeFlowNodeIds = useMemo(
+    () => new Set(
+      Object.entries(nodeActivityById)
+          .filter(([, value]) => isHotTimestamp(value.toolUpdatedAt) || isHotTimestamp(value.streamUpdatedAt))
+        .map(([taskId]) => taskId),
+    ),
+    [nodeActivityById],
+  );
 
   return (
     <div className="rounded-xl border border-slate-200/60 bg-white shadow-sm dark:border-slate-700/60 dark:bg-slate-900">
@@ -259,10 +384,24 @@ export function EntityGraphCard({ selectedSession, selectedSessionRunning, selec
           {graphLayout.nodes.flatMap((node) => node.dependencies.map((dep) => {
             const fromNode = graphLayout.nodes.find((c) => c.id === dep);
             if (!fromNode) return null;
-            return <GraphEdge from={fromNode} isDark={isDark} key={`edge-${dep}-${node.id}`} to={node} />;
+            return (
+              <GraphEdge
+                activeByFlow={activeFlowNodeIds.has(node.id)}
+                from={fromNode}
+                isDark={isDark}
+                key={`edge-${dep}-${node.id}`}
+                to={node}
+              />
+            );
           }))}
           {graphLayout.nodes.map((node, i) => (
-            <GraphNode delay={i * 60} isDark={isDark} key={node.id} node={node} />
+            <GraphNode
+              activity={nodeActivityById[node.id]}
+              delay={i * 60}
+              isDark={isDark}
+              key={node.id}
+              node={node}
+            />
           ))}
         </svg>
       </div>

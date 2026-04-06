@@ -39,7 +39,7 @@ import {
   trimThreadMessages,
 } from './ui-server/chat.js';
 import { asString, toErrorMessage } from './ui-server/strings.js';
-import { broadcastTodoUpdate, broadcastWorkStream, closeWorkStream, sendSse } from './ui-server/sse.js';
+import { broadcastSessionUpdate, broadcastTodoUpdate, broadcastWorkStream, closeWorkStream, sendSse } from './ui-server/sse.js';
 import type {
   AgentTodoItem,
   AuthSession,
@@ -65,6 +65,7 @@ import { WorkspaceManager } from './workspace-manager.js';
 import { FileEventStore } from '@orchestrace/store';
 import { materializeSession as materializeFromEvents } from '@orchestrace/store';
 import type { SessionEventInput } from '@orchestrace/store';
+import { ObserverDaemon } from './observer/index.js';
 
 const GITHUB_PROVIDER_ID = 'github';
 const GITHUB_API_BASE_URL = 'https://api.github.com';
@@ -235,6 +236,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           worktreeBranch: c.worktreeBranch,
           creationReason: c.creationReason,
           sourceSessionId: c.sourceSessionId,
+          source: c.source,
           createdAt: materialized.createdAt,
           updatedAt: materialized.updatedAt,
           status: materialized.status,
@@ -345,6 +347,10 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                 }
                 default:
                   break;
+              }
+              // Broadcast session state for all events except high-frequency stream deltas
+              if (event.type !== 'session:stream-delta') {
+                broadcastSessionUpdate(workStreamClients, sessionId, serializeWorkSession(session, sessionTodos.get(sessionId) ?? []));
               }
               uiStatePersistence.schedule();
             });
@@ -690,6 +696,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     batchMinConcurrency?: number;
     creationReason?: SessionCreationReason;
     sourceSessionId?: string;
+    source?: 'user' | 'observer';
   }): Promise<{ id: string } | { error: string; statusCode: number }> {
     const promptParts = cloneChatContentParts(request.promptParts ?? []);
     const prompt = asString(request.prompt);
@@ -775,6 +782,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       worktreeBranch: selectedWorktreeBranch,
       creationReason: request.creationReason ?? 'start',
       sourceSessionId: asString(request.sourceSessionId) || undefined,
+      source: request.source,
       createdAt,
       updatedAt: createdAt,
       status: 'running',
@@ -819,6 +827,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           batchMinConcurrency,
           creationReason: request.creationReason ?? 'start',
           sourceSessionId: asString(request.sourceSessionId) || undefined,
+          source: request.source,
         },
       },
     });
@@ -976,6 +985,11 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           break;
       }
 
+      // Broadcast session state for all events except high-frequency stream deltas
+      if (event.type !== 'session:stream-delta') {
+        broadcastSessionUpdate(workStreamClients, id, serializeWorkSession(session, sessionTodos.get(id) ?? []));
+      }
+
       uiStatePersistence.schedule();
     });
 
@@ -1011,6 +1025,17 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     return { id };
   }
 
+  // -- Observer daemon (autonomous background agent) --------------------------
+  const observerDaemon = new ObserverDaemon({
+    orchestraceDir: join(workspaceManager.getRootDir(), '.orchestrace'),
+    eventStore,
+    llm,
+    startSession: startWorkSession,
+  });
+  void observerDaemon.start().catch((err) => {
+    console.error('[orchestrace][observer] Failed to start daemon:', err);
+  });
+
   let hmrWatcher: FSWatcher | undefined;
   if (hmrEnabled) {
     const watchPath = resolveUiWatchPath(workspaceManager.getRootDir());
@@ -1043,7 +1068,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       const url = new URL(req.url ?? '/', 'http://localhost');
       const { pathname } = url;
 
-      if (req.method === 'GET' && pathname === '/') {
+      if (req.method === 'GET' && (pathname === '/' || pathname === '/settings' || pathname === '/settings/')) {
         sendHtml(res, renderDashboardHtml(hmrEnabled));
         return;
       }
@@ -1099,11 +1124,17 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         }
         clients.add(res);
 
+        const todos = (sessionTodos.get(id) ?? []).map((item) => ({ ...item }));
+        const thread = sessionChats.get(id) ?? createSessionChatThread(session);
+        sessionChats.set(id, thread);
+
         sendSse(res, 'ready', {
           id,
+          session: serializeWorkSession(session, sessionTodos.get(id) ?? []),
+          messages: thread.messages.filter((message) => message.role !== 'system'),
+          todos,
           status: session.status,
           llmStatus: session.llmStatus,
-          todos: (sessionTodos.get(id) ?? []).map((item) => ({ ...item })),
           time: now(),
         });
 
@@ -1249,7 +1280,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         }
 
         uiPreferences = normalizeUiPreferences(body, uiPreferences);
-        uiStatePersistence.schedule();
+        await uiStatePersistence.flush();
         sendJson(res, 200, { preferences: { ...uiPreferences } });
         return;
       }
@@ -2178,6 +2209,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                   emitSubAgentWorkerEvent({
                     session,
                     uiStatePersistence,
+                    persistEvent: emitSessionEvent,
                     taskId: 'chat',
                     phase: subAgentPhase,
                     toolCallId,
@@ -2223,6 +2255,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                     emitSubAgentWorkerEvent({
                       session,
                       uiStatePersistence,
+                      persistEvent: emitSessionEvent,
                       taskId: 'chat',
                       phase: subAgentPhase,
                       toolCallId,
@@ -2240,6 +2273,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                     emitSubAgentWorkerEvent({
                       session,
                       uiStatePersistence,
+                      persistEvent: emitSessionEvent,
                       taskId: 'chat',
                       phase: subAgentPhase,
                       toolCallId,
@@ -2281,6 +2315,13 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                       cost: streamState.usage?.cost ?? 0,
                     };
                     streamState.usageEstimated = true;
+
+                    // Dual-write: persist stream deltas for chat turns
+                    emitSessionEvent(session.id, {
+                      time: now(),
+                      type: 'session:stream-delta',
+                      payload: { taskId: 'chat', phase: continuationPhase === 'planning' ? 'planning' : 'implementation', delta },
+                    });
 
                     broadcastWorkStream(chatStreamClients, streamId, 'token', {
                       streamId,
@@ -2333,6 +2374,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                       pendingSubagentNodeIdsBySession,
                       workStreamClients,
                       uiStatePersistence,
+                      emitSessionEvent,
                     );
                   },
                 });
@@ -2552,6 +2594,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                 emitSubAgentWorkerEvent({
                   session,
                   uiStatePersistence,
+                  persistEvent: emitSessionEvent,
                   taskId: 'chat',
                   phase: subAgentPhase,
                   toolCallId,
@@ -2597,6 +2640,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                   emitSubAgentWorkerEvent({
                     session,
                     uiStatePersistence,
+                    persistEvent: emitSessionEvent,
                     taskId: 'chat',
                     phase: subAgentPhase,
                     toolCallId,
@@ -2614,6 +2658,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                   emitSubAgentWorkerEvent({
                     session,
                     uiStatePersistence,
+                    persistEvent: emitSessionEvent,
                     taskId: 'chat',
                     phase: subAgentPhase,
                     toolCallId,
@@ -2646,6 +2691,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                     pendingSubagentNodeIdsBySession,
                     workStreamClients,
                     uiStatePersistence,
+                    emitSessionEvent,
                   );
                 },
               });
@@ -2718,6 +2764,46 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         }
       }
 
+      // -- Observer API -------------------------------------------------------
+
+      if (req.method === 'GET' && pathname === '/api/observer/status') {
+        sendJson(res, 200, {
+          config: observerDaemon.getConfig(),
+          state: observerDaemon.getState(),
+        });
+        return;
+      }
+
+      if (req.method === 'GET' && pathname === '/api/observer/findings') {
+        sendJson(res, 200, { findings: observerDaemon.getFindings() });
+        return;
+      }
+
+      if (req.method === 'POST' && pathname === '/api/observer/enable') {
+        await observerDaemon.setEnabled(true);
+        sendJson(res, 200, { enabled: true });
+        return;
+      }
+
+      if (req.method === 'POST' && pathname === '/api/observer/disable') {
+        await observerDaemon.setEnabled(false);
+        sendJson(res, 200, { enabled: false });
+        return;
+      }
+
+      if (req.method === 'POST' && pathname === '/api/observer/config') {
+        const body = await readJsonBody(req);
+        await observerDaemon.updateConfig(body);
+        sendJson(res, 200, { config: observerDaemon.getConfig() });
+        return;
+      }
+
+      if (req.method === 'POST' && pathname === '/api/observer/trigger') {
+        const result = await observerDaemon.triggerAnalysis();
+        sendJson(res, 200, result);
+        return;
+      }
+
       sendJson(res, 404, { error: 'Not found' });
     } catch (error) {
       sendJson(res, 500, { error: toErrorMessage(error) });
@@ -2736,6 +2822,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
 
   server.on('close', () => {
     void uiStatePersistence.flush();
+    observerDaemon.stop();
     hmrWatcher?.close();
     hmrClients.clear();
     for (const [id] of workStreamClients) {
@@ -3787,6 +3874,10 @@ function resolveUiPreferencesDefaults(): UiPreferences {
   const batchMinConcurrency = Math.min(batchConcurrency, resolveBatchMinConcurrencyDefault());
   const executionContext = resolveExecutionContextDefault();
   return {
+    activeTab: resolveUiTabDefault(),
+    observerShowFindings: resolveObserverShowFindingsDefault(),
+    defaultProvider: resolveDefaultProviderPreferenceDefault(),
+    defaultModel: resolveDefaultModelPreferenceDefault(),
     executionContext,
     selectedWorktreePath: asString(process.env.ORCHESTRACE_UI_SELECTED_WORKTREE_PATH) || undefined,
     useWorktree: executionContext === 'git-worktree',
@@ -3814,6 +3905,10 @@ function normalizeUiPreferences(value: unknown, fallback: UiPreferences): UiPref
     || fallback.selectedWorktreePath;
 
   return {
+    activeTab: normalizeUiTab(value.activeTab) ?? fallback.activeTab,
+    observerShowFindings: parseBooleanSetting(value.observerShowFindings) ?? fallback.observerShowFindings,
+    defaultProvider: normalizeStringPreference(value.defaultProvider, fallback.defaultProvider),
+    defaultModel: normalizeStringPreference(value.defaultModel, fallback.defaultModel),
     executionContext,
     selectedWorktreePath,
     useWorktree: executionContext === 'git-worktree',
@@ -3821,6 +3916,39 @@ function normalizeUiPreferences(value: unknown, fallback: UiPreferences): UiPref
     batchConcurrency,
     batchMinConcurrency,
   };
+}
+
+function resolveUiTabDefault(): 'graph' | 'settings' {
+  return normalizeUiTab(process.env.ORCHESTRACE_UI_ACTIVE_TAB) ?? 'graph';
+}
+
+function resolveObserverShowFindingsDefault(): boolean {
+  return parseBooleanSetting(process.env.ORCHESTRACE_UI_OBSERVER_SHOW_FINDINGS) ?? false;
+}
+
+function resolveDefaultProviderPreferenceDefault(): string {
+  return asString(process.env.ORCHESTRACE_UI_DEFAULT_PROVIDER) || '';
+}
+
+function resolveDefaultModelPreferenceDefault(): string {
+  return asString(process.env.ORCHESTRACE_UI_DEFAULT_MODEL) || '';
+}
+
+function normalizeUiTab(value: unknown): 'graph' | 'settings' | undefined {
+  const normalized = asString(value).toLowerCase();
+  if (normalized === 'graph' || normalized === 'settings') {
+    return normalized;
+  }
+
+  return undefined;
+}
+
+function normalizeStringPreference(value: unknown, fallback: string): string {
+  if (typeof value !== 'string') {
+    return fallback;
+  }
+
+  return value.trim();
 }
 
 function resolveAdaptiveConcurrencyDefault(): boolean {
@@ -4100,6 +4228,7 @@ function resolveToolPreviewLimit(toolName: string, direction: 'input' | 'output'
 function emitSubAgentWorkerEvent(params: {
   session: WorkSession;
   uiStatePersistence: { schedule: () => void; flush: () => Promise<void> };
+  persistEvent?: (sessionId: string, event: SessionEventInput) => void;
   taskId: string;
   phase: 'planning' | 'implementation';
   toolCallId: string;
@@ -4157,10 +4286,14 @@ function emitSubAgentWorkerEvent(params: {
     }
   }
 
-  // Note: emitSubAgentWorkerEvent is a standalone function without access to emitSessionEvent.
-  // Sub-agent events are captured indirectly via the onEvent callback's dag-event dual-writes
-  // during orchestration, and via handleChatToolCallEvent during chat. No separate dual-write
-  // needed here — the UiDagEvent push + llmStatus mutation are already covered by the callers.
+  // Dual-write: persist sub-agent worker events to event store for auditability
+  if (uiEvent && params.persistEvent) {
+    params.persistEvent(params.session.id, {
+      time: uiEvent.time,
+      type: 'session:dag-event',
+      payload: { event: uiEvent },
+    });
+  }
 
   params.session.updatedAt = now();
   if (params.status === 'started') {
@@ -4189,13 +4322,25 @@ function emitSubAgentWorkerEvent(params: {
           params.status === 'failed' ? 'failed' : undefined;
     if (graphStatus) {
       setAgentGraphNodeStatus(params.session, [params.nodeId], graphStatus);
+      // Dual-write: persist graph node status changes
+      if (params.persistEvent) {
+        params.persistEvent(params.session.id, {
+          time: now(),
+          type: 'session:agent-graph-set',
+          payload: { graph: params.session.agentGraph },
+        });
+      }
     }
   }
 
-  // Note: emitSubAgentWorkerEvent is a standalone function without access to emitSessionEvent.
-  // Sub-agent events are captured indirectly via the onEvent callback's dag-event dual-writes
-  // during orchestration, and via handleChatToolCallEvent during chat. No separate dual-write
-  // needed here — the UiDagEvent push + llmStatus mutation are already covered by the callers.
+  // Dual-write: persist llm-status changes during sub-agent execution
+  if (params.persistEvent) {
+    params.persistEvent(params.session.id, {
+      time: params.session.updatedAt,
+      type: 'session:llm-status-change',
+      payload: { llmStatus: params.session.llmStatus },
+    });
+  }
 }
 
 function compactSubAgentWorkerText(value: string, maxChars: number): string {
@@ -4218,6 +4363,7 @@ function handleChatToolCallEvent(
   pendingSubagentNodeIdsBySession: Map<string, Map<string, string[]>>,
   workStreamClients: Map<string, Set<ServerResponse>>,
   uiStatePersistence: { schedule: () => void; flush: () => Promise<void> },
+  persistEvent: (sessionId: string, event: SessionEventInput) => void,
 ): void {
   const event = toChatToolDagEvent(toolEvent);
   const uiEvent = toUiEvent(session.id, event);
@@ -4228,12 +4374,27 @@ function handleChatToolCallEvent(
     }
   }
 
+  // Dual-write: persist chat tool calls to event store for auditability
+  if (uiEvent) {
+    persistEvent(session.id, {
+      time: uiEvent.time,
+      type: 'session:dag-event',
+      payload: { event: uiEvent },
+    });
+  }
+
   let checklistChanged = false;
   let graphChanged = false;
   if (event.status === 'started') {
     checklistChanged = applyChecklistFromToolEvent(session.id, event, sessionTodos);
     if (checklistChanged) {
       broadcastTodoUpdate(workStreamClients, session.id, sessionTodos.get(session.id) ?? []);
+      // Dual-write: persist todo state for chat tool calls
+      persistEvent(session.id, {
+        time: now(),
+        type: 'session:todos-set',
+        payload: { items: sessionTodos.get(session.id) ?? [] },
+      });
     }
 
     graphChanged = applyAgentGraphFromToolEvent(session, event) || graphChanged;
@@ -4244,6 +4405,15 @@ function handleChatToolCallEvent(
     event,
     pendingSubagentNodeIdsBySession,
   );
+
+  if (graphChanged || graphProgressChanged) {
+    // Dual-write: persist agent graph state for chat tool calls
+    persistEvent(session.id, {
+      time: now(),
+      type: 'session:agent-graph-set',
+      payload: { graph: session.agentGraph },
+    });
+  }
 
   if (uiEvent || checklistChanged || graphChanged) {
     session.updatedAt = now();
@@ -5180,6 +5350,7 @@ function serializeWorkSession(session: WorkSession, todos: AgentTodoItem[] = [])
     worktreeBranch: session.worktreeBranch,
     creationReason: session.creationReason,
     sourceSessionId: session.sourceSessionId,
+    source: session.source,
     createdAt: session.createdAt,
     updatedAt: session.updatedAt,
     status: session.status,
@@ -5852,6 +6023,7 @@ function buildSessionSystemPrompt(session: WorkSession, phase: SessionPromptPhas
           'When asked to inspect or change todos/agent graph, call the corresponding tools instead of simulating success.',
           'For reading multiple files, prefer read_files with concurrency over repeated one-by-one read_file calls.',
           'When calling todo tools, use canonical statuses only: todo, in_progress, done.',
+          'Always run `git fetch origin` before checking remote branch state, merge status, or pushing. Never trust local tracking refs without fetching first.',
           'Do not ask the user to continue after partial progress; continue autonomously until completion or a concrete blocker is reached.',
           'For transient tool or sub-agent failures (timeouts, aborts, rate limits), retry automatically before surfacing a blocker.',
           'If no tool was executed, explicitly state that no tool output is available.',
@@ -5886,6 +6058,7 @@ function buildSessionSystemPrompt(session: WorkSession, phase: SessionPromptPhas
             'Iterate until validation passes or a true blocker is reached.',
             'After each push or PR update, query remote CI/check status with github_api and keep fixing/re-pushing until checks pass or a true blocker is reached.',
             'Do not stop at green checks alone: verify PR mergeability, required checks, and review state via github_api, then keep iterating until the PR is merge-ready or a true blocker is reached.',
+            'Always run `git fetch origin` before checking remote branch state, merge status, or pushing. Never trust local tracking refs without fetching first.',
             'Do not ask the user to continue after partial progress; continue autonomously until completion or a concrete blocker is reached.',
             'For transient tool or sub-agent failures (timeouts, aborts, rate limits), retry automatically before surfacing a blocker.',
           ];

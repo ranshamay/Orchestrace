@@ -43,8 +43,16 @@ type Params = {
   providers: AppMainContentProps['providers'];
   providerStatuses: AppMainContentProps['providerStatuses'];
   activeWorkspaceId: string;
+  defaultProvider: string;
+  defaultModel: string;
+  onSetDefaultProvider: AppMainContentProps['onSetDefaultProvider'];
+  onSetDefaultModel: AppMainContentProps['onSetDefaultModel'];
   onSetExecutionContext: AppMainContentProps['onSetExecutionContext'];
   onSetSelectedWorktreePath: AppMainContentProps['onSetSelectedWorktreePath'];
+  observerShowFindings: boolean;
+  onSetObserverShowFindings: (next: boolean) => void;
+  onSettingsSaveStatus: AppMainContentProps['onSettingsSaveStatus'];
+  nodeTokenStreams: AppMainContentProps['nodeTokenStreams'];
   copyTraceState: 'idle' | 'copied' | 'failed';
   setCopyTraceState: (state: 'idle' | 'copied' | 'failed') => void;
 };
@@ -100,7 +108,15 @@ export function buildMainContentProps(params: Params): AppMainContentProps {
     providers: params.providers,
     providerStatuses: params.providerStatuses,
     activeWorkspaceId: params.activeWorkspaceId,
+    defaultProvider: params.defaultProvider,
+    defaultModel: params.defaultModel,
+    onSetDefaultProvider: params.onSetDefaultProvider,
+    onSetDefaultModel: params.onSetDefaultModel,
     onSetExecutionContext: params.onSetExecutionContext,
     onSetSelectedWorktreePath: params.onSetSelectedWorktreePath,
+    observerShowFindings: params.observerShowFindings,
+    onSetObserverShowFindings: params.onSetObserverShowFindings,
+    onSettingsSaveStatus: params.onSettingsSaveStatus,
+    nodeTokenStreams: params.nodeTokenStreams,
   };
 }

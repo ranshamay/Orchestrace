@@ -40,6 +40,12 @@ body.is-horizontal-resizing {
   to { opacity: 1; transform: scale(1); }
 }
 
+@keyframes graph-io-flow {
+  0% { opacity: 0.85; }
+  50% { opacity: 1; }
+  100% { opacity: 0.85; }
+}
+
 .graph-node-enter {
   animation: graph-node-enter 0.4s ease-out both;
 }
@@ -60,4 +66,8 @@ body.is-horizontal-resizing {
 .graph-spin {
   animation: graph-spin 1.5s linear infinite;
   transform-origin: center;
+}
+
+.graph-io-flow {
+  animation: graph-io-flow 1.25s ease-in-out infinite;
 }

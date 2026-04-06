@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import {
+  type UiPreferences,
   type ExecutionContext,
   fetchGithubAuthStatus,
   fetchProviders,
@@ -13,6 +14,7 @@ import {
 } from '../../lib/api';
 import type { SessionLlmControls } from '../types';
 import { readRunIdFromUrl, updateRunIdInUrl } from '../utils/runUrl';
+import { readTabFromUrl } from '../utils/viewRoute';
 
 type ProviderStatus = { provider: string; source: string };
 
@@ -53,6 +55,8 @@ export function useBootstrapData() {
   const [adaptiveConcurrency, setAdaptiveConcurrency] = useState(false);
   const [batchConcurrency, setBatchConcurrency] = useState(8);
   const [batchMinConcurrency, setBatchMinConcurrency] = useState(1);
+  const [activeTabPreference, setActiveTabPreference] = useState<'graph' | 'settings'>(() => readTabFromUrl());
+  const [observerShowFindings, setObserverShowFindings] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
   const [bootstrapComplete, setBootstrapComplete] = useState(false);
 
@@ -108,9 +112,13 @@ export function useBootstrapData() {
           setGithubAuthStatus(githubAuthStatusResult.value.status);
         }
 
-        const preferences = preferencesResult.status === 'fulfilled'
+            const preferences: UiPreferences = preferencesResult.status === 'fulfilled'
           ? preferencesResult.value.preferences
           : {
+              activeTab: 'graph',
+              observerShowFindings: false,
+              defaultProvider: '',
+              defaultModel: '',
               executionContext: 'workspace' as const,
               selectedWorktreePath: undefined,
               useWorktree: false,
@@ -123,14 +131,29 @@ export function useBootstrapData() {
           bootstrapErrors.push(toErrorMessage(preferencesResult.reason));
         }
 
+        const preferredProvider = (() => {
+          const configured = typeof preferences.defaultProvider === 'string'
+            ? preferences.defaultProvider.trim()
+            : '';
+          if (!configured) {
+            return '';
+          }
+
+          return providersState?.statuses.some((status) => status.provider === configured && status.source !== 'none')
+            ? configured
+            : '';
+        })();
         const connectedProvider = providersState?.statuses.find((status) => status.source !== 'none')?.provider || '';
-        const defaultProvider = connectedProvider || providersState?.defaults.provider || providersState?.providers[0]?.id || '';
+        const defaultProvider = preferredProvider || connectedProvider || providersState?.defaults.provider || providersState?.providers[0]?.id || '';
+        const defaultModel = typeof preferences.defaultModel === 'string'
+          ? preferences.defaultModel.trim()
+          : '';
         const defaultWorkspace = workspacesState?.activeWorkspaceId || workspacesState?.workspaces[0]?.id || '';
         const defaultExecutionContext: ExecutionContext = preferences.executionContext
           ?? (preferences.useWorktree ? 'git-worktree' : 'workspace');
         const initialControls: SessionLlmControls = {
           provider: defaultProvider,
-          model: '',
+          model: defaultModel,
           workspaceId: defaultWorkspace,
           autoApprove: true,
           executionContext: defaultExecutionContext,
@@ -152,6 +175,8 @@ export function useBootstrapData() {
         setAdaptiveConcurrency(initialControls.adaptiveConcurrency);
         setBatchConcurrency(initialControls.batchConcurrency);
         setBatchMinConcurrency(initialControls.batchMinConcurrency);
+        setActiveTabPreference(preferences.activeTab ?? 'graph');
+        setObserverShowFindings(preferences.observerShowFindings ?? false);
 
         if (bootstrapErrors.length > 0) {
           setErrorMessage(bootstrapErrors[0]);
@@ -207,6 +232,9 @@ export function useBootstrapData() {
     setBatchConcurrency,
     batchMinConcurrency,
     setBatchMinConcurrency,
+    activeTabPreference,
+    observerShowFindings,
+    setObserverShowFindings,
     errorMessage,
     setErrorMessage,
     bootstrapComplete,

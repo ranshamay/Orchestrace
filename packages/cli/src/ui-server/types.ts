@@ -138,6 +138,7 @@ export interface WorkSession {
   worktreeBranch?: string;
   creationReason: SessionCreationReason;
   sourceSessionId?: string;
+  source?: 'user' | 'observer';
   createdAt: string;
   updatedAt: string;
   status: WorkState;
@@ -182,6 +183,10 @@ export interface PersistedWorkSession {
 }
 
 export interface UiPreferences {
+  activeTab: 'graph' | 'settings';
+  observerShowFindings: boolean;
+  defaultProvider: string;
+  defaultModel: string;
   executionContext: ExecutionContext;
   selectedWorktreePath?: string;
   useWorktree: boolean;
@@ -191,6 +196,10 @@ export interface UiPreferences {
 }
 
 export interface PersistedUiPreferences {
+  activeTab?: 'graph' | 'settings';
+  observerShowFindings?: boolean;
+  defaultProvider?: string;
+  defaultModel?: string;
   executionContext?: ExecutionContext;
   selectedWorktreePath?: string;
   useWorktree?: boolean;

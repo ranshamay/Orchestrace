@@ -120,6 +120,8 @@ export interface SessionConfig {
   worktreeBranch?: string;
   creationReason: SessionCreationReason;
   sourceSessionId?: string;
+  /** Session origin: 'user' (default) or 'observer' (auto-created by observer agent). */
+  source?: 'user' | 'observer';
 }
 
 // ---- Event discriminated union ----------------------------------------------

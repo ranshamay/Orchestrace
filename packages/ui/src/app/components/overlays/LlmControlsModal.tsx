@@ -1,8 +1,11 @@
+import { useEffect, useMemo } from 'react';
 import type { GitWorktreeInfo, ProviderInfo, Workspace } from '../../../lib/api';
+import { ModelAutocomplete } from '../ModelAutocomplete';
 
 export type LlmControlsModalProps = {
   isOpen: boolean;
   providers: ProviderInfo[];
+  providerStatuses: Array<{ provider: string; source: string }>;
   workspaces: Workspace[];
   currentModels: string[];
   workWorkspaceId: string;
@@ -32,6 +35,7 @@ export function LlmControlsModal(props: LlmControlsModalProps) {
   const {
     isOpen,
     providers,
+    providerStatuses,
     workspaces,
     currentModels,
     workWorkspaceId,
@@ -57,6 +61,32 @@ export function LlmControlsModal(props: LlmControlsModalProps) {
     onChangeBatchMinConcurrency,
   } = props;
 
+  const connectedProviders = useMemo(() => {
+    const connectedProviderIds = new Set(
+      providerStatuses.filter((entry) => entry.source !== 'none').map((entry) => entry.provider),
+    );
+    return providers.filter((provider) => connectedProviderIds.has(provider.id));
+  }, [providerStatuses, providers]);
+
+  useEffect(() => {
+    if (!isOpen) {
+      return;
+    }
+
+    if (connectedProviders.length === 0) {
+      if (workProvider) {
+        onChangeProvider('');
+      }
+      return;
+    }
+
+    if (connectedProviders.some((provider) => provider.id === workProvider)) {
+      return;
+    }
+
+    onChangeProvider(connectedProviders[0].id);
+  }, [connectedProviders, isOpen, onChangeProvider, workProvider]);
+
   if (!isOpen) {
     return null;
   }
@@ -81,13 +111,17 @@ export function LlmControlsModal(props: LlmControlsModalProps) {
 
           <select className="rounded border border-slate-200 px-2 py-1.5 text-sm dark:border-slate-700 dark:bg-slate-900" value={workProvider} onChange={(event) => onChangeProvider(event.target.value)}>
             <option value="">Provider</option>
-            {providers.map((provider) => <option key={provider.id} value={provider.id}>{provider.id}</option>)}
+            {connectedProviders.length === 0 && <option value="" disabled>No connected providers</option>}
+            {connectedProviders.map((provider) => <option key={provider.id} value={provider.id}>{provider.id}</option>)}
           </select>
 
-          <select className="rounded border border-slate-200 px-2 py-1.5 text-sm dark:border-slate-700 dark:bg-slate-900 md:col-span-2" value={workModel} onChange={(event) => onChangeModel(event.target.value)}>
-            <option value="">Model</option>
-            {currentModels.map((model) => <option key={model} value={model}>{model}</option>)}
-          </select>
+          <ModelAutocomplete
+            models={currentModels}
+            value={workModel}
+            onChange={onChangeModel}
+            placeholder="Search models…"
+            className="md:col-span-2"
+          />
 
           <label className="md:col-span-2 flex items-center gap-2 rounded border border-slate-200 bg-white px-2 py-1.5 text-sm text-slate-600 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300">
             <input checked={autoApprove} className="h-4 w-4" onChange={(event) => onChangeAutoApprove(event.target.checked)} type="checkbox" />

@@ -3,9 +3,17 @@ import { SessionsRail } from '../components/layout/SessionsRail';
 import { TopBar } from '../components/layout/TopBar';
 import { ErrorToast } from '../components/overlays/ErrorToast';
 import { LlmControlsModal } from '../components/overlays/LlmControlsModal';
+import { SettingsSaveToast } from '../components/overlays/SettingsSaveToast';
 import type { AppShellProps } from './types';
 
-export function AppShell({ sessionSidebarProps, mainContentProps, llmModalProps, errorMessage }: AppShellProps) {
+export function AppShell({
+  sessionSidebarProps,
+  mainContentProps,
+  llmModalProps,
+  errorMessage,
+  settingsSaveToastState,
+  settingsSaveToastMessage,
+}: AppShellProps) {
   return (
     <div className="flex h-screen w-screen flex-col overflow-hidden bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-100">
       <TopBar
@@ -30,6 +38,7 @@ export function AppShell({ sessionSidebarProps, mainContentProps, llmModalProps,
           <AppMainContent {...mainContentProps} />
         </main>
       </div>
+      <SettingsSaveToast state={settingsSaveToastState} message={settingsSaveToastMessage} />
       <ErrorToast message={errorMessage} />
       <LlmControlsModal {...llmModalProps} />
     </div>

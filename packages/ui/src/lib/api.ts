@@ -44,6 +44,10 @@ export interface GitWorktreeInfo {
 }
 
 export interface UiPreferences {
+  activeTab: 'graph' | 'settings';
+  observerShowFindings: boolean;
+  defaultProvider: string;
+  defaultModel: string;
   executionContext: ExecutionContext;
   selectedWorktreePath?: string;
   useWorktree: boolean;
@@ -113,6 +117,7 @@ export interface WorkSession {
   worktreeBranch?: string;
   creationReason?: SessionCreationReason;
   sourceSessionId?: string;
+  source?: 'user' | 'observer';
   createdAt: string;
   updatedAt: string;
   status: string;
@@ -399,5 +404,77 @@ export async function toggleTodo(id: string, todoId: string, done: boolean): Pro
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ id, todoId, done }),
   });
+  return readJson(res);
+}
+
+// -- Observer API --
+
+export interface ObserverFinding {
+  fingerprint: string;
+  category: string;
+  severity: string;
+  title: string;
+  description: string;
+  suggestedFix: string;
+  relevantFiles?: string[];
+  observedInSessions: string[];
+  detectedAt: string;
+  fixSessionId: string | null;
+  fixStatus: 'pending' | 'spawned' | 'completed' | 'failed';
+  additionalSessions: string[];
+}
+
+export interface ObserverStatusResponse {
+  config: {
+    enabled: boolean;
+    provider: string;
+    model: string;
+    fixProvider: string;
+    fixModel: string;
+    analysisCooldownMs: number;
+    assessmentCategories: Array<
+      'code-quality' | 'performance' | 'agent-efficiency' | 'architecture' | 'test-coverage'
+    >;
+  };
+  state: {
+    running: boolean;
+    lastAnalysisAt: string | null;
+    analyzedCount: number;
+    pendingFindings: number;
+    totalFindings: number;
+  };
+}
+
+export async function fetchObserverStatus(): Promise<ObserverStatusResponse> {
+  const res = await fetch(`${API_BASE}/observer/status`);
+  return readJson(res);
+}
+
+export async function fetchObserverFindings(): Promise<{ findings: ObserverFinding[] }> {
+  const res = await fetch(`${API_BASE}/observer/findings`);
+  return readJson(res);
+}
+
+export async function enableObserver(): Promise<{ enabled: boolean }> {
+  const res = await fetch(`${API_BASE}/observer/enable`, { method: 'POST' });
+  return readJson(res);
+}
+
+export async function disableObserver(): Promise<{ enabled: boolean }> {
+  const res = await fetch(`${API_BASE}/observer/disable`, { method: 'POST' });
+  return readJson(res);
+}
+
+export async function updateObserverConfig(config: Record<string, unknown>): Promise<{ config: ObserverStatusResponse['config'] }> {
+  const res = await fetch(`${API_BASE}/observer/config`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(config),
+  });
+  return readJson(res);
+}
+
+export async function triggerObserverAnalysis(): Promise<{ analyzed: number; findings: number; spawned: number }> {
+  const res = await fetch(`${API_BASE}/observer/trigger`, { method: 'POST' });
   return readJson(res);
 }

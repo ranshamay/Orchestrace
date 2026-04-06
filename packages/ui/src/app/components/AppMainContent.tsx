@@ -1,5 +1,6 @@
 import type { AgentTodo, GitWorktreeInfo, ProviderInfo, WorkSession, Workspace } from '../../lib/api';
-import type { ComposerImageAttachment, ComposerMode, FailureType, LlmSessionStatus, TimelineItem } from '../types';
+import type { ComposerImageAttachment, ComposerMode, FailureType, LlmSessionStatus, NodeTokenStream, TimelineItem } from '../types';
+import type { SettingsSaveToastState } from './overlays/SettingsSaveToast';
 import { GraphTabView } from './graph/GraphTabView';
 import { TimelinePanel } from './work/TimelinePanel';
 import { ComposerPanel } from './work/ComposerPanel';
@@ -54,8 +55,16 @@ export type AppMainContentProps = {
   providers: ProviderInfo[];
   providerStatuses: Array<{ provider: string; source: string }>;
   activeWorkspaceId: string;
+  defaultProvider: string;
+  defaultModel: string;
+  onSetDefaultProvider: (next: string) => void;
+  onSetDefaultModel: (next: string) => void;
   onSetExecutionContext: (next: 'workspace' | 'git-worktree') => void;
   onSetSelectedWorktreePath: (next: string) => void;
+  observerShowFindings: boolean;
+  onSetObserverShowFindings: (next: boolean) => void;
+  onSettingsSaveStatus: (state: Exclude<SettingsSaveToastState, 'idle'>, message: string) => void;
+  nodeTokenStreams: Record<string, NodeTokenStream>;
 };
 
 export function AppMainContent(props: AppMainContentProps) {
@@ -66,11 +75,18 @@ export function AppMainContent(props: AppMainContentProps) {
         providerStatuses={props.providerStatuses}
         workspaces={props.workspaces}
         activeWorkspaceId={props.activeWorkspaceId}
+        defaultProvider={props.defaultProvider}
+        defaultModel={props.defaultModel}
+        setDefaultProvider={props.onSetDefaultProvider}
+        setDefaultModel={props.onSetDefaultModel}
         executionContext={props.executionContext}
         setExecutionContext={props.onSetExecutionContext}
         selectedWorktreePath={props.selectedWorktreePath}
         setSelectedWorktreePath={props.onSetSelectedWorktreePath}
         availableWorktrees={props.availableWorktrees}
+        observerShowFindings={props.observerShowFindings}
+        setObserverShowFindings={props.onSetObserverShowFindings}
+        onSettingsSaveStatus={props.onSettingsSaveStatus}
       />
     );
   }
@@ -132,6 +148,7 @@ export function AppMainContent(props: AppMainContentProps) {
       selectedSessionRunning={props.selectedSessionRunning}
       selectedFailureType={props.selectedFailureType}
       selectedLlmStatus={props.selectedLlmStatus}
+      nodeTokenStreams={props.nodeTokenStreams}
       isDark={props.isDark}
       selectedSessionId={props.selectedSessionId}
       todos={props.todos}

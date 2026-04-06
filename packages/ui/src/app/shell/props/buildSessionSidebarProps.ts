@@ -9,6 +9,7 @@ type Params = {
   sessions: SessionSidebarProps['sessions'];
   selectedSessionId: string;
   setSessionSelection: (id: string) => void;
+  onStartNewSessionDraft: () => void;
   setCopyTraceState: (next: { sessionId: string; state: 'idle' | 'copied' | 'failed' }) => void;
   actions: {
     handleDelete: (sessionId?: string) => Promise<void>;
@@ -29,10 +30,7 @@ export function buildSessionSidebarProps(params: Params): SessionSidebarProps {
     sessions: params.sessions,
     selectedSessionId: params.selectedSessionId,
     onSelectSession: params.setSessionSelection,
-    onNewSession: () => {
-      params.setActiveTab('graph');
-      params.setSessionSelection('');
-    },
+    onNewSession: params.onStartNewSessionDraft,
     onDeleteSession: async (sessionId) => params.actions.handleDelete(sessionId),
     onRetrySession: async (sessionId) => params.actions.handleRetrySession(sessionId),
     onCopyTraceSession: async (sessionId) => {

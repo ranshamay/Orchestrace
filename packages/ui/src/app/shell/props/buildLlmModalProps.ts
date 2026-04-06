@@ -3,6 +3,7 @@ import type { LlmControlsModalProps } from '../../components/overlays/LlmControl
 type Params = {
   isOpen: boolean;
   providers: LlmControlsModalProps['providers'];
+  providerStatuses: LlmControlsModalProps['providerStatuses'];
   workspaces: LlmControlsModalProps['workspaces'];
   currentModels: LlmControlsModalProps['currentModels'];
   workWorkspaceId: string;
@@ -32,6 +33,7 @@ export function buildLlmModalProps(params: Params): LlmControlsModalProps {
   return {
     isOpen: params.isOpen,
     providers: params.providers,
+    providerStatuses: params.providerStatuses,
     workspaces: params.workspaces,
     currentModels: params.currentModels,
     workWorkspaceId: params.workWorkspaceId,

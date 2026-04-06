@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   fetchWorktrees,
   type AgentTodo,
@@ -7,10 +7,12 @@ import {
   updateUiPreferences,
 } from './lib/api';
 import type { ComposerImageAttachment, Tab } from './app/types';
+import type { NodeTokenStream } from './app/types';
 import { buildTimelineItems } from './app/utils/timelineItems';
 import { useBootstrapData } from './app/hooks/useBootstrapData';
 import { useProviderModels } from './app/hooks/useProviderModels';
 import { useSessionPolling } from './app/hooks/useSessionPolling';
+import { useSessionStream } from './app/hooks/useSessionStream';
 import { useRunUrlSync } from './app/hooks/useRunUrlSync';
 import { useTimelineFollow } from './app/hooks/useTimelineFollow';
 import { useToolsPanel } from './app/hooks/useToolsPanel';
@@ -24,9 +26,12 @@ import { buildSessionSidebarProps } from './app/shell/props/buildSessionSidebarP
 import { buildMainContentProps } from './app/shell/props/buildMainContentProps';
 import { buildLlmModalProps } from './app/shell/props/buildLlmModalProps';
 import { AppShell } from './app/shell/AppShell';
+import type { SettingsSaveToastState } from './app/components/overlays/SettingsSaveToast';
+import { readTabFromUrl, updateTabInUrl } from './app/utils/viewRoute';
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<Tab>('graph');
+  const [activeTab, setActiveTabState] = useState<Tab>(() => readTabFromUrl());
+  const [hydratedActiveTabPreference, setHydratedActiveTabPreference] = useState(false);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [todos, setTodos] = useState<AgentTodo[]>([]);
   const [composerText, setComposerText] = useState('');
@@ -35,6 +40,13 @@ export default function App() {
   const [todoInput, setTodoInput] = useState('');
   const [copyTraceState, setCopyTraceState] = useState<{ sessionId: string; state: 'idle' | 'copied' | 'failed' }>({ sessionId: '', state: 'idle' });
   const [availableWorktrees, setAvailableWorktrees] = useState<GitWorktreeInfo[]>([]);
+  const [settingsSaveToastState, setSettingsSaveToastState] = useState<SettingsSaveToastState>('idle');
+  const [settingsSaveToastMessage, setSettingsSaveToastMessage] = useState('');
+  const [nodeTokenStreams, setNodeTokenStreams] = useState<Record<string, NodeTokenStream>>({});
+  const settingsSaveToastTimerRef = useRef<number | undefined>(undefined);
+  const preferencesSyncInitializedRef = useRef(false);
+  const preferenceSaveRequestIdRef = useRef(0);
+  const preferenceSaveQueueRef = useRef<Promise<void>>(Promise.resolve());
 
   const bootstrap = useBootstrapData();
   const {
@@ -50,14 +62,80 @@ export default function App() {
     bootstrapComplete,
     batchConcurrency, setBatchConcurrency,
     batchMinConcurrency, setBatchMinConcurrency,
+    activeTabPreference,
+    observerShowFindings, setObserverShowFindings,
   } = bootstrap;
 
   const { theme, setTheme, isDark } = useThemePreference();
   const { setSessionSelection } = useSessionSelectionController({ selectedSessionId, sessions, setSelectedSessionId });
   const { isLlmControlsModalOpen, openLlmControlsModal, closeLlmControlsModal } = useLlmControlsModalState();
 
+  const onSettingsSaveStatus = useCallback((state: Exclude<SettingsSaveToastState, 'idle'>, message: string) => {
+    if (settingsSaveToastTimerRef.current !== undefined) {
+      window.clearTimeout(settingsSaveToastTimerRef.current);
+      settingsSaveToastTimerRef.current = undefined;
+    }
+
+    setSettingsSaveToastState(state);
+    setSettingsSaveToastMessage(message);
+
+    if (state === 'saved' || state === 'error') {
+      const timeoutMs = state === 'saved' ? 1600 : 4500;
+      settingsSaveToastTimerRef.current = window.setTimeout(() => {
+        setSettingsSaveToastState('idle');
+        setSettingsSaveToastMessage('');
+        settingsSaveToastTimerRef.current = undefined;
+      }, timeoutMs);
+    }
+  }, []);
+
+  const setActiveTab = useCallback((tab: Tab) => {
+    setActiveTabState(tab);
+    updateTabInUrl(tab, 'push');
+  }, []);
+
   useSessionPolling({ selectedSessionId, setSelectedSessionId: setSessionSelection, setSessions, setChatMessages, setTodos });
+  useSessionStream({ selectedSessionId, setSessions, setChatMessages, setTodos, setNodeTokenStreams });
   useRunUrlSync(selectedSessionId, setSessionSelection);
+
+  useEffect(() => {
+    updateTabInUrl(activeTab, 'replace');
+  }, [activeTab]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    const handlePopState = () => {
+      setActiveTabState(readTabFromUrl());
+    };
+
+    window.addEventListener('popstate', handlePopState);
+    return () => {
+      window.removeEventListener('popstate', handlePopState);
+    };
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (settingsSaveToastTimerRef.current !== undefined) {
+        window.clearTimeout(settingsSaveToastTimerRef.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!bootstrapComplete || hydratedActiveTabPreference) {
+      return;
+    }
+
+    setHydratedActiveTabPreference(true);
+    if (readTabFromUrl() === 'graph' && activeTabPreference === 'settings') {
+      setActiveTabState('settings');
+      updateTabInUrl('settings', 'replace');
+    }
+  }, [activeTabPreference, bootstrapComplete, hydratedActiveTabPreference]);
 
   const selectedSession = useMemo(() => selectCurrentSession(sessions, selectedSessionId), [sessions, selectedSessionId]);
   const { selectedLlmStatus, selectedFailureType, selectedSessionRunning, composerMode } = useMemo(
@@ -76,6 +154,41 @@ export default function App() {
     batchConcurrency, setBatchConcurrency,
     batchMinConcurrency, setBatchMinConcurrency,
   });
+
+  const setDefaultProvider = useCallback((nextProvider: string) => {
+    const normalizedProvider = typeof nextProvider === 'string' ? nextProvider.trim() : '';
+    const resetModel = normalizedProvider !== defaultLlmControls.provider;
+    const nextModel = resetModel ? '' : defaultLlmControls.model;
+
+    setDefaultLlmControls((current) => ({
+      ...current,
+      provider: normalizedProvider,
+      model: resetModel ? '' : current.model,
+    }));
+
+    if (!selectedSessionId) {
+      updateActiveLlmControls({ provider: normalizedProvider, model: nextModel });
+    }
+  }, [defaultLlmControls.model, defaultLlmControls.provider, selectedSessionId, setDefaultLlmControls, updateActiveLlmControls]);
+
+  const setDefaultModel = useCallback((nextModel: string) => {
+    const normalizedModel = typeof nextModel === 'string' ? nextModel.trim() : '';
+    setDefaultLlmControls((current) => ({ ...current, model: normalizedModel }));
+
+    if (!selectedSessionId) {
+      updateActiveLlmControls({ model: normalizedModel });
+    }
+  }, [selectedSessionId, setDefaultLlmControls, updateActiveLlmControls]);
+
+  const handleStartNewSessionDraft = useCallback(() => {
+    setActiveTab('graph');
+    setSessionSelection('');
+    updateActiveLlmControls({
+      provider: defaultLlmControls.provider,
+      model: defaultLlmControls.model,
+    });
+  }, [defaultLlmControls.model, defaultLlmControls.provider, setActiveTab, setSessionSelection, updateActiveLlmControls]);
+
   const { currentModels } = useProviderModels(workProvider, workModel, setWorkModel);
 
   const timelineItems = useMemo(() => buildTimelineItems(selectedSession, chatMessages), [chatMessages, selectedSession]);
@@ -106,22 +219,54 @@ export default function App() {
       return;
     }
 
-    void updateUiPreferences({
+    if (!preferencesSyncInitializedRef.current) {
+      preferencesSyncInitializedRef.current = true;
+      return;
+    }
+
+    const requestId = ++preferenceSaveRequestIdRef.current;
+    onSettingsSaveStatus('saving', 'Saving settings...');
+
+    const payload = {
+      activeTab,
+      observerShowFindings,
+      defaultProvider: defaultLlmControls.provider,
+      defaultModel: defaultLlmControls.model,
       executionContext,
       selectedWorktreePath: selectedWorktreePath || undefined,
       useWorktree,
       adaptiveConcurrency,
       batchConcurrency,
       batchMinConcurrency,
-    }).catch((error) => {
-      setErrorMessage(error instanceof Error ? error.message : String(error));
-    });
+    };
+
+    preferenceSaveQueueRef.current = preferenceSaveQueueRef.current
+      .catch(() => undefined)
+      .then(async () => {
+        await updateUiPreferences(payload);
+        if (requestId !== preferenceSaveRequestIdRef.current) {
+          return;
+        }
+        onSettingsSaveStatus('saved', 'Settings saved.');
+      })
+      .catch((error) => {
+        if (requestId === preferenceSaveRequestIdRef.current) {
+          onSettingsSaveStatus('error', 'Failed to save settings.');
+          setErrorMessage(error instanceof Error ? error.message : String(error));
+        }
+        throw error;
+      });
   }, [
+    activeTab,
     adaptiveConcurrency,
     batchConcurrency,
     batchMinConcurrency,
     bootstrapComplete,
+    defaultLlmControls.model,
+    defaultLlmControls.provider,
     executionContext,
+    onSettingsSaveStatus,
+    observerShowFindings,
     selectedWorktreePath,
     setErrorMessage,
     useWorktree,
@@ -164,6 +309,7 @@ export default function App() {
     sessions,
     selectedSessionId,
     setSessionSelection,
+    onStartNewSessionDraft: handleStartNewSessionDraft,
     setCopyTraceState,
     actions,
     copyTraceState,
@@ -211,11 +357,19 @@ export default function App() {
     providers,
     providerStatuses,
     activeWorkspaceId,
+    defaultProvider: defaultLlmControls.provider,
+    defaultModel: defaultLlmControls.model,
+    onSetDefaultProvider: setDefaultProvider,
+    onSetDefaultModel: setDefaultModel,
     onSetExecutionContext: (next) => updateActiveLlmControls({
       executionContext: next,
       useWorktree: next === 'git-worktree',
     }),
     onSetSelectedWorktreePath: (next) => updateActiveLlmControls({ selectedWorktreePath: next }),
+    observerShowFindings,
+    onSetObserverShowFindings: setObserverShowFindings,
+    onSettingsSaveStatus,
+    nodeTokenStreams,
     copyTraceState: copyTraceState.sessionId === selectedSessionId ? copyTraceState.state : 'idle',
     setCopyTraceState: (state) => setCopyTraceState({ sessionId: selectedSessionId, state }),
   });
@@ -223,6 +377,7 @@ export default function App() {
   const llmModalProps = buildLlmModalProps({
     isOpen: isLlmControlsModalOpen,
     providers,
+    providerStatuses,
     workspaces,
     currentModels,
     workWorkspaceId,
@@ -257,6 +412,8 @@ export default function App() {
       mainContentProps={mainContentProps}
       llmModalProps={llmModalProps}
       errorMessage={errorMessage}
+      settingsSaveToastState={settingsSaveToastState}
+      settingsSaveToastMessage={settingsSaveToastMessage}
     />
   );
 }

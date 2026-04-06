@@ -1,5 +1,5 @@
 import type { AgentTodo, WorkSession } from '../../../lib/api';
-import type { FailureType, LlmSessionStatus } from '../../types';
+import type { FailureType, LlmSessionStatus, NodeTokenStream } from '../../types';
 import { EntityGraphCard } from './EntityGraphCard';
 import { TodoChecklistCard } from './TodoChecklistCard';
 
@@ -8,6 +8,7 @@ type Props = {
   selectedSessionRunning: boolean;
   selectedFailureType: FailureType | null;
   selectedLlmStatus: LlmSessionStatus;
+  nodeTokenStreams: Record<string, NodeTokenStream>;
   isDark: boolean;
   selectedSessionId: string;
   todos: AgentTodo[];
@@ -23,6 +24,7 @@ export function GraphTabView({
   selectedSessionRunning,
   selectedFailureType,
   selectedLlmStatus,
+  nodeTokenStreams,
   isDark,
   selectedSessionId,
   todos,
@@ -39,6 +41,7 @@ export function GraphTabView({
           isDark={isDark}
           selectedFailureType={selectedFailureType}
           selectedLlmStatus={selectedLlmStatus}
+          nodeTokenStreams={nodeTokenStreams}
           selectedSession={selectedSession}
           selectedSessionRunning={selectedSessionRunning}
         />

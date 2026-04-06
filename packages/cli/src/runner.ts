@@ -677,6 +677,7 @@ function buildSystemPrompt(config: SessionConfig, phase: 'planning' | 'implement
       'Iterate until validation passes or a true blocker is reached.',
       'After each push or PR update, query remote CI/check status with github_api and keep fixing/re-pushing until checks pass or a true blocker is reached.',
       'Do not stop at green checks alone: verify PR mergeability, required checks, and review state via github_api, then keep iterating until the PR is merge-ready or a true blocker is reached.',
+      'Always run `git fetch origin` before checking remote branch state, merge status, or pushing. Never trust local tracking refs without fetching first.',
       'Do not ask the user to continue after partial progress; continue autonomously until completion or a concrete blocker is reached.',
       'For transient tool or sub-agent failures (timeouts, aborts, rate limits), retry automatically before surfacing a blocker.',
     ];

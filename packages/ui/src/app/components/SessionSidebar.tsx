@@ -112,6 +112,7 @@ export function SessionSidebar(props: SessionSidebarProps) {
               >
                 <div className="flex items-center gap-2">
                   {normalizeSessionStatus(session.status) === 'running' && <Loader2 className={`h-3.5 w-3.5 shrink-0 animate-spin ${isSelected ? 'text-blue-100' : 'text-blue-500 dark:text-blue-300'}`} />}
+                  {session.source === 'observer' && <span className={`shrink-0 rounded px-1 py-0.5 text-[9px] font-bold uppercase tracking-wide ${isSelected ? 'bg-white/20 text-white' : 'bg-violet-100 text-violet-700 dark:bg-violet-900/40 dark:text-violet-300'}`}>observer</span>}
                   <span className="min-w-0 flex-1 truncate">{compactPromptDisplay(session.prompt)}</span>
                   <span className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${progressBadgeClass(overallPercent, isSelected)}`} title={progressTitle}>{overallPercent}%</span>
                   <span className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${sessionStatusBadgeClass(session.status, isSelected)}`}>{formatSessionStatus(session.status)}</span>
@@ -243,6 +244,10 @@ function progressBadgeClass(percent: number, selected: boolean): string {
 }
 
 function formatSessionLineageLabel(session: WorkSession): string | undefined {
+  if (session.source === 'observer') {
+    return 'observer fix';
+  }
+
   const sourceSessionId = session.sourceSessionId?.trim();
   if (sourceSessionId) {
     return `retry of ${compactRunId(sourceSessionId)}`;
