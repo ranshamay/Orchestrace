@@ -19,6 +19,7 @@ import { PiAiAdapter, ProviderAuthManager } from '@orchestrace/provider';
 import {
   DEFAULT_AGENT_TOOL_POLICY_VERSION,
   createAgentToolset,
+  createFileReadCache,
   type SubAgentRequest,
   type SubAgentResult,
 } from '@orchestrace/tools';
@@ -111,6 +112,7 @@ async function main(): Promise<void> {
 
   // Shared context store for this session
   const sharedContextStore = new InMemorySharedContextStore();
+  const fileReadCache = createFileReadCache();
   let lastLlmStatusEmission: LlmStatusEmissionState | undefined;
 
   // Local state for graph progress tracking
@@ -159,6 +161,7 @@ async function main(): Promise<void> {
         batchMinConcurrency: config.batchMinConcurrency,
         resolveGithubToken: () => githubAuthManager.resolveApiKey('github'),
         sharedContextStore,
+        fileReadCache,
         agentId: `orchestrator::${task.id}`,
         runSubAgent: async (request, _signal) => {
           const subProvider = request.provider ?? activeProvider;
@@ -197,6 +200,7 @@ async function main(): Promise<void> {
             batchMinConcurrency: config.batchMinConcurrency,
             resolveGithubToken: () => githubAuthManager.resolveApiKey('github'),
             sharedContextStore,
+            fileReadCache,
             agentId: `subagent::${task.id}::subagent::${request.nodeId ?? toolCallId}`,
           });
 
