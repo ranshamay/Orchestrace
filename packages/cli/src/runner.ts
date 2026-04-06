@@ -49,7 +49,9 @@ async function main(): Promise<void> {
   }
 
   const eventStore = new FileEventStore(join(workspaceRoot, '.orchestrace', 'sessions'));
-  const authManager = new ProviderAuthManager();
+  const authManager = new ProviderAuthManager({
+    authFilePath: join(workspaceRoot, 'auth.json'),
+  });
   const githubAuthManager = new ProviderAuthManager({
     authFilePath: join(process.env.HOME ?? '~', '.orchestrace', 'github-auth.json'),
   });
