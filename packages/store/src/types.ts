@@ -153,7 +153,10 @@ export type SessionEventType =
   // Runner lifecycle
   | 'session:runner-heartbeat'
   // Stream deltas (high-frequency, used for real-time SSE replay)
-  | 'session:stream-delta';
+  | 'session:stream-delta'
+  // Observer real-time events (per-session observer agent)
+  | 'session:observer-status-change'
+  | 'session:observer-finding';
 
 // Per-event payload types
 export interface SessionCreatedPayload {
@@ -245,6 +248,29 @@ export interface SessionStreamDeltaPayload {
   delta: string;
 }
 
+export type ObserverSessionStatus = 'idle' | 'watching' | 'analyzing' | 'done';
+
+export interface SessionObserverStatusChangePayload {
+  status: ObserverSessionStatus;
+  findings: number;
+  analyzedSteps: number;
+  lastAnalyzedAt: string | null;
+}
+
+export interface SessionObserverFindingPayload {
+  finding: {
+    id: string;
+    category: string;
+    severity: string;
+    title: string;
+    description: string;
+    suggestedFix: string;
+    relevantFiles?: string[];
+    phase: string;
+    detectedAt: string;
+  };
+}
+
 // The discriminated union
 export type SessionEvent =
   | { seq: number; time: string; type: 'session:created'; payload: SessionCreatedPayload }
@@ -266,7 +292,9 @@ export type SessionEvent =
   | { seq: number; time: string; type: 'session:context-fact'; payload: SessionContextFactPayload }
   | { seq: number; time: string; type: 'session:context-compaction'; payload: SessionContextCompactionPayload }
   | { seq: number; time: string; type: 'session:runner-heartbeat'; payload: SessionRunnerHeartbeatPayload }
-  | { seq: number; time: string; type: 'session:stream-delta'; payload: SessionStreamDeltaPayload };
+  | { seq: number; time: string; type: 'session:stream-delta'; payload: SessionStreamDeltaPayload }
+  | { seq: number; time: string; type: 'session:observer-status-change'; payload: SessionObserverStatusChangePayload }
+  | { seq: number; time: string; type: 'session:observer-finding'; payload: SessionObserverFindingPayload };
 
 // Input type for appending (seq is auto-assigned)
 export type SessionEventInput = Omit<SessionEvent, 'seq'>;

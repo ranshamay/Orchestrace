@@ -1,4 +1,4 @@
-import type { AgentTodo, ProviderInfo, WorkSession, Workspace } from '../../lib/api';
+import type { AgentTodo, ProviderInfo, SessionObserverState, WorkSession, Workspace } from '../../lib/api';
 import type { ComposerImageAttachment, ComposerMode, FailureType, LlmSessionStatus, NodeTokenStream, TimelineItem } from '../types';
 import type { SettingsSaveToastState } from './overlays/SettingsSaveToast';
 import { GraphTabView } from './graph/GraphTabView';
@@ -58,6 +58,7 @@ export type AppMainContentProps = {
   onSetObserverShowFindings: (next: boolean) => void;
   onSettingsSaveStatus: (state: Exclude<SettingsSaveToastState, 'idle'>, message: string) => void;
   nodeTokenStreams: Record<string, NodeTokenStream>;
+  observerState: SessionObserverState | null;
   copyTraceState: 'idle' | 'copied' | 'failed';
   onCopyTrace: () => void;
 };
@@ -144,6 +145,7 @@ export function AppMainContent(props: AppMainContentProps) {
       onAddTodo={props.onAddTodo}
       onToggleTodo={props.onToggleTodo}
       chatOverlay={chatOverlay}
+      observerState={props.observerState}
     />
   );
 }

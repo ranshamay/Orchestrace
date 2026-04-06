@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react';
-import { API_BASE, type AgentTodo, type ChatMessage, type WorkSession } from '../../lib/api';
+import { API_BASE, type AgentTodo, type ChatMessage, type SessionObserverFinding, type SessionObserverState, type WorkSession } from '../../lib/api';
 import type { NodeTokenStream } from '../types';
 
 type Params = {
@@ -8,6 +8,7 @@ type Params = {
   setChatMessages: (updater: ChatMessage[] | ((current: ChatMessage[]) => ChatMessage[])) => void;
   setTodos: (updater: AgentTodo[] | ((current: AgentTodo[]) => AgentTodo[])) => void;
   setNodeTokenStreams: (updater: Record<string, NodeTokenStream> | ((current: Record<string, NodeTokenStream>) => Record<string, NodeTokenStream>)) => void;
+  setObserverState: (updater: SessionObserverState | null | ((current: SessionObserverState | null) => SessionObserverState | null)) => void;
 };
 
 /**
@@ -15,7 +16,7 @@ type Params = {
  * real-time incremental updates to sessions, chat messages, and todos.
  * Falls back gracefully — if SSE disconnects, the polling fallback still works.
  */
-export function useSessionStream({ selectedSessionId, setSessions, setChatMessages, setTodos, setNodeTokenStreams }: Params) {
+export function useSessionStream({ selectedSessionId, setSessions, setChatMessages, setTodos, setNodeTokenStreams, setObserverState }: Params) {
   const connectedIdRef = useRef<string>('');
 
   useEffect(() => {
@@ -37,6 +38,7 @@ export function useSessionStream({ selectedSessionId, setSessions, setChatMessag
           session: WorkSession;
           messages?: ChatMessage[];
           todos?: AgentTodo[];
+          observer?: SessionObserverState | null;
         };
         if (data.session) {
           setSessions((prev) => {
@@ -55,6 +57,7 @@ export function useSessionStream({ selectedSessionId, setSessions, setChatMessag
         if (data.todos) {
           setTodos(data.todos);
         }
+        setObserverState(data.observer ?? null);
       } catch {
         // Ignore malformed data
       }
@@ -155,16 +158,70 @@ export function useSessionStream({ selectedSessionId, setSessions, setChatMessag
       }
     };
 
+    // Observer real-time events
+    const handleObserverStatus = (ev: MessageEvent) => {
+      try {
+        const data = JSON.parse(ev.data) as {
+          id: string;
+          observer: { status: SessionObserverState['status']; findings: number; analyzedSteps: number; lastAnalyzedAt: string | null };
+        };
+        if (data.id === selectedSessionId) {
+          setObserverState((prev) => ({
+            status: data.observer.status,
+            findings: prev?.findings ?? [],
+            analyzedSteps: data.observer.analyzedSteps,
+            lastAnalyzedAt: data.observer.lastAnalyzedAt,
+          }));
+        }
+      } catch {
+        // Ignore malformed data
+      }
+    };
+
+    const handleObserverFinding = (ev: MessageEvent) => {
+      try {
+        const data = JSON.parse(ev.data) as {
+          id: string;
+          finding: SessionObserverFinding;
+        };
+        if (data.id === selectedSessionId && data.finding) {
+          setObserverState((prev) => {
+            if (!prev) {
+              return {
+                status: 'watching',
+                findings: [data.finding],
+                analyzedSteps: 0,
+                lastAnalyzedAt: null,
+              };
+            }
+            // Deduplicate by id
+            if (prev.findings.some((f) => f.id === data.finding.id)) {
+              return prev;
+            }
+            return {
+              ...prev,
+              findings: [...prev.findings, data.finding],
+            };
+          });
+        }
+      } catch {
+        // Ignore malformed data
+      }
+    };
+
     es.addEventListener('ready', handleReady);
     es.addEventListener('session-update', handleSessionUpdate);
     es.addEventListener('todo-update', handleTodoUpdate);
     es.addEventListener('token', handleToken);
     es.addEventListener('end', handleEnd);
     es.addEventListener('error', handleError);
+    es.addEventListener('observer-status', handleObserverStatus);
+    es.addEventListener('observer-finding', handleObserverFinding);
 
     return () => {
       connectedIdRef.current = '';
+      setObserverState(null);
       es.close();
     };
-  }, [selectedSessionId, setSessions, setChatMessages, setNodeTokenStreams, setTodos]);
+  }, [selectedSessionId, setSessions, setChatMessages, setNodeTokenStreams, setObserverState, setTodos]);
 }

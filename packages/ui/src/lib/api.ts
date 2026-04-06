@@ -430,3 +430,36 @@ export async function triggerObserverAnalysis(): Promise<{ analyzed: number; fin
   const res = await fetch(`${API_BASE}/observer/trigger`, { method: 'POST' });
   return readJson(res);
 }
+
+// -- Per-Session Observer API --
+
+export type SessionObserverStatus = 'idle' | 'watching' | 'analyzing' | 'done';
+
+export interface SessionObserverFinding {
+  id: string;
+  category: string;
+  severity: string;
+  title: string;
+  description: string;
+  suggestedFix: string;
+  relevantFiles?: string[];
+  phase: string;
+  detectedAt: string;
+}
+
+export interface SessionObserverState {
+  status: SessionObserverStatus;
+  findings: SessionObserverFinding[];
+  analyzedSteps: number;
+  lastAnalyzedAt: string | null;
+}
+
+export interface SessionObserverResponse {
+  active: boolean;
+  state: SessionObserverState | null;
+}
+
+export async function fetchSessionObserver(sessionId: string): Promise<SessionObserverResponse> {
+  const res = await fetch(`${API_BASE}/observer/session?id=${encodeURIComponent(sessionId)}`);
+  return readJson(res);
+}

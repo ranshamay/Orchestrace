@@ -1,7 +1,8 @@
-import type { AgentTodo, WorkSession } from '../../../lib/api';
+import type { AgentTodo, SessionObserverState, WorkSession } from '../../../lib/api';
 import type { FailureType, LlmSessionStatus, NodeTokenStream } from '../../types';
 import { EntityGraphCard } from './EntityGraphCard';
 import { TodoChecklistCard } from './TodoChecklistCard';
+import { ObserverPanel } from '../observer/ObserverPanel';
 
 type Props = {
   selectedSession?: WorkSession;
@@ -17,6 +18,7 @@ type Props = {
   onAddTodo: () => Promise<void>;
   onToggleTodo: (todo: AgentTodo) => Promise<void>;
   chatOverlay: React.ReactNode;
+  observerState: SessionObserverState | null;
 };
 
 export function GraphTabView({
@@ -33,10 +35,16 @@ export function GraphTabView({
   onAddTodo,
   onToggleTodo,
   chatOverlay,
+  observerState,
 }: Props) {
   return (
     <div className="relative flex h-full flex-1 flex-col">
       <div className="min-h-0 flex-1 overflow-auto bg-slate-50 p-4 dark:bg-slate-950">
+        {observerState && (
+          <div className="mb-4">
+            <ObserverPanel observerState={observerState} />
+          </div>
+        )}
         <EntityGraphCard
           isDark={isDark}
           selectedFailureType={selectedFailureType}

@@ -1,3 +1,4 @@
+import type { SessionObserverState } from '../../../lib/api';
 import type { AppMainContentProps } from '../../components/AppMainContent';
 
 type Params = {
@@ -47,6 +48,7 @@ type Params = {
   onSetObserverShowFindings: (next: boolean) => void;
   onSettingsSaveStatus: AppMainContentProps['onSettingsSaveStatus'];
   nodeTokenStreams: AppMainContentProps['nodeTokenStreams'];
+  observerState: SessionObserverState | null;
   copyTraceState: 'idle' | 'copied' | 'failed';
   onCopyTrace: () => void;
 };
@@ -103,6 +105,7 @@ export function buildMainContentProps(params: Params): AppMainContentProps {
     onSetObserverShowFindings: params.onSetObserverShowFindings,
     onSettingsSaveStatus: params.onSettingsSaveStatus,
     nodeTokenStreams: params.nodeTokenStreams,
+    observerState: params.observerState,
     copyTraceState: params.copyTraceState,
     onCopyTrace: params.onCopyTrace,
   };

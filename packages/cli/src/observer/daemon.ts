@@ -30,6 +30,8 @@ export interface ObserverDaemonOptions {
   llm: LlmAdapter;
   /** Function to create a new work session (closure from ui-server). */
   startSession: StartSessionFn;
+  /** Resolve API key for a given provider (shared auth with ui-server). */
+  resolveApiKey: (provider: string) => Promise<string | undefined>;
 }
 
 export class ObserverDaemon {
@@ -38,6 +40,7 @@ export class ObserverDaemon {
   private readonly eventStore: EventStore;
   private readonly llm: LlmAdapter;
   private readonly startSession: StartSessionFn;
+  private readonly resolveApiKey: (provider: string) => Promise<string | undefined>;
   private readonly registry: FindingRegistry;
   private config: ObserverConfig = { ...DEFAULT_OBSERVER_CONFIG };
   private state: ObserverDaemonState = {
@@ -55,6 +58,7 @@ export class ObserverDaemon {
     this.eventStore = options.eventStore;
     this.llm = options.llm;
     this.startSession = options.startSession;
+    this.resolveApiKey = options.resolveApiKey;
     this.registry = new FindingRegistry(this.observerDir);
   }
 
@@ -212,6 +216,7 @@ export class ObserverDaemon {
       this.config,
       summaries,
       this.controller.signal,
+      this.resolveApiKey,
     );
 
     // Register findings with dedup

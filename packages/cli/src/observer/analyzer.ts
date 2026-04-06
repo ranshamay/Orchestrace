@@ -24,6 +24,7 @@ export async function analyzeSessionSummaries(
   config: ObserverConfig,
   summaries: SessionSummary[],
   signal?: AbortSignal,
+  resolveApiKey?: (provider: string) => Promise<string | undefined>,
 ): Promise<AnalysisResult> {
   if (summaries.length === 0) return { findings: [] };
 
@@ -34,12 +35,15 @@ export async function analyzeSessionSummaries(
 
   const userPrompt = buildAnalysisPrompt(summaries, allowedCategories);
 
+  const apiKey = resolveApiKey ? await resolveApiKey(config.provider) : undefined;
   const result = await llm.complete({
     provider: config.provider,
     model: config.model,
     systemPrompt: OBSERVER_SYSTEM_PROMPT,
     prompt: userPrompt,
     signal,
+    apiKey,
+    refreshApiKey: resolveApiKey ? () => resolveApiKey(config.provider) : undefined,
   });
 
   return parseAnalysisResponse(result.text, allowedCategories);

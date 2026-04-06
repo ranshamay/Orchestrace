@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   type AgentTodo,
   type ChatMessage,
+  type SessionObserverState,
   updateUiPreferences,
 } from './lib/api';
 import type { ComposerImageAttachment, Tab } from './app/types';
@@ -40,6 +41,7 @@ export default function App() {
   const [settingsSaveToastState, setSettingsSaveToastState] = useState<SettingsSaveToastState>('idle');
   const [settingsSaveToastMessage, setSettingsSaveToastMessage] = useState('');
   const [nodeTokenStreams, setNodeTokenStreams] = useState<Record<string, NodeTokenStream>>({});
+  const [observerState, setObserverState] = useState<SessionObserverState | null>(null);
   const settingsSaveToastTimerRef = useRef<number | undefined>(undefined);
   const preferencesSyncInitializedRef = useRef(false);
   const preferenceSaveRequestIdRef = useRef(0);
@@ -90,7 +92,7 @@ export default function App() {
   }, []);
 
   useSessionPolling({ selectedSessionId, setSelectedSessionId: setSessionSelection, setSessions, setChatMessages, setTodos });
-  useSessionStream({ selectedSessionId, setSessions, setChatMessages, setTodos, setNodeTokenStreams });
+  useSessionStream({ selectedSessionId, setSessions, setChatMessages, setTodos, setNodeTokenStreams, setObserverState });
   useRunUrlSync(selectedSessionId, setSessionSelection);
 
   useEffect(() => {
@@ -318,6 +320,7 @@ export default function App() {
     onSetObserverShowFindings: setObserverShowFindings,
     onSettingsSaveStatus,
     nodeTokenStreams,
+    observerState,
     copyTraceState: copyTraceState.sessionId === selectedSessionId ? copyTraceState.state : 'idle',
     onCopyTrace: () => {
       if (!selectedSessionId) return;

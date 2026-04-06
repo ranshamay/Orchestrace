@@ -168,6 +168,12 @@ export function applyEvent(state: MaterializedSession, event: SessionEvent): voi
       // don't affect materialized state. The final text lands as chat
       // messages or session output.
       break;
+
+    case 'session:observer-status-change':
+    case 'session:observer-finding':
+      // Observer events are transient — used for real-time SSE streaming
+      // only. Findings are persisted separately by the observer registry.
+      break;
   }
 }
 

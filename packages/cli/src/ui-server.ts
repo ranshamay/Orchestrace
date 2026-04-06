@@ -65,7 +65,7 @@ import { WorkspaceManager } from './workspace-manager.js';
 import { FileEventStore } from '@orchestrace/store';
 import { materializeSession as materializeFromEvents } from '@orchestrace/store';
 import type { SessionEventInput } from '@orchestrace/store';
-import { ObserverDaemon } from './observer/index.js';
+import { ObserverDaemon, SessionObserver } from './observer/index.js';
 
 const GITHUB_PROVIDER_ID = 'github';
 const GITHUB_API_BASE_URL = 'https://api.github.com';
@@ -178,6 +178,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
   const sessionContextEngines = new Map<string, ContextEngine>();
   const sessionContextStates = new Map<string, SessionContextState>();
   const pendingSubagentNodeIdsBySession = new Map<string, Map<string, string[]>>();
+  const sessionObservers = new Map<string, SessionObserver>();
   const chatStreams = new Map<string, ChatTokenStream>();
   let uiPreferences = resolveUiPreferencesDefaults();
   const hmrClients = new Set<ServerResponse>();
@@ -877,7 +878,12 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           const newStatus = event.payload.status as WorkState;
           session.status = newStatus;
           if (newStatus === 'completed' || newStatus === 'failed' || newStatus === 'cancelled') {
-            // Terminal state — broadcast end event and stop watching
+            // Terminal state — broadcast end event, stop watching, and stop observer
+            const obs = sessionObservers.get(id);
+            if (obs) {
+              obs.stop();
+              sessionObservers.delete(id);
+            }
             broadcastWorkStream(workStreamClients, id, newStatus === 'completed' ? 'end' : 'error', {
               id,
               status: session.status,
@@ -981,17 +987,56 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           break;
         }
 
+        // Observer real-time events — broadcast to UI via SSE
+        case 'session:observer-status-change': {
+          broadcastWorkStream(workStreamClients, id, 'observer-status', {
+            id,
+            observer: event.payload,
+            time: event.time,
+          });
+          break;
+        }
+
+        case 'session:observer-finding': {
+          broadcastWorkStream(workStreamClients, id, 'observer-finding', {
+            id,
+            finding: (event.payload as { finding: unknown }).finding,
+            time: event.time,
+          });
+          break;
+        }
+
         default:
           break;
       }
 
-      // Broadcast session state for all events except high-frequency stream deltas
-      if (event.type !== 'session:stream-delta') {
+      // Broadcast session state for all events except high-frequency stream deltas and observer events
+      if (event.type !== 'session:stream-delta' && event.type !== 'session:observer-status-change' && event.type !== 'session:observer-finding') {
         broadcastSessionUpdate(workStreamClients, id, serializeWorkSession(session, sessionTodos.get(id) ?? []));
       }
 
       uiStatePersistence.schedule();
     });
+
+    // Attach per-session real-time observer (if observer is enabled and session is not from observer itself)
+    if (observerDaemon.getConfig().enabled && request.source !== 'observer') {
+      const sessionObs = new SessionObserver({
+        sessionId: id,
+        eventStore,
+        llm,
+        config: observerDaemon.getConfig(),
+        resolveApiKey: (provider) => authManager.resolveApiKey(provider),
+        emit: (evt) => {
+          emitSessionEvent(id, {
+            time: new Date().toISOString(),
+            type: evt.type as 'session:observer-status-change' | 'session:observer-finding',
+            payload: evt.payload as Record<string, unknown>,
+          });
+        },
+      });
+      sessionObservers.set(id, sessionObs);
+      sessionObs.start();
+    }
 
     // Monitor runner process exit (backup for missed events)
     runnerProcess.on('exit', (code) => {
@@ -1018,6 +1063,13 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
 
           uiStatePersistence.schedule();
           unwatch();
+
+          // Stop per-session observer on unexpected exit
+          const obs = sessionObservers.get(id);
+          if (obs) {
+            obs.stop();
+            sessionObservers.delete(id);
+          }
         }
       }, 3_000);
     });
@@ -1031,6 +1083,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     eventStore,
     llm,
     startSession: startWorkSession,
+    resolveApiKey: (provider) => authManager.resolveApiKey(provider),
   });
   void observerDaemon.start().catch((err) => {
     console.error('[orchestrace][observer] Failed to start daemon:', err);
@@ -1135,6 +1188,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           todos,
           status: session.status,
           llmStatus: session.llmStatus,
+          observer: sessionObservers.get(id)?.getState() ?? null,
           time: now(),
         });
 
@@ -2766,6 +2820,21 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
 
       // -- Observer API -------------------------------------------------------
 
+      // Per-session observer state
+      if (req.method === 'GET' && pathname === '/api/observer/session') {
+        const sessionId = asString(url.searchParams.get('id'));
+        if (!sessionId) {
+          sendJson(res, 400, { error: 'Missing id' });
+          return;
+        }
+        const obs = sessionObservers.get(sessionId);
+        sendJson(res, 200, {
+          active: !!obs,
+          state: obs?.getState() ?? null,
+        });
+        return;
+      }
+
       if (req.method === 'GET' && pathname === '/api/observer/status') {
         sendJson(res, 200, {
           config: observerDaemon.getConfig(),
@@ -2823,6 +2892,11 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
   server.on('close', () => {
     void uiStatePersistence.flush();
     observerDaemon.stop();
+    // Stop all per-session observers
+    for (const [, obs] of sessionObservers) {
+      obs.stop();
+    }
+    sessionObservers.clear();
     hmrWatcher?.close();
     hmrClients.clear();
     for (const [id] of workStreamClients) {
