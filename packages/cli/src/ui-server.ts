@@ -67,6 +67,8 @@ const GITHUB_DEVICE_AUTH_CLIENT_ID_DEFAULT = '178c6fc778ccc68e1d6a';
 const DEFAULT_UI_ADAPTIVE_CONCURRENCY = false;
 const DEFAULT_UI_BATCH_CONCURRENCY = 8;
 const DEFAULT_UI_BATCH_MIN_CONCURRENCY = 1;
+const SUBAGENT_WORKER_PROMPT_PREVIEW_MAX_CHARS = 2_000;
+const SUBAGENT_WORKER_OUTPUT_PREVIEW_MAX_CHARS = 4_000;
 
 type GithubDeviceAuthSessionState = 'awaiting-user' | 'polling' | 'completed' | 'failed';
 
@@ -2851,7 +2853,7 @@ function toUiEvent(runId: string, event: DagEvent): UiDagEvent | undefined {
   }
 }
 
-function previewToolLog(value: string | undefined): string {
+function previewToolLog(value: string | undefined, maxChars = 600): string {
   if (!value) {
     return '(empty)';
   }
