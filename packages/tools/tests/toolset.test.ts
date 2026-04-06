@@ -313,6 +313,84 @@ describe('batch filesystem tools', () => {
   });
 });
 
+describe('search_files tool', () => {
+  it('supports literal mode for queries containing regex metacharacters', async () => {
+    const cwd = await makeWorkspace();
+    await writeFile(join(cwd, 'src', 'paren.ts'), 'const marker = "value(1)";\n', 'utf-8');
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+
+    const result = await toolset.executeTool({
+      id: '1',
+      name: 'search_files',
+      arguments: {
+        query: 'value(1)',
+        queryMode: 'literal',
+        path: 'src',
+      },
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.content).toContain('paren.ts');
+    expect(result.content).toContain('value(1)');
+  });
+
+  it('uses regex mode semantics when queryMode is regex', async () => {
+    const cwd = await makeWorkspace();
+    await writeFile(join(cwd, 'src', 'regex.ts'), 'const name = "value1";\n', 'utf-8');
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+
+    const result = await toolset.executeTool({
+      id: '1',
+      name: 'search_files',
+      arguments: {
+        query: 'value(1)',
+        queryMode: 'regex',
+        path: 'src',
+      },
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.content).toContain('regex.ts');
+    expect(result.content).toContain('value1');
+  });
+
+  it('returns an error for malformed regex in regex mode', async () => {
+    const cwd = await makeWorkspace();
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+
+    const result = await toolset.executeTool({
+      id: '1',
+      name: 'search_files',
+      arguments: {
+        query: '(',
+        queryMode: 'regex',
+        path: 'src',
+      },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content.toLowerCase()).toContain('regex');
+  });
+
+  it('preserves no-match output semantics', async () => {
+    const cwd = await makeWorkspace();
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+
+    const result = await toolset.executeTool({
+      id: '1',
+      name: 'search_files',
+      arguments: {
+        query: 'definitely-not-present-token',
+        queryMode: 'literal',
+        path: 'src',
+      },
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.content).toBe('(no matches)');
+  });
+});
+
 describe('git_status tool', () => {
   it('returns status output in a git repository', async () => {
     const cwd = await makeWorkspace();

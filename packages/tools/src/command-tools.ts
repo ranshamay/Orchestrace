@@ -40,19 +40,36 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
           query: Type.String({ description: 'Regex or plain-text search pattern passed to ripgrep.' }),
           path: Type.Optional(Type.String({ description: 'Relative path to search inside. Defaults to workspace root.' })),
           glob: Type.Optional(Type.String({ description: 'Optional glob include filter, e.g. src/**/*.ts' })),
+          queryMode: Type.Optional(Type.Union([
+            Type.Literal('regex'),
+            Type.Literal('literal'),
+          ], {
+            description: 'How to interpret query: regex (default) or literal fixed-string search.',
+          })),
         }),
       },
       execute: async (toolArgs, signal) => {
         const query = asRequiredString(toolArgs.query, 'query');
         const path = asString(toolArgs.path) ?? '.';
         const glob = asString(toolArgs.glob);
+        const queryModeRaw = asString(toolArgs.queryMode) ?? 'regex';
+        if (queryModeRaw !== 'regex' && queryModeRaw !== 'literal') {
+          return {
+            content: "Invalid queryMode. Expected 'regex' or 'literal'.",
+            isError: true,
+          };
+        }
         const target = resolveWorkspacePath(options.cwd, path);
         const relTarget = toWorkspaceRelative(options.cwd, target);
 
-        const args = ['-n', '--no-heading', '--color', 'never', query, relTarget];
+        const args = ['-n', '--no-heading', '--color', 'never'];
+        if (queryModeRaw === 'literal') {
+          args.push('-F');
+        }
         if (glob) {
           args.push('--glob', glob);
         }
+        args.push('-e', query, relTarget);
 
         const result = await runCommand('rg', args, {
           cwd: options.cwd,
