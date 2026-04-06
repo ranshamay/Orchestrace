@@ -313,25 +313,70 @@ describe('batch filesystem tools', () => {
   });
 });
 
-describe('git_status tool', () => {
-  it('returns status output in a git repository', async () => {
+describe('git_status and git_diff intent gating', () => {
+  it('returns status output in a git repository when intent is provided', async () => {
     const cwd = await makeWorkspace();
     const toolset = createAgentToolset({ cwd, phase: 'implementation', taskType: 'code' });
 
     const init = await toolset.executeTool({ id: '1', name: 'run_command', arguments: { command: 'git init' } });
     expect(init.isError).toBeFalsy();
 
-    const status = await toolset.executeTool({ id: '2', name: 'git_status', arguments: {} });
+    const status = await toolset.executeTool({
+      id: '2',
+      name: 'git_status',
+      arguments: { intent: 'write' },
+    });
     expect(status.isError).toBeFalsy();
     expect(status.content.toLowerCase()).toContain('##');
   });
 
-  it('returns an error outside git repositories', async () => {
+  it('returns an error outside git repositories even when intent is valid', async () => {
     const cwd = await makeWorkspace();
     const toolset = createAgentToolset({ cwd, phase: 'implementation', taskType: 'code' });
 
-    const status = await toolset.executeTool({ id: '2', name: 'git_status', arguments: {} });
+    const status = await toolset.executeTool({
+      id: '2',
+      name: 'git_status',
+      arguments: { intent: 'read_only' },
+    });
     expect(status.isError).toBe(true);
+  });
+
+  it('rejects git_status calls when intent is missing', async () => {
+    const cwd = await makeWorkspace();
+    const toolset = createAgentToolset({ cwd, phase: 'implementation', taskType: 'code' });
+
+    const status = await toolset.executeTool({ id: '1', name: 'git_status', arguments: {} });
+    expect(status.isError).toBe(true);
+    expect(status.content).toContain('requires arguments.intent');
+  });
+
+  it('rejects git_diff calls when intent is invalid', async () => {
+    const cwd = await makeWorkspace();
+    const toolset = createAgentToolset({ cwd, phase: 'implementation', taskType: 'code' });
+
+    const diff = await toolset.executeTool({
+      id: '1',
+      name: 'git_diff',
+      arguments: { intent: 'invalid' },
+    });
+    expect(diff.isError).toBe(true);
+    expect(diff.content).toContain('requires arguments.intent');
+  });
+
+  it('accepts git_diff calls when intent is valid', async () => {
+    const cwd = await makeWorkspace();
+    const toolset = createAgentToolset({ cwd, phase: 'implementation', taskType: 'code' });
+
+    const init = await toolset.executeTool({ id: '1', name: 'run_command', arguments: { command: 'git init' } });
+    expect(init.isError).toBeFalsy();
+
+    const diff = await toolset.executeTool({
+      id: '2',
+      name: 'git_diff',
+      arguments: { intent: 'read_only' },
+    });
+    expect(diff.isError).toBeFalsy();
   });
 });
 
