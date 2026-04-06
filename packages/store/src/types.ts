@@ -109,6 +109,10 @@ export interface SessionConfig {
   provider: string;
   model: string;
   autoApprove: boolean;
+  /** Enable quick-start planning mode that delegates within first few tool calls. */
+  quickStartMode?: boolean;
+  /** Max successful tool calls allowed before first successful sub-agent delegation in quick-start mode. */
+  quickStartMaxPreDelegationToolCalls?: number;
   executionContext?: 'workspace' | 'git-worktree';
   selectedWorktreePath?: string;
   useWorktree?: boolean;

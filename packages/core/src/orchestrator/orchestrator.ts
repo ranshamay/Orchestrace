@@ -62,6 +62,10 @@ export interface OrchestratorConfig extends RunnerConfig {
   promptVersion?: string;
   /** Replay policy version tag persisted into task outputs. */
   policyVersion?: string;
+  /** Enable quick-start planning mode that enforces early delegation. Defaults to false. */
+  quickStartMode?: boolean;
+  /** Max successful tool calls allowed before first successful sub-agent delegation. Defaults to 3 when quick-start is enabled. */
+  quickStartMaxPreDelegationToolCalls?: number;
 }
 
 type OrchestratorPhase = 'planning' | 'implementation';
@@ -97,6 +101,8 @@ export async function orchestrate(
     onEvent,
     promptVersion,
     policyVersion,
+    quickStartMode,
+    quickStartMaxPreDelegationToolCalls,
   } = config;
 
   const emit = onEvent ?? (() => {});
@@ -311,7 +317,10 @@ export async function orchestrate(
       });
 
       if (createToolset) {
-        const planningContractError = buildPlanningContractError(planningToolCalls);
+        const planningContractError = buildPlanningContractError(planningToolCalls, {
+          quickStartMode,
+          quickStartMaxPreDelegationToolCalls,
+        });
         if (planningContractError) {
           completedPlanningAttempt.failureType = 'validation';
           completedPlanningAttempt.error = planningContractError;
@@ -1137,7 +1146,13 @@ function buildCompletionFailureRetryHint(params: {
   }
 }
 
-function buildPlanningContractError(toolCalls: ReplayToolCallRecord[]): string | undefined {
+function buildPlanningContractError(
+  toolCalls: ReplayToolCallRecord[],
+  options?: {
+    quickStartMode?: boolean;
+    quickStartMaxPreDelegationToolCalls?: number;
+  },
+): string | undefined {
   const hasSubAgentDelegation = hasSuccessfulToolCall(toolCalls, 'subagent_spawn')
     || hasSuccessfulToolCall(toolCalls, 'subagent_spawn_batch');
   const requiredTools = ['todo_set', 'agent_graph_set'];
@@ -1153,7 +1168,10 @@ function buildPlanningContractError(toolCalls: ReplayToolCallRecord[]): string |
 
   const todoSetResult = latestSuccessfulToolCall(toolCalls, 'todo_set');
   if (todoSetResult) {
-    const todoValidation = validateWeightedListPayload(todoSetResult.input, 'items');
+    const todoValidation = validateWeightedListPayload(
+      resolveToolCallInputForValidation(toolCalls, 'todo_set', todoSetResult),
+      'items',
+    );
     if (todoValidation.sum === undefined) {
       contractIssues.push('todo_set must include numeric weight for each item.');
     } else if (!isWeightTotalValid(todoValidation.sum)) {
@@ -1168,7 +1186,10 @@ function buildPlanningContractError(toolCalls: ReplayToolCallRecord[]): string |
   let graphNodeIds = new Set<string>();
   const graphSetResult = latestSuccessfulToolCall(toolCalls, 'agent_graph_set');
   if (graphSetResult) {
-    const graphValidation = validateWeightedListPayload(graphSetResult.input, 'nodes');
+    const graphValidation = validateWeightedListPayload(
+      resolveToolCallInputForValidation(toolCalls, 'agent_graph_set', graphSetResult),
+      'nodes',
+    );
     graphNodeIds = graphValidation.ids;
     if (graphValidation.sum === undefined) {
       contractIssues.push('agent_graph_set must include numeric weight for each node.');
@@ -1189,6 +1210,20 @@ function buildPlanningContractError(toolCalls: ReplayToolCallRecord[]): string |
     }
   }
 
+  if (options?.quickStartMode) {
+    const maxPreDelegationToolCalls = normalizeQuickStartMaxPreDelegationToolCalls(options.quickStartMaxPreDelegationToolCalls);
+    const quickStartAssessment = assessQuickStartDelegation(toolCalls, maxPreDelegationToolCalls);
+    if (!quickStartAssessment.hasDelegation) {
+      contractIssues.push(
+        `quick-start mode requires a successful sub-agent delegation (subagent_spawn or subagent_spawn_batch) within the first ${maxPreDelegationToolCalls} successful tool call(s).`,
+      );
+    } else if (!quickStartAssessment.withinLimit) {
+      contractIssues.push(
+        `quick-start mode requires delegation within the first ${maxPreDelegationToolCalls} successful tool call(s), but first delegation occurred after ${quickStartAssessment.preDelegationSuccessfulToolCalls} successful call(s).`,
+      );
+    }
+  }
+
   if (contractIssues.length === 0) {
     return undefined;
   }
@@ -1204,6 +1239,48 @@ function hasSuccessfulToolCall(toolCalls: ReplayToolCallRecord[], toolName: stri
   return toolCalls.some((call) => call.status === 'result' && call.toolName === toolName && !call.isError);
 }
 
+function normalizeQuickStartMaxPreDelegationToolCalls(value: number | undefined): number {
+  if (Number.isFinite(value) && typeof value === 'number' && value >= 0) {
+    return Math.floor(value);
+  }
+
+  return 3;
+}
+
+function assessQuickStartDelegation(
+  toolCalls: ReplayToolCallRecord[],
+  maxPreDelegationToolCalls: number,
+): {
+  hasDelegation: boolean;
+  withinLimit: boolean;
+  preDelegationSuccessfulToolCalls: number;
+} {
+  let successfulToolCallCount = 0;
+
+  for (const call of toolCalls) {
+    if (call.status !== 'result' || call.isError) {
+      continue;
+    }
+
+    const isDelegationCall = call.toolName === 'subagent_spawn' || call.toolName === 'subagent_spawn_batch';
+    if (isDelegationCall) {
+      return {
+        hasDelegation: true,
+        withinLimit: successfulToolCallCount <= maxPreDelegationToolCalls,
+        preDelegationSuccessfulToolCalls: successfulToolCallCount,
+      };
+    }
+
+    successfulToolCallCount += 1;
+  }
+
+  return {
+    hasDelegation: false,
+    withinLimit: false,
+    preDelegationSuccessfulToolCalls: successfulToolCallCount,
+  };
+}
+
 function latestSuccessfulToolCall(
   toolCalls: ReplayToolCallRecord[],
   toolName: string,
@@ -1212,6 +1289,40 @@ function latestSuccessfulToolCall(
     const call = toolCalls[index];
     if (call.status === 'result' && call.toolName === toolName && !call.isError) {
       return call;
+    }
+  }
+
+  return undefined;
+}
+
+function resolveToolCallInputForValidation(
+  toolCalls: ReplayToolCallRecord[],
+  toolName: string,
+  successfulResultCall: ReplayToolCallRecord,
+): string | undefined {
+  if (successfulResultCall.input) {
+    return successfulResultCall.input;
+  }
+
+  if (successfulResultCall.toolCallId) {
+    for (let index = toolCalls.length - 1; index >= 0; index -= 1) {
+      const call = toolCalls[index];
+      if (call.toolCallId !== successfulResultCall.toolCallId) {
+        continue;
+      }
+      if (call.toolName !== toolName || call.status !== 'started') {
+        continue;
+      }
+      if (call.input) {
+        return call.input;
+      }
+    }
+  }
+
+  for (let index = toolCalls.length - 1; index >= 0; index -= 1) {
+    const call = toolCalls[index];
+    if (call.toolName === toolName && call.status === 'started' && call.input) {
+      return call.input;
     }
   }
 

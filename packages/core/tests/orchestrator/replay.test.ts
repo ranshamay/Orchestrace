@@ -26,6 +26,7 @@ function createAdapter(params: {
   planningThrows?: boolean;
   failImplementationOnceWithType?: 'timeout' | 'rate_limit' | 'tool_runtime' | 'empty_response';
   omitPlanningCoordination?: boolean;
+  planningDelegationDelaySuccessfulCalls?: number;
   onPrompt?: (phase: 'planning' | 'implementation', prompt: LlmPromptInput) => void;
 }): LlmAdapter {
   let implementationCalls = 0;
@@ -46,7 +47,7 @@ function createAdapter(params: {
               type: 'started',
               toolCallId: 'plan-todo-1',
               toolName: 'todo_set',
-              arguments: '{"items":[{"id":"p1","title":"Plan","status":"in_progress"}]}',
+              arguments: '{"items":[{"id":"p1","title":"Plan","status":"in_progress","weight":100}]}',
             });
             options?.onToolCall?.({
               type: 'result',
@@ -59,7 +60,7 @@ function createAdapter(params: {
               type: 'started',
               toolCallId: 'plan-graph-1',
               toolName: 'agent_graph_set',
-              arguments: '{"nodes":[{"id":"a1","prompt":"Inspect docs"}]}',
+              arguments: '{"nodes":[{"id":"a1","prompt":"Inspect docs","weight":100}]}',
             });
             options?.onToolCall?.({
               type: 'result',
@@ -68,11 +69,29 @@ function createAdapter(params: {
               result: 'Stored agent dependency graph with 1 node(s).',
               isError: false,
             });
+            const preDelegationSuccessfulCalls = Math.max(0, params.planningDelegationDelaySuccessfulCalls ?? 0);
+            for (let index = 0; index < preDelegationSuccessfulCalls; index += 1) {
+              const toolCallId = `plan-prep-${index + 1}`;
+              options?.onToolCall?.({
+                type: 'started',
+                toolCallId,
+                toolName: 'list_directory',
+                arguments: '{"path":"."}',
+              });
+              options?.onToolCall?.({
+                type: 'result',
+                toolCallId,
+                toolName: 'list_directory',
+                result: 'Listed entries.',
+                isError: false,
+              });
+            }
+
             options?.onToolCall?.({
               type: 'started',
               toolCallId: 'plan-sub-1',
               toolName: 'subagent_spawn',
-              arguments: '{"prompt":"Summarize only relevant planner constraints"}',
+              arguments: '{"prompt":"Summarize only relevant planner constraints","nodeId":"a1"}',
             });
             options?.onToolCall?.({
               type: 'result',
@@ -263,6 +282,58 @@ describe('orchestrate replay capture', () => {
       await rm(cwd, { recursive: true, force: true });
     }
   }, 15_000);
+
+  it('passes quick-start planning contract when delegation occurs within configured call limit', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'orchestrace-replay-quick-start-pass-'));
+
+    try {
+      const outputs = await orchestrate(makeSingleNodeGraph(), {
+        llm: createAdapter({ planningDelegationDelaySuccessfulCalls: 1 }),
+        cwd,
+        requirePlanApproval: false,
+        planningSystemPrompt: 'planning',
+        implementationSystemPrompt: 'implementation',
+        createToolset: () => ({ tools: [], executeTool: async () => ({ content: 'noop' }) }),
+        quickStartMode: true,
+        quickStartMaxPreDelegationToolCalls: 3,
+      });
+
+      const output = outputs.get('task-1');
+      expect(output).toBeDefined();
+      expect(output?.status).toBe('completed');
+      expect(output?.failureType).toBeUndefined();
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  }, 20_000);
+
+  it('fails quick-start planning contract when delegation occurs too late', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'orchestrace-replay-quick-start-fail-'));
+
+    try {
+      const outputs = await orchestrate(makeSingleNodeGraph(), {
+        llm: createAdapter({ planningDelegationDelaySuccessfulCalls: 4 }),
+        cwd,
+        requirePlanApproval: false,
+        planningSystemPrompt: 'planning',
+        implementationSystemPrompt: 'implementation',
+        createToolset: () => ({ tools: [], executeTool: async () => ({ content: 'noop' }) }),
+        quickStartMode: true,
+        quickStartMaxPreDelegationToolCalls: 3,
+      });
+
+      const output = outputs.get('task-1');
+      expect(output).toBeDefined();
+      expect(output?.status).toBe('failed');
+      expect(output?.failureType).toBe('validation');
+      expect(output?.error).toContain('Planning contract not satisfied');
+      expect(output?.error).toContain('quick-start mode requires delegation within the first 3 successful tool call(s)');
+      expect(output?.replay?.attempts.length).toBe(3);
+      expect(output?.replay?.attempts.at(-1)?.failureType).toBe('validation');
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  }, 20_000);
 
   it('includes granular planning contract guidance in planning prompt', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'orchestrace-replay-plan-prompt-'));
