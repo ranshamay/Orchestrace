@@ -5,9 +5,9 @@ import { join } from 'node:path';
 import { FileEventStore } from '../src/event-store.js';
 import { materializeSession, applyEvent } from '../src/materializer.js';
 import type {
+  SessionEvent,
   SessionEventInput,
   SessionConfig,
-  MaterializedSession,
 } from '../src/types.js';
 
 // ---------------------------------------------------------------------------
@@ -24,8 +24,6 @@ function makeConfig(overrides?: Partial<SessionConfig>): SessionConfig {
     provider: 'openai',
     model: 'gpt-4',
     autoApprove: false,
-    executionContext: 'workspace',
-    useWorktree: false,
     adaptiveConcurrency: false,
     batchConcurrency: 4,
     batchMinConcurrency: 1,
@@ -543,7 +541,7 @@ describe('materializeSession', () => {
   it('trims events beyond MAX_EVENTS (200)', () => {
     const t = now();
     const config = makeConfig();
-    const events: any[] = [
+    const events: SessionEvent[] = [
       { seq: 1, time: t, type: 'session:created', payload: { config } },
     ];
     for (let i = 2; i <= 210; i++) {

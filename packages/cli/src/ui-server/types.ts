@@ -7,8 +7,6 @@ export interface UiServerOptions {
 }
 
 export type WorkState = 'running' | 'completed' | 'failed' | 'cancelled';
-export type ExecutionContext = 'workspace' | 'git-worktree';
-export type SessionCreationReason = 'start' | 'retry';
 
 export type LlmSessionState =
   | 'queued'
@@ -38,7 +36,6 @@ export interface SessionAgentGraphNode {
   id: string;
   name?: string;
   prompt: string;
-  weight?: number;
   dependencies: string[];
   status?: 'pending' | 'running' | 'completed' | 'failed';
   provider?: string;
@@ -99,9 +96,7 @@ export interface SessionChatThread {
 export interface AgentTodoItem {
   id: string;
   text: string;
-  status?: 'todo' | 'in_progress' | 'done';
   done: boolean;
-  weight?: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -128,16 +123,11 @@ export interface WorkSession {
   provider: string;
   model: string;
   autoApprove: boolean;
-  executionContext: ExecutionContext;
-  selectedWorktreePath?: string;
-  useWorktree: boolean;
   adaptiveConcurrency: boolean;
   batchConcurrency: number;
   batchMinConcurrency: number;
-  worktreePath?: string;
-  worktreeBranch?: string;
-  creationReason: SessionCreationReason;
-  sourceSessionId?: string;
+  worktreePath: string;
+  worktreeBranch: string;
   createdAt: string;
   updatedAt: string;
   status: WorkState;
@@ -148,6 +138,7 @@ export interface WorkSession {
   error?: string;
   output?: { text?: string; planPath?: string; failureType?: string };
   controller: AbortController;
+  cleanupWorktree?: () => Promise<void>;
 }
 
 export interface PersistedWorkSession {
@@ -160,16 +151,11 @@ export interface PersistedWorkSession {
   provider: string;
   model: string;
   autoApprove: boolean;
-  executionContext?: ExecutionContext;
-  selectedWorktreePath?: string;
-  useWorktree?: boolean;
   adaptiveConcurrency?: boolean;
   batchConcurrency?: number;
   batchMinConcurrency?: number;
-  worktreePath?: string;
-  worktreeBranch?: string;
-  creationReason?: SessionCreationReason;
-  sourceSessionId?: string;
+  worktreePath: string;
+  worktreeBranch: string;
   createdAt: string;
   updatedAt: string;
   status: WorkState;
@@ -182,18 +168,12 @@ export interface PersistedWorkSession {
 }
 
 export interface UiPreferences {
-  executionContext: ExecutionContext;
-  selectedWorktreePath?: string;
-  useWorktree: boolean;
   adaptiveConcurrency: boolean;
   batchConcurrency: number;
   batchMinConcurrency: number;
 }
 
 export interface PersistedUiPreferences {
-  executionContext?: ExecutionContext;
-  selectedWorktreePath?: string;
-  useWorktree?: boolean;
   adaptiveConcurrency?: boolean;
   batchConcurrency?: number;
   batchMinConcurrency?: number;

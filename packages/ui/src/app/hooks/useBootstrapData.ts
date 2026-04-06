@@ -1,6 +1,5 @@
 import { useEffect, useState } from 'react';
 import {
-  type ExecutionContext,
   fetchGithubAuthStatus,
   fetchProviders,
   fetchSessions,
@@ -35,9 +34,6 @@ export function useBootstrapData() {
     model: '',
     workspaceId: '',
     autoApprove: true,
-    executionContext: 'workspace',
-    selectedWorktreePath: undefined,
-    useWorktree: false,
     adaptiveConcurrency: false,
     batchConcurrency: 8,
     batchMinConcurrency: 1,
@@ -47,9 +43,6 @@ export function useBootstrapData() {
   const [workModel, setWorkModel] = useState('');
   const [workWorkspaceId, setWorkWorkspaceId] = useState('');
   const [autoApprove, setAutoApprove] = useState(true);
-  const [executionContext, setExecutionContext] = useState<ExecutionContext>('workspace');
-  const [selectedWorktreePath, setSelectedWorktreePath] = useState<string>('');
-  const [useWorktree, setUseWorktree] = useState(false);
   const [adaptiveConcurrency, setAdaptiveConcurrency] = useState(false);
   const [batchConcurrency, setBatchConcurrency] = useState(8);
   const [batchMinConcurrency, setBatchMinConcurrency] = useState(1);
@@ -59,7 +52,7 @@ export function useBootstrapData() {
   useEffect(() => {
     const bootstrap = async () => {
       try {
-        const [providersResult, workspacesResult, sessionsResult, githubAuthStatusResult, preferencesResult] = await Promise.allSettled([
+        const [providersState, workspacesState, sessionsState, githubAuthStatusResponse, preferencesResponse] = await Promise.all([
           fetchProviders(),
           fetchWorkspaces(),
           fetchSessions(),
@@ -67,78 +60,31 @@ export function useBootstrapData() {
           fetchUiPreferences(),
         ]);
 
-        const bootstrapErrors: string[] = [];
+        setProviders(providersState.providers);
+        setProviderStatuses(providersState.statuses);
+        setWorkspaces(workspacesState.workspaces);
+        setActiveWorkspaceId(workspacesState.activeWorkspaceId ?? '');
+        setSessions(sessionsState.sessions);
+        setGithubAuthStatus(githubAuthStatusResponse.status);
 
-        let providersState;
-        if (providersResult.status === 'fulfilled') {
-          providersState = providersResult.value;
-          setProviders(providersState.providers);
-          setProviderStatuses(providersState.statuses);
-        } else {
-          bootstrapErrors.push(toErrorMessage(providersResult.reason));
-        }
+        const runIdFromUrl = readRunIdFromUrl();
+        const hasRunIdInResults = Boolean(runIdFromUrl && sessionsState.sessions.some((session) => session.id === runIdFromUrl));
+        const initialSessionId = hasRunIdInResults ? runIdFromUrl : sessionsState.sessions[0]?.id ?? '';
 
-        let workspacesState;
-        if (workspacesResult.status === 'fulfilled') {
-          workspacesState = workspacesResult.value;
-          setWorkspaces(workspacesState.workspaces);
-          setActiveWorkspaceId(workspacesState.activeWorkspaceId ?? '');
-        } else {
-          bootstrapErrors.push(toErrorMessage(workspacesResult.reason));
-        }
+        setSelectedSessionId(initialSessionId);
+        updateRunIdInUrl(initialSessionId);
 
-        let sessionsState;
-        if (sessionsResult.status === 'fulfilled') {
-          sessionsState = sessionsResult.value;
-          setSessions(sessionsState.sessions);
-
-          const runIdFromUrl = readRunIdFromUrl();
-          const hasRunIdInResults = Boolean(
-            runIdFromUrl && sessionsState.sessions.some((session) => session.id === runIdFromUrl),
-          );
-          const initialSessionId = hasRunIdInResults ? runIdFromUrl : sessionsState.sessions[0]?.id ?? '';
-
-          setSelectedSessionId(initialSessionId);
-          updateRunIdInUrl(initialSessionId);
-        } else {
-          bootstrapErrors.push(toErrorMessage(sessionsResult.reason));
-        }
-
-        if (githubAuthStatusResult.status === 'fulfilled') {
-          setGithubAuthStatus(githubAuthStatusResult.value.status);
-        }
-
-        const preferences = preferencesResult.status === 'fulfilled'
-          ? preferencesResult.value.preferences
-          : {
-              executionContext: 'workspace' as const,
-              selectedWorktreePath: undefined,
-              useWorktree: false,
-              adaptiveConcurrency: false,
-              batchConcurrency: 8,
-              batchMinConcurrency: 1,
-            };
-
-        if (preferencesResult.status === 'rejected') {
-          bootstrapErrors.push(toErrorMessage(preferencesResult.reason));
-        }
-
-        const connectedProvider = providersState?.statuses.find((status) => status.source !== 'none')?.provider || '';
-        const defaultProvider = connectedProvider || providersState?.defaults.provider || providersState?.providers[0]?.id || '';
-        const defaultWorkspace = workspacesState?.activeWorkspaceId || workspacesState?.workspaces[0]?.id || '';
-        const defaultExecutionContext: ExecutionContext = preferences.executionContext
-          ?? (preferences.useWorktree ? 'git-worktree' : 'workspace');
+        const connectedProvider = providersState.statuses.find((status) => status.source !== 'none')?.provider || '';
+        const defaultProvider = connectedProvider || providersState.defaults.provider || providersState.providers[0]?.id || '';
+        const defaultWorkspace = workspacesState.activeWorkspaceId || workspacesState.workspaces[0]?.id || '';
         const initialControls: SessionLlmControls = {
           provider: defaultProvider,
-          model: '',
+          model: providersState.defaults.model || '',
           workspaceId: defaultWorkspace,
           autoApprove: true,
-          executionContext: defaultExecutionContext,
-          selectedWorktreePath: preferences.selectedWorktreePath,
-          useWorktree: defaultExecutionContext === 'git-worktree',
-          adaptiveConcurrency: preferences.adaptiveConcurrency,
-          batchConcurrency: preferences.batchConcurrency,
-          batchMinConcurrency: preferences.batchMinConcurrency,
+          adaptiveConcurrency: preferencesResponse.preferences.adaptiveConcurrency,
+          batchConcurrency: preferencesResponse.preferences.batchConcurrency,
+          batchMinConcurrency: preferencesResponse.preferences.batchMinConcurrency,
         };
 
         setDefaultLlmControls(initialControls);
@@ -146,18 +92,11 @@ export function useBootstrapData() {
         setWorkModel(initialControls.model);
         setWorkWorkspaceId(initialControls.workspaceId);
         setAutoApprove(initialControls.autoApprove);
-        setExecutionContext(initialControls.executionContext);
-        setSelectedWorktreePath(initialControls.selectedWorktreePath ?? '');
-        setUseWorktree(initialControls.useWorktree);
         setAdaptiveConcurrency(initialControls.adaptiveConcurrency);
         setBatchConcurrency(initialControls.batchConcurrency);
         setBatchMinConcurrency(initialControls.batchMinConcurrency);
-
-        if (bootstrapErrors.length > 0) {
-          setErrorMessage(bootstrapErrors[0]);
-        }
       } catch (error) {
-        setErrorMessage(toErrorMessage(error));
+        setErrorMessage(error instanceof Error ? error.message : String(error));
       } finally {
         setBootstrapComplete(true);
       }
@@ -165,14 +104,6 @@ export function useBootstrapData() {
 
     void bootstrap();
   }, []);
-
-  function toErrorMessage(error: unknown): string {
-    if (error instanceof Error) {
-      return error.message;
-    }
-
-    return String(error);
-  }
 
   return {
     providers,
@@ -195,12 +126,6 @@ export function useBootstrapData() {
     setWorkWorkspaceId,
     autoApprove,
     setAutoApprove,
-    executionContext,
-    setExecutionContext,
-    selectedWorktreePath,
-    setSelectedWorktreePath,
-    useWorktree,
-    setUseWorktree,
     adaptiveConcurrency,
     setAdaptiveConcurrency,
     batchConcurrency,

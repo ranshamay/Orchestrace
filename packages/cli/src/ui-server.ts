@@ -1,30 +1,20 @@
 import { randomUUID } from 'node:crypto';
-import { execFile, spawn } from 'node:child_process';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { existsSync, watch, type FSWatcher } from 'node:fs';
 import { homedir } from 'node:os';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { promisify } from 'node:util';
-import { PromptSectionName, renderPromptSections } from '@orchestrace/core';
-import type { DagEvent, PromptSection } from '@orchestrace/core';
+import { dirname, join } from 'node:path';
+import { orchestrate, PromptSectionName, renderPromptSections } from '@orchestrace/core';
+import type { DagEvent, PlanApprovalRequest, PromptSection, TaskGraph } from '@orchestrace/core';
 import { getModels } from '@mariozechner/pi-ai';
-import { PiAiAdapter, ProviderAuthManager, type LlmPromptInput, type LlmToolCallEvent } from '@orchestrace/provider';
+import { PiAiAdapter, ProviderAuthManager, type LlmToolCallEvent } from '@orchestrace/provider';
+import { createWorktree, type WorktreeHandle } from '@orchestrace/sandbox';
 import {
+  DEFAULT_AGENT_TOOL_POLICY_VERSION,
   createAgentToolset,
   listAgentTools,
   type AgentToolPhase,
-  type SubAgentRequest,
-  type SubAgentResult,
 } from '@orchestrace/tools';
-import {
-  InMemorySharedContextStore,
-  ContextEngine,
-  countTokens,
-  type ConversationTurn,
-  type ModelInfo,
-} from '@orchestrace/context';
 import { now } from './ui-server/clock.js';
 import {
   buildChatContinuationInput,
@@ -58,13 +48,16 @@ import type {
   WorkSession,
   WorkState,
   LlmSessionState,
-  ExecutionContext,
-  SessionCreationReason,
 } from './ui-server/types.js';
 import { WorkspaceManager } from './workspace-manager.js';
-import { FileEventStore } from '@orchestrace/store';
-import { materializeSession as materializeFromEvents } from '@orchestrace/store';
-import type { SessionEventInput } from '@orchestrace/store';
+
+const SUB_AGENT_READ_ONLY_TOOL_ALLOWLIST = [
+  'list_directory',
+  'read_file',
+  'search_files',
+  'git_diff',
+  'git_status',
+];
 
 const GITHUB_PROVIDER_ID = 'github';
 const GITHUB_API_BASE_URL = 'https://api.github.com';
@@ -74,28 +67,8 @@ const GITHUB_DEVICE_AUTH_CLIENT_ID_DEFAULT = '178c6fc778ccc68e1d6a';
 const DEFAULT_UI_ADAPTIVE_CONCURRENCY = false;
 const DEFAULT_UI_BATCH_CONCURRENCY = 8;
 const DEFAULT_UI_BATCH_MIN_CONCURRENCY = 1;
-const SUBAGENT_WORKER_PROMPT_PREVIEW_MAX_CHARS = 220;
-const SUBAGENT_WORKER_OUTPUT_PREVIEW_MAX_CHARS = 420;
-const SUBAGENT_RETRY_MAX_ATTEMPTS = 2;
-const SUBAGENT_RETRY_BASE_DELAY_MS = 300;
-const CHAT_RETRY_MAX_ATTEMPTS = 2;
-const CHAT_RETRY_BASE_DELAY_MS = 300;
-const DEFAULT_CONTEXT_COMPACTION_MODEL = 'gpt-4.1-mini';
-const CONTEXT_COMPACTION_PROVIDER_ENV = 'ORCHESTRACE_CONTEXT_COMPACTION_PROVIDER';
-const CONTEXT_COMPACTION_MODEL_ENV = 'ORCHESTRACE_CONTEXT_COMPACTION_MODEL';
-const PERSIST_RAW_DEBUG_ENV = 'ORCHESTRACE_PERSIST_RAW_DEBUG';
-const PERSIST_TEXT_MAX_CHARS = 3_000;
-const PERSIST_EVENT_MESSAGE_MAX_CHARS = 1_200;
-const PERSIST_CHAT_MESSAGE_MAX_CHARS = 2_400;
-const PHASE_PROGRESS_PLAN_WEIGHT_DEFAULT = 30;
-const PHASE_PROGRESS_IMPLEMENTATION_WEIGHT_DEFAULT = 70;
-const execFileAsync = promisify(execFile);
-
-type NativeGitWorktree = {
-  path: string;
-  branch?: string;
-  detached: boolean;
-};
+const SUBAGENT_WORKER_PROMPT_PREVIEW_MAX_CHARS = 2_000;
+const SUBAGENT_WORKER_OUTPUT_PREVIEW_MAX_CHARS = 4_000;
 
 type GithubDeviceAuthSessionState = 'awaiting-user' | 'polling' | 'completed' | 'failed';
 
@@ -115,44 +88,21 @@ interface GithubDeviceAuthSession {
   error?: string;
 }
 
-interface SessionContextState {
-  turnsSinceLastCompaction: number;
-  previousCompressedHistory?: string;
-}
-
-function createInheritedSubAgentToolset(
+function createReadOnlySubAgentToolset(
   cwd: string,
-  options: {
-    phase: AgentToolPhase;
-    taskId: string;
-    taskType?: string;
-    graphId?: string;
-    provider?: string;
-    model?: string;
-    reasoning?: 'minimal' | 'low' | 'medium' | 'high';
-    adaptiveConcurrency?: boolean;
-    batchConcurrency?: number;
-    batchMinConcurrency?: number;
-    resolveGithubToken: () => Promise<string | undefined>;
-    sharedContextStore?: import('@orchestrace/context').SharedContextStore;
-    agentId?: string;
-  },
+  options?: { adaptiveConcurrency?: boolean; batchConcurrency?: number; batchMinConcurrency?: number },
 ) {
   return createAgentToolset({
     cwd,
-    phase: options.phase,
-    taskId: options.taskId,
-    taskType: options.taskType,
-    graphId: options.graphId,
-    provider: options.provider,
-    model: options.model,
-    reasoning: options.reasoning,
+    phase: 'planning',
     adaptiveConcurrency: options?.adaptiveConcurrency,
     batchConcurrency: options?.batchConcurrency,
     batchMinConcurrency: options?.batchMinConcurrency,
-    resolveGithubToken: options.resolveGithubToken,
-    sharedContextStore: options.sharedContextStore,
-    agentId: options.agentId,
+    permissions: {
+      allowWriteTools: false,
+      allowRunCommand: false,
+      toolAllowlist: [...SUB_AGENT_READ_ONLY_TOOL_ALLOWLIST],
+    },
   });
 }
 
@@ -173,9 +123,6 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
   const githubDeviceAuthSessions = new Map<string, GithubDeviceAuthSession>();
   const sessionChats = new Map<string, SessionChatThread>();
   const sessionTodos = new Map<string, AgentTodoItem[]>();
-  const sessionSharedContextStores = new Map<string, InMemorySharedContextStore>();
-  const sessionContextEngines = new Map<string, ContextEngine>();
-  const sessionContextStates = new Map<string, SessionContextState>();
   const pendingSubagentNodeIdsBySession = new Map<string, Map<string, string[]>>();
   const chatStreams = new Map<string, ChatTokenStream>();
   let uiPreferences = resolveUiPreferencesDefaults();
@@ -184,380 +131,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
   const chatStreamClients = new Map<string, Set<ServerResponse>>();
   const uiStatePath = join(workspaceManager.getRootDir(), '.orchestrace', 'ui-state.json');
 
-  // Event store for durable session event logs (Phase 2: dual-write alongside in-memory state)
-  const eventStore = new FileEventStore(
-    join(workspaceManager.getRootDir(), '.orchestrace', 'sessions'),
-  );
-
-  /** Append a session event to the durable event store. Fire-and-forget; errors are logged. */
-  function emitSessionEvent(sessionId: string, event: SessionEventInput): void {
-    void eventStore.append(sessionId, event).catch((err) => {
-      console.error(`[orchestrace][event-store] Failed to append event for ${sessionId}:`, err);
-    });
-  }
-
-  /**
-   * Restore session state from the event store (event-sourced reads).
-   * Returns the number of sessions restored. If no event logs exist,
-   * returns 0 so the caller can fall back to legacy ui-state.json.
-   */
-  async function restoreFromEventStore(): Promise<number> {
-    const sessionIds = await eventStore.listSessions();
-    if (sessionIds.length === 0) return 0;
-
-    let restored = 0;
-    for (const sessionId of sessionIds) {
-      try {
-        const events = await eventStore.read(sessionId);
-        if (events.length === 0) continue;
-
-        const materialized = materializeFromEvents(events);
-        if (!materialized) continue;
-
-        const c = materialized.config;
-        const session: WorkSession = {
-          id: c.id,
-          workspaceId: c.workspaceId,
-          workspaceName: c.workspaceName,
-          workspacePath: c.workspacePath,
-          prompt: c.prompt,
-          promptParts: c.promptParts,
-          provider: c.provider,
-          model: c.model,
-          autoApprove: c.autoApprove,
-          executionContext: c.executionContext,
-          selectedWorktreePath: c.selectedWorktreePath,
-          useWorktree: c.useWorktree,
-          adaptiveConcurrency: c.adaptiveConcurrency,
-          batchConcurrency: c.batchConcurrency,
-          batchMinConcurrency: c.batchMinConcurrency,
-          worktreePath: c.worktreePath,
-          worktreeBranch: c.worktreeBranch,
-          creationReason: c.creationReason,
-          sourceSessionId: c.sourceSessionId,
-          createdAt: materialized.createdAt,
-          updatedAt: materialized.updatedAt,
-          status: materialized.status,
-          llmStatus: materialized.llmStatus,
-          taskStatus: materialized.taskStatus,
-          events: materialized.events as UiDagEvent[],
-          agentGraph: materialized.agentGraph,
-          error: materialized.error,
-          output: materialized.output,
-          controller: new AbortController(),
-        };
-
-        // If the session was 'running', check if the runner process is still alive
-        if (session.status === 'running') {
-          const meta = await eventStore.getMetadata(sessionId);
-          let runnerAlive = false;
-          if (meta?.pid) {
-            try {
-              process.kill(meta.pid, 0); // Signal 0 checks if process exists
-              runnerAlive = true;
-            } catch {
-              // Process is dead
-            }
-          }
-
-          if (runnerAlive) {
-            // Runner is still alive — set up event watcher to observe its progress
-            console.log(`[orchestrace][event-store] Session ${sessionId}: runner PID ${meta!.pid} is alive, reconnecting...`);
-            const lastSeq = events[events.length - 1]?.seq ?? 0;
-            const unwatch = eventStore.watch(sessionId, lastSeq, (event) => {
-              session.updatedAt = event.time;
-              switch (event.type) {
-                case 'session:llm-status-change':
-                  session.llmStatus = event.payload.llmStatus as SessionLlmStatus;
-                  break;
-                case 'session:status-change': {
-                  const newStatus = event.payload.status as WorkState;
-                  session.status = newStatus;
-                  if (newStatus === 'completed' || newStatus === 'failed' || newStatus === 'cancelled') {
-                    broadcastWorkStream(workStreamClients, sessionId, newStatus === 'completed' ? 'end' : 'error', {
-                      id: sessionId, status: session.status, llmStatus: session.llmStatus, error: session.error, time: event.time,
-                    });
-                    unwatch();
-                  }
-                  break;
-                }
-                case 'session:error-change':
-                  session.error = event.payload.error as string | undefined;
-                  break;
-                case 'session:output-set':
-                  session.output = event.payload.output as WorkSession['output'];
-                  break;
-                case 'session:dag-event': {
-                  const uiEvent = event.payload.event as UiDagEvent;
-                  session.events.push(uiEvent);
-                  if (session.events.length > 200) session.events.shift();
-                  break;
-                }
-                case 'session:stream-delta': {
-                  const p = event.payload as { taskId: string; phase: string; delta: string };
-                  broadcastWorkStream(workStreamClients, sessionId, 'token', {
-                    id: sessionId, taskId: p.taskId, phase: p.phase, delta: p.delta, llmStatus: session.llmStatus, time: event.time,
-                  });
-                  break;
-                }
-                case 'session:task-status-change': {
-                  const p = event.payload as { taskId: string; taskStatus: string };
-                  session.taskStatus[p.taskId] = p.taskStatus;
-                  break;
-                }
-                case 'session:todos-set': {
-                  const items = (event.payload as { items: AgentTodoItem[] }).items;
-                  sessionTodos.set(sessionId, items);
-                  broadcastTodoUpdate(workStreamClients, sessionId, items);
-                  break;
-                }
-                case 'session:todo-item-added': {
-                  const item = (event.payload as { item: AgentTodoItem }).item;
-                  const existing = sessionTodos.get(sessionId) ?? [];
-                  existing.push(item);
-                  sessionTodos.set(sessionId, existing);
-                  broadcastTodoUpdate(workStreamClients, sessionId, existing);
-                  break;
-                }
-                case 'session:todo-item-toggled': {
-                  const p = event.payload as { itemId: string; done: boolean; status?: string };
-                  const items = sessionTodos.get(sessionId) ?? [];
-                  const idx = items.findIndex((i) => i.id === p.itemId);
-                  if (idx >= 0) {
-                    items[idx] = { ...items[idx], done: p.done, status: (p.status as AgentTodoItem['status']) ?? items[idx].status, updatedAt: event.time };
-                    broadcastTodoUpdate(workStreamClients, sessionId, items);
-                  }
-                  break;
-                }
-                case 'session:agent-graph-set': {
-                  session.agentGraph = (event.payload as { graph: SessionAgentGraphNode[] }).graph;
-                  break;
-                }
-                case 'session:chat-message': {
-                  const msg = (event.payload as { message: SessionChatMessage }).message;
-                  const thread = sessionChats.get(sessionId);
-                  if (thread) {
-                    thread.messages.push(msg);
-                    trimThreadMessages(thread);
-                    thread.updatedAt = event.time;
-                  }
-                  break;
-                }
-                default:
-                  break;
-              }
-              uiStatePersistence.schedule();
-            });
-          } else {
-            // Runner is dead — mark session as failed
-            const failedAt = now();
-            session.status = 'failed';
-            session.error = 'Session interrupted because the runner process exited.';
-            session.updatedAt = failedAt;
-            session.llmStatus = createLlmStatus('failed', failedAt, {
-              detail: session.error,
-            });
-            emitSessionEvent(sessionId, { time: failedAt, type: 'session:error-change', payload: { error: session.error } });
-            emitSessionEvent(sessionId, { time: failedAt, type: 'session:llm-status-change', payload: { llmStatus: session.llmStatus } });
-            emitSessionEvent(sessionId, { time: failedAt, type: 'session:status-change', payload: { status: 'failed' } });
-          }
-        }
-
-        workSessions.set(sessionId, session);
-
-        // Restore chat thread
-        if (materialized.chatThread) {
-          const ct = materialized.chatThread;
-          sessionChats.set(sessionId, {
-            sessionId,
-            provider: ct.provider,
-            model: ct.model,
-            workspacePath: ct.workspacePath,
-            taskPrompt: ct.taskPrompt,
-            createdAt: ct.createdAt,
-            updatedAt: ct.updatedAt,
-            messages: ct.messages,
-          });
-        }
-
-        // Restore todos
-        if (materialized.todos.length > 0) {
-          sessionTodos.set(sessionId, materialized.todos);
-        }
-
-        restored++;
-      } catch (err) {
-        console.error(`[orchestrace][event-store][restore] Error restoring session ${sessionId}:`, err);
-      }
-    }
-
-    console.log(`[orchestrace][event-store] Restored ${restored}/${sessionIds.length} sessions from event logs.`);
-    return restored;
-  }
-
-  /**
-   * Migrate sessions from legacy ui-state.json into the event store.
-   * Synthesizes a minimal event log for each session so subsequent restarts use event logs.
-   */
-  async function migrateUiStateToEventStore(): Promise<void> {
-    for (const [sessionId, session] of workSessions.entries()) {
-      try {
-        const existing = await eventStore.read(sessionId);
-        if (existing.length > 0) continue; // Already has events
-
-        const t = session.createdAt;
-        const events: SessionEventInput[] = [];
-
-        // session:created
-        events.push({
-          time: t,
-          type: 'session:created',
-          payload: {
-            config: {
-              id: session.id,
-              workspaceId: session.workspaceId,
-              workspaceName: session.workspaceName,
-              workspacePath: session.workspacePath,
-              prompt: session.prompt,
-              promptParts: session.promptParts,
-              provider: session.provider,
-              model: session.model,
-              autoApprove: session.autoApprove,
-              executionContext: session.executionContext,
-              selectedWorktreePath: session.selectedWorktreePath,
-              useWorktree: session.useWorktree,
-              adaptiveConcurrency: session.adaptiveConcurrency,
-              batchConcurrency: session.batchConcurrency,
-              batchMinConcurrency: session.batchMinConcurrency,
-              worktreePath: session.worktreePath,
-              worktreeBranch: session.worktreeBranch,
-              creationReason: session.creationReason,
-              sourceSessionId: session.sourceSessionId,
-            },
-          },
-        });
-
-        // dag events
-        for (const evt of session.events) {
-          events.push({ time: evt.time, type: 'session:dag-event', payload: { event: evt } });
-        }
-
-        // agent graph
-        if (session.agentGraph.length > 0) {
-          events.push({ time: t, type: 'session:agent-graph-set', payload: { graph: session.agentGraph } });
-        }
-
-        // todos
-        const todos = sessionTodos.get(sessionId);
-        if (todos && todos.length > 0) {
-          events.push({ time: t, type: 'session:todos-set', payload: { items: todos } });
-        }
-
-        // chat thread
-        const chatThread = sessionChats.get(sessionId);
-        if (chatThread) {
-          events.push({
-            time: chatThread.createdAt,
-            type: 'session:chat-thread-created',
-            payload: {
-              provider: chatThread.provider,
-              model: chatThread.model,
-              workspacePath: chatThread.workspacePath,
-              taskPrompt: chatThread.taskPrompt,
-            },
-          });
-          for (const msg of chatThread.messages) {
-            events.push({ time: msg.time, type: 'session:chat-message', payload: { message: msg } });
-          }
-        }
-
-        // Terminal state
-        if (session.output) {
-          events.push({ time: session.updatedAt, type: 'session:output-set', payload: { output: session.output } });
-        }
-        if (session.error) {
-          events.push({ time: session.updatedAt, type: 'session:error-change', payload: { error: session.error } });
-        }
-        events.push({ time: session.updatedAt, type: 'session:llm-status-change', payload: { llmStatus: session.llmStatus } });
-        events.push({ time: session.updatedAt, type: 'session:status-change', payload: { status: session.status } });
-
-        await eventStore.appendBatch(sessionId, events);
-      } catch (err) {
-        console.error(`[orchestrace][event-store][migrate] Error migrating session ${sessionId}:`, err);
-      }
-    }
-  }
-
-  async function refreshSessionFromEventStore(sessionId: string): Promise<boolean> {
-    const existing = workSessions.get(sessionId);
-    if (!existing) {
-      return false;
-    }
-
-    try {
-      const events = await eventStore.read(sessionId);
-      if (events.length === 0) {
-        return false;
-      }
-
-      const materialized = materializeFromEvents(events);
-      if (!materialized) {
-        return false;
-      }
-
-      existing.updatedAt = materialized.updatedAt;
-      existing.status = materialized.status;
-      existing.llmStatus = materialized.llmStatus;
-      existing.taskStatus = { ...materialized.taskStatus };
-      existing.events = materialized.events as UiDagEvent[];
-      existing.agentGraph = materialized.agentGraph;
-      existing.error = materialized.error;
-      existing.output = materialized.output;
-
-      if (materialized.chatThread) {
-        const thread = materialized.chatThread;
-        sessionChats.set(sessionId, {
-          sessionId,
-          provider: thread.provider,
-          model: thread.model,
-          workspacePath: thread.workspacePath,
-          taskPrompt: thread.taskPrompt,
-          createdAt: thread.createdAt,
-          updatedAt: thread.updatedAt,
-          messages: thread.messages,
-        });
-      }
-
-      sessionTodos.set(sessionId, materialized.todos);
-      return true;
-    } catch (err) {
-      console.error(`[orchestrace][event-store][refresh] Error refreshing session ${sessionId}:`, err);
-      return false;
-    }
-  }
-
-  // Restore sessions: try event store first, fall back to legacy ui-state.json
-  const eventStoreSessionCount = await restoreFromEventStore();
-  let restoredUiPreferences: PersistedUiPreferences | undefined;
-  if (eventStoreSessionCount === 0) {
-    // No event logs — try legacy restoration and migrate
-    restoredUiPreferences = await restoreUiState(uiStatePath, workSessions, sessionChats, sessionTodos);
-    if (workSessions.size > 0) {
-      console.log(`[orchestrace][event-store] Migrating ${workSessions.size} sessions from ui-state.json to event store...`);
-      await migrateUiStateToEventStore();
-    }
-  } else {
-    // Event store is authoritative; only read preferences from legacy file
-    const payload = await readPersistedUiState(uiStatePath).catch(() => null);
-    restoredUiPreferences = payload?.preferences;
-  }
+  const restoredUiPreferences = await restoreUiState(uiStatePath, workSessions, sessionChats, sessionTodos);
   uiPreferences = normalizeUiPreferences(restoredUiPreferences, resolveUiPreferencesDefaults());
-
-  for (const [sessionId, restoredSession] of workSessions.entries()) {
-    sessionSharedContextStores.set(sessionId, new InMemorySharedContextStore());
-    sessionContextEngines.set(sessionId, createSessionContextEngine(restoredSession.provider, restoredSession.model));
-    sessionContextStates.set(sessionId, { turnsSinceLastCompaction: 0 });
-  }
 
   const uiStatePersistence = createUiStatePersistence(
     uiStatePath,
@@ -566,61 +141,6 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     sessionTodos,
     () => ({ ...uiPreferences }),
   );
-
-  function createCompactionDelegate(defaultProvider: string, defaultModel: string) {
-    return {
-      summarize: async (text: string, maxTokens: number, signal?: AbortSignal): Promise<string> => {
-        const preferredProvider = asString(process.env[CONTEXT_COMPACTION_PROVIDER_ENV]) || defaultProvider;
-        const preferredModel = asString(process.env[CONTEXT_COMPACTION_MODEL_ENV]) || DEFAULT_CONTEXT_COMPACTION_MODEL;
-
-        const candidates: Array<{ provider: string; model: string }> = [];
-        const addCandidate = (provider: string, model: string): void => {
-          if (!provider || !model) {
-            return;
-          }
-          if (candidates.some((entry) => entry.provider === provider && entry.model === model)) {
-            return;
-          }
-          candidates.push({ provider, model });
-        };
-
-        addCandidate(preferredProvider, preferredModel);
-        addCandidate(defaultProvider, defaultModel);
-
-        for (const candidate of candidates) {
-          try {
-            const result = await llm.complete({
-              provider: candidate.provider,
-              model: candidate.model,
-              systemPrompt: 'You compress conversation history into structured technical summaries while preserving decisions, blockers, and key details.',
-              prompt: text,
-              timeoutMs: Math.min(resolveLongTurnTimeoutMs(), 20_000),
-              signal,
-              apiKey: await authManager.resolveApiKey(candidate.provider),
-              refreshApiKey: () => authManager.resolveApiKey(candidate.provider),
-            });
-
-            const trimmed = trimCompactionSummary(result.text, maxTokens);
-            if (trimmed) {
-              return trimmed;
-            }
-          } catch {
-            // Try next candidate before degrading to heuristic-only fallback.
-          }
-        }
-
-        return buildCompactionFallbackSummary(text, maxTokens);
-      },
-    };
-  }
-
-  function createSessionContextEngine(provider: string, model: string): ContextEngine {
-    const modelInfo: ModelInfo = llm.getModelInfo(provider, model);
-    return new ContextEngine({
-      modelInfo,
-      compactionDelegate: createCompactionDelegate(provider, model),
-    });
-  }
 
   function deleteWorkSession(id: string): boolean {
     const session = workSessions.get(id);
@@ -635,26 +155,17 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       session.llmStatus = createLlmStatus('cancelled', session.updatedAt, {
         detail: 'Cancelled by user.',
       });
-      // Dual-write: cancellation before deletion
-      emitSessionEvent(id, {
-        time: session.updatedAt,
-        type: 'session:llm-status-change',
-        payload: { llmStatus: session.llmStatus },
-      });
-      emitSessionEvent(id, {
-        time: session.updatedAt,
-        type: 'session:status-change',
-        payload: { status: 'cancelled' },
-      });
+    }
+
+    if (session.cleanupWorktree) {
+      void session.cleanupWorktree().catch(() => {});
+      session.cleanupWorktree = undefined;
     }
 
     closeWorkStream(workStreamClients, id);
     workSessions.delete(id);
     sessionChats.delete(id);
     sessionTodos.delete(id);
-    sessionSharedContextStores.delete(id);
-    sessionContextEngines.delete(id);
-    sessionContextStates.delete(id);
     pendingSubagentNodeIdsBySession.delete(id);
 
     for (const [streamId, streamState] of [...chatStreams.entries()]) {
@@ -665,11 +176,6 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       closeWorkStream(chatStreamClients, streamId);
       chatStreams.delete(streamId);
     }
-
-    // Dual-write: delete event store data
-    void eventStore.deleteSession(id).catch((err) => {
-      console.error(`[orchestrace][event-store] Failed to delete session ${id}:`, err);
-    });
 
     uiStatePersistence.schedule();
     return true;
@@ -682,14 +188,9 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     provider: string;
     model: string;
     autoApprove: boolean;
-    executionContext?: ExecutionContext;
-    selectedWorktreePath?: string;
-    useWorktree?: boolean;
     adaptiveConcurrency?: boolean;
     batchConcurrency?: number;
     batchMinConcurrency?: number;
-    creationReason?: SessionCreationReason;
-    sourceSessionId?: string;
   }): Promise<{ id: string } | { error: string; statusCode: number }> {
     const promptParts = cloneChatContentParts(request.promptParts ?? []);
     const prompt = asString(request.prompt);
@@ -716,13 +217,6 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       : (prompt || summarizeChatContentParts(promptParts));
 
     const id = randomUUID();
-    const requestedExecutionContext = normalizeExecutionContext(request.executionContext)
-      ?? (request.useWorktree ? 'git-worktree' : undefined)
-      ?? uiPreferences.executionContext
-      ?? (uiPreferences.useWorktree ? 'git-worktree' : 'workspace');
-    const requestedWorktreePath = asString(request.selectedWorktreePath)
-      || uiPreferences.selectedWorktreePath
-      || undefined;
     const adaptiveConcurrency = request.adaptiveConcurrency ?? uiPreferences.adaptiveConcurrency;
     const batchConcurrency = normalizePositiveSetting(request.batchConcurrency, uiPreferences.batchConcurrency);
     const batchMinConcurrency = Math.min(
@@ -730,27 +224,16 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       normalizePositiveSetting(request.batchMinConcurrency, uiPreferences.batchMinConcurrency),
     );
 
-    let workspacePath = workspace.path;
-    let executionContext: ExecutionContext = 'workspace';
-    let selectedWorktreePath: string | undefined;
-    let selectedWorktreeBranch: string | undefined;
-    if (requestedExecutionContext === 'git-worktree') {
-      try {
-        const resolved = await resolveSessionWorkspacePath({
-          workspaceRoot: workspace.path,
-          executionContext: requestedExecutionContext,
-          selectedWorktreePath: requestedWorktreePath,
-        });
-        workspacePath = resolved.workspacePath;
-        executionContext = resolved.executionContext;
-        selectedWorktreePath = resolved.selectedWorktreePath;
-        selectedWorktreeBranch = resolved.worktreeBranch;
-      } catch (error) {
-        return {
-          error: toErrorMessage(error),
-          statusCode: 400,
-        };
-      }
+    let worktreeHandle: WorktreeHandle;
+    let executionPath = workspace.path;
+    try {
+      worktreeHandle = await createWorktree(workspace.path, `session-${id}`);
+      executionPath = worktreeHandle.path;
+    } catch (error) {
+      return {
+        error: `Failed to create worktree: ${toErrorMessage(error)}`,
+        statusCode: 500,
+      };
     }
 
     const controller = new AbortController();
@@ -759,22 +242,17 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       id,
       workspaceId: workspace.id,
       workspaceName: workspace.name,
-      workspacePath,
+      workspacePath: executionPath,
       prompt: normalizedPrompt,
       promptParts: promptParts.length > 0 ? cloneChatContentParts(promptParts) : undefined,
       provider: request.provider,
       model: request.model,
       autoApprove: request.autoApprove,
-      executionContext,
-      selectedWorktreePath,
-      useWorktree: executionContext === 'git-worktree',
       adaptiveConcurrency,
       batchConcurrency,
       batchMinConcurrency,
-      worktreePath: selectedWorktreePath,
-      worktreeBranch: selectedWorktreeBranch,
-      creationReason: request.creationReason ?? 'start',
-      sourceSessionId: asString(request.sourceSessionId) || undefined,
+      worktreePath: worktreeHandle.path,
+      worktreeBranch: worktreeHandle.branch,
       createdAt,
       updatedAt: createdAt,
       status: 'running',
@@ -785,227 +263,202 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       events: [],
       agentGraph: [],
       controller,
+      cleanupWorktree: () => worktreeHandle.cleanup(),
     };
 
     workSessions.set(id, session);
     sessionChats.set(id, createSessionChatThread(session, promptParts));
     sessionTodos.set(id, []);
-    sessionSharedContextStores.set(id, new InMemorySharedContextStore());
-    sessionContextEngines.set(id, createSessionContextEngine(request.provider, request.model));
-    sessionContextStates.set(id, { turnsSinceLastCompaction: 0 });
     uiStatePersistence.schedule();
     broadcastTodoUpdate(workStreamClients, id, sessionTodos.get(id) ?? []);
 
-    // Dual-write: emit session:created event to durable event store
-    emitSessionEvent(id, {
-      time: createdAt,
-      type: 'session:created',
-      payload: {
-        config: {
-          id,
-          workspaceId: workspace.id,
-          workspaceName: workspace.name,
-          workspacePath,
-          prompt: normalizedPrompt,
-          promptParts: promptParts.length > 0 ? cloneChatContentParts(promptParts) : undefined,
-          provider: request.provider,
-          model: request.model,
-          autoApprove: request.autoApprove,
-          executionContext,
-          selectedWorktreePath,
-          useWorktree: executionContext === 'git-worktree',
-          adaptiveConcurrency,
-          batchConcurrency,
-          batchMinConcurrency,
-          creationReason: request.creationReason ?? 'start',
-          sourceSessionId: asString(request.sourceSessionId) || undefined,
-        },
-      },
-    });
-    emitSessionEvent(id, {
-      time: createdAt,
-      type: 'session:chat-thread-created',
-      payload: {
-        provider: request.provider,
-        model: request.model,
-        workspacePath,
-        taskPrompt: normalizedPrompt,
-      },
-    });
+    const graph = buildSingleTaskGraph(id, normalizedPrompt);
 
-    // Spawn runner as a detached child process
-    const runnerPath = join(dirname(fileURLToPath(import.meta.url)), 'runner.ts');
-    const runnerProcess = spawn(
-      process.execPath,
-      [...(process.execArgv.length > 0 ? process.execArgv : ['--import', 'tsx']), runnerPath, id, workspaceManager.getRootDir()],
-      {
-        detached: true,
-        stdio: 'ignore',
-        cwd: workspacePath,
-        env: { ...process.env, ORCHESTRACE_SESSION_ID: id },
-      },
-    );
-    runnerProcess.unref();
-
-    // Record runner PID in metadata
-    void eventStore.setMetadata(id, {
-      id,
-      pid: runnerProcess.pid ?? 0,
-      createdAt,
-      workspacePath,
-    });
-
-    // Watch event store for updates from the runner
-    const unwatch = eventStore.watch(id, 0, (event) => {
-      session.updatedAt = event.time;
-
-      switch (event.type) {
-        case 'session:llm-status-change':
-          session.llmStatus = event.payload.llmStatus as SessionLlmStatus;
-          break;
-
-        case 'session:status-change': {
-          const newStatus = event.payload.status as WorkState;
-          session.status = newStatus;
-          if (newStatus === 'completed' || newStatus === 'failed' || newStatus === 'cancelled') {
-            // Terminal state — broadcast end event and stop watching
-            broadcastWorkStream(workStreamClients, id, newStatus === 'completed' ? 'end' : 'error', {
-              id,
-              status: session.status,
-              llmStatus: session.llmStatus,
-              error: session.error,
-              time: event.time,
-            });
-            unwatch();
-          }
-          break;
-        }
-
-        case 'session:error-change':
-          session.error = event.payload.error as string | undefined;
-          break;
-
-        case 'session:output-set':
-          session.output = event.payload.output as WorkSession['output'];
-          break;
-
-        case 'session:dag-event': {
-          const uiEvent = event.payload.event as UiDagEvent;
-          session.events.push(uiEvent);
-          if (session.events.length > 200) session.events.shift();
-          break;
-        }
-
-        case 'session:stream-delta': {
-          const p = event.payload as { taskId: string; phase: string; delta: string };
-          broadcastWorkStream(workStreamClients, id, 'token', {
-            id,
-            taskId: p.taskId,
-            phase: p.phase,
-            delta: p.delta,
-            llmStatus: session.llmStatus,
-            time: event.time,
+    void orchestrate(graph, {
+      llm,
+      cwd: session.workspacePath,
+      planOutputDir: join(session.workspacePath, '.orchestrace', 'plans'),
+      promptVersion: process.env.ORCHESTRACE_PROMPT_VERSION,
+      policyVersion: process.env.ORCHESTRACE_POLICY_VERSION ?? DEFAULT_AGENT_TOOL_POLICY_VERSION,
+      defaultModel: { provider: request.provider, model: request.model },
+      planningSystemPrompt: buildPlanningSystemPrompt(session),
+      implementationSystemPrompt: buildImplementationSystemPrompt(session),
+      maxParallel: 1,
+      requirePlanApproval: !request.autoApprove,
+      onPlanApproval: async (_approvalRequest: PlanApprovalRequest) => request.autoApprove,
+      signal: controller.signal,
+      resolveApiKey: async (providerId) => authManager.resolveApiKey(providerId),
+      createToolset: ({ phase, task, graphId, provider: activeProvider, model: activeModel, reasoning }) => createAgentToolset({
+        cwd: session.workspacePath,
+        phase,
+        taskType: task.type,
+        graphId,
+        taskId: task.id,
+        provider: activeProvider,
+        model: activeModel,
+        reasoning,
+        adaptiveConcurrency: session.adaptiveConcurrency,
+        batchConcurrency: session.batchConcurrency,
+        batchMinConcurrency: session.batchMinConcurrency,
+        resolveGithubToken: () => githubAuthManager.resolveApiKey(GITHUB_PROVIDER_ID),
+        runSubAgent: async (runSubAgentRequest, _signal) => {
+          const subProvider = runSubAgentRequest.provider ?? activeProvider;
+          const subModel = runSubAgentRequest.model ?? activeModel;
+          const subAgentSignal = session.controller.signal;
+          const subAgentToolset = createReadOnlySubAgentToolset(session.workspacePath, {
+            adaptiveConcurrency: session.adaptiveConcurrency,
+            batchConcurrency: session.batchConcurrency,
+            batchMinConcurrency: session.batchMinConcurrency,
           });
-          break;
+          const subAgent = await llm.spawnAgent({
+            provider: subProvider,
+            model: subModel,
+            reasoning: runSubAgentRequest.reasoning ?? reasoning,
+            timeoutMs: resolveSubAgentTimeoutMs(),
+            systemPrompt: runSubAgentRequest.systemPrompt
+              ?? 'You are a focused sub-agent. Use only the provided task-relevant context, avoid unrelated history, and return concise actionable output.',
+            signal: subAgentSignal,
+            toolset: subAgentToolset,
+            apiKey: await authManager.resolveApiKey(subProvider),
+                      refreshApiKey: () => authManager.resolveApiKey(subProvider),
+          });
+
+          const result = await subAgent.complete(runSubAgentRequest.prompt, subAgentSignal);
+          return {
+            text: result.text,
+            usage: result.usage,
+          };
+        },
+      }),
+      onEvent: (event) => {
+        session.updatedAt = now();
+        const llmStatus = deriveLlmStatusFromDagEvent(event, session.updatedAt);
+        if (llmStatus) {
+          session.llmStatus = llmStatus;
         }
 
-        case 'session:task-status-change': {
-          const p = event.payload as { taskId: string; taskStatus: string };
-          session.taskStatus[p.taskId] = p.taskStatus;
-          break;
+        if (event.type === 'task:stream-delta') {
+          broadcastWorkStream(workStreamClients, session.id, 'token', {
+            id: session.id,
+            taskId: event.taskId,
+            phase: event.phase,
+            attempt: event.attempt,
+            delta: event.delta,
+            llmStatus: session.llmStatus,
+            time: now(),
+          });
         }
 
-        case 'session:todos-set': {
-          const items = (event.payload as { items: AgentTodoItem[] }).items;
-          sessionTodos.set(id, items);
-          broadcastTodoUpdate(workStreamClients, id, items);
-          break;
-        }
-
-        case 'session:todo-item-added': {
-          const item = (event.payload as { item: AgentTodoItem }).item;
-          const existing = sessionTodos.get(id) ?? [];
-          existing.push(item);
-          sessionTodos.set(id, existing);
-          broadcastTodoUpdate(workStreamClients, id, existing);
-          break;
-        }
-
-        case 'session:todo-item-toggled': {
-          const p = event.payload as { itemId: string; done: boolean; status?: string };
-          const items = sessionTodos.get(id) ?? [];
-          const idx = items.findIndex((i) => i.id === p.itemId);
-          if (idx >= 0) {
-            items[idx] = {
-              ...items[idx],
-              done: p.done,
-              status: (p.status as AgentTodoItem['status']) ?? items[idx].status,
-              updatedAt: event.time,
-            };
-            broadcastTodoUpdate(workStreamClients, id, items);
+        const uiEvent = toUiEvent(session.id, event);
+        if (uiEvent) {
+          session.events.push(uiEvent);
+          if (session.events.length > 200) {
+            session.events.shift();
           }
-          break;
         }
 
-        case 'session:agent-graph-set': {
-          const graph = (event.payload as { graph: SessionAgentGraphNode[] }).graph;
-          session.agentGraph = graph;
-          break;
+        if (event.type === 'task:tool-call' && event.status === 'started') {
+          const changed = applyChecklistFromToolEvent(session.id, event, sessionTodos);
+          if (changed) {
+            broadcastTodoUpdate(workStreamClients, session.id, sessionTodos.get(session.id) ?? []);
+            uiStatePersistence.schedule();
+          }
+
+          const graphChanged = applyAgentGraphFromToolEvent(session, event);
+          if (graphChanged) {
+            uiStatePersistence.schedule();
+          }
         }
 
-        case 'session:agent-graph-node-status': {
-          const p = event.payload as { nodeId: string; status: string };
-          session.agentGraph = session.agentGraph.map((node) =>
-            node.id === p.nodeId ? { ...node, status: p.status as SessionAgentGraphNode['status'] } : node,
+        if (event.type === 'task:tool-call') {
+          const graphProgressChanged = applyAgentGraphProgressFromToolEvent(
+            session,
+            event,
+            pendingSubagentNodeIdsBySession,
           );
-          break;
-        }
-
-        case 'session:chat-message': {
-          const msg = (event.payload as { message: SessionChatMessage }).message;
-          const thread = sessionChats.get(id);
-          if (thread) {
-            thread.messages.push(msg);
-            trimThreadMessages(thread);
-            thread.updatedAt = event.time;
+          if (graphProgressChanged) {
+            uiStatePersistence.schedule();
           }
-          break;
         }
 
-        default:
-          break;
+        if (
+          'taskId' in event
+          && event.type !== 'task:stream-delta'
+          && event.type !== 'task:tool-call'
+        ) {
+          session.taskStatus[event.taskId] = event.type;
+        }
+
+        if (event.type !== 'task:stream-delta') {
+          uiStatePersistence.schedule();
+        }
+      },
+    }).then((outputs) => {
+      if (session.status === 'cancelled') {
+        return;
+      }
+
+      const allOutputs = [...outputs.values()];
+      const failedOutput = allOutputs.find((output) => output.status === 'failed');
+      const primaryOutput = failedOutput ?? allOutputs[0];
+      const failed = Boolean(failedOutput);
+      const failureType = failedOutput?.failureType;
+
+      session.status = failed ? 'failed' : 'completed';
+      session.updatedAt = now();
+      session.llmStatus = failed
+        ? createLlmStatus('failed', session.updatedAt, {
+          detail: failureType
+            ? `${failureType}: ${failedOutput?.error || 'Execution failed.'}`
+            : (failedOutput?.error || 'Execution failed.'),
+          failureType,
+        })
+        : createLlmStatus('completed', session.updatedAt, {
+          detail: 'Run completed successfully.',
+        });
+      session.output = {
+        text: primaryOutput?.response,
+        planPath: primaryOutput?.planPath,
+        failureType,
+      };
+      session.error = failed ? failedOutput?.error ?? 'Execution failed' : undefined;
+
+      broadcastWorkStream(workStreamClients, session.id, 'end', {
+        id: session.id,
+        status: session.status,
+        llmStatus: session.llmStatus,
+        time: now(),
+      });
+
+      const thread = sessionChats.get(session.id);
+      if (thread && primaryOutput?.response) {
+        thread.messages.push({
+          role: 'assistant',
+          content: primaryOutput.response,
+          time: now(),
+        });
+        trimThreadMessages(thread);
+        thread.updatedAt = now();
       }
 
       uiStatePersistence.schedule();
-    });
+    }).catch((error) => {
+      if (session.status !== 'cancelled') {
+        session.status = 'failed';
+        session.error = toErrorMessage(error);
+        session.updatedAt = now();
+        session.llmStatus = createLlmStatus('failed', session.updatedAt, {
+          detail: session.error,
+        });
 
-    // Monitor runner process exit (backup for missed events)
-    runnerProcess.on('exit', (code) => {
-      // Give event store watcher time to deliver final events
-      setTimeout(() => {
-        if (session.status === 'running') {
-          // Runner exited without writing terminal event — mark as failed
-          const t = now();
-          session.status = 'failed';
-          session.error = `Runner process exited unexpectedly (code ${code}).`;
-          session.llmStatus = createLlmStatus('failed', t, { detail: session.error });
-          session.updatedAt = t;
-
-          emitSessionEvent(id, { time: t, type: 'session:error-change', payload: { error: session.error } });
-          emitSessionEvent(id, { time: t, type: 'session:llm-status-change', payload: { llmStatus: session.llmStatus } });
-          emitSessionEvent(id, { time: t, type: 'session:status-change', payload: { status: 'failed' } });
-
-          broadcastWorkStream(workStreamClients, id, 'error', {
-            id,
-            error: session.error,
-            llmStatus: session.llmStatus,
-            time: t,
-          });
-
-          uiStatePersistence.schedule();
-          unwatch();
-        }
-      }, 3_000);
+        broadcastWorkStream(workStreamClients, session.id, 'error', {
+          id: session.id,
+          error: session.error,
+          llmStatus: session.llmStatus,
+          time: now(),
+        });
+        uiStatePersistence.schedule();
+      }
     });
 
     return { id };
@@ -1077,8 +530,6 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           sendJson(res, 400, { error: 'Missing id' });
           return;
         }
-
-        await refreshSessionFromEventStore(id);
 
         const session = workSessions.get(id);
         if (!session) {
@@ -1196,29 +647,6 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
 
         const result = await workspaceManager.removeWorkspace(workspace);
         sendJson(res, 200, result);
-        return;
-      }
-
-      if (req.method === 'GET' && pathname === '/api/worktrees') {
-        const workspaceId = asString(url.searchParams.get('workspaceId'));
-        const workspace = workspaceId
-          ? await workspaceManager.selectWorkspace(workspaceId)
-          : await workspaceManager.getActiveWorkspace();
-
-        try {
-          const worktrees = await listNativeGitWorktrees(workspace.path);
-          sendJson(res, 200, {
-            workspaceId: workspace.id,
-            workspaceName: workspace.name,
-            workspacePath: workspace.path,
-            worktrees: worktrees.map((entry) => ({
-              ...entry,
-              isPrimary: resolve(entry.path) === resolve(workspace.path),
-            })),
-          });
-        } catch (error) {
-          sendJson(res, 400, { error: toErrorMessage(error) });
-        }
         return;
       }
 
@@ -1493,30 +921,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         const prompt = asString(body.prompt);
         const promptParts = parseChatContentParts(body.promptParts);
         const provider = asString(body.provider) || process.env.ORCHESTRACE_DEFAULT_PROVIDER || 'anthropic';
-        let model = asString(body.model);
-        if (!model) {
-          try {
-            model = getModels(provider as never)[0]?.id ?? '';
-          } catch (error) {
-            sendJson(res, 400, { error: toErrorMessage(error) });
-            return;
-          }
-
-          if (!model) {
-            sendJson(res, 400, { error: `No models available for provider ${provider}.` });
-            return;
-          }
-        }
+        const model = asString(body.model) || process.env.ORCHESTRACE_DEFAULT_MODEL || 'claude-sonnet-4-20250514';
         const autoApprove = Boolean(body.autoApprove);
-        const executionContext = normalizeExecutionContext(body.executionContext)
-          ?? normalizeExecutionContext(body.mode)
-          ?? normalizeExecutionContext(body.executionMode);
-        const selectedWorktreePath = asString(body.selectedWorktreePath)
-          || asString(body.worktreePath)
-          || undefined;
-        const useWorktree = parseBooleanSetting(body.useWorktree)
-          ?? parseBooleanSetting(body.worktreeEnabled)
-          ?? parseBooleanSetting(body.enableWorktree);
         const adaptiveConcurrency = parseBooleanSetting(body.adaptiveConcurrency)
           ?? parseBooleanSetting(body.adaptiveToolConcurrency);
         const batchConcurrency = parsePositiveSetting(body.batchConcurrency)
@@ -1530,13 +936,9 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           provider,
           model,
           autoApprove,
-          executionContext,
-          selectedWorktreePath,
-          useWorktree,
           adaptiveConcurrency,
           batchConcurrency,
           batchMinConcurrency,
-          creationReason: 'start',
         });
 
         if ('error' in result) {
@@ -1588,14 +990,9 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           provider: sourceSession.provider,
           model: sourceSession.model,
           autoApprove: sourceSession.autoApprove,
-          executionContext: sourceSession.executionContext,
-          selectedWorktreePath: sourceSession.selectedWorktreePath,
-          useWorktree: sourceSession.useWorktree,
           adaptiveConcurrency: sourceSession.adaptiveConcurrency,
           batchConcurrency: sourceSession.batchConcurrency,
           batchMinConcurrency: sourceSession.batchMinConcurrency,
-          creationReason: 'retry',
-          sourceSessionId: id,
         });
 
         if ('error' in result) {
@@ -1623,12 +1020,6 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         }
 
         if (session.status === 'running') {
-          // Send SIGTERM to the runner process if it's alive
-          const meta = await eventStore.getMetadata(id);
-          if (meta?.pid) {
-            try { process.kill(meta.pid, 'SIGTERM'); } catch { /* already dead */ }
-          }
-          // Also abort in-process controller (for backward compat / chat cancellation)
           session.controller.abort();
           session.status = 'cancelled';
           session.updatedAt = now();
@@ -1642,19 +1033,6 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
             llmStatus: session.llmStatus,
             time: now(),
           });
-
-          // Dual-write: cancellation events
-          emitSessionEvent(session.id, {
-            time: session.updatedAt,
-            type: 'session:llm-status-change',
-            payload: { llmStatus: session.llmStatus },
-          });
-          emitSessionEvent(session.id, {
-            time: session.updatedAt,
-            type: 'session:status-change',
-            payload: { status: 'cancelled' },
-          });
-
           uiStatePersistence.schedule();
         }
 
@@ -1682,15 +1060,9 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       }
 
       if (req.method === 'GET' && pathname === '/api/work') {
-        const runningSessionIds = [...workSessions.values()]
-          .filter((session) => session.status === 'running')
-          .map((session) => session.id);
-
-        await Promise.all(runningSessionIds.map((id) => refreshSessionFromEventStore(id)));
-
         const sessions = [...workSessions.values()]
           .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
-          .map((session) => serializeWorkSession(session, sessionTodos.get(session.id) ?? []));
+          .map(serializeWorkSession);
         sendJson(res, 200, { sessions });
         return;
       }
@@ -1713,17 +1085,6 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         const tools = listAgentTools({
           cwd: session.workspacePath,
           phase: mode,
-          modeController: {
-            getMode: () => mode,
-            setMode: async (nextMode, reason) => ({
-              mode: nextMode,
-              changed: nextMode !== mode,
-              detail: reason
-                ? `Mode switch preview: ${mode} -> ${nextMode} (${reason}).`
-                : `Mode switch preview: ${mode} -> ${nextMode}.`,
-            }),
-            availableModes: ['chat', 'planning', 'implementation'],
-          },
           adaptiveConcurrency: session.adaptiveConcurrency,
           batchConcurrency: session.batchConcurrency,
           batchMinConcurrency: session.batchMinConcurrency,
@@ -1741,8 +1102,6 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           sendJson(res, 400, { error: 'Missing id' });
           return;
         }
-
-        await refreshSessionFromEventStore(id);
 
         const session = workSessions.get(id);
         if (!session) {
@@ -1764,7 +1123,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         uiStatePersistence.schedule();
 
         sendJson(res, 200, {
-          session: serializeWorkSession(session, sessionTodos.get(id) ?? []),
+          session: serializeWorkSession(session),
           messages: thread.messages.filter((message) => message.role !== 'system'),
           todos: (sessionTodos.get(id) ?? []).map((item) => ({ ...item })),
         });
@@ -1814,7 +1173,6 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         const todo: AgentTodoItem = {
           id: randomUUID(),
           text,
-          status: 'todo',
           done: false,
           createdAt: now(),
           updatedAt: now(),
@@ -1825,13 +1183,6 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         session.updatedAt = now();
         uiStatePersistence.schedule();
         broadcastTodoUpdate(workStreamClients, id, items);
-
-        // Dual-write: todo added
-        emitSessionEvent(id, {
-          time: session.updatedAt,
-          type: 'session:todo-item-added',
-          payload: { item: todo },
-        });
 
         sendJson(res, 200, { ok: true, todo: { ...todo }, todos: items.map((item) => ({ ...item })) });
         return;
@@ -1863,18 +1214,10 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         const requested = body.done;
         const nextDone = typeof requested === 'boolean' ? requested : !target.done;
         target.done = nextDone;
-        target.status = nextDone ? 'done' : 'todo';
         target.updatedAt = now();
         session.updatedAt = now();
         uiStatePersistence.schedule();
         broadcastTodoUpdate(workStreamClients, id, items);
-
-        // Dual-write: todo toggled
-        emitSessionEvent(id, {
-          time: session.updatedAt,
-          type: 'session:todo-item-toggled',
-          payload: { itemId: todoId, done: nextDone, status: target.status },
-        });
 
         sendJson(res, 200, {
           ok: true,
@@ -1912,13 +1255,6 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         uiStatePersistence.schedule();
         broadcastTodoUpdate(workStreamClients, id, nextItems);
 
-        // Dual-write: todo removed
-        emitSessionEvent(id, {
-          time: session.updatedAt,
-          type: 'session:todo-item-removed',
-          payload: { itemId: todoId },
-        });
-
         sendJson(res, 200, { ok: true, todos: nextItems.map((item) => ({ ...item })) });
         return;
       }
@@ -1929,8 +1265,6 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           sendJson(res, 400, { error: 'Missing id' });
           return;
         }
-
-        await refreshSessionFromEventStore(id);
 
         const session = workSessions.get(id);
         if (!session) {
@@ -2071,8 +1405,6 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           return;
         }
 
-        await ensureSessionWorkspaceReady(session, workspaceManager, uiStatePersistence);
-
         const thread = sessionChats.get(id) ?? createSessionChatThread(session);
         sessionChats.set(id, thread);
 
@@ -2080,38 +1412,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         thread.messages.push(userMessage);
         trimThreadMessages(thread);
         thread.updatedAt = now();
-
-        // Dual-write: user chat message
-        emitSessionEvent(id, {
-          time: thread.updatedAt,
-          type: 'session:chat-message',
-          payload: { message: userMessage },
-        });
-
-        const continuationPhase = resolveSessionToolMode(session);
-        const previousSessionStatus = session.status;
-        const chatStartedAt = now();
-        session.status = 'running';
-        session.updatedAt = chatStartedAt;
-        session.llmStatus = createLlmStatus('analyzing', chatStartedAt, {
-          detail: 'Processing follow-up prompt.',
-          phase: continuationPhase === 'planning' || continuationPhase === 'implementation'
-            ? continuationPhase
-            : undefined,
-        });
         uiStatePersistence.schedule();
-
-        // Dual-write: session status + llm status change for chat follow-up
-        emitSessionEvent(id, {
-          time: chatStartedAt,
-          type: 'session:status-change',
-          payload: { status: 'running' },
-        });
-        emitSessionEvent(id, {
-          time: chatStartedAt,
-          type: 'session:llm-status-change',
-          payload: { llmStatus: session.llmStatus },
-        });
 
         const streamId = randomUUID();
         const streamState: ChatTokenStream = {
@@ -2128,235 +1429,125 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
 
         void (async () => {
           try {
-            const systemPrompt = continuationPhase === 'planning'
-              ? buildPlanningSystemPrompt(session)
-              : continuationPhase === 'implementation'
-                ? buildImplementationSystemPrompt(session)
-                : buildChatSystemPrompt(session);
-            const sharedContextStore = sessionSharedContextStores.get(session.id)
-              ?? new InMemorySharedContextStore();
-            sessionSharedContextStores.set(session.id, sharedContextStore);
-            const contextEngine = sessionContextEngines.get(session.id)
-              ?? createSessionContextEngine(session.provider, session.model);
-            sessionContextEngines.set(session.id, contextEngine);
-            const contextState = sessionContextStates.get(session.id) ?? { turnsSinceLastCompaction: 0 };
-
-            const managedContext = await buildManagedChatContinuationInput({
-              session,
-              thread,
-              systemPrompt,
-              todos: sessionTodos.get(session.id) ?? [],
-              contextEngine,
-              contextState,
-              sharedContextStore,
-            });
-            sessionContextStates.set(session.id, managedContext.nextState);
-
             const chatAgent = await llm.spawnAgent({
               provider: session.provider,
               model: session.model,
               timeoutMs: resolveLongTurnTimeoutMs(),
-              systemPrompt,
+              systemPrompt: buildChatSystemPrompt(session),
               toolset: createAgentToolset({
                 cwd: session.workspacePath,
-                phase: continuationPhase,
+                phase: 'chat',
                 adaptiveConcurrency: session.adaptiveConcurrency,
                 batchConcurrency: session.batchConcurrency,
                 batchMinConcurrency: session.batchMinConcurrency,
                 resolveGithubToken: () => githubAuthManager.resolveApiKey(GITHUB_PROVIDER_ID),
-                sharedContextStore: sessionSharedContextStores.get(session.id),
-                agentId: `chat::${session.id}`,
                 runSubAgent: async (runSubAgentRequest, _signal) => {
                   const subProvider = runSubAgentRequest.provider ?? session.provider;
                   const subModel = runSubAgentRequest.model ?? session.model;
                   const subAgentSignal = session.controller.signal;
-                  const toolCallId = `subagent-worker-${randomUUID()}`;
-                  const subAgentTaskId = `chat::subagent::${runSubAgentRequest.nodeId ?? toolCallId}`;
-                  const subAgentPhase: 'planning' | 'implementation' = continuationPhase === 'planning'
-                    ? 'planning'
-                    : 'implementation';
-                  emitSubAgentWorkerEvent({
-                    session,
-                    uiStatePersistence,
-                    taskId: 'chat',
-                    phase: subAgentPhase,
-                    toolCallId,
-                    status: 'started',
-                    provider: subProvider,
-                    model: subModel,
-                    reasoning: runSubAgentRequest.reasoning,
-                    nodeId: runSubAgentRequest.nodeId,
-                    prompt: runSubAgentRequest.prompt,
-                  });
-                  const subAgentToolset = createInheritedSubAgentToolset(session.workspacePath, {
-                    phase: continuationPhase,
-                    taskId: subAgentTaskId,
-                    provider: subProvider,
-                    model: subModel,
-                    reasoning: runSubAgentRequest.reasoning,
+                  const subAgentToolset = createReadOnlySubAgentToolset(session.workspacePath, {
                     adaptiveConcurrency: session.adaptiveConcurrency,
                     batchConcurrency: session.batchConcurrency,
                     batchMinConcurrency: session.batchMinConcurrency,
-                    resolveGithubToken: () => githubAuthManager.resolveApiKey(GITHUB_PROVIDER_ID),
-                    sharedContextStore: sessionSharedContextStores.get(session.id),
-                    agentId: `subagent::${subAgentTaskId}`,
                   });
-                  try {
-                    const subAgent = await llm.spawnAgent({
-                      provider: subProvider,
-                      model: subModel,
-                      reasoning: runSubAgentRequest.reasoning,
-                      timeoutMs: resolveSubAgentTimeoutMs(),
-                      systemPrompt: resolveSubAgentSystemPrompt(runSubAgentRequest),
-                      signal: subAgentSignal,
-                      toolset: subAgentToolset,
-                      apiKey: await authManager.resolveApiKey(subProvider),
+                  const subAgent = await llm.spawnAgent({
+                    provider: subProvider,
+                    model: subModel,
+                    reasoning: runSubAgentRequest.reasoning,
+                    timeoutMs: resolveSubAgentTimeoutMs(),
+                    systemPrompt: runSubAgentRequest.systemPrompt
+                      ?? 'You are a focused sub-agent. Use only the provided task-relevant context, avoid unrelated history, and return concise actionable output.',
+                    signal: subAgentSignal,
+                    toolset: subAgentToolset,
+                    apiKey: await authManager.resolveApiKey(subProvider),
                       refreshApiKey: () => authManager.resolveApiKey(subProvider),
-                    });
+                  });
 
-                    const result = await completeSubAgentWithRetry(
-                      subAgent,
-                      runSubAgentRequest.prompt,
-                      subAgentSignal,
-                    );
-                    const structuredResult = buildStructuredSubAgentResult(result);
-                    emitSubAgentWorkerEvent({
-                      session,
-                      uiStatePersistence,
-                      taskId: 'chat',
-                      phase: subAgentPhase,
-                      toolCallId,
-                      status: 'completed',
-                      provider: subProvider,
-                      model: subModel,
-                      reasoning: runSubAgentRequest.reasoning,
-                      nodeId: runSubAgentRequest.nodeId,
-                      prompt: runSubAgentRequest.prompt,
-                      outputText: structuredResult.summary ?? result.text,
-                      usage: result.usage,
-                    });
-                    return structuredResult;
-                  } catch (error) {
-                    emitSubAgentWorkerEvent({
-                      session,
-                      uiStatePersistence,
-                      taskId: 'chat',
-                      phase: subAgentPhase,
-                      toolCallId,
-                      status: 'failed',
-                      provider: subProvider,
-                      model: subModel,
-                      reasoning: runSubAgentRequest.reasoning,
-                      nodeId: runSubAgentRequest.nodeId,
-                      prompt: runSubAgentRequest.prompt,
-                      error: toErrorMessage(error),
-                    });
-                    throw error;
-                  }
+                  const result = await subAgent.complete(runSubAgentRequest.prompt, subAgentSignal);
+                  return {
+                    text: result.text,
+                    usage: result.usage,
+                  };
                 },
               }),
               apiKey: await authManager.resolveApiKey(session.provider),
                 refreshApiKey: () => authManager.resolveApiKey(session.provider),
             });
 
-            const chatPrompt = managedContext.prompt;
-            let response: Awaited<ReturnType<typeof chatAgent.complete>> | undefined;
-            let receivedTextDelta = false;
-            for (let attempt = 1; attempt <= CHAT_RETRY_MAX_ATTEMPTS; attempt += 1) {
-              try {
-                response = await chatAgent.complete(chatPrompt, undefined, {
-                  onTextDelta: (delta) => {
-                    if (!delta) {
-                      return;
-                    }
-
-                    receivedTextDelta = true;
-                    streamState.replyText += delta;
-                    streamState.updatedAt = now();
-
-                    const estimatedOutput = estimateTokensFromText(streamState.replyText);
-                    streamState.usage = {
-                      input: streamState.usage?.input ?? 0,
-                      output: estimatedOutput,
-                      cost: streamState.usage?.cost ?? 0,
-                    };
-                    streamState.usageEstimated = true;
-
-                    broadcastWorkStream(chatStreamClients, streamId, 'token', {
-                      streamId,
-                      sessionId: session.id,
-                      delta,
-                      time: now(),
-                    });
-
-                    broadcastWorkStream(chatStreamClients, streamId, 'usage', {
-                      streamId,
-                      sessionId: session.id,
-                      usage: streamState.usage,
-                      estimated: true,
-                      time: now(),
-                    });
-                  },
-                  onUsage: (usage) => {
-                    const isZeroUsage = usage.input === 0 && usage.output === 0 && usage.cost === 0;
-                    if (isZeroUsage && streamState.replyText.length > 0) {
-                      return;
-                    }
-
-                    const previous = streamState.usage;
-                    if (
-                      previous
-                      && previous.input === usage.input
-                      && previous.output === usage.output
-                      && previous.cost === usage.cost
-                    ) {
-                      return;
-                    }
-
-                    streamState.usage = usage;
-                    streamState.usageEstimated = false;
-                    streamState.updatedAt = now();
-
-                    broadcastWorkStream(chatStreamClients, streamId, 'usage', {
-                      streamId,
-                      sessionId: session.id,
-                      usage,
-                      estimated: false,
-                      time: now(),
-                    });
-                  },
-                  onToolCall: (toolEvent) => {
-                    handleChatToolCallEvent(
-                      session,
-                      toolEvent,
-                      sessionTodos,
-                      pendingSubagentNodeIdsBySession,
-                      workStreamClients,
-                      uiStatePersistence,
-                    );
-                  },
-                });
-                break;
-              } catch (error) {
-                if (
-                  attempt >= CHAT_RETRY_MAX_ATTEMPTS
-                  || receivedTextDelta
-                  || !isRetryableSubAgentError(error)
-                ) {
-                  throw error;
+            const chatPrompt = buildChatContinuationInput(thread);
+            const response = await chatAgent.complete(chatPrompt, undefined, {
+              onTextDelta: (delta) => {
+                if (!delta) {
+                  return;
                 }
 
-                await new Promise<void>((resolve) => {
-                  setTimeout(resolve, CHAT_RETRY_BASE_DELAY_MS * attempt);
+                streamState.replyText += delta;
+                streamState.updatedAt = now();
+
+                const estimatedOutput = estimateTokensFromText(streamState.replyText);
+                streamState.usage = {
+                  input: streamState.usage?.input ?? 0,
+                  output: estimatedOutput,
+                  cost: streamState.usage?.cost ?? 0,
+                };
+                streamState.usageEstimated = true;
+
+                broadcastWorkStream(chatStreamClients, streamId, 'token', {
+                  streamId,
+                  sessionId: session.id,
+                  delta,
+                  time: now(),
                 });
-              }
-            }
 
-            if (!response) {
-              throw new Error('Chat completion failed before producing a response.');
-            }
+                broadcastWorkStream(chatStreamClients, streamId, 'usage', {
+                  streamId,
+                  sessionId: session.id,
+                  usage: streamState.usage,
+                  estimated: true,
+                  time: now(),
+                });
+              },
+              onUsage: (usage) => {
+                const isZeroUsage = usage.input === 0 && usage.output === 0 && usage.cost === 0;
+                if (isZeroUsage && streamState.replyText.length > 0) {
+                  return;
+                }
 
-            const responseText = ensureFollowUpSuggestions(response.text, continuationPhase);
+                const previous = streamState.usage;
+                if (
+                  previous
+                  && previous.input === usage.input
+                  && previous.output === usage.output
+                  && previous.cost === usage.cost
+                ) {
+                  return;
+                }
+
+                streamState.usage = usage;
+                streamState.usageEstimated = false;
+                streamState.updatedAt = now();
+
+                broadcastWorkStream(chatStreamClients, streamId, 'usage', {
+                  streamId,
+                  sessionId: session.id,
+                  usage,
+                  estimated: false,
+                  time: now(),
+                });
+              },
+              onToolCall: (toolEvent) => {
+                handleChatToolCallEvent(
+                  session,
+                  toolEvent,
+                  sessionTodos,
+                  pendingSubagentNodeIdsBySession,
+                  workStreamClients,
+                  uiStatePersistence,
+                );
+              },
+            });
+
+            const responseText = ensureFollowUpSuggestions(response.text, 'chat');
 
             const assistantMessage: SessionChatMessage = {
               role: 'assistant',
@@ -2367,32 +1558,9 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
 
             thread.messages.push(assistantMessage);
             trimThreadMessages(thread);
-            const completedAt = now();
-            thread.updatedAt = completedAt;
-            applyFollowUpCompletionState(
-              session,
-              sessionTodos.get(session.id) ?? [],
-              continuationPhase,
-              completedAt,
-            );
+            thread.updatedAt = now();
+            session.updatedAt = now();
             uiStatePersistence.schedule();
-
-            // Dual-write: chat assistant message + follow-up state
-            emitSessionEvent(session.id, {
-              time: completedAt,
-              type: 'session:chat-message',
-              payload: { message: assistantMessage },
-            });
-            emitSessionEvent(session.id, {
-              time: completedAt,
-              type: 'session:status-change',
-              payload: { status: session.status },
-            });
-            emitSessionEvent(session.id, {
-              time: completedAt,
-              type: 'session:llm-status-change',
-              payload: { llmStatus: session.llmStatus },
-            });
 
             streamState.status = 'completed';
             streamState.replyText = responseText;
@@ -2413,21 +1581,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
             streamState.status = 'failed';
             streamState.error = toErrorMessage(error);
             streamState.updatedAt = now();
-
-            const failedAt = now();
-            applyFollowUpFailureState(
-              session,
-              sessionTodos.get(session.id) ?? [],
-              continuationPhase,
-              previousSessionStatus,
-              streamState.error,
-              failedAt,
-            );
             uiStatePersistence.schedule();
-
-            // Dual-write: streaming chat failure state
-            emitSessionEvent(session.id, { time: failedAt, type: 'session:status-change', payload: { status: session.status } });
-            emitSessionEvent(session.id, { time: failedAt, type: 'session:llm-status-change', payload: { llmStatus: session.llmStatus } });
 
             broadcastWorkStream(chatStreamClients, streamId, 'chat-error', {
               streamId,
@@ -2473,8 +1627,6 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           return;
         }
 
-        await ensureSessionWorkspaceReady(session, workspaceManager, uiStatePersistence);
-
         const thread = sessionChats.get(id) ?? createSessionChatThread(session);
         sessionChats.set(id, thread);
         uiStatePersistence.schedule();
@@ -2482,240 +1634,88 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         const userMessage = createSessionChatMessage('user', message, messageParts);
         thread.messages.push(userMessage);
         trimThreadMessages(thread);
-        const continuationPhase = resolveSessionToolMode(session);
-        const previousSessionStatus = session.status;
-        const chatStartedAt = now();
-        thread.updatedAt = chatStartedAt;
-        session.status = 'running';
-        session.updatedAt = chatStartedAt;
-        session.llmStatus = createLlmStatus('analyzing', chatStartedAt, {
-          detail: 'Processing follow-up prompt.',
-          phase: continuationPhase === 'planning' || continuationPhase === 'implementation'
-            ? continuationPhase
-            : undefined,
-        });
+        thread.updatedAt = now();
         uiStatePersistence.schedule();
 
-        // Dual-write: sync chat user message + status
-        emitSessionEvent(id, { time: chatStartedAt, type: 'session:chat-message', payload: { message: userMessage } });
-        emitSessionEvent(id, { time: chatStartedAt, type: 'session:status-change', payload: { status: 'running' } });
-        emitSessionEvent(id, { time: chatStartedAt, type: 'session:llm-status-change', payload: { llmStatus: session.llmStatus } });
-
-        try {
-          const systemPrompt = continuationPhase === 'planning'
-            ? buildPlanningSystemPrompt(session)
-            : continuationPhase === 'implementation'
-              ? buildImplementationSystemPrompt(session)
-              : buildChatSystemPrompt(session);
-          const sharedContextStore = sessionSharedContextStores.get(session.id)
-            ?? new InMemorySharedContextStore();
-          sessionSharedContextStores.set(session.id, sharedContextStore);
-          const contextEngine = sessionContextEngines.get(session.id)
-            ?? createSessionContextEngine(session.provider, session.model);
-          sessionContextEngines.set(session.id, contextEngine);
-          const contextState = sessionContextStates.get(session.id) ?? { turnsSinceLastCompaction: 0 };
-
-          const managedContext = await buildManagedChatContinuationInput({
-            session,
-            thread,
-            systemPrompt,
-            todos: sessionTodos.get(session.id) ?? [],
-            contextEngine,
-            contextState,
-            sharedContextStore,
-          });
-          sessionContextStates.set(session.id, managedContext.nextState);
-
-          const chatAgent = await llm.spawnAgent({
-            provider: session.provider,
-            model: session.model,
-            timeoutMs: resolveLongTurnTimeoutMs(),
-            systemPrompt,
-            toolset: createAgentToolset({
-              cwd: session.workspacePath,
-              phase: continuationPhase,
-              adaptiveConcurrency: session.adaptiveConcurrency,
-              batchConcurrency: session.batchConcurrency,
-              batchMinConcurrency: session.batchMinConcurrency,
-              resolveGithubToken: () => githubAuthManager.resolveApiKey(GITHUB_PROVIDER_ID),
-              sharedContextStore: sessionSharedContextStores.get(session.id),
-              agentId: `chat::${session.id}`,
-              runSubAgent: async (runSubAgentRequest, _signal) => {
-                const subProvider = runSubAgentRequest.provider ?? session.provider;
-                const subModel = runSubAgentRequest.model ?? session.model;
-                const subAgentSignal = session.controller.signal;
-                const toolCallId = `subagent-worker-${randomUUID()}`;
-                const subAgentTaskId = `chat::subagent::${runSubAgentRequest.nodeId ?? toolCallId}`;
-                const subAgentPhase: 'planning' | 'implementation' = continuationPhase === 'planning'
-                  ? 'planning'
-                  : 'implementation';
-                emitSubAgentWorkerEvent({
-                  session,
-                  uiStatePersistence,
-                  taskId: 'chat',
-                  phase: subAgentPhase,
-                  toolCallId,
-                  status: 'started',
-                  provider: subProvider,
-                  model: subModel,
-                  reasoning: runSubAgentRequest.reasoning,
-                  nodeId: runSubAgentRequest.nodeId,
-                  prompt: runSubAgentRequest.prompt,
-                });
-                const subAgentToolset = createInheritedSubAgentToolset(session.workspacePath, {
-                  phase: continuationPhase,
-                  taskId: subAgentTaskId,
-                  provider: subProvider,
-                  model: subModel,
-                  reasoning: runSubAgentRequest.reasoning,
-                  adaptiveConcurrency: session.adaptiveConcurrency,
-                  batchConcurrency: session.batchConcurrency,
-                  batchMinConcurrency: session.batchMinConcurrency,
-                  resolveGithubToken: () => githubAuthManager.resolveApiKey(GITHUB_PROVIDER_ID),
-                  sharedContextStore: sessionSharedContextStores.get(session.id),
-                  agentId: `subagent::${subAgentTaskId}`,
-                });
-                try {
-                  const subAgent = await llm.spawnAgent({
-                    provider: subProvider,
-                    model: subModel,
-                    reasoning: runSubAgentRequest.reasoning,
-                    timeoutMs: resolveSubAgentTimeoutMs(),
-                    systemPrompt: resolveSubAgentSystemPrompt(runSubAgentRequest),
-                    signal: subAgentSignal,
-                    toolset: subAgentToolset,
-                    apiKey: await authManager.resolveApiKey(subProvider),
-                    refreshApiKey: () => authManager.resolveApiKey(subProvider),
-                  });
-
-                  const result = await completeSubAgentWithRetry(
-                    subAgent,
-                    runSubAgentRequest.prompt,
-                    subAgentSignal,
-                  );
-                  const structuredResult = buildStructuredSubAgentResult(result);
-                  emitSubAgentWorkerEvent({
-                    session,
-                    uiStatePersistence,
-                    taskId: 'chat',
-                    phase: subAgentPhase,
-                    toolCallId,
-                    status: 'completed',
-                    provider: subProvider,
-                    model: subModel,
-                    reasoning: runSubAgentRequest.reasoning,
-                    nodeId: runSubAgentRequest.nodeId,
-                    prompt: runSubAgentRequest.prompt,
-                    outputText: structuredResult.summary ?? result.text,
-                    usage: result.usage,
-                  });
-                  return structuredResult;
-                } catch (error) {
-                  emitSubAgentWorkerEvent({
-                    session,
-                    uiStatePersistence,
-                    taskId: 'chat',
-                    phase: subAgentPhase,
-                    toolCallId,
-                    status: 'failed',
-                    provider: subProvider,
-                    model: subModel,
-                    reasoning: runSubAgentRequest.reasoning,
-                    nodeId: runSubAgentRequest.nodeId,
-                    prompt: runSubAgentRequest.prompt,
-                    error: toErrorMessage(error),
-                  });
-                  throw error;
-                }
-              },
-            }),
-            apiKey: await authManager.resolveApiKey(session.provider),
-            refreshApiKey: () => authManager.resolveApiKey(session.provider),
-          });
-
-          const chatPrompt = managedContext.prompt;
-          let response: Awaited<ReturnType<typeof chatAgent.complete>> | undefined;
-          for (let attempt = 1; attempt <= CHAT_RETRY_MAX_ATTEMPTS; attempt += 1) {
-            try {
-              response = await chatAgent.complete(chatPrompt, undefined, {
-                onToolCall: (toolEvent) => {
-                  handleChatToolCallEvent(
-                    session,
-                    toolEvent,
-                    sessionTodos,
-                    pendingSubagentNodeIdsBySession,
-                    workStreamClients,
-                    uiStatePersistence,
-                  );
-                },
+        const chatAgent = await llm.spawnAgent({
+          provider: session.provider,
+          model: session.model,
+          timeoutMs: resolveLongTurnTimeoutMs(),
+          systemPrompt: buildChatSystemPrompt(session),
+          toolset: createAgentToolset({
+            cwd: session.workspacePath,
+            phase: 'chat',
+            adaptiveConcurrency: session.adaptiveConcurrency,
+            batchConcurrency: session.batchConcurrency,
+            batchMinConcurrency: session.batchMinConcurrency,
+            resolveGithubToken: () => githubAuthManager.resolveApiKey(GITHUB_PROVIDER_ID),
+            runSubAgent: async (runSubAgentRequest, _signal) => {
+              const subProvider = runSubAgentRequest.provider ?? session.provider;
+              const subModel = runSubAgentRequest.model ?? session.model;
+              const subAgentSignal = session.controller.signal;
+              const subAgentToolset = createReadOnlySubAgentToolset(session.workspacePath, {
+                adaptiveConcurrency: session.adaptiveConcurrency,
+                batchConcurrency: session.batchConcurrency,
+                batchMinConcurrency: session.batchMinConcurrency,
               });
-              break;
-            } catch (error) {
-              if (attempt >= CHAT_RETRY_MAX_ATTEMPTS || !isRetryableSubAgentError(error)) {
-                throw error;
-              }
-
-              await new Promise<void>((resolve) => {
-                setTimeout(resolve, CHAT_RETRY_BASE_DELAY_MS * attempt);
+              const subAgent = await llm.spawnAgent({
+                provider: subProvider,
+                model: subModel,
+                reasoning: runSubAgentRequest.reasoning,
+                timeoutMs: resolveSubAgentTimeoutMs(),
+                systemPrompt: runSubAgentRequest.systemPrompt
+                  ?? 'You are a focused sub-agent. Use only the provided task-relevant context, avoid unrelated history, and return concise actionable output.',
+                signal: subAgentSignal,
+                toolset: subAgentToolset,
+                apiKey: await authManager.resolveApiKey(subProvider),
+                refreshApiKey: () => authManager.resolveApiKey(subProvider),
               });
-            }
-          }
 
-          if (!response) {
-            throw new Error('Chat completion failed before producing a response.');
-          }
-          const text = ensureFollowUpSuggestions(response.text, continuationPhase);
+              const result = await subAgent.complete(runSubAgentRequest.prompt, subAgentSignal);
+              return {
+                text: result.text,
+                usage: result.usage,
+              };
+            },
+          }),
+          apiKey: await authManager.resolveApiKey(session.provider),
+          refreshApiKey: () => authManager.resolveApiKey(session.provider),
+        });
 
-          const assistantMessage: SessionChatMessage = {
-            role: 'assistant',
-            content: text,
-            time: now(),
-            usage: response.usage,
-          };
+        const chatPrompt = buildChatContinuationInput(thread);
+        const response = await chatAgent.complete(chatPrompt, undefined, {
+          onToolCall: (toolEvent) => {
+            handleChatToolCallEvent(
+              session,
+              toolEvent,
+              sessionTodos,
+              pendingSubagentNodeIdsBySession,
+              workStreamClients,
+              uiStatePersistence,
+            );
+          },
+        });
+        const text = ensureFollowUpSuggestions(response.text, 'chat');
 
-          thread.messages.push(assistantMessage);
-          trimThreadMessages(thread);
-          const completedAt = now();
-          thread.updatedAt = completedAt;
-          applyFollowUpCompletionState(
-            session,
-            sessionTodos.get(session.id) ?? [],
-            continuationPhase,
-            completedAt,
-          );
-          uiStatePersistence.schedule();
+        const assistantMessage: SessionChatMessage = {
+          role: 'assistant',
+          content: text,
+          time: now(),
+          usage: response.usage,
+        };
 
-          // Dual-write: sync chat assistant message + follow-up state
-          emitSessionEvent(session.id, { time: completedAt, type: 'session:chat-message', payload: { message: assistantMessage } });
-          emitSessionEvent(session.id, { time: completedAt, type: 'session:status-change', payload: { status: session.status } });
-          emitSessionEvent(session.id, { time: completedAt, type: 'session:llm-status-change', payload: { llmStatus: session.llmStatus } });
+        thread.messages.push(assistantMessage);
+        trimThreadMessages(thread);
+        thread.updatedAt = now();
+        session.updatedAt = now();
+        uiStatePersistence.schedule();
 
-          sendJson(res, 200, {
-            ok: true,
-            reply: assistantMessage,
-            messages: thread.messages.filter((entry) => entry.role !== 'system'),
-          });
-          return;
-        } catch (error) {
-          const failedAt = now();
-          const detail = toErrorMessage(error);
-          applyFollowUpFailureState(
-            session,
-            sessionTodos.get(session.id) ?? [],
-            continuationPhase,
-            previousSessionStatus,
-            detail,
-            failedAt,
-          );
-          uiStatePersistence.schedule();
-
-          // Dual-write: sync chat failure state
-          emitSessionEvent(session.id, { time: failedAt, type: 'session:status-change', payload: { status: session.status } });
-          emitSessionEvent(session.id, { time: failedAt, type: 'session:llm-status-change', payload: { llmStatus: session.llmStatus } });
-
-          sendJson(res, 500, { error: detail });
-          return;
-        }
+        sendJson(res, 200, {
+          ok: true,
+          reply: assistantMessage,
+          messages: thread.messages.filter((entry) => entry.role !== 'system'),
+        });
+        return;
       }
 
       sendJson(res, 404, { error: 'Not found' });
@@ -2847,9 +1847,7 @@ async function restoreUiState(
         .map((item) => ({
           id: asString(item.id) || randomUUID(),
           text: asString(item.text),
-          status: normalizeChecklistTodoStatus(item.status) ?? (Boolean(item.done) ? 'done' : 'todo'),
           done: Boolean(item.done),
-          weight: normalizeProgressWeight(item.weight),
           createdAt: asString(item.createdAt) || now(),
           updatedAt: asString(item.updatedAt) || now(),
         }))
@@ -2880,105 +1878,6 @@ async function restoreUiState(
   return payload.preferences;
 }
 
-function computeSessionCompletionState(
-  session: WorkSession,
-  todos: AgentTodoItem[],
-): {
-  satisfied: boolean;
-  pendingTodoCount: number;
-  nonCompletedNodeCount: number;
-  failedNodeCount: number;
-} {
-  const pendingTodoCount = todos.filter((item) => !item.done).length;
-  const nonCompletedNodes = session.agentGraph.filter((node) => node.status !== 'completed');
-  const nonCompletedNodeCount = nonCompletedNodes.length;
-  const failedNodeCount = nonCompletedNodes.filter((node) => node.status === 'failed').length;
-
-  return {
-    satisfied: pendingTodoCount === 0 && nonCompletedNodeCount === 0,
-    pendingTodoCount,
-    nonCompletedNodeCount,
-    failedNodeCount,
-  };
-}
-
-function describeRemainingCompletionWork(completion: {
-  pendingTodoCount: number;
-  nonCompletedNodeCount: number;
-}): string {
-  const remaining: string[] = [];
-  if (completion.pendingTodoCount > 0) {
-    remaining.push(`${completion.pendingTodoCount} todo(s) pending`);
-  }
-  if (completion.nonCompletedNodeCount > 0) {
-    remaining.push(`${completion.nonCompletedNodeCount} graph node(s) pending`);
-  }
-
-  return remaining.join(', ');
-}
-
-function applyFollowUpCompletionState(
-  session: WorkSession,
-  todos: AgentTodoItem[],
-  phase: SessionPromptPhase,
-  updatedAt: string,
-): void {
-  const completion = computeSessionCompletionState(session, todos);
-  if (completion.satisfied) {
-    session.status = 'completed';
-    session.updatedAt = updatedAt;
-    session.error = undefined;
-    session.llmStatus = createLlmStatus('completed', updatedAt, {
-      detail: 'Follow-up response generated.',
-    });
-    return;
-  }
-
-  const phaseForStatus: LlmSessionState = phase === 'planning'
-    ? 'planning'
-    : phase === 'implementation'
-      ? 'implementing'
-      : 'thinking';
-  const phaseDetail = phase === 'planning' || phase === 'implementation' ? phase : undefined;
-
-  session.status = 'running';
-  session.updatedAt = updatedAt;
-  session.error = undefined;
-  session.llmStatus = createLlmStatus(phaseForStatus, updatedAt, {
-    detail: `Follow-up response generated; ${describeRemainingCompletionWork(completion)}.`,
-    phase: phaseDetail,
-  });
-}
-
-function applyFollowUpFailureState(
-  session: WorkSession,
-  todos: AgentTodoItem[],
-  phase: SessionPromptPhase,
-  previousStatus: WorkState,
-  detail: string,
-  updatedAt: string,
-): void {
-  const completion = computeSessionCompletionState(session, todos);
-  if (previousStatus === 'completed' && completion.satisfied) {
-    session.status = 'completed';
-    session.updatedAt = updatedAt;
-    session.error = undefined;
-    session.llmStatus = createLlmStatus('completed', updatedAt, {
-      detail: 'Follow-up request failed; preserving completed run state.',
-    });
-    return;
-  }
-
-  const phaseDetail = phase === 'planning' || phase === 'implementation' ? phase : undefined;
-  session.status = 'running';
-  session.updatedAt = updatedAt;
-  session.error = undefined;
-  session.llmStatus = createLlmStatus('failed', updatedAt, {
-    detail,
-    phase: phaseDetail,
-  });
-}
-
 async function persistUiState(
   path: string,
   workSessions: Map<string, WorkSession>,
@@ -2986,23 +1885,18 @@ async function persistUiState(
   sessionTodos: Map<string, AgentTodoItem[]>,
   preferences: UiPreferences,
 ): Promise<void> {
-  const persistRawDebug = shouldPersistRawDebugArtifacts();
-  const rawSessions = [...workSessions.values()]
-    .map(toPersistedSession)
-    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-
-  const rawChats = [...sessionChats.values()]
-    .map((thread) => ({
-      ...thread,
-      messages: [...thread.messages],
-    }))
-    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-
-  const safePayload: PersistedUiState = {
+  const payload: PersistedUiState = {
     version: 1,
     updatedAt: now(),
-    sessions: rawSessions.map((session) => sanitizePersistedSession(session)),
-    chats: rawChats.map((thread) => sanitizePersistedChatThread(thread)),
+    sessions: [...workSessions.values()]
+      .map(toPersistedSession)
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
+    chats: [...sessionChats.values()]
+      .map((thread) => ({
+        ...thread,
+        messages: [...thread.messages],
+      }))
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
     todos: [...sessionTodos.entries()]
       .map(([sessionId, items]) => ({
         sessionId,
@@ -3012,20 +1906,8 @@ async function persistUiState(
     preferences: { ...preferences },
   };
 
-  const rawPayload: PersistedUiState | undefined = persistRawDebug
-    ? {
-      ...safePayload,
-      sessions: rawSessions,
-      chats: rawChats,
-    }
-    : undefined;
-
   await mkdir(dirname(path), { recursive: true });
-  await writeFile(path, JSON.stringify(safePayload, null, 2), 'utf-8');
-
-  if (rawPayload) {
-    await writeFile(resolveRawArtifactPath(path), JSON.stringify(rawPayload, null, 2), 'utf-8');
-  }
+  await writeFile(path, JSON.stringify(payload, null, 2), 'utf-8');
 }
 
 async function readPersistedUiState(path: string): Promise<PersistedUiState | undefined> {
@@ -3052,95 +1934,6 @@ async function readPersistedUiState(path: string): Promise<PersistedUiState | un
   }
 }
 
-function shouldPersistRawDebugArtifacts(): boolean {
-  return parseBooleanSetting(process.env[PERSIST_RAW_DEBUG_ENV]) ?? false;
-}
-
-function resolveRawArtifactPath(path: string): string {
-  if (path.endsWith('.json')) {
-    return `${path.slice(0, -5)}.raw.json`;
-  }
-
-  return `${path}.raw.json`;
-}
-
-function sanitizePersistedSession(session: PersistedWorkSession): PersistedWorkSession {
-  return {
-    ...session,
-    prompt: sanitizePersistedText(session.prompt, PERSIST_TEXT_MAX_CHARS),
-    promptParts: sanitizePersistedContentParts(session.promptParts),
-    events: session.events.map((event) => ({
-      ...event,
-      message: sanitizePersistedText(event.message, PERSIST_EVENT_MESSAGE_MAX_CHARS),
-    })),
-    error: session.error ? sanitizePersistedText(session.error, PERSIST_TEXT_MAX_CHARS) : undefined,
-    output: session.output
-      ? {
-        ...session.output,
-        text: session.output.text
-          ? sanitizePersistedText(session.output.text, PERSIST_TEXT_MAX_CHARS)
-          : session.output.text,
-      }
-      : session.output,
-  };
-}
-
-function sanitizePersistedChatThread(thread: SessionChatThread): SessionChatThread {
-  return {
-    ...thread,
-    taskPrompt: sanitizePersistedText(thread.taskPrompt, PERSIST_TEXT_MAX_CHARS),
-    messages: thread.messages.map((message) => ({
-      ...message,
-      content: sanitizePersistedText(message.content, PERSIST_CHAT_MESSAGE_MAX_CHARS),
-      contentParts: sanitizePersistedContentParts(message.contentParts),
-    })),
-  };
-}
-
-function sanitizePersistedContentParts(parts: SessionChatContentPart[] | undefined): SessionChatContentPart[] | undefined {
-  if (!parts || parts.length === 0) {
-    return undefined;
-  }
-
-  const sanitized = parts.map((part): SessionChatContentPart => {
-    if (part.type === 'text') {
-      return {
-        type: 'text',
-        text: sanitizePersistedText(part.text, PERSIST_CHAT_MESSAGE_MAX_CHARS),
-      };
-    }
-
-    return {
-      type: 'text',
-      text: `[image omitted${part.name ? `: ${part.name}` : ''}]`,
-    };
-  });
-
-  return sanitized.length > 0 ? sanitized : undefined;
-}
-
-function sanitizePersistedText(text: string, maxChars: number): string {
-  const redacted = redactSensitiveText(asString(text));
-  if (redacted.length <= maxChars) {
-    return redacted;
-  }
-
-  return `${redacted.slice(0, maxChars)}... [truncated]`;
-}
-
-function redactSensitiveText(text: string): string {
-  if (!text) {
-    return text;
-  }
-
-  return text
-    .replace(/\bgh[pousr]_[A-Za-z0-9]{30,}\b/g, '[REDACTED_GITHUB_TOKEN]')
-    .replace(/\bsk-[A-Za-z0-9_-]{16,}\b/g, '[REDACTED_API_KEY]')
-    .replace(/\b(?:api[_-]?key|token|secret|password)\s*[:=]\s*[^\s"',;]+/gi, '$1=[REDACTED]')
-    .replace(/\bBearer\s+[A-Za-z0-9._-]{16,}\b/gi, 'Bearer [REDACTED]')
-    .replace(/data:image\/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=\s]+/g, '[REDACTED_IMAGE_DATA]');
-}
-
 function toPersistedSession(session: WorkSession): PersistedWorkSession {
   return {
     id: session.id,
@@ -3165,16 +1958,11 @@ function toPersistedSession(session: WorkSession): PersistedWorkSession {
     provider: session.provider,
     model: session.model,
     autoApprove: session.autoApprove,
-    executionContext: session.executionContext,
-    selectedWorktreePath: session.selectedWorktreePath,
-    useWorktree: session.useWorktree,
     adaptiveConcurrency: session.adaptiveConcurrency,
     batchConcurrency: session.batchConcurrency,
     batchMinConcurrency: session.batchMinConcurrency,
     worktreePath: session.worktreePath,
     worktreeBranch: session.worktreeBranch,
-    creationReason: session.creationReason,
-    sourceSessionId: session.sourceSessionId,
     createdAt: session.createdAt,
     updatedAt: session.updatedAt,
     status: session.status,
@@ -3197,67 +1985,28 @@ function hydratePersistedSession(session: PersistedWorkSession): WorkSession {
     : session.error;
   const resumedUpdatedAt = asString(session.updatedAt) || now();
   const promptParts = parseChatContentParts(session.promptParts);
-  const persistedLlmStatus = session.llmStatus
+  const resumedLlmStatus = session.llmStatus
     ? normalizeLlmStatus(session.llmStatus, resumedUpdatedAt)
-    : undefined;
-  const resumedLlmStatus = resolveHydratedLlmStatus(
-    resumedStatus,
-    resumedUpdatedAt,
-    resumedError,
-    persistedLlmStatus,
-  );
+    : deriveLlmStatusFromWorkState(resumedStatus, resumedUpdatedAt, resumedError);
 
   return {
     ...session,
     promptParts: promptParts.length > 0 ? promptParts : undefined,
-    executionContext: normalizeExecutionContext(session.executionContext)
-      ?? (Boolean(session.useWorktree) ? 'git-worktree' : 'workspace'),
-    selectedWorktreePath: asString(session.selectedWorktreePath)
-      || asString(session.worktreePath)
-      || undefined,
-    useWorktree: (normalizeExecutionContext(session.executionContext)
-      ?? (Boolean(session.useWorktree) ? 'git-worktree' : 'workspace')) === 'git-worktree',
     adaptiveConcurrency: parseBooleanSetting(session.adaptiveConcurrency) ?? resolveAdaptiveConcurrencyDefault(),
     batchConcurrency: normalizePositiveSetting(session.batchConcurrency, resolveBatchConcurrencyDefault()),
     batchMinConcurrency: Math.min(
       normalizePositiveSetting(session.batchConcurrency, resolveBatchConcurrencyDefault()),
       normalizePositiveSetting(session.batchMinConcurrency, resolveBatchMinConcurrencyDefault()),
     ),
-    worktreePath: asString(session.worktreePath) || undefined,
-    worktreeBranch: asString(session.worktreeBranch) || undefined,
-    creationReason: normalizeSessionCreationReason(session.creationReason),
-    sourceSessionId: asString(session.sourceSessionId) || undefined,
+    worktreePath: asString(session.worktreePath) || session.workspacePath,
+    worktreeBranch: asString(session.worktreeBranch) || 'unknown',
     agentGraph: normalizeSessionAgentGraphNodes(session.agentGraph),
     status: resumedStatus,
     llmStatus: resumedLlmStatus,
     error: resumedError,
     controller: new AbortController(),
+    cleanupWorktree: undefined,
   };
-}
-
-function resolveHydratedLlmStatus(
-  status: WorkState,
-  updatedAt: string,
-  error: string | undefined,
-  persisted: SessionLlmStatus | undefined,
-): SessionLlmStatus {
-  if (!persisted) {
-    return deriveLlmStatusFromWorkState(status, updatedAt, error);
-  }
-
-  if (status === 'completed' && persisted.state !== 'completed') {
-    return deriveLlmStatusFromWorkState(status, updatedAt, error);
-  }
-
-  if (status === 'failed' && persisted.state !== 'failed') {
-    return deriveLlmStatusFromWorkState(status, updatedAt, error);
-  }
-
-  if (status === 'cancelled' && persisted.state !== 'cancelled') {
-    return deriveLlmStatusFromWorkState(status, updatedAt, error);
-  }
-
-  return persisted;
 }
 
 function createAuthSession(providerId: string): AuthSession {
@@ -3650,6 +2399,42 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
 
+function buildSingleTaskGraph(id: string, prompt: string): TaskGraph {
+  const verifyCommands = parseVerifyCommands();
+
+  return {
+    id: `ui-${id}`,
+    name: 'UI Work Session',
+    nodes: [
+      {
+        id: 'task',
+        name: 'Execute UI prompt',
+        type: 'code',
+        prompt,
+        isolated: true,
+        dependencies: [],
+        validation: {
+          commands: verifyCommands,
+          maxRetries: 2,
+          retryDelayMs: 0,
+        },
+      },
+    ],
+  };
+}
+
+function parseVerifyCommands(): string[] {
+  const raw = process.env.ORCHESTRACE_VERIFY_COMMANDS;
+  if (!raw) {
+    return ['pnpm typecheck', 'pnpm test'];
+  }
+
+  return raw
+    .split(';')
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0);
+}
+
 function parseBooleanSetting(value: unknown): boolean | undefined {
   if (typeof value === 'boolean') {
     return value;
@@ -3704,7 +2489,7 @@ function normalizePositiveSetting(value: unknown, fallback: number): number {
 function resolveLongTurnTimeoutMs(): number {
   return resolveConfiguredTimeoutMs(
     ['ORCHESTRACE_LLM_LONG_TURN_TIMEOUT_MS', 'ORCHESTRACE_LLM_TIMEOUT_MS'],
-    600_000,
+    300_000,
   );
 }
 
@@ -3740,56 +2525,10 @@ function parsePositiveInt(raw: string | undefined): number | undefined {
   return parsed;
 }
 
-function normalizeExecutionContext(raw: unknown): ExecutionContext | undefined {
-  const value = asString(raw).trim().toLowerCase();
-  if (value === 'workspace') {
-    return 'workspace';
-  }
-  if (value === 'git-worktree' || value === 'git_worktree' || value === 'worktree') {
-    return 'git-worktree';
-  }
-  return undefined;
-}
-
-function normalizeSessionCreationReason(raw: unknown): SessionCreationReason {
-  const value = asString(raw).trim().toLowerCase();
-  if (value === 'retry') {
-    return 'retry';
-  }
-
-  return 'start';
-}
-
-function resolveExecutionContextDefault(): ExecutionContext {
-  const fromEnv = normalizeExecutionContext(
-    process.env.ORCHESTRACE_UI_EXECUTION_CONTEXT ?? process.env.ORCHESTRACE_EXECUTION_CONTEXT,
-  );
-  if (fromEnv) {
-    return fromEnv;
-  }
-
-  const rawUseWorktree = process.env.ORCHESTRACE_UI_USE_WORKTREE ?? process.env.ORCHESTRACE_USE_WORKTREE;
-  return parseBooleanSetting(rawUseWorktree) ? 'git-worktree' : 'workspace';
-}
-
-function resolveUseWorktreeDefault(): boolean {
-  const raw = process.env.ORCHESTRACE_UI_USE_WORKTREE ?? process.env.ORCHESTRACE_USE_WORKTREE;
-  const parsed = parseBooleanSetting(raw);
-  if (parsed !== undefined) {
-    return parsed;
-  }
-
-  return resolveExecutionContextDefault() === 'git-worktree';
-}
-
 function resolveUiPreferencesDefaults(): UiPreferences {
   const batchConcurrency = resolveBatchConcurrencyDefault();
   const batchMinConcurrency = Math.min(batchConcurrency, resolveBatchMinConcurrencyDefault());
-  const executionContext = resolveExecutionContextDefault();
   return {
-    executionContext,
-    selectedWorktreePath: asString(process.env.ORCHESTRACE_UI_SELECTED_WORKTREE_PATH) || undefined,
-    useWorktree: executionContext === 'git-worktree',
     adaptiveConcurrency: resolveAdaptiveConcurrencyDefault(),
     batchConcurrency,
     batchMinConcurrency,
@@ -3806,17 +2545,8 @@ function normalizeUiPreferences(value: unknown, fallback: UiPreferences): UiPref
     batchConcurrency,
     normalizePositiveSetting(value.batchMinConcurrency, fallback.batchMinConcurrency),
   );
-  const executionContext = normalizeExecutionContext(value.executionContext)
-    ?? (parseBooleanSetting(value.useWorktree) ? 'git-worktree' : undefined)
-    ?? fallback.executionContext;
-  const selectedWorktreePath = asString(value.selectedWorktreePath)
-    || asString(value.worktreePath)
-    || fallback.selectedWorktreePath;
 
   return {
-    executionContext,
-    selectedWorktreePath,
-    useWorktree: executionContext === 'git-worktree',
     adaptiveConcurrency: parseBooleanSetting(value.adaptiveConcurrency) ?? fallback.adaptiveConcurrency,
     batchConcurrency,
     batchMinConcurrency,
@@ -3883,13 +2613,6 @@ function normalizeAgentToolPhase(value: string): AgentToolPhase | undefined {
   return undefined;
 }
 
-function hasImplementationGraphActivity(session: WorkSession): boolean {
-  return session.agentGraph.some((node) => {
-    const status = node.status ?? 'pending';
-    return status === 'running' || status === 'completed' || status === 'failed';
-  });
-}
-
 function resolveSessionToolMode(session: WorkSession): AgentToolPhase {
   const phase = session.llmStatus.phase;
   if (phase === 'planning' || phase === 'implementation') {
@@ -3898,22 +2621,13 @@ function resolveSessionToolMode(session: WorkSession): AgentToolPhase {
 
   switch (session.llmStatus.state) {
     case 'queued':
-    case 'planning':
-    case 'awaiting-approval':
     case 'analyzing':
     case 'thinking':
+    case 'planning':
+    case 'awaiting-approval':
       return 'planning';
-    case 'implementing':
-    case 'using-tools':
-    case 'validating':
-    case 'retrying':
-      return 'implementation';
-    case 'completed':
-    case 'failed':
-    case 'cancelled':
-      return hasImplementationGraphActivity(session) ? 'implementation' : 'planning';
     default:
-      return 'planning';
+      return 'implementation';
   }
 }
 
@@ -3996,6 +2710,85 @@ function deriveLlmStatusFromWorkState(status: WorkState, updatedAt: string, erro
   return createLlmStatus('queued', updatedAt, { detail: 'Queued for orchestration.' });
 }
 
+function deriveLlmStatusFromDagEvent(event: DagEvent, updatedAt: string): SessionLlmStatus | undefined {
+  switch (event.type) {
+    case 'task:ready':
+    case 'task:started':
+    case 'task:planning':
+      return createLlmStatus('analyzing', updatedAt, {
+        detail: 'Reviewing prompt and dependencies.',
+        taskId: event.taskId,
+      });
+    case 'task:stream-delta':
+      return createLlmStatus('thinking', updatedAt, {
+        detail: event.phase === 'planning' ? 'Generating plan...' : 'Generating implementation...',
+        taskId: event.taskId,
+        phase: event.phase,
+      });
+    case 'task:plan-persisted':
+      return createLlmStatus('planning', updatedAt, {
+        detail: 'Plan drafted and saved.',
+        taskId: event.taskId,
+      });
+    case 'task:approval-requested':
+      return createLlmStatus('awaiting-approval', updatedAt, {
+        detail: 'Waiting for plan approval.',
+        taskId: event.taskId,
+      });
+    case 'task:approved':
+      return createLlmStatus('implementing', updatedAt, {
+        detail: 'Plan approved. Starting implementation.',
+        taskId: event.taskId,
+      });
+    case 'task:implementation-attempt':
+      return createLlmStatus('implementing', updatedAt, {
+        detail: `Implementation attempt ${event.attempt}/${event.maxAttempts}.`,
+        taskId: event.taskId,
+      });
+    case 'task:tool-call':
+      if (event.status !== 'started') {
+        return undefined;
+      }
+      return createLlmStatus('using-tools', updatedAt, {
+        detail: `Running tool ${event.toolName}.`,
+        taskId: event.taskId,
+        phase: event.phase,
+      });
+    case 'task:validating':
+      return createLlmStatus('validating', updatedAt, {
+        detail: 'Running verification checks.',
+        taskId: event.taskId,
+      });
+    case 'task:verification-failed':
+      return createLlmStatus('retrying', updatedAt, {
+        detail: `Verification failed on attempt ${event.attempt}.`,
+        taskId: event.taskId,
+      });
+    case 'task:retrying':
+      return createLlmStatus('retrying', updatedAt, {
+        detail: `Retrying (${event.attempt}/${event.maxRetries}).`,
+        taskId: event.taskId,
+      });
+    case 'task:completed':
+    case 'graph:completed':
+      return createLlmStatus('completed', updatedAt, {
+        detail: 'Run completed successfully.',
+        taskId: 'taskId' in event ? event.taskId : undefined,
+      });
+    case 'task:failed':
+    case 'graph:failed':
+      return createLlmStatus('failed', updatedAt, {
+        detail: event.type === 'task:failed' && event.failureType
+          ? `${event.failureType}: ${event.error}`
+          : event.error,
+        failureType: event.type === 'task:failed' ? event.failureType : undefined,
+        taskId: 'taskId' in event ? event.taskId : undefined,
+      });
+    default:
+      return undefined;
+  }
+}
+
 function toUiEvent(runId: string, event: DagEvent): UiDagEvent | undefined {
   const base = {
     time: now(),
@@ -4022,18 +2815,14 @@ function toUiEvent(runId: string, event: DagEvent): UiDagEvent | undefined {
       if (event.status === 'started') {
         return {
           ...base,
-          message: tagged(
-            `${event.taskId}: tool ${event.toolName} input ${previewToolLog(event.input, resolveToolPreviewLimit(event.toolName, 'input'))}`,
-          ),
+          message: tagged(`${event.taskId}: tool ${event.toolName} input ${previewToolLog(event.input)}`),
         };
       }
 
       const errorSuffix = event.isError ? ' [error]' : '';
       return {
         ...base,
-        message: tagged(
-          `${event.taskId}: tool ${event.toolName} output${errorSuffix} ${previewToolLog(event.output, resolveToolPreviewLimit(event.toolName, 'output'))}`,
-        ),
+        message: tagged(`${event.taskId}: tool ${event.toolName} output${errorSuffix} ${previewToolLog(event.output)}`),
       };
     }
     case 'task:verification-failed':
@@ -4069,12 +2858,12 @@ function previewToolLog(value: string | undefined, maxChars = 600): string {
     return '(empty)';
   }
 
-  const compact = redactSensitiveText(value).replace(/\s+/g, ' ').trim();
+  const compact = value.replace(/\s+/g, ' ').trim();
   if (!compact) {
     return '(blank)';
   }
 
-  if (compact.length <= maxChars) {
+if (compact.length <= maxChars) {
     return compact;
   }
 
@@ -4311,15 +3100,12 @@ function applyChecklistFromTodoArgs(
       .map((item) => {
         const id = asString(item.id) || randomUUID();
         const title = asString(item.title) || `Todo ${id}`;
-        const status = normalizeChecklistTodoStatus(item.status) ?? 'todo';
-        const weight = normalizeProgressWeight(item.weight);
+        const status = normalizeChecklistTodoStatus(item.status);
         const previous = existing.find((entry) => entry.id === id);
         return {
           id,
           text: compactTodoText(title, item.details),
           done: status === 'done',
-          status,
-          weight,
           createdAt: previous?.createdAt ?? nowTime,
           updatedAt: nowTime,
         };
@@ -4332,15 +3118,12 @@ function applyChecklistFromTodoArgs(
   if (toolName === 'todo_add') {
     const id = asString(args.id) || randomUUID();
     const title = asString(args.title) || `Todo ${id}`;
-    const status = normalizeChecklistTodoStatus(args.status) ?? 'todo';
-    const weight = normalizeProgressWeight(args.weight);
+    const status = normalizeChecklistTodoStatus(args.status);
     const next = existing.filter((item) => item.id !== id);
     next.push({
       id,
       text: compactTodoText(title, args.details),
       done: status === 'done',
-      status,
-      weight,
       createdAt: nowTime,
       updatedAt: nowTime,
     });
@@ -4355,7 +3138,6 @@ function applyChecklistFromTodoArgs(
 
   const index = existing.findIndex((item) => item.id === id);
   const status = normalizeChecklistTodoStatus(args.status);
-  const nextWeight = args.weight === undefined ? undefined : normalizeProgressWeight(args.weight);
   const title = asString(args.title);
   const details = asString(args.details);
   const appendDetails = asString(args.appendDetails);
@@ -4366,8 +3148,6 @@ function applyChecklistFromTodoArgs(
       id,
       text: fallbackText,
       done: status === 'done',
-      status: status ?? 'todo',
-      weight: nextWeight,
       createdAt: nowTime,
       updatedAt: nowTime,
     };
@@ -4385,8 +3165,6 @@ function applyChecklistFromTodoArgs(
     ...item,
     text: nextText,
     done: status ? status === 'done' : item.done,
-    status: status ?? item.status,
-    weight: nextWeight === undefined ? item.weight : nextWeight,
     updatedAt: nowTime,
   };
 
@@ -4449,7 +3227,6 @@ function parseTodoToolArgs(
   const title = extractQuotedField(input, 'title');
   const details = extractQuotedField(input, 'details');
   const appendDetails = extractQuotedField(input, 'appendDetails');
-  const weight = extractNumericField(input, 'weight');
 
   if (toolName === 'todo_update') {
     if (!id) {
@@ -4459,7 +3236,6 @@ function parseTodoToolArgs(
     return {
       id,
       status,
-      weight,
       title,
       details,
       appendDetails,
@@ -4475,7 +3251,6 @@ function parseTodoToolArgs(
       id,
       title: title || `Todo ${id}`,
       status,
-      weight,
       details,
     };
   }
@@ -4488,17 +3263,6 @@ function extractQuotedField(input: string, key: string): string | undefined {
   const pattern = new RegExp(`"${key}"\\s*:\\s*"([^"]+)"`);
   const match = input.match(pattern);
   return match?.[1];
-}
-
-function extractNumericField(input: string, key: string): number | undefined {
-  const pattern = new RegExp(`"${key}"\\s*:\\s*(-?\\d+(?:\\.\\d+)?)`);
-  const match = input.match(pattern);
-  if (!match) {
-    return undefined;
-  }
-
-  const parsed = Number.parseFloat(match[1]);
-  return Number.isFinite(parsed) ? parsed : undefined;
 }
 
 function backfillChecklistFromUiEvents(
@@ -4809,7 +3573,6 @@ function normalizeSessionAgentGraphNodes(rawNodes: unknown): SessionAgentGraphNo
       id,
       name: asString(node.name) || undefined,
       prompt,
-      weight: normalizeProgressWeight(node.weight),
       dependencies,
       status: normalizeGraphNodeStatus(node.status),
       provider: asString(node.provider) || undefined,
@@ -4862,291 +3625,7 @@ function normalizeGraphNodeStatus(value: unknown): SessionAgentGraphNode['status
   return 'pending';
 }
 
-type SessionProgressSource = 'graph+todos' | 'graph' | 'todos' | 'llm';
-type SessionProgressConfidence = 'high' | 'medium' | 'low';
-
-function normalizeProgressWeight(value: unknown): number | undefined {
-  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
-    return undefined;
-  }
-
-  return Math.round(value * 100) / 100;
-}
-
-function clampUnit(value: number): number {
-  if (Number.isNaN(value) || !Number.isFinite(value)) {
-    return 0;
-  }
-
-  return Math.min(1, Math.max(0, value));
-}
-
-function llmStateProgressFraction(state: LlmSessionState): number {
-  switch (state) {
-    case 'queued':
-      return 0.02;
-    case 'analyzing':
-      return 0.12;
-    case 'thinking':
-      return 0.2;
-    case 'planning':
-      return 0.32;
-    case 'awaiting-approval':
-      return 0.4;
-    case 'implementing':
-      return 0.62;
-    case 'using-tools':
-      return 0.75;
-    case 'validating':
-      return 0.9;
-    case 'retrying':
-      return 0.72;
-    case 'completed':
-      return 1;
-    case 'failed':
-    case 'cancelled':
-    default:
-      return 0;
-  }
-}
-
-function computeGraphProgressFraction(session: WorkSession): {
-  fraction: number;
-  total: number;
-  completed: number;
-  completedWeight: number;
-  totalWeight: number;
-  running: number;
-  failed: number;
-} | undefined {
-  const nodes = serializeAgentGraphWithProgressInvariant(session);
-  if (nodes.length === 0) {
-    return undefined;
-  }
-
-  const hasExplicitWeights = nodes.every((node) => normalizeProgressWeight(node.weight) !== undefined);
-  const runningScore = clampUnit(Math.max(0.25, Math.min(0.9, llmStateProgressFraction(session.llmStatus.state))));
-  let score = 0;
-  let completed = 0;
-  let completedWeight = 0;
-  let totalWeight = 0;
-  let running = 0;
-  let failed = 0;
-
-  for (const node of nodes) {
-    const weight = hasExplicitWeights ? (normalizeProgressWeight(node.weight) ?? 0) : 1;
-    totalWeight += weight;
-
-    const status = node.status ?? 'pending';
-    if (status === 'completed') {
-      score += weight;
-      completed += 1;
-      completedWeight += weight;
-      continue;
-    }
-
-    if (status === 'running') {
-      score += weight * runningScore;
-      running += 1;
-      continue;
-    }
-
-    if (status === 'failed') {
-      failed += 1;
-    }
-  }
-
-  return {
-    fraction: clampUnit(score / Math.max(1, totalWeight)),
-    total: nodes.length,
-    completed,
-    completedWeight,
-    totalWeight,
-    running,
-    failed,
-  };
-}
-
-function computeTodoProgressFraction(todos: AgentTodoItem[]): {
-  fraction: number;
-  total: number;
-  done: number;
-  inProgress: number;
-  doneWeight: number;
-  totalWeight: number;
-} | undefined {
-  if (todos.length === 0) {
-    return undefined;
-  }
-
-  const hasExplicitWeights = todos.every((item) => normalizeProgressWeight(item.weight) !== undefined);
-  let score = 0;
-  let done = 0;
-  let inProgress = 0;
-  let doneWeight = 0;
-  let totalWeight = 0;
-
-  for (const item of todos) {
-    const status = item.status ?? (item.done ? 'done' : 'todo');
-    const weight = hasExplicitWeights ? (normalizeProgressWeight(item.weight) ?? 0) : 1;
-    totalWeight += weight;
-
-    if (status === 'done' || item.done) {
-      score += weight;
-      done += 1;
-      doneWeight += weight;
-      continue;
-    }
-
-    if (status === 'in_progress') {
-      score += weight * 0.5;
-      inProgress += 1;
-    }
-  }
-
-  return {
-    fraction: clampUnit(score / Math.max(1, totalWeight)),
-    total: todos.length,
-    done,
-    inProgress,
-    doneWeight,
-    totalWeight,
-  };
-}
-
-function computeSessionProgress(session: WorkSession, todos: AgentTodoItem[]): {
-  percent: number;
-  planningPercent: number;
-  implementationPercent: number;
-  weightedOverallPercent: number;
-  source: SessionProgressSource;
-  confidence: SessionProgressConfidence;
-  weights: {
-    planning: number;
-    implementation: number;
-    source: 'configured' | 'planning-only' | 'implementation-only' | 'fallback';
-  };
-  graphPercent?: number;
-  todoPercent?: number;
-  llmPercent?: number;
-  totals: {
-    todos: number;
-    todosDone: number;
-    todosInProgress: number;
-    todoWeightTotal: number;
-    todoWeightDone: number;
-    nodes: number;
-    nodesCompleted: number;
-    nodesRunning: number;
-    nodesFailed: number;
-    nodeWeightTotal: number;
-    nodeWeightCompleted: number;
-  };
-} {
-  const graph = computeGraphProgressFraction(session);
-  const checklist = computeTodoProgressFraction(todos);
-  const llm = clampUnit(llmStateProgressFraction(session.llmStatus.state));
-  const mode = resolveSessionToolMode(session);
-  const isPlanningMode = mode === 'planning';
-  const planningFraction = isPlanningMode ? (checklist?.fraction ?? llm) : 1;
-  const implementationFraction = isPlanningMode ? 0 : (graph?.fraction ?? llm);
-
-  let source: SessionProgressSource;
-  let confidence: SessionProgressConfidence;
-  let overallFraction: number;
-  let planningWeight = 50;
-  let implementationWeight = 50;
-  let weightSource: 'configured' | 'planning-only' | 'implementation-only' | 'fallback' = 'fallback';
-
-  if (isPlanningMode) {
-    source = checklist ? 'todos' : 'llm';
-    confidence = checklist ? 'medium' : 'low';
-    planningWeight = 100;
-    implementationWeight = 0;
-    weightSource = 'planning-only';
-    overallFraction = planningFraction;
-  } else if (graph && checklist) {
-    source = 'graph+todos';
-    confidence = 'high';
-    planningWeight = PHASE_PROGRESS_PLAN_WEIGHT_DEFAULT;
-    implementationWeight = PHASE_PROGRESS_IMPLEMENTATION_WEIGHT_DEFAULT;
-    weightSource = 'configured';
-    const total = planningWeight + implementationWeight;
-    overallFraction = total > 0
-      ? ((planningFraction * planningWeight) + (implementationFraction * implementationWeight)) / total
-      : Math.min(implementationFraction, planningFraction);
-  } else if (graph) {
-    source = 'graph';
-    confidence = 'medium';
-    planningWeight = 0;
-    implementationWeight = 100;
-    weightSource = 'implementation-only';
-    overallFraction = implementationFraction;
-  } else if (checklist) {
-    source = 'llm';
-    confidence = 'low';
-    planningWeight = PHASE_PROGRESS_PLAN_WEIGHT_DEFAULT;
-    implementationWeight = PHASE_PROGRESS_IMPLEMENTATION_WEIGHT_DEFAULT;
-    weightSource = 'configured';
-    overallFraction = ((planningFraction * planningWeight)
-      + (implementationFraction * implementationWeight))
-      / (planningWeight + implementationWeight);
-  } else {
-    source = 'llm';
-    confidence = 'low';
-    planningWeight = PHASE_PROGRESS_PLAN_WEIGHT_DEFAULT;
-    implementationWeight = PHASE_PROGRESS_IMPLEMENTATION_WEIGHT_DEFAULT;
-    weightSource = 'configured';
-    overallFraction = ((planningFraction * planningWeight)
-      + (implementationFraction * implementationWeight))
-      / (planningWeight + implementationWeight);
-  }
-
-  const planningPercent = Math.floor(planningFraction * 100);
-  const implementationPercent = Math.floor(implementationFraction * 100);
-
-  if (session.status === 'completed') {
-    overallFraction = 1;
-  } else {
-    overallFraction = Math.min(0.99, clampUnit(overallFraction));
-  }
-
-  const weightedOverallPercent = Math.floor(overallFraction * 100);
-
-  return {
-    percent: weightedOverallPercent,
-    planningPercent,
-    implementationPercent,
-    weightedOverallPercent,
-    source,
-    confidence,
-    weights: {
-      planning: planningWeight,
-      implementation: implementationWeight,
-      source: weightSource,
-    },
-    graphPercent: graph ? Math.floor(graph.fraction * 100) : undefined,
-    todoPercent: checklist ? Math.floor(checklist.fraction * 100) : undefined,
-    llmPercent: source === 'llm' ? Math.floor(llm * 100) : undefined,
-    totals: {
-      todos: checklist?.total ?? 0,
-      todosDone: checklist?.done ?? 0,
-      todosInProgress: checklist?.inProgress ?? 0,
-      todoWeightTotal: checklist?.totalWeight ?? 0,
-      todoWeightDone: checklist?.doneWeight ?? 0,
-      nodes: graph?.total ?? 0,
-      nodesCompleted: graph?.completed ?? 0,
-      nodesRunning: graph?.running ?? 0,
-      nodesFailed: graph?.failed ?? 0,
-      nodeWeightTotal: graph?.totalWeight ?? 0,
-      nodeWeightCompleted: graph?.completedWeight ?? 0,
-    },
-  };
-}
-
-function serializeWorkSession(session: WorkSession, todos: AgentTodoItem[] = []): Record<string, unknown> {
-  const serializedAgentGraph = serializeAgentGraphWithProgressInvariant(session);
-  const progress = computeSessionProgress(session, todos);
+function serializeWorkSession(session: WorkSession): Record<string, unknown> {
   return {
     id: session.id,
     workspaceId: session.workspaceId,
@@ -5170,61 +3649,24 @@ function serializeWorkSession(session: WorkSession, todos: AgentTodoItem[] = [])
     provider: session.provider,
     model: session.model,
     autoApprove: session.autoApprove,
-    executionContext: session.executionContext,
-    selectedWorktreePath: session.selectedWorktreePath,
-    useWorktree: session.useWorktree,
     adaptiveConcurrency: session.adaptiveConcurrency,
     batchConcurrency: session.batchConcurrency,
     batchMinConcurrency: session.batchMinConcurrency,
     worktreePath: session.worktreePath,
     worktreeBranch: session.worktreeBranch,
-    creationReason: session.creationReason,
-    sourceSessionId: session.sourceSessionId,
     createdAt: session.createdAt,
     updatedAt: session.updatedAt,
     status: session.status,
-    mode: resolveSessionToolMode(session),
     llmStatus: session.llmStatus,
     taskStatus: session.taskStatus,
     events: session.events,
-    agentGraph: serializedAgentGraph,
-    progress,
+    agentGraph: session.agentGraph.map((node) => ({
+      ...node,
+      dependencies: [...node.dependencies],
+    })),
     error: session.error,
     output: session.output,
   };
-}
-
-function serializeAgentGraphWithProgressInvariant(session: WorkSession): SessionAgentGraphNode[] {
-  const nodes = session.agentGraph.map((node) => ({
-    ...node,
-    dependencies: [...node.dependencies],
-  }));
-
-  if (session.status !== 'running' || nodes.length === 0) {
-    return nodes;
-  }
-
-  if (nodes.some((node) => node.status === 'running')) {
-    return nodes;
-  }
-
-  const statusById = new Map(nodes.map((node) => [node.id, node.status ?? 'pending']));
-  const readyPending = nodes.find((node) => {
-    const status = statusById.get(node.id) ?? 'pending';
-    if (status === 'completed' || status === 'failed') {
-      return false;
-    }
-
-    return (node.dependencies ?? []).every((dep) => (statusById.get(dep) ?? 'pending') === 'completed');
-  });
-
-  const nonTerminal = nodes.find((node) => {
-    const status = statusById.get(node.id) ?? 'pending';
-    return status !== 'completed' && status !== 'failed';
-  });
-
-  const targetId = (readyPending ?? nonTerminal ?? nodes[0]).id;
-  return nodes.map((node) => (node.id === targetId ? { ...node, status: 'running' } : node));
 }
 
 function serializeAuthSession(session: AuthSession): Record<string, unknown> {
@@ -5310,294 +3752,6 @@ function resolveUiWatchPath(workspaceRoot: string): string | undefined {
   return undefined;
 }
 
-async function listNativeGitWorktrees(repoRoot: string): Promise<NativeGitWorktree[]> {
-  try {
-    const { stdout } = await execFileAsync('git', ['worktree', 'list', '--porcelain'], {
-      cwd: repoRoot,
-      timeout: 30_000,
-      maxBuffer: 1024 * 1024,
-    });
-
-    const worktrees: NativeGitWorktree[] = [];
-    let current: NativeGitWorktree | undefined;
-    for (const rawLine of stdout.split('\n')) {
-      const line = rawLine.trim();
-      if (!line) {
-        if (current?.path) {
-          worktrees.push(current);
-        }
-        current = undefined;
-        continue;
-      }
-
-      if (line.startsWith('worktree ')) {
-        if (current?.path) {
-          worktrees.push(current);
-        }
-        current = {
-          path: resolve(line.slice('worktree '.length)),
-          detached: false,
-        };
-        continue;
-      }
-
-      if (!current) {
-        continue;
-      }
-
-      if (line.startsWith('branch ')) {
-        const rawBranch = line.slice('branch '.length);
-        current.branch = rawBranch.startsWith('refs/heads/')
-          ? rawBranch.slice('refs/heads/'.length)
-          : rawBranch;
-      } else if (line === 'detached') {
-        current.detached = true;
-      }
-    }
-
-    if (current?.path) {
-      worktrees.push(current);
-    }
-
-    return worktrees;
-  } catch (error) {
-    throw new Error(`Failed to list git worktrees: ${toErrorMessage(error)}`);
-  }
-}
-
-async function resolveSessionWorkspacePath(request: {
-  workspaceRoot: string;
-  executionContext: ExecutionContext;
-  selectedWorktreePath?: string;
-}): Promise<{
-  workspacePath: string;
-  executionContext: ExecutionContext;
-  selectedWorktreePath?: string;
-  worktreeBranch?: string;
-}> {
-  if (request.executionContext === 'workspace') {
-    return {
-      workspacePath: request.workspaceRoot,
-      executionContext: 'workspace',
-    };
-  }
-
-  const workspaceRoot = resolve(request.workspaceRoot);
-  const worktrees = await listNativeGitWorktrees(workspaceRoot);
-  const secondaryWorktrees = worktrees.filter((entry) => resolve(entry.path) !== workspaceRoot);
-
-  if (secondaryWorktrees.length === 0) {
-    throw new Error(
-      'No secondary git worktrees found for this workspace. Create one with "git worktree add" or switch execution context to workspace.',
-    );
-  }
-
-  if (request.selectedWorktreePath) {
-    const selectedPath = resolve(request.selectedWorktreePath);
-    if (selectedPath === workspaceRoot) {
-      throw new Error('Selected worktree path points to the primary workspace. Choose a git worktree path instead.');
-    }
-
-    const selected = secondaryWorktrees.find((entry) => resolve(entry.path) === selectedPath);
-    if (!selected) {
-      throw new Error(`Selected git worktree is not registered in this repository: ${request.selectedWorktreePath}`);
-    }
-
-    return {
-      workspacePath: selected.path,
-      executionContext: 'git-worktree',
-      selectedWorktreePath: selected.path,
-      worktreeBranch: selected.branch,
-    };
-  }
-
-  const fallback = secondaryWorktrees[0];
-  return {
-    workspacePath: fallback.path,
-    executionContext: 'git-worktree',
-    selectedWorktreePath: fallback.path,
-    worktreeBranch: fallback.branch,
-  };
-}
-
-async function ensureSessionWorkspaceReady(
-  session: WorkSession,
-  workspaceManager: WorkspaceManager,
-  uiStatePersistence: { schedule: () => void; flush: () => Promise<void> },
-): Promise<void> {
-  if (existsSync(session.workspacePath)) {
-    return;
-  }
-
-  const workspace = await workspaceManager.selectWorkspace(session.workspaceId);
-  session.workspacePath = workspace.path;
-  session.workspaceName = workspace.name;
-  session.executionContext = 'workspace';
-  session.selectedWorktreePath = undefined;
-  session.useWorktree = false;
-  session.worktreePath = undefined;
-  session.worktreeBranch = undefined;
-  session.updatedAt = now();
-  uiStatePersistence.schedule();
-}
-
-function isRetryableSubAgentError(error: unknown): boolean {
-  const message = toErrorMessage(error).toLowerCase();
-  return message.includes('aborted')
-    || message.includes('timeout')
-    || message.includes('timed out')
-    || message.includes('rate limit')
-    || message.includes('429')
-    || message.includes('temporar')
-    || message.includes('econnreset')
-    || message.includes('etimedout')
-    || message.includes('network');
-}
-
-function resolveSubAgentSystemPrompt(request: SubAgentRequest): string {
-  if (request.systemPrompt) {
-    return request.systemPrompt;
-  }
-
-  if (request.contextPacket) {
-    return [
-      'You are a focused sub-agent. Use only delegated context and avoid unrelated history.',
-      'Respect boundaries in the provided SubAgentContextPacket.',
-      'Respond concisely with machine-readable structure when possible.',
-      'Preferred output contract: JSON object with keys summary, actions[], evidence[{type,ref,note?}], risks[], openQuestions[], patchIntent[].',
-    ].join('\n');
-  }
-
-  return 'You are a focused sub-agent. Use only the provided task-relevant context, avoid unrelated history, and return concise actionable output.';
-}
-
-function buildStructuredSubAgentResult(result: {
-  text: string;
-  usage?: { input: number; output: number; cost: number };
-}): SubAgentResult {
-  const parsed = parseSubAgentResultJson(result.text);
-  const summary = normalizeSubAgentSummary(parsed?.summary, result.text);
-
-  return {
-    text: result.text,
-    usage: result.usage,
-    summary,
-    actions: normalizeStringList(parsed?.actions),
-    evidence: normalizeSubAgentEvidence(parsed?.evidence),
-    risks: normalizeStringList(parsed?.risks),
-    openQuestions: normalizeStringList(parsed?.openQuestions),
-    patchIntent: normalizeStringList(parsed?.patchIntent),
-  };
-}
-
-function parseSubAgentResultJson(text: string): Record<string, unknown> | undefined {
-  const trimmed = text.trim();
-  if (!trimmed) {
-    return undefined;
-  }
-
-  const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1];
-  const candidates = [trimmed, fenced].filter((entry): entry is string => Boolean(entry));
-
-  for (const candidate of candidates) {
-    try {
-      const parsed = JSON.parse(candidate);
-      if (parsed && typeof parsed === 'object') {
-        return parsed as Record<string, unknown>;
-      }
-    } catch {
-      // Try next candidate.
-    }
-  }
-
-  return undefined;
-}
-
-function normalizeSubAgentSummary(summary: unknown, fallbackText: string): string {
-  if (typeof summary === 'string' && summary.trim()) {
-    return summary.trim().slice(0, 900);
-  }
-
-  const compact = fallbackText.replace(/\s+/g, ' ').trim();
-  return compact.length > 900 ? `${compact.slice(0, 900)}...` : compact;
-}
-
-function normalizeStringList(value: unknown): string[] {
-  if (!Array.isArray(value)) {
-    return [];
-  }
-
-  return value
-    .map((entry) => (typeof entry === 'string' ? entry.trim() : ''))
-    .filter((entry) => entry.length > 0)
-    .slice(0, 12);
-}
-
-function normalizeSubAgentEvidence(value: unknown): NonNullable<SubAgentResult['evidence']> {
-  if (!Array.isArray(value)) {
-    return [];
-  }
-
-  const entries: NonNullable<SubAgentResult['evidence']> = [];
-  for (const item of value) {
-    if (!item || typeof item !== 'object') {
-      continue;
-    }
-
-    const record = item as Record<string, unknown>;
-    const type = record.type;
-    if (
-      type !== 'file'
-      && type !== 'command'
-      && type !== 'test'
-      && type !== 'log'
-      && type !== 'url'
-      && type !== 'other'
-    ) {
-      continue;
-    }
-
-    const ref = typeof record.ref === 'string' ? record.ref.trim() : '';
-    if (!ref) {
-      continue;
-    }
-
-    const note = typeof record.note === 'string' && record.note.trim() ? record.note.trim() : undefined;
-    entries.push({ type, ref, note });
-  }
-
-  return entries.slice(0, 16);
-}
-
-async function completeSubAgentWithRetry(
-  subAgent: {
-    complete: (
-      prompt: string,
-      signal?: AbortSignal,
-    ) => Promise<{ text: string; usage?: { input: number; output: number; cost: number } }>;
-  },
-  prompt: string,
-  signal?: AbortSignal,
-): Promise<{ text: string; usage?: { input: number; output: number; cost: number } }> {
-  let lastError: unknown;
-  for (let attempt = 1; attempt <= SUBAGENT_RETRY_MAX_ATTEMPTS; attempt += 1) {
-    try {
-      return await subAgent.complete(prompt, signal);
-    } catch (error) {
-      lastError = error;
-      if (attempt >= SUBAGENT_RETRY_MAX_ATTEMPTS || !isRetryableSubAgentError(error)) {
-        throw error;
-      }
-
-      await new Promise<void>((resolve) => {
-        setTimeout(resolve, SUBAGENT_RETRY_BASE_DELAY_MS * attempt);
-      });
-    }
-  }
-
-  throw lastError instanceof Error ? lastError : new Error(toErrorMessage(lastError));
-}
-
 type SessionPromptPhase = 'chat' | 'planning' | 'implementation';
 
 type FollowUpSuggestionPhase = 'chat' | 'planning' | 'implementation';
@@ -5673,167 +3827,6 @@ function buildRetryFollowUpParts(params: {
   return [...merged, ...cloneChatContentParts(params.followUpParts)];
 }
 
-function trimCompactionSummary(text: string, maxTokens: number): string {
-  const trimmed = text.trim();
-  if (!trimmed) {
-    return '';
-  }
-
-  const maxChars = Math.max(1_200, Math.floor(maxTokens * 4));
-  if (trimmed.length <= maxChars) {
-    return trimmed;
-  }
-
-  return `${trimmed.slice(0, maxChars)}\n... [summary truncated for budget]`;
-}
-
-function buildCompactionFallbackSummary(text: string, maxTokens: number): string {
-  const excerpt = trimCompactionSummary(text, maxTokens);
-  if (!excerpt) {
-    return '';
-  }
-
-  return [
-    '## Decisions',
-    '- Compaction fallback used due summarization-model unavailability.',
-    '',
-    '## Errors & Blockers',
-    '- Verify provider auth/model availability for compaction path if this repeats.',
-    '',
-    '## Progress',
-    '- Preserved a bounded raw excerpt from prior context.',
-    '',
-    '## Key Technical Details',
-    `- Excerpt:\n${excerpt}`,
-  ].join('\n');
-}
-
-async function buildManagedChatContinuationInput(params: {
-  session: WorkSession;
-  thread: SessionChatThread;
-  systemPrompt: string;
-  todos: AgentTodoItem[];
-  contextEngine: ContextEngine;
-  contextState: SessionContextState;
-  sharedContextStore: InMemorySharedContextStore;
-}): Promise<{ prompt: LlmPromptInput; nextState: SessionContextState }> {
-  try {
-    const relevantMessages = params.thread.messages
-      .filter((message) => message.role === 'user' || message.role === 'assistant');
-
-    let latestMultimodalUser: SessionChatMessage | undefined;
-    for (let index = relevantMessages.length - 1; index >= 0; index -= 1) {
-      const candidate = relevantMessages[index];
-      if (candidate.role === 'user' && candidate.contentParts?.some((part) => part.type === 'image')) {
-        latestMultimodalUser = candidate;
-        break;
-      }
-    }
-
-    const historyMessages = latestMultimodalUser
-      ? relevantMessages.filter((message) => message !== latestMultimodalUser)
-      : relevantMessages;
-
-    const turns: ConversationTurn[] = historyMessages.map((message, index) => {
-      const content = message.contentParts?.length
-        ? summarizeChatContentParts(message.contentParts)
-        : message.content;
-      return {
-        role: message.role === 'user' ? 'user' : 'assistant',
-        content,
-        turnIndex: index,
-        tokens: countTokens(content),
-      };
-    });
-
-    const contextResult = await params.contextEngine.buildContext({
-      systemPrompt: params.systemPrompt,
-      turns,
-      executionState: buildContextExecutionStateSummary(params.session, params.todos),
-      sharedFacts: params.sharedContextStore.list(params.session.id),
-      turnsSinceLastCompaction: params.contextState.turnsSinceLastCompaction,
-      previousCompressedHistory: params.contextState.previousCompressedHistory,
-    });
-
-    const nextState: SessionContextState = {
-      turnsSinceLastCompaction: contextResult.compactionPerformed
-        ? 0
-        : params.contextState.turnsSinceLastCompaction + 1,
-      previousCompressedHistory: contextResult.compactionPerformed
-        ? contextResult.envelope.compressedHistory.content
-        : params.contextState.previousCompressedHistory,
-    };
-
-    if (!latestMultimodalUser) {
-      return {
-        prompt: contextResult.userPrompt,
-        nextState,
-      };
-    }
-
-    const multimodalParts = (latestMultimodalUser.contentParts ?? [{ type: 'text', text: latestMultimodalUser.content }]).map((part) => {
-      if (part.type === 'text') {
-        return { type: 'text' as const, text: part.text };
-      }
-      return { type: 'image' as const, data: part.data, mimeType: part.mimeType };
-    });
-
-    const basePromptText = typeof contextResult.userPrompt === 'string'
-      ? contextResult.userPrompt
-      : 'Continue from the conversation context and respond to the latest multimodal user message.';
-
-    return {
-      prompt: [
-        {
-          type: 'text',
-          text: [
-            basePromptText,
-            '',
-            'The latest user message follows as multimodal content (text + image attachments).',
-            'Reply as ASSISTANT and continue from that latest user message.',
-          ].join('\n'),
-        },
-        ...multimodalParts,
-      ],
-      nextState,
-    };
-  } catch {
-    return {
-      prompt: buildChatContinuationInput(params.thread),
-      nextState: {
-        turnsSinceLastCompaction: params.contextState.turnsSinceLastCompaction + 1,
-        previousCompressedHistory: params.contextState.previousCompressedHistory,
-      },
-    };
-  }
-}
-
-function buildContextExecutionStateSummary(session: WorkSession, todos: AgentTodoItem[]): string {
-  const doneCount = todos.filter((todo) => todo.done || todo.status === 'done').length;
-  const pendingTodos = todos
-    .filter((todo) => !(todo.done || todo.status === 'done'))
-    .slice(0, 12)
-    .map((todo) => {
-      const status = todo.status ?? (todo.done ? 'done' : 'todo');
-      const weight = Number.isFinite(todo.weight) ? ` (${todo.weight}%)` : '';
-      return `- ${todo.id}: ${todo.text} [${status}]${weight}`;
-    });
-
-  const lines = [
-    `Session status: ${session.status}`,
-    `LLM status: ${session.llmStatus.state}${session.llmStatus.phase ? ` (${session.llmStatus.phase})` : ''}`,
-    session.llmStatus.detail ? `LLM detail: ${session.llmStatus.detail}` : '',
-    `Todo progress: ${doneCount}/${todos.length} completed`,
-  ].filter(Boolean);
-
-  if (pendingTodos.length > 0) {
-    lines.push('Pending todo items:');
-    lines.push(...pendingTodos);
-  }
-
-  return lines.join('\n');
-}
-
 function buildSessionSystemPrompt(session: WorkSession, phase: SessionPromptPhase): string {
   const phaseRules =
     phase === 'chat'
@@ -5842,19 +3835,15 @@ function buildSessionSystemPrompt(session: WorkSession, phase: SessionPromptPhas
           'Use chat responses to clarify intent, summarize progress, and gather missing context.',
           'When direct implementation is requested, proceed with concrete action-oriented steps.',
           'When the user asks for planning, switch to planning mode and perform todo_set + agent_graph_set before presenting the plan.',
-          'In planning mode, todo_set items must include numeric weight values that sum to 100 for planning-progress tracking.',
-          'In planning mode, agent_graph_set nodes must include numeric weight values that sum to 100 for implementation-progress tracking.',
           'When planning, require atomic task granularity: one action per task with explicit done criteria and verification commands.',
           'Reject broad bundled tasks; split work into smaller units before finalizing the plan.',
           'When publishing agent_graph_set, use descriptive node ids/names instead of generic n1/n2 labels.',
           'Planning requests must also use subagent_spawn or subagent_spawn_batch with focused, task-relevant context per sub-agent.',
           'Pass nodeId on each sub-agent request so graph progress stays visible and current.',
           'When asked to inspect or change todos/agent graph, call the corresponding tools instead of simulating success.',
-          'For reading multiple files, prefer read_files with concurrency over repeated one-by-one read_file calls.',
           'When calling todo tools, use canonical statuses only: todo, in_progress, done.',
-          'Do not ask the user to continue after partial progress; continue autonomously until completion or a concrete blocker is reached.',
-          'For transient tool or sub-agent failures (timeouts, aborts, rate limits), retry automatically before surfacing a blocker.',
           'If no tool was executed, explicitly state that no tool output is available.',
+          'Always end your response with 1-3 numbered next follow-up suggestions.',
         ]
       : phase === 'planning'
         ? [
@@ -5864,15 +3853,11 @@ function buildSessionSystemPrompt(session: WorkSession, phase: SessionPromptPhas
             'Split broad, multi-area, or multi-step tasks into smaller independent tasks before finalizing.',
             'Each planned task must include explicit dependencies, concrete done criteria, and at least one verification command.',
             'Planning must produce and maintain todo_set and agent_graph_set state.',
-            'todo_set items must include numeric weight values and the total todo weight must sum to 100.',
-            'agent_graph_set nodes must include numeric weight values and the total node weight must sum to 100.',
             'Planning must use subagent_spawn or subagent_spawn_batch for focused parallel research and delegate only relevant context.',
             'For independent nodes, use subagent_spawn_batch so work runs in parallel.',
-            'For multi-file inspection, use read_files with concurrency to reduce latency; avoid repeated single-file reads when possible.',
             'Pass nodeId for each sub-agent request so graph status stays current.',
             'Keep todo and dependency graph state synchronized.',
-            'Do not ask the user to continue after partial progress; continue autonomously until completion or a concrete blocker is reached.',
-            'For transient tool or sub-agent failures (timeouts, aborts, rate limits), retry automatically before surfacing a blocker.',
+            'Always end your response with 1-3 numbered next follow-up suggestions.',
           ]
         : [
             'Execute approved work with minimal, scoped edits and verify outcomes.',
@@ -5880,7 +3865,6 @@ function buildSessionSystemPrompt(session: WorkSession, phase: SessionPromptPhas
             'Read todo_get and agent_graph_get before coding, then keep todo_update current while implementing.',
             'Use subagent_spawn or subagent_spawn_batch to execute parallelizable slices with minimal relevant context per agent.',
             'For independent nodes, use subagent_spawn_batch so work runs in parallel.',
-            'For multi-file inspection, use read_files with concurrency to reduce latency; avoid repeated single-file reads when possible.',
             'Pass nodeId for each sub-agent request so graph status stays current.',
             'Use github_api for GitHub REST/GraphQL operations; do not use gh CLI.',
             'Iterate until validation passes or a true blocker is reached.',
@@ -5888,6 +3872,7 @@ function buildSessionSystemPrompt(session: WorkSession, phase: SessionPromptPhas
             'Do not stop at green checks alone: verify PR mergeability, required checks, and review state via github_api, then keep iterating until the PR is merge-ready or a true blocker is reached.',
             'Do not ask the user to continue after partial progress; continue autonomously until completion or a concrete blocker is reached.',
             'For transient tool or sub-agent failures (timeouts, aborts, rate limits), retry automatically before surfacing a blocker.',
+            'Always end your response with 1-3 numbered next follow-up suggestions.',
           ];
 
   const sections: PromptSection[] = [
@@ -5938,11 +3923,7 @@ function buildChatSystemPrompt(session: WorkSession): string {
 function ensureFollowUpSuggestions(text: string, phase: FollowUpSuggestionPhase): string {
   const trimmed = text.trim();
   if (!trimmed) {
-    return phase === 'chat' ? buildFollowUpSuggestionsBlock(phase) : 'No response generated.';
-  }
-
-  if (phase !== 'chat') {
-    return trimmed;
+    return buildFollowUpSuggestionsBlock(phase);
   }
 
   if (hasFollowUpSuggestions(trimmed)) {

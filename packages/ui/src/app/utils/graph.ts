@@ -22,7 +22,7 @@ export function buildGraphLayout(session?: WorkSession): { nodes: GraphNodeView[
     return { nodes: [], width: 900, height: 520 };
   }
 
-  let baseNodes = session.agentGraph && session.agentGraph.length > 0
+  const baseNodes = session.agentGraph && session.agentGraph.length > 0
     ? session.agentGraph
     : [{ id: session.id, prompt: session.prompt, dependencies: [] }];
 

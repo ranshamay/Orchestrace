@@ -1,5 +1,7 @@
 import type { AppMainContentProps } from '../../components/AppMainContent';
 
+type CopyTraceState = 'idle' | 'copied' | 'failed';
+
 type Params = {
   activeTab: AppMainContentProps['activeTab'];
   selectedSessionId: string;
@@ -14,10 +16,10 @@ type Params = {
   actions: {
     handleAddTodo: (todoInput: string, setTodoInput: (value: string) => void) => Promise<void>;
     handleToggleTodo: AppMainContentProps['onToggleTodo'];
-    handleCopyTrace: () => Promise<'idle' | 'copied' | 'failed'>;
     hasComposerContent: boolean;
     handleComposerPaste: AppMainContentProps['onComposerPaste'];
-    handleRun: AppMainContentProps['onRun'];
+    handleStartFromComposer: AppMainContentProps['onStartFromComposer'];
+    handleSendChat: AppMainContentProps['onSendChat'];
     handleStop: AppMainContentProps['onStop'];
   };
   openLlmControlsModal: () => void;
@@ -32,10 +34,6 @@ type Params = {
   workProvider: string;
   workModel: string;
   autoApprove: boolean;
-  executionContext: AppMainContentProps['executionContext'];
-  selectedWorktreePath: string;
-  availableWorktrees: AppMainContentProps['availableWorktrees'];
-  useWorktree: boolean;
   composerText: string;
   setComposerText: (value: string) => void;
   composerImages: AppMainContentProps['composerImages'];
@@ -43,10 +41,8 @@ type Params = {
   providers: AppMainContentProps['providers'];
   providerStatuses: AppMainContentProps['providerStatuses'];
   activeWorkspaceId: string;
-  onSetExecutionContext: AppMainContentProps['onSetExecutionContext'];
-  onSetSelectedWorktreePath: AppMainContentProps['onSetSelectedWorktreePath'];
-  copyTraceState: 'idle' | 'copied' | 'failed';
-  setCopyTraceState: (state: 'idle' | 'copied' | 'failed') => void;
+  copyTraceState: CopyTraceState;
+  onCopyTrace: () => void;
 };
 
 export function buildMainContentProps(params: Params): AppMainContentProps {
@@ -81,26 +77,19 @@ export function buildMainContentProps(params: Params): AppMainContentProps {
     workProvider: params.workProvider,
     workModel: params.workModel,
     autoApprove: params.autoApprove,
-    executionContext: params.executionContext,
-    selectedWorktreePath: params.selectedWorktreePath,
-    availableWorktrees: params.availableWorktrees,
-    useWorktree: params.useWorktree,
     composerText: params.composerText,
     setComposerText: params.setComposerText,
     composerImages: params.composerImages,
     removeComposerAttachment: (id) => params.setComposerImages((current) => current.filter((item) => item.id !== id)),
     hasComposerContent: params.actions.hasComposerContent,
     onComposerPaste: params.actions.handleComposerPaste,
-    onRun: params.actions.handleRun,
+    onStartFromComposer: params.actions.handleStartFromComposer,
+    onSendChat: params.actions.handleSendChat,
     onStop: params.actions.handleStop,
-    copyTraceState: params.copyTraceState,
-    onCopyTrace: () => {
-      void params.actions.handleCopyTrace().then((state) => params.setCopyTraceState(state));
-    },
     providers: params.providers,
     providerStatuses: params.providerStatuses,
     activeWorkspaceId: params.activeWorkspaceId,
-    onSetExecutionContext: params.onSetExecutionContext,
-    onSetSelectedWorktreePath: params.onSetSelectedWorktreePath,
+    copyTraceState: params.copyTraceState,
+    onCopyTrace: params.onCopyTrace,
   };
 }

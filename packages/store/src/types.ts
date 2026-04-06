@@ -9,7 +9,6 @@
 // Intentionally duplicated here so the store package has zero workspace deps.
 
 export type WorkState = 'running' | 'completed' | 'failed' | 'cancelled';
-export type ExecutionContext = 'workspace' | 'git-worktree';
 export type SessionCreationReason = 'start' | 'retry';
 
 export type LlmSessionState =
@@ -110,9 +109,6 @@ export interface SessionConfig {
   provider: string;
   model: string;
   autoApprove: boolean;
-  executionContext: ExecutionContext;
-  selectedWorktreePath?: string;
-  useWorktree: boolean;
   adaptiveConcurrency: boolean;
   batchConcurrency: number;
   batchMinConcurrency: number;

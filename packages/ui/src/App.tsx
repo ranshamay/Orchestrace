@@ -1,11 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import {
-  fetchWorktrees,
-  type AgentTodo,
-  type ChatMessage,
-  type GitWorktreeInfo,
-  updateUiPreferences,
-} from './lib/api';
+import { type AgentTodo, type ChatMessage, updateUiPreferences } from './lib/api';
 import type { ComposerImageAttachment, Tab } from './app/types';
 import { buildTimelineItems } from './app/utils/timelineItems';
 import { useBootstrapData } from './app/hooks/useBootstrapData';
@@ -34,7 +28,6 @@ export default function App() {
   const [showToolsPanel, setShowToolsPanel] = useState(false);
   const [todoInput, setTodoInput] = useState('');
   const [copyTraceState, setCopyTraceState] = useState<{ sessionId: string; state: 'idle' | 'copied' | 'failed' }>({ sessionId: '', state: 'idle' });
-  const [availableWorktrees, setAvailableWorktrees] = useState<GitWorktreeInfo[]>([]);
 
   const bootstrap = useBootstrapData();
   const {
@@ -43,9 +36,7 @@ export default function App() {
     defaultLlmControls, setDefaultLlmControls,
     workProvider, setWorkProvider, workModel, setWorkModel,
     workWorkspaceId, setWorkWorkspaceId, autoApprove, setAutoApprove,
-    executionContext, setExecutionContext,
-    selectedWorktreePath, setSelectedWorktreePath,
-    useWorktree, setUseWorktree, errorMessage, setErrorMessage,
+    errorMessage, setErrorMessage,
     adaptiveConcurrency, setAdaptiveConcurrency,
     bootstrapComplete,
     batchConcurrency, setBatchConcurrency,
@@ -69,9 +60,6 @@ export default function App() {
     selectedSessionId, selectedSession, defaultLlmControls, setDefaultLlmControls,
     workProvider, setWorkProvider, workModel, setWorkModel, workWorkspaceId, setWorkWorkspaceId,
     autoApprove, setAutoApprove,
-    executionContext, setExecutionContext,
-    selectedWorktreePath, setSelectedWorktreePath,
-    useWorktree, setUseWorktree,
     adaptiveConcurrency, setAdaptiveConcurrency,
     batchConcurrency, setBatchConcurrency,
     batchMinConcurrency, setBatchMinConcurrency,
@@ -86,8 +74,6 @@ export default function App() {
   const actions = useSessionActions({
     selectedSessionId, selectedSession, sessions, chatMessages, todos, composerText, composerImages,
     workWorkspaceId, workProvider, workModel, autoApprove,
-    executionContext, selectedWorktreePath,
-    useWorktree,
     adaptiveConcurrency, batchConcurrency, batchMinConcurrency,
     setErrorMessage, setSessions, setSelectedSessionId, setChatMessages, setTodos,
     setComposerText, setComposerImages, setLlmControlsBySessionId,
@@ -96,65 +82,18 @@ export default function App() {
   const { sessionStatusSummary, failureTypeSummary } = useMemo(() => selectSidebarSummaries(sessions), [sessions]);
 
   useEffect(() => {
-    if (copyTraceState.state !== 'copied') return;
-    const timer = setTimeout(() => setCopyTraceState({ sessionId: '', state: 'idle' }), 2200);
-    return () => clearTimeout(timer);
-  }, [copyTraceState]);
-
-  useEffect(() => {
     if (!bootstrapComplete) {
       return;
     }
 
     void updateUiPreferences({
-      executionContext,
-      selectedWorktreePath: selectedWorktreePath || undefined,
-      useWorktree,
       adaptiveConcurrency,
       batchConcurrency,
       batchMinConcurrency,
     }).catch((error) => {
       setErrorMessage(error instanceof Error ? error.message : String(error));
     });
-  }, [
-    adaptiveConcurrency,
-    batchConcurrency,
-    batchMinConcurrency,
-    bootstrapComplete,
-    executionContext,
-    selectedWorktreePath,
-    setErrorMessage,
-    useWorktree,
-  ]);
-
-  useEffect(() => {
-    if (!workWorkspaceId) {
-      setAvailableWorktrees([]);
-      return;
-    }
-
-    let cancelled = false;
-    void fetchWorktrees(workWorkspaceId)
-      .then((response) => {
-        if (cancelled) {
-          return;
-        }
-
-        setAvailableWorktrees(response.worktrees.filter((entry) => !entry.isPrimary));
-      })
-      .catch((error) => {
-        if (cancelled) {
-          return;
-        }
-
-        setAvailableWorktrees([]);
-        setErrorMessage(error instanceof Error ? error.message : String(error));
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [setErrorMessage, workWorkspaceId]);
+  }, [adaptiveConcurrency, batchConcurrency, batchMinConcurrency, bootstrapComplete, setErrorMessage]);
 
   const sessionSidebarProps = buildSessionSidebarProps({
     activeTab,
@@ -200,10 +139,6 @@ export default function App() {
     workProvider,
     workModel,
     autoApprove,
-    executionContext,
-    selectedWorktreePath,
-    availableWorktrees,
-    useWorktree,
     composerText,
     setComposerText,
     composerImages,
@@ -211,13 +146,13 @@ export default function App() {
     providers,
     providerStatuses,
     activeWorkspaceId,
-    onSetExecutionContext: (next) => updateActiveLlmControls({
-      executionContext: next,
-      useWorktree: next === 'git-worktree',
-    }),
-    onSetSelectedWorktreePath: (next) => updateActiveLlmControls({ selectedWorktreePath: next }),
     copyTraceState: copyTraceState.sessionId === selectedSessionId ? copyTraceState.state : 'idle',
-    setCopyTraceState: (state) => setCopyTraceState({ sessionId: selectedSessionId, state }),
+    onCopyTrace: () => {
+      if (!selectedSessionId) return;
+      void actions.handleCopyTraceSession(selectedSessionId).then((state) => {
+        setCopyTraceState({ sessionId: selectedSessionId, state });
+      });
+    },
   });
 
   const llmModalProps = buildLlmModalProps({
@@ -229,10 +164,6 @@ export default function App() {
     workProvider,
     workModel,
     autoApprove,
-    executionContext,
-    selectedWorktreePath,
-    availableWorktrees,
-    useWorktree,
     adaptiveConcurrency,
     batchConcurrency,
     batchMinConcurrency,
@@ -241,11 +172,6 @@ export default function App() {
     onChangeProvider: (provider) => updateActiveLlmControls({ provider, model: '' }),
     onChangeModel: (model) => updateActiveLlmControls({ model }),
     onChangeAutoApprove: (next) => updateActiveLlmControls({ autoApprove: next }),
-    onChangeExecutionContext: (next) => updateActiveLlmControls({
-      executionContext: next,
-      useWorktree: next === 'git-worktree',
-    }),
-    onChangeSelectedWorktreePath: (next) => updateActiveLlmControls({ selectedWorktreePath: next }),
     onChangeAdaptiveConcurrency: (next) => updateActiveLlmControls({ adaptiveConcurrency: next }),
     onChangeBatchConcurrency: (next) => updateActiveLlmControls({ batchConcurrency: next }),
     onChangeBatchMinConcurrency: (next) => updateActiveLlmControls({ batchMinConcurrency: next }),

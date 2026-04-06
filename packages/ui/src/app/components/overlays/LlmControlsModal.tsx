@@ -1,4 +1,4 @@
-import type { GitWorktreeInfo, ProviderInfo, Workspace } from '../../../lib/api';
+import type { ProviderInfo, Workspace } from '../../../lib/api';
 
 export type LlmControlsModalProps = {
   isOpen: boolean;
@@ -9,10 +9,6 @@ export type LlmControlsModalProps = {
   workProvider: string;
   workModel: string;
   autoApprove: boolean;
-  executionContext: 'workspace' | 'git-worktree';
-  selectedWorktreePath: string;
-  availableWorktrees: GitWorktreeInfo[];
-  useWorktree: boolean;
   adaptiveConcurrency: boolean;
   batchConcurrency: number;
   batchMinConcurrency: number;
@@ -21,8 +17,6 @@ export type LlmControlsModalProps = {
   onChangeProvider: (provider: string) => void;
   onChangeModel: (model: string) => void;
   onChangeAutoApprove: (next: boolean) => void;
-  onChangeExecutionContext: (next: 'workspace' | 'git-worktree') => void;
-  onChangeSelectedWorktreePath: (next: string) => void;
   onChangeAdaptiveConcurrency: (next: boolean) => void;
   onChangeBatchConcurrency: (next: number) => void;
   onChangeBatchMinConcurrency: (next: number) => void;
@@ -38,10 +32,6 @@ export function LlmControlsModal(props: LlmControlsModalProps) {
     workProvider,
     workModel,
     autoApprove,
-    executionContext,
-    selectedWorktreePath,
-    availableWorktrees,
-    useWorktree,
     adaptiveConcurrency,
     batchConcurrency,
     batchMinConcurrency,
@@ -50,8 +40,6 @@ export function LlmControlsModal(props: LlmControlsModalProps) {
     onChangeProvider,
     onChangeModel,
     onChangeAutoApprove,
-    onChangeExecutionContext,
-    onChangeSelectedWorktreePath,
     onChangeAdaptiveConcurrency,
     onChangeBatchConcurrency,
     onChangeBatchMinConcurrency,
@@ -94,41 +82,9 @@ export function LlmControlsModal(props: LlmControlsModalProps) {
             Auto-approve
           </label>
 
-          <label className="md:col-span-2 flex flex-col gap-1 rounded border border-slate-200 bg-white px-2 py-1.5 text-sm text-slate-600 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300">
-            <span>Execution context</span>
-            <select
-              className="rounded border border-slate-200 px-2 py-1.5 text-sm dark:border-slate-700 dark:bg-slate-950"
-              value={executionContext}
-              onChange={(event) => onChangeExecutionContext(event.target.value as 'workspace' | 'git-worktree')}
-            >
-              <option value="workspace">Workspace</option>
-              <option value="git-worktree">Git worktree</option>
-            </select>
-            {useWorktree !== (executionContext === 'git-worktree') && (
-              <span className="text-[11px] text-amber-700 dark:text-amber-300">Legacy worktree flag is being derived from execution context.</span>
-            )}
-          </label>
-
-          {executionContext === 'git-worktree' && (
-            <label className="md:col-span-2 flex flex-col gap-1 rounded border border-slate-200 bg-white px-2 py-1.5 text-sm text-slate-600 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300">
-              <span>Git worktree path</span>
-              <select
-                className="rounded border border-slate-200 px-2 py-1.5 text-sm dark:border-slate-700 dark:bg-slate-950"
-                value={selectedWorktreePath}
-                onChange={(event) => onChangeSelectedWorktreePath(event.target.value)}
-              >
-                <option value="">Auto-select first available</option>
-                {availableWorktrees.map((entry) => (
-                  <option key={entry.path} value={entry.path}>
-                    {entry.branch ? `${entry.branch} - ${entry.path}` : entry.path}
-                  </option>
-                ))}
-              </select>
-              {availableWorktrees.length === 0 && (
-                <span className="text-[11px] text-amber-700 dark:text-amber-300">No secondary git worktrees discovered for this workspace.</span>
-              )}
-            </label>
-          )}
+          <div className="md:col-span-2 rounded border border-slate-200 bg-slate-50 px-2 py-1.5 text-sm text-slate-600 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-300">
+            Worktree mode: <span className="font-mono">native git worktree</span>
+          </div>
 
           <label className="md:col-span-2 flex items-center gap-2 rounded border border-slate-200 bg-white px-2 py-1.5 text-sm text-slate-600 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300">
             <input checked={adaptiveConcurrency} className="h-4 w-4" onChange={(event) => onChangeAdaptiveConcurrency(event.target.checked)} type="checkbox" />

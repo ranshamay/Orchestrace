@@ -13,8 +13,8 @@ Vendor-agnostic agent orchestration system. Define task graphs (or a single prom
 │  DAG Engine │ Scheduler │ Orchestrator │ Validator        │
 ├──────────────────┬──────────────────────────────────────┤
 │ @orchestrace/    │         @orchestrace/sandbox          │
-│    provider      │  Native Git Worktree helpers          │
-│  (pi-ai BYOK)   │  Docker Containers / Cloud Runtime     │
+│    provider      │  Git Worktrees │ Runtime Helpers      │
+│  (pi-ai BYOK)   │  Parallel Isolation │ Native Local Runtime │
 └──────────────────┴──────────────────────────────────────┘
 ```
 
@@ -24,7 +24,7 @@ Vendor-agnostic agent orchestration system. Define task graphs (or a single prom
 |---------|-------------|
 | `@orchestrace/core` | DAG engine, dependency scheduler, orchestration loop, validation |
 | `@orchestrace/provider` | LLM abstraction wrapping [pi-ai](https://www.npmjs.com/package/@mariozechner/pi-ai) — BYOK multi-provider |
-| `@orchestrace/sandbox` | Optional native git worktree and Docker sandbox helpers |
+| `@orchestrace/sandbox` | Native git worktree isolation and runtime sandbox helpers |
 | `@orchestrace/cli` | CLI to execute task graph plans |
 
 ## Quick Start
@@ -135,8 +135,8 @@ export ANTHROPIC_API_KEY=sk-...
 - **Approval gate** — Plans are persisted under `.orchestrace/plans/...` and require user approval before implementation
 - **Git finalize** — Optional stage/commit/push after success (`--push`)
 - **Git worktree isolation** — Parallel tasks get their own worktree to avoid conflicts
-- **Docker sandbox** — Run tasks in isolated containers for cloud execution
-- **Sub-agent support** — Tasks marked `isolated: true` run in separate worktrees
+- **Sandbox helpers** — Runtime helper primitives for native local execution workflows
+- **Sub-agent support** — Parallel runs execute in dedicated git worktrees
 
 ## Supported Providers (via pi-ai)
 
