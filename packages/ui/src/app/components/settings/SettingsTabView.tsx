@@ -739,6 +739,10 @@ function ObserverSection({
   const [editFixProvider, setEditFixProvider] = useState('');
   const [editFixModel, setEditFixModel] = useState('');
   const [editCooldown, setEditCooldown] = useState('');
+  const [editMaxPromptChars, setEditMaxPromptChars] = useState('');
+  const [editMaxSessionsPerBatch, setEditMaxSessionsPerBatch] = useState('');
+  const [editRateLimitCooldown, setEditRateLimitCooldown] = useState('');
+  const [editMaxRateLimitBackoff, setEditMaxRateLimitBackoff] = useState('');
   const [editAssessmentCategories, setEditAssessmentCategories] = useState<AssessmentCategory[]>([]);
   const [providerModels, setProviderModels] = useState<Record<string, string[]>>({});
   const [configDirty, setConfigDirty] = useState(false);
@@ -779,6 +783,10 @@ function ObserverSection({
       setEditFixProvider(nextFixProvider);
       setEditFixModel(nextFixProvider === statusRes.config.fixProvider ? statusRes.config.fixModel : '');
       setEditCooldown(String(Math.round(statusRes.config.analysisCooldownMs / 1000)));
+      setEditMaxPromptChars(String(statusRes.config.maxAnalysisPromptChars ?? 180000));
+      setEditMaxSessionsPerBatch(String(statusRes.config.maxSessionsPerAnalysisBatch ?? 3));
+      setEditRateLimitCooldown(String(Math.round((statusRes.config.rateLimitCooldownMs ?? 120000) / 1000)));
+      setEditMaxRateLimitBackoff(String(Math.round((statusRes.config.maxRateLimitBackoffMs ?? 900000) / 1000)));
       setEditAssessmentCategories(statusRes.config.assessmentCategories);
       setConfigDirty(providerSelectionNormalized);
       if (!providerSelectionNormalized) {
@@ -801,6 +809,10 @@ function ObserverSection({
       setEditFixProvider('');
       setEditModel('');
       setEditFixModel('');
+      setEditMaxPromptChars('');
+      setEditMaxSessionsPerBatch('');
+      setEditRateLimitCooldown('');
+      setEditMaxRateLimitBackoff('');
       setProviderModels({});
       return;
     }
@@ -937,6 +949,15 @@ function ObserverSection({
       return;
     }
 
+    const analysisCooldownMs = Math.max(10, Number(editCooldown) || 60) * 1000;
+    const maxAnalysisPromptChars = Math.max(20_000, Math.round(Number(editMaxPromptChars) || 180_000));
+    const maxSessionsPerAnalysisBatch = Math.max(1, Math.round(Number(editMaxSessionsPerBatch) || 3));
+    const rateLimitCooldownMs = Math.max(5, Number(editRateLimitCooldown) || 120) * 1000;
+    const maxRateLimitBackoffMs = Math.max(
+      rateLimitCooldownMs,
+      Math.max(5, Number(editMaxRateLimitBackoff) || 900) * 1000,
+    );
+
     setSavingConfig(true);
     onSettingsSaveStatus('saving', 'Saving settings...');
     try {
@@ -945,7 +966,11 @@ function ObserverSection({
         model: editModel,
         fixProvider: editFixProvider,
         fixModel: editFixModel,
-        analysisCooldownMs: Math.max(10, Number(editCooldown) || 60) * 1000,
+        analysisCooldownMs,
+        maxAnalysisPromptChars,
+        maxSessionsPerAnalysisBatch,
+        rateLimitCooldownMs,
+        maxRateLimitBackoffMs,
         assessmentCategories: editAssessmentCategories,
       });
       await refresh();
@@ -956,6 +981,10 @@ function ObserverSection({
   }, [
     editAssessmentCategories,
     editCooldown,
+    editMaxPromptChars,
+    editMaxSessionsPerBatch,
+    editRateLimitCooldown,
+    editMaxRateLimitBackoff,
     editFixModel,
     editFixProvider,
     editModel,
@@ -997,7 +1026,11 @@ function ObserverSection({
     && editProvider.length > 0
     && editFixProvider.length > 0
     && editModel.length > 0
-    && editFixModel.length > 0;
+    && editFixModel.length > 0
+    && editMaxPromptChars.length > 0
+    && editMaxSessionsPerBatch.length > 0
+    && editRateLimitCooldown.length > 0
+    && editMaxRateLimitBackoff.length > 0;
 
   const configSignature = useMemo(() => JSON.stringify({
     provider: editProvider,
@@ -1005,8 +1038,26 @@ function ObserverSection({
     fixProvider: editFixProvider,
     fixModel: editFixModel,
     analysisCooldownMs: Math.max(10, Number(editCooldown) || 60) * 1000,
+    maxAnalysisPromptChars: Math.max(20_000, Math.round(Number(editMaxPromptChars) || 180_000)),
+    maxSessionsPerAnalysisBatch: Math.max(1, Math.round(Number(editMaxSessionsPerBatch) || 3)),
+    rateLimitCooldownMs: Math.max(5, Number(editRateLimitCooldown) || 120) * 1000,
+    maxRateLimitBackoffMs: Math.max(
+      Math.max(5, Number(editRateLimitCooldown) || 120) * 1000,
+      Math.max(5, Number(editMaxRateLimitBackoff) || 900) * 1000,
+    ),
     assessmentCategories: editAssessmentCategories,
-  }), [editAssessmentCategories, editCooldown, editFixModel, editFixProvider, editModel, editProvider]);
+  }), [
+    editAssessmentCategories,
+    editCooldown,
+    editFixModel,
+    editFixProvider,
+    editMaxPromptChars,
+    editMaxRateLimitBackoff,
+    editMaxSessionsPerBatch,
+    editModel,
+    editProvider,
+    editRateLimitCooldown,
+  ]);
 
   useEffect(() => {
     if (!configDirty || !canSaveConfig || savingConfig) {
@@ -1073,6 +1124,11 @@ function ObserverSection({
             {status.state.lastAnalysisAt && (
               <span className="rounded bg-slate-100 px-2 py-1 text-[10px] dark:bg-slate-800">
                 Last analysis: {new Date(status.state.lastAnalysisAt).toLocaleTimeString()}
+              </span>
+            )}
+            {status.state.rateLimitedUntil && (
+              <span className="rounded bg-red-100 px-2 py-1 text-[10px] text-red-700 dark:bg-red-900/30 dark:text-red-300">
+                Rate limited until: {new Date(status.state.rateLimitedUntil).toLocaleTimeString()}
               </span>
             )}
           </div>
@@ -1176,6 +1232,48 @@ function ObserverSection({
                   min={10}
                   value={editCooldown}
                   onChange={(e) => { setEditCooldown(e.target.value); markDirty(); }}
+                />
+              </label>
+              <label className="flex flex-col gap-1 text-xs text-slate-700 dark:text-slate-200">
+                <span className="text-[10px] uppercase tracking-wide text-slate-500 dark:text-slate-400">Max Prompt Chars</span>
+                <input
+                  className="rounded border border-slate-200 px-2 py-1.5 text-xs dark:border-slate-700 dark:bg-slate-900"
+                  type="number"
+                  min={20000}
+                  step={1000}
+                  value={editMaxPromptChars}
+                  onChange={(e) => { setEditMaxPromptChars(e.target.value); markDirty(); }}
+                />
+              </label>
+              <label className="flex flex-col gap-1 text-xs text-slate-700 dark:text-slate-200">
+                <span className="text-[10px] uppercase tracking-wide text-slate-500 dark:text-slate-400">Max Sessions Per Batch</span>
+                <input
+                  className="rounded border border-slate-200 px-2 py-1.5 text-xs dark:border-slate-700 dark:bg-slate-900"
+                  type="number"
+                  min={1}
+                  max={50}
+                  value={editMaxSessionsPerBatch}
+                  onChange={(e) => { setEditMaxSessionsPerBatch(e.target.value); markDirty(); }}
+                />
+              </label>
+              <label className="flex flex-col gap-1 text-xs text-slate-700 dark:text-slate-200">
+                <span className="text-[10px] uppercase tracking-wide text-slate-500 dark:text-slate-400">Rate Limit Cooldown (seconds)</span>
+                <input
+                  className="rounded border border-slate-200 px-2 py-1.5 text-xs dark:border-slate-700 dark:bg-slate-900"
+                  type="number"
+                  min={5}
+                  value={editRateLimitCooldown}
+                  onChange={(e) => { setEditRateLimitCooldown(e.target.value); markDirty(); }}
+                />
+              </label>
+              <label className="flex flex-col gap-1 text-xs text-slate-700 dark:text-slate-200">
+                <span className="text-[10px] uppercase tracking-wide text-slate-500 dark:text-slate-400">Max Backoff (seconds)</span>
+                <input
+                  className="rounded border border-slate-200 px-2 py-1.5 text-xs dark:border-slate-700 dark:bg-slate-900"
+                  type="number"
+                  min={5}
+                  value={editMaxRateLimitBackoff}
+                  onChange={(e) => { setEditMaxRateLimitBackoff(e.target.value); markDirty(); }}
                 />
               </label>
             </div>

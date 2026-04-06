@@ -1,6 +1,5 @@
 import type { WorkSession } from '../../../lib/api';
 import type { FailureType, LlmSessionStatus } from '../../types';
-import { compactPromptDisplay } from '../../utils/text';
 import { formatFailureTypeLabel, failureTypeBadgeClass } from '../../utils/failure';
 import { formatSessionStatus, normalizeSessionStatus, sessionStatusBadgeClass } from '../../utils/status';
 import { llmStatusBadgeClass } from '../../utils/llm';
@@ -32,9 +31,6 @@ export function SessionSummaryCard({ selectedSession, selectedFailureType, selec
         )}
         <span className={`rounded px-1.5 py-0.5 font-semibold uppercase tracking-wide ${llmStatusBadgeClass(selectedLlmStatus)}`}>
           {selectedLlmStatus.label}
-        </span>
-        <span className="truncate text-slate-500 dark:text-slate-400" title={selectedSession.prompt}>
-          {compactPromptDisplay(selectedSession.prompt)}
         </span>
       </div>
       {isTerminal && errorDetail && (

@@ -1,6 +1,6 @@
 import type { ChatContentPart } from '../lib/api';
 
-export type Tab = 'graph' | 'settings';
+export type Tab = 'graph' | 'settings' | 'logs';
 export type ThemeMode = 'light' | 'dark';
 
 export type GraphNodeView = {

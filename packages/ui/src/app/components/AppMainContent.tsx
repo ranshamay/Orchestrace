@@ -5,10 +5,11 @@ import { GraphTabView } from './graph/GraphTabView';
 import { TimelinePanel } from './work/TimelinePanel';
 import { ComposerPanel } from './work/ComposerPanel';
 import { SettingsTabView } from './settings/SettingsTabView';
+import { LogsTabView } from './logs/LogsTabView';
 import { FloatingChatOverlay } from './layout/FloatingChatOverlay';
 
 export type AppMainContentProps = {
-  activeTab: 'graph' | 'settings';
+  activeTab: 'graph' | 'settings' | 'logs';
   selectedSessionId: string;
   selectedSession?: WorkSession;
   selectedSessionRunning: boolean;
@@ -64,7 +65,11 @@ export type AppMainContentProps = {
 };
 
 export function AppMainContent(props: AppMainContentProps) {
-  if (props.activeTab !== 'graph') {
+  if (props.activeTab === 'logs') {
+    return <LogsTabView />;
+  }
+
+  if (props.activeTab === 'settings') {
     return (
       <SettingsTabView
         providers={props.providers}
@@ -146,6 +151,12 @@ export function AppMainContent(props: AppMainContentProps) {
       onToggleTodo={props.onToggleTodo}
       chatOverlay={chatOverlay}
       observerState={props.observerState}
+      workspaces={props.workspaces}
+      workWorkspaceId={props.workWorkspaceId}
+      workProvider={props.workProvider}
+      workModel={props.workModel}
+      autoApprove={props.autoApprove}
+      composerMode={props.composerMode}
     />
   );
 }

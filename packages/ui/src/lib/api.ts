@@ -34,7 +34,7 @@ export interface Workspace {
 }
 
 export interface UiPreferences {
-  activeTab: 'graph' | 'settings';
+  activeTab: 'graph' | 'settings' | 'logs';
   observerShowFindings: boolean;
   defaultProvider: string;
   defaultModel: string;
@@ -384,6 +384,10 @@ export interface ObserverStatusResponse {
     fixProvider: string;
     fixModel: string;
     analysisCooldownMs: number;
+    maxAnalysisPromptChars: number;
+    maxSessionsPerAnalysisBatch: number;
+    rateLimitCooldownMs: number;
+    maxRateLimitBackoffMs: number;
     assessmentCategories: Array<
       'code-quality' | 'performance' | 'agent-efficiency' | 'architecture' | 'test-coverage'
     >;
@@ -391,6 +395,7 @@ export interface ObserverStatusResponse {
   state: {
     running: boolean;
     lastAnalysisAt: string | null;
+    rateLimitedUntil: string | null;
     analyzedCount: number;
     pendingFindings: number;
     totalFindings: number;

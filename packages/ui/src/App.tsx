@@ -22,7 +22,6 @@ import { useSessionSelectionController } from './app/hooks/useSessionSelectionCo
 import { useLlmControlsModalState } from './app/hooks/useLlmControlsModalState';
 import { selectCurrentSession, selectSessionViewState, selectSidebarSummaries } from './app/selectors/sessionViewSelectors';
 import { buildSessionSidebarProps } from './app/shell/props/buildSessionSidebarProps';
-import { buildMainContentProps } from './app/shell/props/buildMainContentProps';
 import { buildLlmModalProps } from './app/shell/props/buildLlmModalProps';
 import { AppShell } from './app/shell/AppShell';
 import type { SettingsSaveToastState } from './app/components/overlays/SettingsSaveToast';
@@ -30,7 +29,6 @@ import { readTabFromUrl, updateTabInUrl } from './app/utils/viewRoute';
 
 export default function App() {
   const [activeTab, setActiveTabState] = useState<Tab>(() => readTabFromUrl());
-  const [hydratedActiveTabPreference, setHydratedActiveTabPreference] = useState(false);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [todos, setTodos] = useState<AgentTodo[]>([]);
   const [composerText, setComposerText] = useState('');
@@ -43,6 +41,7 @@ export default function App() {
   const [nodeTokenStreams, setNodeTokenStreams] = useState<Record<string, NodeTokenStream>>({});
   const [observerState, setObserverState] = useState<SessionObserverState | null>(null);
   const settingsSaveToastTimerRef = useRef<number | undefined>(undefined);
+  const hydratedActiveTabPreferenceRef = useRef(false);
   const preferencesSyncInitializedRef = useRef(false);
   const preferenceSaveRequestIdRef = useRef(0);
   const preferenceSaveQueueRef = useRef<Promise<void>>(Promise.resolve());
@@ -123,16 +122,21 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (!bootstrapComplete || hydratedActiveTabPreference) {
+    if (!bootstrapComplete || hydratedActiveTabPreferenceRef.current) {
       return;
     }
 
-    setHydratedActiveTabPreference(true);
+    hydratedActiveTabPreferenceRef.current = true;
     if (readTabFromUrl() === 'graph' && activeTabPreference === 'settings') {
-      setActiveTabState('settings');
-      updateTabInUrl('settings', 'replace');
+      const timer = window.setTimeout(() => {
+        setActiveTabState('settings');
+        updateTabInUrl('settings', 'replace');
+      }, 0);
+      return () => {
+        window.clearTimeout(timer);
+      };
     }
-  }, [activeTabPreference, bootstrapComplete, hydratedActiveTabPreference]);
+  }, [activeTabPreference, bootstrapComplete]);
 
   const selectedSession = useMemo(() => selectCurrentSession(sessions, selectedSessionId), [sessions, selectedSessionId]);
   const { selectedLlmStatus, selectedFailureType, selectedSessionRunning, composerMode } = useMemo(
@@ -224,7 +228,6 @@ export default function App() {
     }
 
     const requestId = ++preferenceSaveRequestIdRef.current;
-    onSettingsSaveStatus('saving', 'Saving settings...');
 
     const payload = {
       activeTab,
@@ -281,7 +284,7 @@ export default function App() {
     failureTypeSummary,
   });
 
-  const mainContentProps = buildMainContentProps({
+  const mainContentProps = {
     activeTab,
     selectedSessionId,
     selectedSession,
@@ -292,17 +295,19 @@ export default function App() {
     todos,
     todoInput,
     setTodoInput,
-    actions,
-    openLlmControlsModal,
+    onAddTodo: () => actions.handleAddTodo(todoInput, setTodoInput),
+    onToggleTodo: actions.handleToggleTodo,
+    onOpenLlmControls: openLlmControlsModal,
     showToolsPanel,
     setShowToolsPanel,
-    toolsPanel,
-    timelineFollow: {
-      timelineContainerRef: timelineFollow.timelineContainerRef,
-      followTimelineTail: timelineFollow.followTimelineTail,
-      jumpToLatest: timelineFollow.jumpToLatest,
-      onTimelineScroll: timelineFollow.handleTimelineScroll,
-    },
+    toolsMode: toolsPanel.toolsMode,
+    availableTools: toolsPanel.availableTools,
+    isToolsLoading: toolsPanel.isToolsLoading,
+    toolsLoadError: toolsPanel.toolsLoadError,
+    timelineContainerRef: timelineFollow.timelineContainerRef,
+    followTimelineTail: timelineFollow.followTimelineTail,
+    jumpToLatest: timelineFollow.jumpToLatest,
+    onTimelineScroll: timelineFollow.handleTimelineScroll,
     timelineItems,
     composerMode,
     workspaces,
@@ -313,7 +318,14 @@ export default function App() {
     composerText,
     setComposerText,
     composerImages,
-    setComposerImages,
+    removeComposerAttachment: (id: string) => {
+      setComposerImages((current) => current.filter((item) => item.id !== id));
+    },
+    hasComposerContent: actions.hasComposerContent,
+    onComposerPaste: actions.handleComposerPaste,
+    onStartFromComposer: actions.handleStartFromComposer,
+    onSendChat: actions.handleSendChat,
+    onStop: actions.handleStop,
     providers,
     providerStatuses,
     activeWorkspaceId,
@@ -333,7 +345,7 @@ export default function App() {
         setCopyTraceState({ sessionId: selectedSessionId, state });
       });
     },
-  });
+  };
 
   const llmModalProps = buildLlmModalProps({
     isOpen: isLlmControlsModalOpen,

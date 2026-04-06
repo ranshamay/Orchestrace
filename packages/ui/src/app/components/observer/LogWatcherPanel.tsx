@@ -1,5 +1,5 @@
 import { ScrollText, AlertTriangle, CheckCircle, Loader2, ChevronDown, ChevronUp, FileCode } from 'lucide-react';
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect } from 'react';
 import type { LogFinding, LogWatcherState } from '../../../lib/api';
 import { fetchLogWatcherStatus } from '../../../lib/api';
 
@@ -56,22 +56,32 @@ export function LogWatcherPanel({ logWatcherState: sseProp }: Props) {
   const [expandedFindingId, setExpandedFindingId] = useState<string | null>(null);
   const [polledState, setPolledState] = useState<LogWatcherState | null>(null);
 
-  // Polling fallback if no SSE prop
-  const poll = useCallback(async () => {
-    try {
-      const data = await fetchLogWatcherStatus();
-      setPolledState(data.state);
-    } catch {
-      // Ignore polling errors
-    }
-  }, []);
-
   useEffect(() => {
     if (sseProp != null) return;
-    poll();
-    const interval = setInterval(poll, 30_000);
-    return () => clearInterval(interval);
-  }, [sseProp, poll]);
+
+    let cancelled = false;
+
+    const poll = async (): Promise<void> => {
+      try {
+        const data = await fetchLogWatcherStatus();
+        if (!cancelled) {
+          setPolledState(data.state);
+        }
+      } catch {
+        // Ignore polling errors
+      }
+    };
+
+    void poll();
+    const interval = window.setInterval(() => {
+      void poll();
+    }, 30_000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [sseProp]);
 
   const state = sseProp ?? polledState;
   if (!state || state.status === 'idle') return null;

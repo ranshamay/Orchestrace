@@ -1,14 +1,15 @@
-import { Activity, Moon, Settings, SlidersHorizontal, Sun } from 'lucide-react';
+import { Activity, Moon, ScrollText, Settings, SlidersHorizontal, Sun } from 'lucide-react';
 import type { ThemeMode } from '../../types';
 
 type Props = {
   theme: ThemeMode;
   setTheme: (updater: (current: ThemeMode) => ThemeMode) => void;
   onOpenSettings: () => void;
+  onOpenLogs: () => void;
   onOpenLlmControls: () => void;
 };
 
-export function TopBar({ theme, setTheme, onOpenSettings, onOpenLlmControls }: Props) {
+export function TopBar({ theme, setTheme, onOpenSettings, onOpenLogs, onOpenLlmControls }: Props) {
   const isDark = theme === 'dark';
 
   return (
@@ -26,6 +27,15 @@ export function TopBar({ theme, setTheme, onOpenSettings, onOpenLlmControls }: P
           type="button"
         >
           <SlidersHorizontal className="h-4 w-4" />
+        </button>
+        <button
+          aria-label="System Logs"
+          className="inline-flex h-7 w-7 items-center justify-center rounded text-slate-500 hover:bg-slate-100 hover:text-slate-700 dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-slate-200"
+          onClick={onOpenLogs}
+          title="System Logs"
+          type="button"
+        >
+          <ScrollText className="h-4 w-4" />
         </button>
         <button
           aria-label="Settings"

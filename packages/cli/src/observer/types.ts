@@ -66,6 +66,14 @@ export interface ObserverConfig {
   fixAutoApprove: boolean;
   /** Minimum interval (ms) between analysis cycles. */
   analysisCooldownMs: number;
+  /** Max prompt size (chars) per observer analysis request. */
+  maxAnalysisPromptChars: number;
+  /** Max number of session summaries to include in one analysis request. */
+  maxSessionsPerAnalysisBatch: number;
+  /** Base cooldown applied after an observer analysis rate-limit failure. */
+  rateLimitCooldownMs: number;
+  /** Upper cap for exponential rate-limit cooldown backoff. */
+  maxRateLimitBackoffMs: number;
   /** Which finding categories should be assessed by the observer. */
   assessmentCategories: FindingCategory[];
   /** Session IDs to exclude from observation. */
@@ -84,6 +92,10 @@ export const DEFAULT_OBSERVER_CONFIG: ObserverConfig = {
   fixModel: 'claude-sonnet-4-20250514',
   fixAutoApprove: true,
   analysisCooldownMs: 60_000,
+  maxAnalysisPromptChars: 180_000,
+  maxSessionsPerAnalysisBatch: 3,
+  rateLimitCooldownMs: 120_000,
+  maxRateLimitBackoffMs: 900_000,
   assessmentCategories: [...ALL_FINDING_CATEGORIES],
   excludeSessionIds: [],
   workspaceFilter: [],

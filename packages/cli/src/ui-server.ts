@@ -196,6 +196,17 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
   const backendLogger = new BackendLogger({ orchestraceDir });
   backendLogger.start();
 
+  // Stream log lines to SSE clients
+  backendLogger.onLine((line) => {
+    for (const client of [...logStreamClients]) {
+      try {
+        sendSse(client, 'log', { line });
+      } catch {
+        logStreamClients.delete(client);
+      }
+    }
+  });
+
   const workSessions = new Map<string, WorkSession>();
   const worktreePathLocks = new Map<string, string>();
   const authSessions = new Map<string, AuthSession>();
@@ -212,6 +223,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
   const hmrClients = new Set<ServerResponse>();
   const workStreamClients = new Map<string, Set<ServerResponse>>();
   const chatStreamClients = new Map<string, Set<ServerResponse>>();
+  const logStreamClients = new Set<ServerResponse>();
   const uiStatePath = join(workspaceManager.getRootDir(), '.orchestrace', 'ui-state.json');
 
   // Event store for durable session event logs (Phase 2: dual-write alongside in-memory state)
@@ -1302,10 +1314,12 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     logger: backendLogger,
     resolveApiKey: (provider) => authManager.resolveApiKey(provider),
     onStateChange: (state) => {
-      // Broadcast log watcher state to all connected SSE clients
-      for (const [, clients] of workStreamClients) {
-        for (const client of clients) {
-          sendSse(client, 'log-watcher', { state });
+      // Broadcast log watcher state to log stream SSE clients
+      for (const client of [...logStreamClients]) {
+        try {
+          sendSse(client, 'log-watcher-state', { state });
+        } catch {
+          logStreamClients.delete(client);
         }
       }
     },
@@ -1347,7 +1361,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       const url = new URL(req.url ?? '/', 'http://localhost');
       const { pathname } = url;
 
-      if (req.method === 'GET' && (pathname === '/' || pathname === '/settings' || pathname === '/settings/')) {
+      if (req.method === 'GET' && (pathname === '/' || pathname === '/settings' || pathname === '/settings/' || pathname === '/logs' || pathname === '/logs/')) {
         sendHtml(res, renderDashboardHtml(hmrEnabled));
         return;
       }
@@ -3119,6 +3133,38 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       }
 
       // -- Log watcher API ---------------------------------------------------
+      if (req.method === 'GET' && pathname === '/api/logs/stream') {
+        res.writeHead(200, {
+          'Content-Type': 'text/event-stream',
+          'Cache-Control': 'no-cache, no-transform',
+          Connection: 'keep-alive',
+        });
+        res.write(': connected\n\n');
+
+        // Preload a recent log tail so the UI has immediate content.
+        try {
+          const logText = await readFile(backendLogger.getLogPath(), 'utf8');
+          const lines = logText
+            .split(/\r?\n/)
+            .map((line) => line.trimEnd())
+            .filter((line) => line.length > 0);
+          const recentLines = lines.slice(-400);
+          for (const line of recentLines) {
+            sendSse(res, 'log', { line });
+          }
+        } catch {
+          // Best effort: stream remains live even if tail preload fails.
+        }
+
+        logStreamClients.add(res);
+        // Send current state as initial payload
+        sendSse(res, 'log-watcher-state', { state: logWatcher.getState() });
+        req.on('close', () => {
+          logStreamClients.delete(res);
+        });
+        return;
+      }
+
       if (req.method === 'GET' && pathname === '/api/logs/status') {
         sendJson(res, 200, { state: logWatcher.getState() });
         return;
@@ -3155,6 +3201,11 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       obs.stop();
     }
     sessionObservers.clear();
+    // Close log stream SSE clients
+    for (const client of logStreamClients) {
+      try { client.end(); } catch { /* ignore */ }
+    }
+    logStreamClients.clear();
     hmrWatcher?.close();
     hmrClients.clear();
     for (const [id] of workStreamClients) {
