@@ -4181,6 +4181,17 @@ function emitSubAgentWorkerEvent(params: {
   }
   params.uiStatePersistence.schedule();
 
+  // Update agent graph node status directly (bypasses truncated DagEvent output)
+  if (params.nodeId && params.session.agentGraph.length > 0) {
+    const graphStatus: 'running' | 'completed' | 'failed' | undefined =
+      params.status === 'started' ? 'running' :
+        params.status === 'completed' ? 'completed' :
+          params.status === 'failed' ? 'failed' : undefined;
+    if (graphStatus) {
+      setAgentGraphNodeStatus(params.session, [params.nodeId], graphStatus);
+    }
+  }
+
   // Note: emitSubAgentWorkerEvent is a standalone function without access to emitSessionEvent.
   // Sub-agent events are captured indirectly via the onEvent callback's dag-event dual-writes
   // during orchestration, and via handleChatToolCallEvent during chat. No separate dual-write

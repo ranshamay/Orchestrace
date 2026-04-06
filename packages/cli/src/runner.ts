@@ -156,6 +156,13 @@ async function main(): Promise<void> {
             nodeId: request.nodeId, prompt: request.prompt,
           });
 
+          // Update graph node status directly (bypasses truncated DagEvent output)
+          if (request.nodeId && agentGraph.length > 0) {
+            if (setNodeStatus([request.nodeId], 'running')) {
+              void emit({ time: iso(), type: 'session:agent-graph-set', payload: { graph: agentGraph } });
+            }
+          }
+
           const subToolset = createAgentToolset({
             cwd: config.workspacePath,
             phase,
@@ -195,6 +202,13 @@ async function main(): Promise<void> {
               outputText: structured.summary ?? result.text, usage: result.usage,
             });
 
+            // Update graph node status directly (bypasses truncated DagEvent output)
+            if (request.nodeId && agentGraph.length > 0) {
+              if (setNodeStatus([request.nodeId], 'completed')) {
+                void emit({ time: iso(), type: 'session:agent-graph-set', payload: { graph: agentGraph } });
+              }
+            }
+
             return structured;
           } catch (error) {
             emitSubAgentEvent(task.id, subPhase, toolCallId, 'failed', {
@@ -202,6 +216,13 @@ async function main(): Promise<void> {
               nodeId: request.nodeId, prompt: request.prompt,
               error: errorMsg(error),
             });
+
+            // Update graph node status directly (bypasses truncated DagEvent output)
+            if (request.nodeId && agentGraph.length > 0) {
+              if (setNodeStatus([request.nodeId], 'failed')) {
+                void emit({ time: iso(), type: 'session:agent-graph-set', payload: { graph: agentGraph } });
+              }
+            }
             throw error;
           }
         },
@@ -455,6 +476,7 @@ async function main(): Promise<void> {
     }
 
     // batch
+    let batchParsed = false;
     if (event.output) {
       try {
         const parsed = JSON.parse(event.output) as Record<string, unknown>;
@@ -470,8 +492,10 @@ async function main(): Promise<void> {
           }
         }
         if (changed) void emit({ time: iso(), type: 'session:agent-graph-set', payload: { graph: agentGraph } });
-      } catch { /* ignore */ }
-    } else if (ids.length > 0) {
+        batchParsed = runs.length > 0;
+      } catch { /* output may be truncated by formatToolPayload — fall through */ }
+    }
+    if (!batchParsed && ids.length > 0) {
       const terminal: 'completed' | 'failed' = event.isError ? 'failed' : 'completed';
       if (setNodeStatus(ids, terminal)) {
         void emit({ time: iso(), type: 'session:agent-graph-set', payload: { graph: agentGraph } });
