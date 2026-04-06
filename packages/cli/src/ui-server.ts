@@ -712,6 +712,16 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     }
 
     if (session.status === 'running') {
+      // Kill the detached runner process so it doesn't keep heartbeating after deletion.
+      void eventStore.getMetadata(id).then((meta) => {
+        if (meta?.pid) {
+          try { process.kill(meta.pid, 'SIGTERM'); } catch { /* already dead */ }
+          // Give it a short grace period, then SIGKILL if still alive (e.g. blocked on network I/O).
+          setTimeout(() => {
+            try { process.kill(meta.pid, 'SIGKILL'); } catch { /* already dead */ }
+          }, 3000);
+        }
+      }).catch(() => { /* ignore */ });
       session.controller.abort();
       session.status = 'cancelled';
       session.updatedAt = now();
