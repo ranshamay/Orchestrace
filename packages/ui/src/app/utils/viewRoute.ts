@@ -1,6 +1,7 @@
 import type { Tab } from '../types';
 
 const SETTINGS_PATH = '/settings';
+const LOGS_PATH = '/logs';
 
 function normalizePathname(pathname: string): string {
   if (!pathname) {
@@ -16,7 +17,9 @@ function normalizePathname(pathname: string): string {
 }
 
 function pathnameForTab(tab: Tab): string {
-  return tab === 'settings' ? SETTINGS_PATH : '/';
+  if (tab === 'settings') return SETTINGS_PATH;
+  if (tab === 'logs') return LOGS_PATH;
+  return '/';
 }
 
 export function readTabFromUrl(): Tab {
@@ -25,7 +28,9 @@ export function readTabFromUrl(): Tab {
   }
 
   const pathname = normalizePathname(window.location.pathname);
-  return pathname === SETTINGS_PATH ? 'settings' : 'graph';
+  if (pathname === SETTINGS_PATH) return 'settings';
+  if (pathname === LOGS_PATH) return 'logs';
+  return 'graph';
 }
 
 export function updateTabInUrl(tab: Tab, mode: 'push' | 'replace' = 'push'): void {

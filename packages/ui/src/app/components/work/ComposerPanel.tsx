@@ -1,7 +1,5 @@
-import { Loader2, Play } from 'lucide-react';
+import { Play } from 'lucide-react';
 import type { ComposerImageAttachment, ComposerMode } from '../../types';
-import { compactPromptDisplay } from '../../utils/text';
-import { composerModeBadgeClass, composerModeDescription } from '../../utils/composer';
 import type { WorkSession, Workspace } from '../../../lib/api';
 import { normalizeSessionStatus } from '../../utils/status';
 
@@ -30,13 +28,9 @@ export function ComposerPanel(props: Props) {
   const {
     selectedSession,
     selectedSessionId,
-    selectedSessionRunning,
-    composerMode,
-    workspaces,
     workWorkspaceId,
     workProvider,
     workModel,
-    autoApprove,
     composerText,
     setComposerText,
     composerImages,
@@ -50,29 +44,6 @@ export function ComposerPanel(props: Props) {
 
   return (
     <div className="border-t border-slate-200 p-3 dark:border-slate-800">
-      <div className="mb-2 grid grid-cols-2 gap-2 rounded border border-slate-200 bg-slate-50 px-2 py-1.5 text-[11px] text-slate-600 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-300">
-        <div className="truncate">Workspace: <span className="font-mono">{workspaces.find((workspace) => workspace.id === workWorkspaceId)?.name ?? 'none'}</span></div>
-        <div className="truncate">Provider: <span className="font-mono">{workProvider || 'none'}</span></div>
-        <div className="truncate">Model: <span className="font-mono">{workModel || 'none'}</span></div>
-        <div>Auto-approve: <span className="font-mono">{autoApprove ? 'on' : 'off'}</span></div>
-        <div>Worktree: <span className="font-mono">native</span></div>
-      </div>
-      {selectedSession && (
-        <div className="mb-2 rounded border border-blue-200 bg-blue-50 px-2 py-1.5 text-[11px] text-blue-800 dark:border-blue-900/60 dark:bg-blue-950/40 dark:text-blue-200">
-          <div className="text-[10px] font-semibold uppercase tracking-wide opacity-80">Original ask kept in context</div>
-          <div className="mt-1 line-clamp-2">{compactPromptDisplay(selectedSession.prompt)}</div>
-        </div>
-      )}
-      <div className="mb-2 flex items-center justify-between rounded border border-slate-200 bg-white px-2 py-1.5 text-[11px] dark:border-slate-700 dark:bg-slate-900">
-        <div className="text-slate-600 dark:text-slate-300">Composer mode: <span className={`rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${composerModeBadgeClass(composerMode)}`}>{composerMode}</span></div>
-        <div className="text-[10px] text-slate-500 dark:text-slate-400">{composerModeDescription(composerMode)}</div>
-      </div>
-      {selectedSessionRunning && (
-        <div className="mb-2 flex items-center gap-1.5 rounded border border-blue-200 bg-blue-50 px-2 py-1 text-[11px] text-blue-700 dark:border-blue-800 dark:bg-blue-950/40 dark:text-blue-300">
-          <Loader2 className="h-3.5 w-3.5 animate-spin" />
-          <span>Agent is actively working. Follow progress in the timeline and graph.</span>
-        </div>
-      )}
       <div className="flex gap-2">
         <textarea
           className="h-14 flex-1 resize-none rounded border border-slate-200 px-2 py-1.5 text-sm dark:border-slate-700 dark:bg-slate-900"

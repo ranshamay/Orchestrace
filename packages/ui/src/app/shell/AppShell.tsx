@@ -24,6 +24,7 @@ export function AppShell({
         theme={sessionSidebarProps.theme}
         setTheme={sessionSidebarProps.setTheme}
         onOpenSettings={() => sessionSidebarProps.setActiveTab('settings')}
+        onOpenLogs={() => sessionSidebarProps.setActiveTab('logs')}
         onOpenLlmControls={mainContentProps.onOpenLlmControls}
       />
       <div className="flex min-h-0 flex-1">

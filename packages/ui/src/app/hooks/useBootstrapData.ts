@@ -48,7 +48,7 @@ export function useBootstrapData() {
   const [adaptiveConcurrency, setAdaptiveConcurrency] = useState(false);
   const [batchConcurrency, setBatchConcurrency] = useState(8);
   const [batchMinConcurrency, setBatchMinConcurrency] = useState(1);
-  const [activeTabPreference, setActiveTabPreference] = useState<'graph' | 'settings'>(() => readTabFromUrl());
+  const [activeTabPreference, setActiveTabPreference] = useState<'graph' | 'settings' | 'logs'>(() => readTabFromUrl());
   const [observerShowFindings, setObserverShowFindings] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
   const [bootstrapComplete, setBootstrapComplete] = useState(false);

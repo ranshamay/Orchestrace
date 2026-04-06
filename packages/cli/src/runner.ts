@@ -158,7 +158,10 @@ async function main(): Promise<void> {
         runSubAgent: async (request, _signal) => {
           const subProvider = request.provider ?? activeProvider;
           const subModel = request.model ?? activeModel;
-          const subSignal = controller.signal;
+          const subTimeoutMs = resolveTimeoutMs('ORCHESTRACE_SUBAGENT_TIMEOUT_MS', 120_000);
+          // Combine the session abort signal with a per-subagent hard timeout so that
+          // a hung LLM connection (no response, no error) cannot block the runner forever.
+          const subSignal = AbortSignal.any([controller.signal, AbortSignal.timeout(subTimeoutMs)]);
           const toolCallId = `subagent-worker-${randomUUID()}`;
           const subPhase: 'planning' | 'implementation' = phase === 'planning' ? 'planning' : 'implementation';
 
@@ -197,7 +200,7 @@ async function main(): Promise<void> {
               provider: subProvider,
               model: subModel,
               reasoning: request.reasoning ?? reasoning,
-              timeoutMs: resolveTimeoutMs('ORCHESTRACE_SUBAGENT_TIMEOUT_MS', 120_000),
+              timeoutMs: subTimeoutMs,
               systemPrompt: resolveSubAgentSystemPrompt(request),
               signal: subSignal,
               toolset: subToolset,

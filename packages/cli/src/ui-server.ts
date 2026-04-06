@@ -72,7 +72,7 @@ import { WorkspaceManager } from './workspace-manager.js';
 import { FileEventStore } from '@orchestrace/store';
 import { materializeSession as materializeFromEvents } from '@orchestrace/store';
 import type { SessionEventInput } from '@orchestrace/store';
-import { ObserverDaemon, SessionObserver } from './observer/index.js';
+import { ObserverDaemon, SessionObserver, BackendLogger, LogWatcher } from './observer/index.js';
 
 const GITHUB_PROVIDER_ID = 'github';
 const GITHUB_API_BASE_URL = 'https://api.github.com';
@@ -191,6 +191,22 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
   const githubAuthManager = createGithubAuthManager();
   const llm = new PiAiAdapter();
 
+  // -- Persistent backend log stream ------------------------------------------
+  const orchestraceDir = join(workspaceManager.getRootDir(), '.orchestrace');
+  const backendLogger = new BackendLogger({ orchestraceDir });
+  backendLogger.start();
+
+  // Stream log lines to SSE clients
+  backendLogger.onLine((line) => {
+    for (const client of [...logStreamClients]) {
+      try {
+        sendSse(client, 'log', { line });
+      } catch {
+        logStreamClients.delete(client);
+      }
+    }
+  });
+
   const workSessions = new Map<string, WorkSession>();
   const worktreePathLocks = new Map<string, string>();
   const authSessions = new Map<string, AuthSession>();
@@ -207,6 +223,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
   const hmrClients = new Set<ServerResponse>();
   const workStreamClients = new Map<string, Set<ServerResponse>>();
   const chatStreamClients = new Map<string, Set<ServerResponse>>();
+  const logStreamClients = new Set<ServerResponse>();
   const uiStatePath = join(workspaceManager.getRootDir(), '.orchestrace', 'ui-state.json');
 
   // Event store for durable session event logs (Phase 2: dual-write alongside in-memory state)
@@ -707,6 +724,17 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     }
 
     if (session.status === 'running') {
+      // Kill the detached runner process so it doesn't keep heartbeating after deletion.
+      void eventStore.getMetadata(id).then((meta) => {
+        if (meta?.pid) {
+          const pid = meta.pid;
+          try { process.kill(pid, 'SIGTERM'); } catch { /* already dead */ }
+          // Give it a short grace period, then SIGKILL if still alive (e.g. blocked on network I/O).
+          setTimeout(() => {
+            try { process.kill(pid, 'SIGKILL'); } catch { /* already dead */ }
+          }, 3000);
+        }
+      }).catch(() => { /* ignore */ });
       session.controller.abort();
       session.status = 'cancelled';
       session.updatedAt = now();
@@ -727,6 +755,12 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     }
 
     releaseWorkspacePathLock(session.workspacePath, id);
+
+    // Clean up any auto-created per-session worktree.
+    if (session.cleanupWorktree) {
+      void session.cleanupWorktree().catch(() => {});
+      session.cleanupWorktree = undefined;
+    }
 
     closeWorkStream(workStreamClients, id);
     workSessions.delete(id);
@@ -812,13 +846,22 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       : (prompt || summarizeChatContentParts(promptParts));
 
     const id = randomUUID();
-    const requestedExecutionContext = normalizeExecutionContext(request.executionContext)
-      ?? (request.useWorktree ? 'git-worktree' : undefined)
-      ?? uiPreferences.executionContext
-      ?? (uiPreferences.useWorktree ? 'git-worktree' : 'workspace');
-    const requestedWorktreePath = asString(request.selectedWorktreePath)
-      || uiPreferences.selectedWorktreePath
-      || undefined;
+    // Observer-spawned sessions must always run in the workspace root.
+    // They must never inherit user-selected worktree paths from uiPreferences
+    // because multiple concurrent observer sessions sharing the same worktree
+    // will conflict with each other and produce broken builds / edit errors.
+    const isObserverSource = request.source === 'observer';
+    const requestedExecutionContext = isObserverSource
+      ? 'workspace'
+      : (normalizeExecutionContext(request.executionContext)
+          ?? (request.useWorktree ? 'git-worktree' : undefined)
+          ?? uiPreferences.executionContext
+          ?? (uiPreferences.useWorktree ? 'git-worktree' : 'workspace'));
+    const requestedWorktreePath = isObserverSource
+      ? undefined
+      : (asString(request.selectedWorktreePath)
+          || uiPreferences.selectedWorktreePath
+          || undefined);
     const adaptiveConcurrency = request.adaptiveConcurrency ?? uiPreferences.adaptiveConcurrency;
     const batchConcurrency = normalizePositiveSetting(request.batchConcurrency, uiPreferences.batchConcurrency);
     const batchMinConcurrency = Math.min(
@@ -858,8 +901,36 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       }
     }
 
-    const lockResult = acquireWorkspacePathLock(workspacePath, id);
+    // If the resolved worktree path is already in use, auto-create a fresh per-session worktree
+    // so a new session is never blocked by an existing one sharing the same path.
+    let autoCreatedWorktreeCleanup: (() => Promise<void>) | undefined;
+    let lockResult = acquireWorkspacePathLock(workspacePath, id);
+    if (!lockResult.ok && executionContext === 'git-worktree') {
+      try {
+        const sessionBranch = `orchestrace/session-${id}`;
+        const sessionWorktreePath = join(workspace.path, '.worktrees', `session-${id}`);
+        await gitExec(workspace.path, ['worktree', 'add', '-b', sessionBranch, sessionWorktreePath, 'HEAD']);
+        try {
+          await ensureWorktreeDependenciesInstalled(sessionWorktreePath);
+        } catch { /* non-fatal: runner will retry if needed */ }
+        workspacePath = sessionWorktreePath;
+        selectedWorktreePath = sessionWorktreePath;
+        selectedWorktreeBranch = sessionBranch;
+        autoCreatedWorktreeCleanup = async () => {
+          await gitExec(workspace.path, ['worktree', 'remove', '--force', sessionWorktreePath]).catch(() => {});
+          await gitExec(workspace.path, ['branch', '-D', sessionBranch]).catch(() => {});
+        };
+        lockResult = acquireWorkspacePathLock(workspacePath, id);
+      } catch (worktreeError) {
+        return {
+          error: `Workspace path is in use and auto-creating a new worktree failed: ${toErrorMessage(worktreeError)}`,
+          statusCode: 409,
+        };
+      }
+    }
+
     if (!lockResult.ok) {
+      void autoCreatedWorktreeCleanup?.().catch(() => {});
       return {
         error: `Workspace path is currently in use by another session (${lockResult.ownerSessionId}). Select a different worktree path or wait for the session to be deleted.`,
         statusCode: 409,
@@ -874,6 +945,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
 
     if (duplicateSession) {
       releaseWorkspacePathLock(workspacePath, id);
+      void autoCreatedWorktreeCleanup?.().catch(() => {});
       return {
         error: `Workspace path is already assigned to active session ${duplicateSession.id}. Select a different worktree path.`,
         statusCode: 409,
@@ -915,6 +987,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       events: [],
       agentGraph: [],
       controller,
+      cleanupWorktree: autoCreatedWorktreeCleanup,
     };
 
     workSessions.set(id, session);
@@ -971,11 +1044,35 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       [...(process.execArgv.length > 0 ? process.execArgv : ['--import', 'tsx']), runnerPath, id, workspaceManager.getRootDir()],
       {
         detached: true,
-        stdio: 'ignore',
+        stdio: ['ignore', 'pipe', 'pipe'],
         cwd: workspacePath,
         env: { ...process.env, ORCHESTRACE_SESSION_ID: id },
       },
     );
+
+    // Capture runner stdout/stderr to persistent log stream
+    if (runnerProcess.stdout) {
+      let stdoutBuf = '';
+      runnerProcess.stdout.on('data', (chunk: Buffer) => {
+        stdoutBuf += chunk.toString();
+        const lines = stdoutBuf.split('\n');
+        stdoutBuf = lines.pop() ?? '';
+        for (const line of lines) {
+          if (line.trim()) backendLogger.appendRunnerLine(id, 'stdout', line);
+        }
+      });
+    }
+    if (runnerProcess.stderr) {
+      let stderrBuf = '';
+      runnerProcess.stderr.on('data', (chunk: Buffer) => {
+        stderrBuf += chunk.toString();
+        const lines = stderrBuf.split('\n');
+        stderrBuf = lines.pop() ?? '';
+        for (const line of lines) {
+          if (line.trim()) backendLogger.appendRunnerLine(id, 'stderr', line);
+        }
+      });
+    }
     runnerProcess.unref();
 
     // Record runner PID in metadata
@@ -1210,6 +1307,28 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     console.error('[orchestrace][observer] Failed to start daemon:', err);
   });
 
+  // -- Log watcher (analyzes backend logs for issues) -------------------------
+  const logWatcher = new LogWatcher({
+    llm,
+    config: observerDaemon.getConfig(),
+    logger: backendLogger,
+    resolveApiKey: (provider) => authManager.resolveApiKey(provider),
+    onStateChange: (state) => {
+      // Broadcast log watcher state to log stream SSE clients
+      for (const client of [...logStreamClients]) {
+        try {
+          sendSse(client, 'log-watcher-state', { state });
+        } catch {
+          logStreamClients.delete(client);
+        }
+      }
+    },
+  });
+  if (observerDaemon.getConfig().enabled) {
+    logWatcher.start(backendLogger);
+    console.log('[orchestrace][log-watcher] Started');
+  }
+
   let hmrWatcher: FSWatcher | undefined;
   if (hmrEnabled) {
     const watchPath = resolveUiWatchPath(workspaceManager.getRootDir());
@@ -1242,7 +1361,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       const url = new URL(req.url ?? '/', 'http://localhost');
       const { pathname } = url;
 
-      if (req.method === 'GET' && (pathname === '/' || pathname === '/settings' || pathname === '/settings/')) {
+      if (req.method === 'GET' && (pathname === '/' || pathname === '/settings' || pathname === '/settings/' || pathname === '/logs' || pathname === '/logs/')) {
         sendHtml(res, renderDashboardHtml(hmrEnabled));
         return;
       }
@@ -2986,12 +3105,16 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
 
       if (req.method === 'POST' && pathname === '/api/observer/enable') {
         await observerDaemon.setEnabled(true);
+        if (logWatcher.getState().status === 'idle' || logWatcher.getState().status === 'stopped') {
+          logWatcher.start(backendLogger);
+        }
         sendJson(res, 200, { enabled: true });
         return;
       }
 
       if (req.method === 'POST' && pathname === '/api/observer/disable') {
         await observerDaemon.setEnabled(false);
+        logWatcher.stop();
         sendJson(res, 200, { enabled: false });
         return;
       }
@@ -3006,6 +3129,49 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       if (req.method === 'POST' && pathname === '/api/observer/trigger') {
         const result = await observerDaemon.triggerAnalysis();
         sendJson(res, 200, result);
+        return;
+      }
+
+      // -- Log watcher API ---------------------------------------------------
+      if (req.method === 'GET' && pathname === '/api/logs/stream') {
+        res.writeHead(200, {
+          'Content-Type': 'text/event-stream',
+          'Cache-Control': 'no-cache, no-transform',
+          Connection: 'keep-alive',
+        });
+        res.write(': connected\n\n');
+
+        // Preload a recent log tail so the UI has immediate content.
+        try {
+          const logText = await readFile(backendLogger.getLogPath(), 'utf8');
+          const lines = logText
+            .split(/\r?\n/)
+            .map((line) => line.trimEnd())
+            .filter((line) => line.length > 0);
+          const recentLines = lines.slice(-400);
+          for (const line of recentLines) {
+            sendSse(res, 'log', { line });
+          }
+        } catch {
+          // Best effort: stream remains live even if tail preload fails.
+        }
+
+        logStreamClients.add(res);
+        // Send current state as initial payload
+        sendSse(res, 'log-watcher-state', { state: logWatcher.getState() });
+        req.on('close', () => {
+          logStreamClients.delete(res);
+        });
+        return;
+      }
+
+      if (req.method === 'GET' && pathname === '/api/logs/status') {
+        sendJson(res, 200, { state: logWatcher.getState() });
+        return;
+      }
+
+      if (req.method === 'GET' && pathname === '/api/logs/findings') {
+        sendJson(res, 200, { findings: logWatcher.getFindings() });
         return;
       }
 
@@ -3028,11 +3194,18 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
   server.on('close', () => {
     void uiStatePersistence.flush();
     observerDaemon.stop();
+    logWatcher.stop();
+    backendLogger.stop();
     // Stop all per-session observers
     for (const [, obs] of sessionObservers) {
       obs.stop();
     }
     sessionObservers.clear();
+    // Close log stream SSE clients
+    for (const client of logStreamClients) {
+      try { client.end(); } catch { /* ignore */ }
+    }
+    logStreamClients.clear();
     hmrWatcher?.close();
     hmrClients.clear();
     for (const [id] of workStreamClients) {
@@ -5784,6 +5957,15 @@ function resolveUiWatchPath(workspaceRoot: string): string | undefined {
   }
 
   return undefined;
+}
+
+async function gitExec(repoRoot: string, args: string[]): Promise<string> {
+  const { stdout } = await execFileAsync('git', args, {
+    cwd: repoRoot,
+    timeout: 60_000,
+    maxBuffer: 1024 * 1024,
+  });
+  return stdout;
 }
 
 async function listNativeGitWorktrees(repoRoot: string): Promise<NativeGitWorktree[]> {

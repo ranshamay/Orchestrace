@@ -21,18 +21,25 @@ export type StartSessionFn = (request: {
 }) => Promise<{ id: string } | { error: string; statusCode: number }>;
 
 /**
- * Spawn fix sessions for all pending findings.
+ * Spawn fix sessions for all pending findings, respecting maxConcurrentFixSessions.
+ * @param activeFixSessionCount - number of observer fix sessions currently in progress
  * Returns the number of sessions successfully spawned.
  */
 export async function spawnFixSessions(
   registry: FindingRegistry,
   config: ObserverConfig,
   startSession: StartSessionFn,
+  activeFixSessionCount = 0,
 ): Promise<number> {
   const pending = registry.getPending();
+  const limit = config.maxConcurrentFixSessions > 0 ? config.maxConcurrentFixSessions : Infinity;
+  const canSpawn = Math.max(0, limit - activeFixSessionCount);
+  if (canSpawn === 0) return 0;
+
+  const toSpawn = pending.slice(0, canSpawn);
   let spawned = 0;
 
-  for (const finding of pending) {
+  for (const finding of toSpawn) {
     const sessionId = await spawnFixSession(finding, config, startSession);
     if (sessionId) {
       registry.markSpawned(finding.fingerprint, sessionId);

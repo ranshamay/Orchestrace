@@ -12,6 +12,8 @@ import { materializeSession } from '@orchestrace/store';
 const TOOL_PREVIEW_LIMIT = 2000;
 /** Max stream-delta characters to include. */
 const STREAM_DELTA_LIMIT = 4000;
+/** Max number of llm status entries to include in one summary. */
+const LLM_STATUS_HISTORY_MAX_ENTRIES = 160;
 
 export interface SessionSummary {
   sessionId: string;
@@ -121,6 +123,8 @@ function buildSummary(
       ? new Date(lastTime).getTime() - new Date(firstTime).getTime()
       : null;
 
+  const compactedLlmStatusHistory = compactLlmStatusHistory(llmStatusHistory);
+
   return {
     sessionId,
     config: {
@@ -133,7 +137,7 @@ function buildSummary(
     status: mat.status,
     error: mat.error,
     output: mat.output?.text ? truncate(mat.output.text, 3000) : undefined,
-    llmStatusHistory,
+    llmStatusHistory: compactedLlmStatusHistory,
     dagEvents,
     toolCalls,
     agentGraph: mat.agentGraph.map((n) => ({
@@ -151,6 +155,86 @@ function buildSummary(
     totalEvents: events.length,
     durationMs,
   };
+}
+
+function compactLlmStatusHistory(
+  history: SessionSummary['llmStatusHistory'],
+): SessionSummary['llmStatusHistory'] {
+  if (history.length === 0) {
+    return history;
+  }
+
+  const collapsed: Array<{
+    time: string;
+    state: string;
+    detail?: string;
+    count: number;
+    key: string;
+  }> = [];
+
+  for (const entry of history) {
+    const key = `${entry.state}|${entry.detail ?? ''}`;
+    const previous = collapsed[collapsed.length - 1];
+    if (previous && previous.key === key) {
+      previous.count += 1;
+      previous.time = entry.time;
+      continue;
+    }
+
+    collapsed.push({
+      time: entry.time,
+      state: entry.state,
+      detail: entry.detail,
+      count: 1,
+      key,
+    });
+  }
+
+  const condensed = collapsed.map((entry) => {
+    if (entry.count <= 1) {
+      return {
+        time: entry.time,
+        state: entry.state,
+        detail: entry.detail,
+      };
+    }
+
+    if (entry.detail && entry.detail.length > 0) {
+      return {
+        time: entry.time,
+        state: entry.state,
+        detail: `${entry.detail} [repeated ${entry.count}x]`,
+      };
+    }
+
+    return {
+      time: entry.time,
+      state: entry.state,
+      detail: `Repeated ${entry.state} status update ${entry.count}x.`,
+    };
+  });
+
+  if (condensed.length <= LLM_STATUS_HISTORY_MAX_ENTRIES) {
+    return condensed;
+  }
+
+  const middleMarkerSlots = 1;
+  const keepCount = Math.max(2, LLM_STATUS_HISTORY_MAX_ENTRIES - middleMarkerSlots);
+  const headCount = Math.ceil(keepCount / 2);
+  const tailCount = Math.floor(keepCount / 2);
+  const omittedCount = condensed.length - headCount - tailCount;
+
+  const marker = {
+    time: condensed[headCount]?.time ?? condensed[condensed.length - tailCount - 1]?.time ?? condensed[0].time,
+    state: 'analyzing',
+    detail: `${omittedCount} status transitions omitted for brevity.`,
+  };
+
+  return [
+    ...condensed.slice(0, headCount),
+    marker,
+    ...condensed.slice(condensed.length - tailCount),
+  ];
 }
 
 /** Try to parse a tool-call message into structured form. */

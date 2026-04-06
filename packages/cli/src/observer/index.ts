@@ -4,3 +4,7 @@ export { SessionObserver } from './session-observer.js';
 export type { SessionObserverState, RealtimeFinding, ObserverSessionStatus, ObserverEventEmitter } from './session-observer.js';
 export type { ObserverConfig, FindingRecord, ObserverFinding } from './types.js';
 export { DEFAULT_OBSERVER_CONFIG } from './types.js';
+export { BackendLogger } from './backend-logger.js';
+export type { BackendLoggerOptions } from './backend-logger.js';
+export { LogWatcher } from './log-watcher.js';
+export type { LogWatcherState, LogFinding, LogFindingCategory, LogWatcherStatus } from './log-watcher.js';

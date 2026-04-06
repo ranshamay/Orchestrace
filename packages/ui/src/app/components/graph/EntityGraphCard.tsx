@@ -308,29 +308,26 @@ export function EntityGraphCard({
   nodeTokenStreams,
   isDark,
 }: Props) {
-  if (!selectedSession) {
-    return (
-      <div className="flex h-full items-center justify-center text-sm text-slate-400 dark:text-slate-500">
-        Select a session to visualize its execution graph
-      </div>
-    );
-  }
+  const sessionEvents = selectedSession?.events;
 
-  const graphLayout = buildGraphLayout(selectedSession);
+  const graphLayout = useMemo(
+    () => (selectedSession ? buildGraphLayout(selectedSession) : null),
+    [selectedSession],
+  );
 
   const nodeActivityById = useMemo(() => {
     const activity: Record<string, NodeActivity> = {};
 
-    for (const event of selectedSession.events) {
+    for (const event of sessionEvents ?? []) {
       if (!event.taskId) {
         continue;
       }
 
-        const current = activity[event.taskId] ?? {};
+      const current = activity[event.taskId] ?? {};
 
       const toolEvent = parseToolCallEvent(event);
       if (toolEvent) {
-          current.toolUpdatedAt = event.time;
+        current.toolUpdatedAt = event.time;
         activity[event.taskId] = current;
         continue;
       }
@@ -345,7 +342,7 @@ export function EntityGraphCard({
     }
 
     return activity;
-  }, [nodeTokenStreams, selectedSession.events]);
+  }, [nodeTokenStreams, sessionEvents]);
 
   const activeFlowNodeIds = useMemo(
     () => new Set(
@@ -355,6 +352,14 @@ export function EntityGraphCard({
     ),
     [nodeActivityById],
   );
+
+  if (!selectedSession || !graphLayout) {
+    return (
+      <div className="flex h-full items-center justify-center text-sm text-slate-400 dark:text-slate-500">
+        Select a session to visualize its execution graph
+      </div>
+    );
+  }
 
   return (
     <div className="rounded-xl border border-slate-200/60 bg-white shadow-sm dark:border-slate-700/60 dark:bg-slate-900">
