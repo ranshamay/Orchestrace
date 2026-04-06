@@ -488,6 +488,54 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     }
   }
 
+  async function refreshSessionFromEventStore(sessionId: string): Promise<boolean> {
+    const existing = workSessions.get(sessionId);
+    if (!existing) {
+      return false;
+    }
+
+    try {
+      const events = await eventStore.read(sessionId);
+      if (events.length === 0) {
+        return false;
+      }
+
+      const materialized = materializeFromEvents(events);
+      if (!materialized) {
+        return false;
+      }
+
+      existing.updatedAt = materialized.updatedAt;
+      existing.status = materialized.status;
+      existing.llmStatus = materialized.llmStatus;
+      existing.taskStatus = { ...materialized.taskStatus };
+      existing.events = materialized.events as UiDagEvent[];
+      existing.agentGraph = materialized.agentGraph;
+      existing.error = materialized.error;
+      existing.output = materialized.output;
+
+      if (materialized.chatThread) {
+        const thread = materialized.chatThread;
+        sessionChats.set(sessionId, {
+          sessionId,
+          provider: thread.provider,
+          model: thread.model,
+          workspacePath: thread.workspacePath,
+          taskPrompt: thread.taskPrompt,
+          createdAt: thread.createdAt,
+          updatedAt: thread.updatedAt,
+          messages: thread.messages,
+        });
+      }
+
+      sessionTodos.set(sessionId, materialized.todos);
+      return true;
+    } catch (err) {
+      console.error(`[orchestrace][event-store][refresh] Error refreshing session ${sessionId}:`, err);
+      return false;
+    }
+  }
+
   // Restore sessions: try event store first, fall back to legacy ui-state.json
   const eventStoreSessionCount = await restoreFromEventStore();
   let restoredUiPreferences: PersistedUiPreferences | undefined;
@@ -1029,6 +1077,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           sendJson(res, 400, { error: 'Missing id' });
           return;
         }
+
+        await refreshSessionFromEventStore(id);
 
         const session = workSessions.get(id);
         if (!session) {
@@ -1632,6 +1682,12 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       }
 
       if (req.method === 'GET' && pathname === '/api/work') {
+        const runningSessionIds = [...workSessions.values()]
+          .filter((session) => session.status === 'running')
+          .map((session) => session.id);
+
+        await Promise.all(runningSessionIds.map((id) => refreshSessionFromEventStore(id)));
+
         const sessions = [...workSessions.values()]
           .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
           .map((session) => serializeWorkSession(session, sessionTodos.get(session.id) ?? []));
@@ -1685,6 +1741,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           sendJson(res, 400, { error: 'Missing id' });
           return;
         }
+
+        await refreshSessionFromEventStore(id);
 
         const session = workSessions.get(id);
         if (!session) {
@@ -1871,6 +1929,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           sendJson(res, 400, { error: 'Missing id' });
           return;
         }
+
+        await refreshSessionFromEventStore(id);
 
         const session = workSessions.get(id);
         if (!session) {
