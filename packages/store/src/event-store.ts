@@ -34,6 +34,9 @@ export class FileEventStore implements EventStore {
   /** Per-session write lock to serialize appends. */
   private writeLocks = new Map<string, Promise<void>>();
 
+  /** Sessions that have been deleted — appends are silently dropped. */
+  private deletedSessions = new Set<string>();
+
   constructor(basePath: string) {
     this.basePath = basePath;
   }
@@ -48,7 +51,9 @@ export class FileEventStore implements EventStore {
 
   async appendBatch(sessionId: string, events: SessionEventInput[]): Promise<number> {
     if (events.length === 0) return this.getSeq(sessionId);
+    if (this.deletedSessions.has(sessionId)) return 0;
     return this.withWriteLock(sessionId, async () => {
+      if (this.deletedSessions.has(sessionId)) return 0;
       const dir = this.sessionDir(sessionId);
       await ensureDir(dir);
       const filePath = join(dir, EVENTS_FILE);
@@ -254,14 +259,18 @@ export class FileEventStore implements EventStore {
   }
 
   async deleteSession(sessionId: string): Promise<void> {
+    this.deletedSessions.add(sessionId);
     this.stopFsWatcher(sessionId);
     this.watchers.delete(sessionId);
+    // Serialize through write lock so no concurrent append can race with rm.
+    await this.withWriteLock(sessionId, async () => {
+      const dir = this.sessionDir(sessionId);
+      if (existsSync(dir)) {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
     this.seqCounters.delete(sessionId);
     this.writeLocks.delete(sessionId);
-    const dir = this.sessionDir(sessionId);
-    if (existsSync(dir)) {
-      await rm(dir, { recursive: true, force: true });
-    }
   }
 
   // ------------------------------------------------------------------
