@@ -1,5 +1,7 @@
-import type { TaskOutput, ValidationConfig, ValidationResult } from '../dag/types.js';
 import { exec } from 'node:child_process';
+import { access } from 'node:fs/promises';
+import { join } from 'node:path';
+import type { TaskOutput, ValidationConfig, ValidationResult } from '../dag/types.js';
 
 /**
  * Run validation commands against a task's output.
@@ -13,6 +15,21 @@ export async function validate(
   const results: ValidationResult[] = [];
 
   if (config.commands) {
+    try {
+      await ensureDependenciesForValidation(cwd);
+    } catch (dependencyError) {
+      const message = dependencyError instanceof Error ? dependencyError.message : String(dependencyError);
+      for (const command of config.commands) {
+        results.push({
+          command,
+          passed: false,
+          output: message,
+          durationMs: 0,
+        });
+      }
+      return results;
+    }
+
     for (const command of config.commands) {
       const start = Date.now();
       try {
@@ -23,9 +40,8 @@ export async function validate(
           output: stdout,
           durationMs: Date.now() - start,
         });
-      } catch (err) {
+      } catch {
         // Flake detection: retry once before reporting failure
-        const retryStart = Date.now();
         try {
           const stdout = await runCommand(command, cwd);
           results.push({
@@ -67,6 +83,29 @@ export async function validate(
   }
 
   return results;
+}
+
+async function ensureDependenciesForValidation(cwd: string): Promise<void> {
+  const lockfilePath = join(cwd, 'pnpm-lock.yaml');
+  const nodeModulesPath = join(cwd, 'node_modules');
+
+  if (!(await pathExists(lockfilePath))) {
+    return;
+  }
+  if (await pathExists(nodeModulesPath)) {
+    return;
+  }
+
+  await runCommand('pnpm install --frozen-lockfile', cwd);
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await access(path);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function runCommand(command: string, cwd: string): Promise<string> {
