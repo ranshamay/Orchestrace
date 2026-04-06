@@ -1,44 +1,42 @@
-import {
-  FileText,
-  PenLine,
-  FolderOpen,
-  Search,
-  Terminal,
-  Bot,
-  ListChecks,
-  Network,
-  Share2,
-  Wrench,
-  type LucideIcon,
-} from 'lucide-react';
+export type ToolIconName =
+  | 'fileText'
+  | 'penLine'
+  | 'folderOpen'
+  | 'search'
+  | 'terminal'
+  | 'bot'
+  | 'listChecks'
+  | 'network'
+  | 'share'
+  | 'wrench';
 
-const iconMap: Record<string, LucideIcon> = {
-  read_file: FileText,
-  write_file: PenLine,
-  patch_file: PenLine,
-  list_directory: FolderOpen,
-  search_files: Search,
-  grep: Search,
-  run_command: Terminal,
-  playwright_run: Terminal,
-  subagent_spawn: Bot,
-  subagent_spawn_batch: Bot,
-  subagent_worker: Bot,
-  agent_graph_set: Network,
+const iconMap: Record<string, ToolIconName> = {
+  read_file: 'fileText',
+  write_file: 'penLine',
+  patch_file: 'penLine',
+  list_directory: 'folderOpen',
+  search_files: 'search',
+  grep: 'search',
+  run_command: 'terminal',
+  playwright_run: 'terminal',
+  subagent_spawn: 'bot',
+  subagent_spawn_batch: 'bot',
+  subagent_worker: 'bot',
+  agent_graph_set: 'network',
 };
 
-const prefixMap: Array<[string, LucideIcon]> = [
-  ['todo_', ListChecks],
-  ['context_share_', Share2],
+const prefixMap: Array<[string, ToolIconName]> = [
+  ['todo_', 'listChecks'],
+  ['context_share_', 'share'],
 ];
 
-export function getToolIcon(toolName: string): LucideIcon {
+export function getToolIconName(toolName: string): ToolIconName {
   const direct = iconMap[toolName];
   if (direct) return direct;
-  for (const [prefix, icon] of prefixMap) {
-    if (toolName.startsWith(prefix)) return icon;
+  for (const [prefix, iconName] of prefixMap) {
+    if (toolName.startsWith(prefix)) return iconName;
   }
-  return Wrench;
+  return 'wrench';
 }
 
 export function getToolDisplayName(toolName: string): string {
