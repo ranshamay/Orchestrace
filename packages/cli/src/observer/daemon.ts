@@ -227,8 +227,12 @@ export class ObserverDaemon {
       if (isNew) newFindings++;
     }
 
-    // Spawn fix sessions for pending findings
-    const spawned = await spawnFixSessions(this.registry, this.config, this.startSession);
+    // Spawn fix sessions for pending findings, respecting concurrency limit.
+    // Count in-flight sessions: spawned findings whose session is still tracked as active.
+    const activeFixSessionCount = this.registry.getAll().filter(
+      (f) => f.fixStatus === 'spawned' && f.fixSessionId && this.state.observerSessionIds.has(f.fixSessionId),
+    ).length;
+    const spawned = await spawnFixSessions(this.registry, this.config, this.startSession, activeFixSessionCount);
 
     // Track spawned session IDs
     for (const finding of this.registry.getAll()) {

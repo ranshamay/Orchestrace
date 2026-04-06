@@ -72,7 +72,7 @@ import { WorkspaceManager } from './workspace-manager.js';
 import { FileEventStore } from '@orchestrace/store';
 import { materializeSession as materializeFromEvents } from '@orchestrace/store';
 import type { SessionEventInput } from '@orchestrace/store';
-import { ObserverDaemon, SessionObserver } from './observer/index.js';
+import { ObserverDaemon, SessionObserver, BackendLogger, LogWatcher } from './observer/index.js';
 
 const GITHUB_PROVIDER_ID = 'github';
 const GITHUB_API_BASE_URL = 'https://api.github.com';
@@ -190,6 +190,11 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
   const authManager = new ProviderAuthManager();
   const githubAuthManager = createGithubAuthManager();
   const llm = new PiAiAdapter();
+
+  // -- Persistent backend log stream ------------------------------------------
+  const orchestraceDir = join(workspaceManager.getRootDir(), '.orchestrace');
+  const backendLogger = new BackendLogger({ orchestraceDir });
+  backendLogger.start();
 
   const workSessions = new Map<string, WorkSession>();
   const worktreePathLocks = new Map<string, string>();
@@ -812,13 +817,22 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       : (prompt || summarizeChatContentParts(promptParts));
 
     const id = randomUUID();
-    const requestedExecutionContext = normalizeExecutionContext(request.executionContext)
-      ?? (request.useWorktree ? 'git-worktree' : undefined)
-      ?? uiPreferences.executionContext
-      ?? (uiPreferences.useWorktree ? 'git-worktree' : 'workspace');
-    const requestedWorktreePath = asString(request.selectedWorktreePath)
-      || uiPreferences.selectedWorktreePath
-      || undefined;
+    // Observer-spawned sessions must always run in the workspace root.
+    // They must never inherit user-selected worktree paths from uiPreferences
+    // because multiple concurrent observer sessions sharing the same worktree
+    // will conflict with each other and produce broken builds / edit errors.
+    const isObserverSource = request.source === 'observer';
+    const requestedExecutionContext = isObserverSource
+      ? 'workspace'
+      : (normalizeExecutionContext(request.executionContext)
+          ?? (request.useWorktree ? 'git-worktree' : undefined)
+          ?? uiPreferences.executionContext
+          ?? (uiPreferences.useWorktree ? 'git-worktree' : 'workspace'));
+    const requestedWorktreePath = isObserverSource
+      ? undefined
+      : (asString(request.selectedWorktreePath)
+          || uiPreferences.selectedWorktreePath
+          || undefined);
     const adaptiveConcurrency = request.adaptiveConcurrency ?? uiPreferences.adaptiveConcurrency;
     const batchConcurrency = normalizePositiveSetting(request.batchConcurrency, uiPreferences.batchConcurrency);
     const batchMinConcurrency = Math.min(
@@ -971,11 +985,35 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       [...(process.execArgv.length > 0 ? process.execArgv : ['--import', 'tsx']), runnerPath, id, workspaceManager.getRootDir()],
       {
         detached: true,
-        stdio: 'ignore',
+        stdio: ['ignore', 'pipe', 'pipe'],
         cwd: workspacePath,
         env: { ...process.env, ORCHESTRACE_SESSION_ID: id },
       },
     );
+
+    // Capture runner stdout/stderr to persistent log stream
+    if (runnerProcess.stdout) {
+      let stdoutBuf = '';
+      runnerProcess.stdout.on('data', (chunk: Buffer) => {
+        stdoutBuf += chunk.toString();
+        const lines = stdoutBuf.split('\n');
+        stdoutBuf = lines.pop() ?? '';
+        for (const line of lines) {
+          if (line.trim()) backendLogger.appendRunnerLine(id, 'stdout', line);
+        }
+      });
+    }
+    if (runnerProcess.stderr) {
+      let stderrBuf = '';
+      runnerProcess.stderr.on('data', (chunk: Buffer) => {
+        stderrBuf += chunk.toString();
+        const lines = stderrBuf.split('\n');
+        stderrBuf = lines.pop() ?? '';
+        for (const line of lines) {
+          if (line.trim()) backendLogger.appendRunnerLine(id, 'stderr', line);
+        }
+      });
+    }
     runnerProcess.unref();
 
     // Record runner PID in metadata
@@ -1209,6 +1247,26 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
   void observerDaemon.start().catch((err) => {
     console.error('[orchestrace][observer] Failed to start daemon:', err);
   });
+
+  // -- Log watcher (analyzes backend logs for issues) -------------------------
+  const logWatcher = new LogWatcher({
+    llm,
+    config: observerDaemon.getConfig(),
+    logger: backendLogger,
+    resolveApiKey: (provider) => authManager.resolveApiKey(provider),
+    onStateChange: (state) => {
+      // Broadcast log watcher state to all connected SSE clients
+      for (const [, clients] of workStreamClients) {
+        for (const client of clients) {
+          sendSse(client, 'log-watcher', { state });
+        }
+      }
+    },
+  });
+  if (observerDaemon.getConfig().enabled) {
+    logWatcher.start(backendLogger);
+    console.log('[orchestrace][log-watcher] Started');
+  }
 
   let hmrWatcher: FSWatcher | undefined;
   if (hmrEnabled) {
@@ -2986,12 +3044,16 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
 
       if (req.method === 'POST' && pathname === '/api/observer/enable') {
         await observerDaemon.setEnabled(true);
+        if (logWatcher.getState().status === 'idle' || logWatcher.getState().status === 'stopped') {
+          logWatcher.start(backendLogger);
+        }
         sendJson(res, 200, { enabled: true });
         return;
       }
 
       if (req.method === 'POST' && pathname === '/api/observer/disable') {
         await observerDaemon.setEnabled(false);
+        logWatcher.stop();
         sendJson(res, 200, { enabled: false });
         return;
       }
@@ -3006,6 +3068,17 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       if (req.method === 'POST' && pathname === '/api/observer/trigger') {
         const result = await observerDaemon.triggerAnalysis();
         sendJson(res, 200, result);
+        return;
+      }
+
+      // -- Log watcher API ---------------------------------------------------
+      if (req.method === 'GET' && pathname === '/api/logs/status') {
+        sendJson(res, 200, { state: logWatcher.getState() });
+        return;
+      }
+
+      if (req.method === 'GET' && pathname === '/api/logs/findings') {
+        sendJson(res, 200, { findings: logWatcher.getFindings() });
         return;
       }
 
@@ -3028,6 +3101,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
   server.on('close', () => {
     void uiStatePersistence.flush();
     observerDaemon.stop();
+    logWatcher.stop();
+    backendLogger.stop();
     // Stop all per-session observers
     for (const [, obs] of sessionObservers) {
       obs.stop();

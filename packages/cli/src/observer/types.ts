@@ -72,6 +72,8 @@ export interface ObserverConfig {
   excludeSessionIds: string[];
   /** Only observe sessions in these workspaces (empty = all). */
   workspaceFilter: string[];
+  /** Maximum number of observer-spawned fix sessions that may run concurrently (0 = unlimited). */
+  maxConcurrentFixSessions: number;
 }
 
 export const DEFAULT_OBSERVER_CONFIG: ObserverConfig = {
@@ -85,6 +87,7 @@ export const DEFAULT_OBSERVER_CONFIG: ObserverConfig = {
   assessmentCategories: [...ALL_FINDING_CATEGORIES],
   excludeSessionIds: [],
   workspaceFilter: [],
+  maxConcurrentFixSessions: 3,
 };
 
 /** Internal state of the observer daemon (not persisted). */
