@@ -149,6 +149,8 @@ export interface WorkSession {
   error?: string;
   output?: { text?: string; planPath?: string; failureType?: string };
   controller: AbortController;
+  /** Clean up an auto-created per-session worktree on session delete. Not persisted. */
+  cleanupWorktree?: () => Promise<void>;
 }
 
 export interface PersistedWorkSession {

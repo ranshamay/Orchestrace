@@ -715,10 +715,11 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       // Kill the detached runner process so it doesn't keep heartbeating after deletion.
       void eventStore.getMetadata(id).then((meta) => {
         if (meta?.pid) {
-          try { process.kill(meta.pid, 'SIGTERM'); } catch { /* already dead */ }
+          const pid = meta.pid;
+          try { process.kill(pid, 'SIGTERM'); } catch { /* already dead */ }
           // Give it a short grace period, then SIGKILL if still alive (e.g. blocked on network I/O).
           setTimeout(() => {
-            try { process.kill(meta.pid, 'SIGKILL'); } catch { /* already dead */ }
+            try { process.kill(pid, 'SIGKILL'); } catch { /* already dead */ }
           }, 3000);
         }
       }).catch(() => { /* ignore */ });
@@ -742,6 +743,12 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     }
 
     releaseWorkspacePathLock(session.workspacePath, id);
+
+    // Clean up any auto-created per-session worktree.
+    if (session.cleanupWorktree) {
+      void session.cleanupWorktree().catch(() => {});
+      session.cleanupWorktree = undefined;
+    }
 
     closeWorkStream(workStreamClients, id);
     workSessions.delete(id);
@@ -882,8 +889,36 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       }
     }
 
-    const lockResult = acquireWorkspacePathLock(workspacePath, id);
+    // If the resolved worktree path is already in use, auto-create a fresh per-session worktree
+    // so a new session is never blocked by an existing one sharing the same path.
+    let autoCreatedWorktreeCleanup: (() => Promise<void>) | undefined;
+    let lockResult = acquireWorkspacePathLock(workspacePath, id);
+    if (!lockResult.ok && executionContext === 'git-worktree') {
+      try {
+        const sessionBranch = `orchestrace/session-${id}`;
+        const sessionWorktreePath = join(workspace.path, '.worktrees', `session-${id}`);
+        await gitExec(workspace.path, ['worktree', 'add', '-b', sessionBranch, sessionWorktreePath, 'HEAD']);
+        try {
+          await ensureWorktreeDependenciesInstalled(sessionWorktreePath);
+        } catch { /* non-fatal: runner will retry if needed */ }
+        workspacePath = sessionWorktreePath;
+        selectedWorktreePath = sessionWorktreePath;
+        selectedWorktreeBranch = sessionBranch;
+        autoCreatedWorktreeCleanup = async () => {
+          await gitExec(workspace.path, ['worktree', 'remove', '--force', sessionWorktreePath]).catch(() => {});
+          await gitExec(workspace.path, ['branch', '-D', sessionBranch]).catch(() => {});
+        };
+        lockResult = acquireWorkspacePathLock(workspacePath, id);
+      } catch (worktreeError) {
+        return {
+          error: `Workspace path is in use and auto-creating a new worktree failed: ${toErrorMessage(worktreeError)}`,
+          statusCode: 409,
+        };
+      }
+    }
+
     if (!lockResult.ok) {
+      void autoCreatedWorktreeCleanup?.().catch(() => {});
       return {
         error: `Workspace path is currently in use by another session (${lockResult.ownerSessionId}). Select a different worktree path or wait for the session to be deleted.`,
         statusCode: 409,
@@ -898,6 +933,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
 
     if (duplicateSession) {
       releaseWorkspacePathLock(workspacePath, id);
+      void autoCreatedWorktreeCleanup?.().catch(() => {});
       return {
         error: `Workspace path is already assigned to active session ${duplicateSession.id}. Select a different worktree path.`,
         statusCode: 409,
@@ -939,6 +975,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       events: [],
       agentGraph: [],
       controller,
+      cleanupWorktree: autoCreatedWorktreeCleanup,
     };
 
     workSessions.set(id, session);
@@ -5869,6 +5906,15 @@ function resolveUiWatchPath(workspaceRoot: string): string | undefined {
   }
 
   return undefined;
+}
+
+async function gitExec(repoRoot: string, args: string[]): Promise<string> {
+  const { stdout } = await execFileAsync('git', args, {
+    cwd: repoRoot,
+    timeout: 60_000,
+    maxBuffer: 1024 * 1024,
+  });
+  return stdout;
 }
 
 async function listNativeGitWorktrees(repoRoot: string): Promise<NativeGitWorktree[]> {
