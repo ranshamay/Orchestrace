@@ -75,5 +75,20 @@ export function buildTimelineItems(selectedSession: WorkSession | undefined, cha
     contentParts: message.contentParts,
   }));
 
+  // Inject a terminal error item when the session has a visible error
+  const errorText = selectedSession?.error || selectedSession?.llmStatus?.detail;
+  const isTerminal = selectedSession?.status && /fail|error|cancel|abort/i.test(selectedSession.status);
+  if (isTerminal && errorText) {
+    const errorTime = selectedSession.updatedAt || new Date().toISOString();
+    items.push({
+      key: `session-error-${errorTime}`,
+      time: errorTime,
+      kind: 'event',
+      title: 'Session Error',
+      tone: 'error',
+      content: errorText,
+    });
+  }
+
   return [...items, ...chatItems].sort((a, b) => a.time.localeCompare(b.time));
 }
