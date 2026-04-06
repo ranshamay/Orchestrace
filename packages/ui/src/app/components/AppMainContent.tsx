@@ -5,6 +5,7 @@ import { GraphTabView } from './graph/GraphTabView';
 import { TimelinePanel } from './work/TimelinePanel';
 import { ComposerPanel } from './work/ComposerPanel';
 import { SettingsTabView } from './settings/SettingsTabView';
+import { FloatingChatOverlay } from './layout/FloatingChatOverlay';
 
 export type AppMainContentProps = {
   activeTab: 'graph' | 'settings';
@@ -80,6 +81,54 @@ export function AppMainContent(props: AppMainContentProps) {
     );
   }
 
+  const chatOverlay = (
+    <FloatingChatOverlay hasSession={Boolean(props.selectedSessionId)}>
+      <TimelinePanel
+        selectedSessionId={props.selectedSessionId}
+        selectedSession={props.selectedSession}
+        selectedSessionRunning={props.selectedSessionRunning}
+        selectedFailureType={props.selectedFailureType}
+        selectedLlmStatus={props.selectedLlmStatus}
+        showToolsPanel={props.showToolsPanel}
+        setShowToolsPanel={props.setShowToolsPanel}
+        toolsMode={props.toolsMode}
+        availableTools={props.availableTools}
+        isToolsLoading={props.isToolsLoading}
+        toolsLoadError={props.toolsLoadError}
+        timelineContainerRef={props.timelineContainerRef}
+        followTimelineTail={props.followTimelineTail}
+        jumpToLatest={props.jumpToLatest}
+        onTimelineScroll={props.onTimelineScroll}
+        timelineItems={props.timelineItems}
+        composer={(
+          <ComposerPanel
+            selectedSession={props.selectedSession}
+            selectedSessionId={props.selectedSessionId}
+            selectedSessionRunning={props.selectedSessionRunning}
+            composerMode={props.composerMode}
+            workspaces={props.workspaces}
+            workWorkspaceId={props.workWorkspaceId}
+            workProvider={props.workProvider}
+            workModel={props.workModel}
+            autoApprove={props.autoApprove}
+            composerText={props.composerText}
+            setComposerText={props.setComposerText}
+            composerImages={props.composerImages}
+            removeComposerAttachment={props.removeComposerAttachment}
+            hasComposerContent={props.hasComposerContent}
+            onComposerPaste={props.onComposerPaste}
+            onStartFromComposer={props.onStartFromComposer}
+            onStop={props.onStop}
+            onSendChat={props.onSendChat}
+          />
+        )}
+        isDark={props.isDark}
+        copyTraceState={props.copyTraceState}
+        onCopyTrace={props.onCopyTrace}
+      />
+    </FloatingChatOverlay>
+  );
+
   return (
     <GraphTabView
       selectedSession={props.selectedSession}
@@ -94,51 +143,7 @@ export function AppMainContent(props: AppMainContentProps) {
       setTodoInput={props.setTodoInput}
       onAddTodo={props.onAddTodo}
       onToggleTodo={props.onToggleTodo}
-      chatOverlay={(
-        <TimelinePanel
-          selectedSessionId={props.selectedSessionId}
-          selectedSession={props.selectedSession}
-          selectedSessionRunning={props.selectedSessionRunning}
-          selectedFailureType={props.selectedFailureType}
-          selectedLlmStatus={props.selectedLlmStatus}
-          showToolsPanel={props.showToolsPanel}
-          setShowToolsPanel={props.setShowToolsPanel}
-          toolsMode={props.toolsMode}
-          availableTools={props.availableTools}
-          isToolsLoading={props.isToolsLoading}
-          toolsLoadError={props.toolsLoadError}
-          timelineContainerRef={props.timelineContainerRef}
-          followTimelineTail={props.followTimelineTail}
-          jumpToLatest={props.jumpToLatest}
-          onTimelineScroll={props.onTimelineScroll}
-          timelineItems={props.timelineItems}
-          composer={(
-            <ComposerPanel
-              selectedSession={props.selectedSession}
-              selectedSessionId={props.selectedSessionId}
-              selectedSessionRunning={props.selectedSessionRunning}
-              composerMode={props.composerMode}
-              workspaces={props.workspaces}
-              workWorkspaceId={props.workWorkspaceId}
-              workProvider={props.workProvider}
-              workModel={props.workModel}
-              autoApprove={props.autoApprove}
-              composerText={props.composerText}
-              setComposerText={props.setComposerText}
-              composerImages={props.composerImages}
-              removeComposerAttachment={props.removeComposerAttachment}
-              hasComposerContent={props.hasComposerContent}
-              onComposerPaste={props.onComposerPaste}
-              onStartFromComposer={props.onStartFromComposer}
-              onStop={props.onStop}
-              onSendChat={props.onSendChat}
-            />
-          )}
-          isDark={props.isDark}
-          copyTraceState={props.copyTraceState}
-          onCopyTrace={props.onCopyTrace}
-        />
-      )}
+      chatOverlay={chatOverlay}
     />
   );
 }
