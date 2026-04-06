@@ -31,6 +31,15 @@ import {
   shouldEmitLlmStatus,
   type LlmStatusEmissionState,
 } from './ui-server/llm-status-emission.js';
+import {
+  MAX_CONSECUTIVE_THINKING,
+  THINKING_CIRCUIT_BREAKER_NUDGE,
+  createThinkingCircuitBreakerState,
+  isThinkingCycleEvent,
+  resetThinkingCircuitBreaker,
+  shouldResetThinkingCircuitBreakerOnEvent,
+  updateThinkingCircuitBreaker,
+} from './thinking-circuit-breaker.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -100,6 +109,7 @@ async function main(): Promise<void> {
   process.on('SIGTERM', () => {
     cancelled = true;
     controller.abort();
+    resetThinkingCircuitBreaker(thinkingCircuitBreaker);
     const llmStatus = makeLlmStatus('cancelled', 'Cancelled by user.');
     lastLlmStatusEmission = {
       key: llmStatusIdentityKey(llmStatus),
@@ -112,6 +122,7 @@ async function main(): Promise<void> {
   // Shared context store for this session
   const sharedContextStore = new InMemorySharedContextStore();
   let lastLlmStatusEmission: LlmStatusEmissionState | undefined;
+  const thinkingCircuitBreaker = createThinkingCircuitBreakerState();
 
   // Local state for graph progress tracking
   const agentGraph: SessionAgentGraphNode[] = [];
@@ -253,6 +264,25 @@ async function main(): Promise<void> {
 
         logDagEventTrace(sessionId, event);
 
+        if (isThinkingCycleEvent(event)) {
+          const shouldEmitNudge = updateThinkingCircuitBreaker(thinkingCircuitBreaker, event, MAX_CONSECUTIVE_THINKING);
+          if (shouldEmitNudge) {
+            void emit({
+              time: t,
+              type: 'session:chat-message',
+              payload: {
+                message: {
+                  role: 'system',
+                  content: THINKING_CIRCUIT_BREAKER_NUDGE,
+                  time: t,
+                },
+              },
+            });
+          }
+        } else if (shouldResetThinkingCircuitBreakerOnEvent(event)) {
+          resetThinkingCircuitBreaker(thinkingCircuitBreaker);
+        }
+
         // LLM status
         const llmStatus = deriveLlmStatus(event, t);
         if (llmStatus && shouldEmitLlmStatus(llmStatus, lastLlmStatusEmission, t)) {
@@ -311,6 +341,7 @@ async function main(): Promise<void> {
       failureType: failedOutput?.failureType,
     };
 
+    resetThinkingCircuitBreaker(thinkingCircuitBreaker);
     await emit({ time: t, type: 'session:output-set', payload: { output } });
 
     if (failed) {
@@ -350,6 +381,7 @@ async function main(): Promise<void> {
 
     const t = iso();
     const errorText = errorMsg(error);
+    resetThinkingCircuitBreaker(thinkingCircuitBreaker);
     await emit({ time: t, type: 'session:error-change', payload: { error: errorText } });
     const llmStatus = makeLlmStatus('failed', errorText);
     lastLlmStatusEmission = {
