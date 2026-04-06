@@ -28,6 +28,12 @@ import {
 } from '@orchestrace/context';
 import { now } from './ui-server/clock.js';
 import {
+  llmStatusIdentityKey,
+  parseTimestamp,
+  shouldEmitLlmStatus,
+  type LlmStatusEmissionState,
+} from './ui-server/llm-status-emission.js';
+import {
   buildChatContinuationInput,
   cloneChatContentParts,
   compactInlineImageMarkdown,
@@ -765,7 +771,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     creationReason?: SessionCreationReason;
     sourceSessionId?: string;
     source?: 'user' | 'observer';
-  }): Promise<{ id: string } | { error: string; statusCode: number }> {
+  }): Promise<{ id: string; warnings?: string[] } | { error: string; statusCode: number }> {
     const promptParts = cloneChatContentParts(request.promptParts ?? []);
     const prompt = asString(request.prompt);
 
@@ -876,6 +882,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
 
     const controller = new AbortController();
     const createdAt = now();
+    let lastLlmStatusEmission: LlmStatusEmissionState | undefined;
+
     const session: WorkSession = {
       id,
       workspaceId: workspace.id,
@@ -1744,7 +1752,10 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           return;
         }
 
-        sendJson(res, 200, { id: result.id });
+        sendJson(res, 200, {
+          id: result.id,
+          warnings: result.warnings,
+        });
         return;
       }
 
@@ -1803,7 +1814,11 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           return;
         }
 
-        sendJson(res, 200, { id: result.id, sourceId: id });
+        sendJson(res, 200, {
+          id: result.id,
+          sourceId: id,
+          warnings: result.warnings,
+        });
         return;
       }
 
@@ -2271,7 +2286,10 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           return;
         }
 
-        await ensureSessionWorkspaceReady(session, workspaceManager, uiStatePersistence);
+        await ensureSessionWorkspaceReady(session, workspaceManager, uiStatePersistence, {
+          releaseWorkspacePathLock,
+          acquireWorkspacePathLock,
+        });
 
         const thread = sessionChats.get(id) ?? createSessionChatThread(session);
         sessionChats.set(id, thread);
@@ -2684,7 +2702,10 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           return;
         }
 
-        await ensureSessionWorkspaceReady(session, workspaceManager, uiStatePersistence);
+        await ensureSessionWorkspaceReady(session, workspaceManager, uiStatePersistence, {
+          releaseWorkspacePathLock,
+          acquireWorkspacePathLock,
+        });
 
         const thread = sessionChats.get(id) ?? createSessionChatThread(session);
         sessionChats.set(id, thread);
@@ -5913,6 +5934,10 @@ async function ensureSessionWorkspaceReady(
   session: WorkSession,
   workspaceManager: WorkspaceManager,
   uiStatePersistence: { schedule: () => void; flush: () => Promise<void> },
+  lockOps?: {
+    releaseWorkspacePathLock: (path: string | undefined, sessionId: string) => void;
+    acquireWorkspacePathLock: (path: string | undefined, sessionId: string) => { ok: true } | { ok: false; ownerSessionId: string };
+  },
 ): Promise<void> {
   if (existsSync(session.workspacePath)) {
     return;
@@ -5921,12 +5946,14 @@ async function ensureSessionWorkspaceReady(
   const previousWorkspacePath = session.workspacePath;
   const workspace = await workspaceManager.selectWorkspace(session.workspaceId);
 
-  releaseWorkspacePathLock(previousWorkspacePath, session.id);
-  const acquired = acquireWorkspacePathLock(workspace.path, session.id);
-  if (!acquired.ok) {
-    throw new Error(
-      `Workspace path ${workspace.path} is currently in use by session ${acquired.ownerSessionId}; cannot recover session workspace path.`,
-    );
+  if (lockOps) {
+    lockOps.releaseWorkspacePathLock(previousWorkspacePath, session.id);
+    const acquired = lockOps.acquireWorkspacePathLock(workspace.path, session.id);
+    if (!acquired.ok) {
+      throw new Error(
+        `Workspace path ${workspace.path} is currently in use by session ${acquired.ownerSessionId}; cannot recover session workspace path.`,
+      );
+    }
   }
 
   session.workspacePath = workspace.path;

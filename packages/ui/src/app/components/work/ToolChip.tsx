@@ -1,7 +1,19 @@
 import { useState } from 'react';
-import { Loader2 } from 'lucide-react';
+import {
+  Loader2,
+  FileText,
+  PenLine,
+  FolderOpen,
+  Search,
+  Terminal,
+  Bot,
+  ListChecks,
+  Network,
+  Share2,
+  Wrench,
+} from 'lucide-react';
 import type { TimelineItem } from '../../types';
-import { getToolIcon, getToolDisplayName } from '../../utils/toolIcons';
+import { getToolDisplayName, getToolIconName } from '../../utils/toolIcons';
 import { formatToolPayloadForDisplay } from '../../utils/timeline';
 
 type Props = {
@@ -13,8 +25,8 @@ type Props = {
 export function ToolChip({ item, isDark, defaultExpanded }: Props) {
   void isDark;
   const [expanded, setExpanded] = useState(defaultExpanded ?? item.toolStatus === 'error');
-  const Icon = getToolIcon(item.toolName ?? '');
-  const displayName = getToolDisplayName(item.toolName ?? '');
+  const toolName = item.toolName ?? '';
+  const displayName = getToolDisplayName(toolName);
   const summary = item.inputSummary ?? item.outputSummary ?? `Calling ${item.toolName}`;
 
   const statusColor =
@@ -38,7 +50,10 @@ export function ToolChip({ item, isDark, defaultExpanded }: Props) {
         className="flex w-full items-center gap-2 px-2 py-1.5 text-left hover:bg-slate-100/80 dark:hover:bg-slate-800/40 rounded"
         onClick={() => setExpanded((prev) => !prev)}
       >
-        <Icon className={`h-3.5 w-3.5 flex-shrink-0 ${item.toolStatus === 'error' ? 'text-red-500 dark:text-red-400' : 'text-sky-500 dark:text-sky-400'}`} />
+        <ToolStatusIcon
+          toolName={toolName}
+          className={`h-3.5 w-3.5 flex-shrink-0 ${item.toolStatus === 'error' ? 'text-red-500 dark:text-red-400' : 'text-sky-500 dark:text-sky-400'}`}
+        />
         <span className="font-mono text-[11px] font-medium text-slate-700 dark:text-slate-200 flex-shrink-0">
           {displayName}
         </span>
@@ -59,13 +74,13 @@ export function ToolChip({ item, isDark, defaultExpanded }: Props) {
       {expanded && (
         <div className="border-t border-slate-200/60 dark:border-slate-700/60 px-3 py-2 space-y-2">
           {item.inputPayload != null && (
-            <PayloadBlock label="Input" payload={item.inputPayload} toolName={item.toolName ?? ''} />
+            <PayloadBlock label="Input" payload={item.inputPayload} toolName={toolName} />
           )}
           {item.outputPayload != null && (
             <PayloadBlock
               label={item.toolStatus === 'error' ? 'Error' : 'Output'}
               payload={item.outputPayload}
-              toolName={item.toolName ?? ''}
+              toolName={toolName}
               isError={item.toolStatus === 'error'}
             />
           )}
@@ -76,6 +91,34 @@ export function ToolChip({ item, isDark, defaultExpanded }: Props) {
       )}
     </div>
   );
+}
+
+function ToolStatusIcon({ toolName, className }: { toolName: string; className: string }) {
+  const iconName = getToolIconName(toolName);
+
+  switch (iconName) {
+    case 'fileText':
+      return <FileText className={className} />;
+    case 'penLine':
+      return <PenLine className={className} />;
+    case 'folderOpen':
+      return <FolderOpen className={className} />;
+    case 'search':
+      return <Search className={className} />;
+    case 'terminal':
+      return <Terminal className={className} />;
+    case 'bot':
+      return <Bot className={className} />;
+    case 'listChecks':
+      return <ListChecks className={className} />;
+    case 'network':
+      return <Network className={className} />;
+    case 'share':
+      return <Share2 className={className} />;
+    case 'wrench':
+    default:
+      return <Wrench className={className} />;
+  }
 }
 
 function PayloadBlock({ label, payload, toolName, isError }: { label: string; payload: string; toolName: string; isError?: boolean }) {
