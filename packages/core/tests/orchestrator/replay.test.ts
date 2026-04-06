@@ -26,12 +26,17 @@ function createAdapter(params: {
   planningThrows?: boolean;
   failImplementationOnceWithType?: 'timeout' | 'rate_limit' | 'tool_runtime' | 'empty_response';
   omitPlanningCoordination?: boolean;
-  onPrompt?: (phase: 'planning' | 'implementation', prompt: LlmPromptInput) => void;
+  onPrompt?: (phase: 'planning' | 'implementation', prompt: LlmPromptInput, systemPrompt: string) => void;
 }): LlmAdapter {
   let implementationCalls = 0;
 
   async function spawnAgent(request: SpawnAgentRequest): Promise<LlmAgent> {
-    const phase = request.systemPrompt === 'planning' ? 'planning' : 'implementation';
+    const systemPrompt = typeof request.systemPrompt === 'string' ? request.systemPrompt : '';
+    const phase = systemPrompt === 'planning'
+      || systemPrompt.includes('Planning-only mode')
+      || systemPrompt.includes('Do not edit files in planning mode.')
+      ? 'planning'
+      : 'implementation';
 
     return {
       complete: async (
@@ -39,7 +44,7 @@ function createAdapter(params: {
         _signal?: AbortSignal,
         options?: LlmCompletionOptions,
       ) => {
-        params.onPrompt?.(phase, _prompt);
+        params.onPrompt?.(phase, _prompt, systemPrompt);
         if (phase === 'planning') {
           if (!params.omitPlanningCoordination) {
             options?.onToolCall?.({
@@ -156,8 +161,6 @@ describe('orchestrate replay capture', () => {
         llm: createAdapter({}),
         cwd,
         requirePlanApproval: false,
-        planningSystemPrompt: 'planning',
-        implementationSystemPrompt: 'implementation',
         promptVersion: 'prompt-v1',
         policyVersion: 'policy-v1',
         onEvent: (event) => events.push(event),
@@ -280,8 +283,6 @@ describe('orchestrate replay capture', () => {
         }),
         cwd,
         requirePlanApproval: false,
-        planningSystemPrompt: 'planning',
-        implementationSystemPrompt: 'implementation',
       });
 
       const output = outputs.get('task-1');
@@ -294,6 +295,34 @@ describe('orchestrate replay capture', () => {
       expect(planningPrompt).toContain('3) per-stage atomic tasks with explicit dependencies and concurrency boundaries');
       expect(planningPrompt).toContain('8) atomic todo specification per task: {id, action, target, deps, verification, done_criteria}');
       expect(planningPrompt).toContain('9) Next Follow-up Suggestions section with 1-3 numbered, concrete next actions');
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('includes search_files regex escaping reminder in implementation prompt', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'orchestrace-replay-impl-prompt-'));
+    const capturedImplementationPrompts: string[] = [];
+
+    try {
+      const outputs = await orchestrate(makeSingleNodeGraph(), {
+        llm: createAdapter({
+          onPrompt: (phase, _prompt, systemPrompt) => {
+            if (phase !== 'implementation' || typeof systemPrompt !== 'string') {
+              return;
+            }
+            capturedImplementationPrompts.push(systemPrompt);
+          },
+        }),
+        cwd,
+        requirePlanApproval: false,
+      });
+
+      const output = outputs.get('task-1');
+      expect(output?.status).toBe('completed');
+      expect(capturedImplementationPrompts.length).toBeGreaterThan(0);
+      const implementationPrompt = capturedImplementationPrompts[0] ?? '';
+      expect(implementationPrompt).toContain('search_files uses regex; characters like ( and ) need escaping as \\( and \\).');
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }

@@ -313,6 +313,64 @@ describe('batch filesystem tools', () => {
   });
 });
 
+describe('search_files tool', () => {
+  it('treats query as literal by default and matches regex-special characters', async () => {
+    const cwd = await makeWorkspace();
+    await writeFile(join(cwd, 'src', 'literal.txt'), 'call(value)\ncallXvalue\n', 'utf-8');
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+
+    const result = await toolset.executeTool({
+      id: '1',
+      name: 'search_files',
+      arguments: {
+        query: 'call(value)',
+        path: 'src',
+      },
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.content).toContain('literal.txt:1:call(value)');
+    expect(result.content).not.toContain('literal.txt:2:callXvalue');
+  });
+
+  it('supports regex mode when regex=true', async () => {
+    const cwd = await makeWorkspace();
+    await writeFile(join(cwd, 'src', 'regex.txt'), 'call(value)\ncallvalue\n', 'utf-8');
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+
+    const result = await toolset.executeTool({
+      id: '1',
+      name: 'search_files',
+      arguments: {
+        query: 'call(value)',
+        regex: true,
+        path: 'src',
+      },
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.content).toContain('regex.txt:2:callvalue');
+    expect(result.content).not.toContain('regex.txt:1:call(value)');
+  });
+
+  it('returns (no matches) when nothing matches', async () => {
+    const cwd = await makeWorkspace();
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+
+    const result = await toolset.executeTool({
+      id: '1',
+      name: 'search_files',
+      arguments: {
+        query: 'definitely-not-present',
+        path: 'src',
+      },
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.content).toBe('(no matches)');
+  });
+});
+
 describe('git_status tool', () => {
   it('returns status output in a git repository', async () => {
     const cwd = await makeWorkspace();
