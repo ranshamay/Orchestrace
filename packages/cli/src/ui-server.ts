@@ -98,6 +98,21 @@ type NativeGitWorktree = {
   detached: boolean;
 };
 
+type WorkStartModelResolutionFailureCode =
+  | 'MODEL_LIST_FETCH_FAILED'
+  | 'MODEL_NOT_FOUND'
+  | 'MODEL_UNAVAILABLE';
+
+type WorkStartModelResolutionResult =
+  | { ok: true; model: string }
+  | {
+      ok: false;
+      statusCode: number;
+      code: WorkStartModelResolutionFailureCode;
+      error: string;
+      details: Record<string, unknown>;
+    };
+
 type GithubDeviceAuthSessionState = 'awaiting-user' | 'polling' | 'completed' | 'failed';
 
 interface GithubDeviceAuthSession {
@@ -1524,20 +1539,22 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         const prompt = asString(body.prompt);
         const promptParts = parseChatContentParts(body.promptParts);
         const provider = asString(body.provider) || process.env.ORCHESTRACE_DEFAULT_PROVIDER || 'anthropic';
-        let model = asString(body.model);
-        if (!model) {
-          try {
-            model = getModels(provider as never)[0]?.id ?? '';
-          } catch (error) {
-            sendJson(res, 400, { error: toErrorMessage(error) });
-            return;
-          }
+        const requestedModel = asString(body.model);
+        const modelResolution = resolveWorkStartModel({
+          provider,
+          requestedModel,
+          envFallbackModel: resolveDefaultModelFromEnv(),
+        });
 
-          if (!model) {
-            sendJson(res, 400, { error: `No models available for provider ${provider}.` });
-            return;
-          }
+        if (modelResolution.ok === false) {
+          sendJson(res, modelResolution.statusCode, {
+            error: modelResolution.error,
+            code: modelResolution.code,
+            details: modelResolution.details,
+          });
+          return;
         }
+
         const autoApprove = Boolean(body.autoApprove);
         const executionContext = normalizeExecutionContext(body.executionContext)
           ?? normalizeExecutionContext(body.mode)
@@ -1559,7 +1576,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           prompt,
           promptParts,
           provider,
-          model,
+          model: modelResolution.model,
           autoApprove,
           executionContext,
           selectedWorktreePath,
@@ -3735,6 +3752,101 @@ function parseGithubScopes(scopes: string | undefined): string[] {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
+}
+
+function resolveDefaultModelFromEnv(): string | undefined {
+  const value = asString(process.env.ORCHESTRACE_DEFAULT_MODEL)?.trim();
+  return value || undefined;
+}
+
+function listProviderModelIds(provider: string): string[] {
+  return getModels(provider as never)
+    .map((model) => asString(model.id)?.trim())
+    .filter((modelId): modelId is string => Boolean(modelId));
+}
+
+function resolveWorkStartModel(params: {
+  provider: string;
+  requestedModel?: string;
+  envFallbackModel?: string;
+}): WorkStartModelResolutionResult {
+  const provider = params.provider;
+  const requestedModel = asString(params.requestedModel)?.trim();
+  const envFallbackModel = asString(params.envFallbackModel)?.trim();
+
+  let availableModels: string[];
+  try {
+    availableModels = listProviderModelIds(provider);
+  } catch (error) {
+    if (requestedModel) {
+      return { ok: true, model: requestedModel };
+    }
+
+    if (envFallbackModel) {
+      console.warn(
+        `[ui-server] /api/work/start model discovery failed for provider "${provider}"; falling back to ORCHESTRACE_DEFAULT_MODEL="${envFallbackModel}". Error: ${toErrorMessage(error)}`,
+      );
+      return { ok: true, model: envFallbackModel };
+    }
+
+    return {
+      ok: false,
+      statusCode: 502,
+      code: 'MODEL_LIST_FETCH_FAILED',
+      error: `Failed to load models for provider ${provider}.`,
+      details: {
+        provider,
+        requestedModel: null,
+        reason: 'provider_model_fetch_failed',
+        retryable: true,
+        cause: toErrorMessage(error),
+      },
+    };
+  }
+
+  if (requestedModel) {
+    if (availableModels.includes(requestedModel)) {
+      return { ok: true, model: requestedModel };
+    }
+
+    return {
+      ok: false,
+      statusCode: 400,
+      code: 'MODEL_NOT_FOUND',
+      error: `Requested model "${requestedModel}" is not available for provider ${provider}.`,
+      details: {
+        provider,
+        requestedModel,
+        availableModels,
+      },
+    };
+  }
+
+  const firstAvailableModel = availableModels[0];
+  if (firstAvailableModel) {
+    return { ok: true, model: firstAvailableModel };
+  }
+
+  if (envFallbackModel) {
+    console.warn(
+      `[ui-server] /api/work/start no models available for provider "${provider}"; falling back to ORCHESTRACE_DEFAULT_MODEL="${envFallbackModel}".`,
+    );
+    return { ok: true, model: envFallbackModel };
+  }
+
+  return {
+    ok: false,
+    statusCode: 400,
+    code: 'MODEL_UNAVAILABLE',
+    error: `No models are available for provider ${provider}, and no model was specified.`,
+    details: {
+      provider,
+      requestedModel: null,
+      availableModels,
+      reason: 'no_model_available',
+      retryable: false,
+    },
+  };
 }
 
 function parseBooleanSetting(value: unknown): boolean | undefined {
