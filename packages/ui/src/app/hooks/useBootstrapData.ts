@@ -1,7 +1,6 @@
 import { useEffect, useState } from 'react';
 import {
   type UiPreferences,
-  type ExecutionContext,
   fetchGithubAuthStatus,
   fetchProviders,
   fetchSessions,
@@ -37,9 +36,6 @@ export function useBootstrapData() {
     model: '',
     workspaceId: '',
     autoApprove: true,
-    executionContext: 'workspace',
-    selectedWorktreePath: undefined,
-    useWorktree: false,
     adaptiveConcurrency: false,
     batchConcurrency: 8,
     batchMinConcurrency: 1,
@@ -49,9 +45,6 @@ export function useBootstrapData() {
   const [workModel, setWorkModel] = useState('');
   const [workWorkspaceId, setWorkWorkspaceId] = useState('');
   const [autoApprove, setAutoApprove] = useState(true);
-  const [executionContext, setExecutionContext] = useState<ExecutionContext>('workspace');
-  const [selectedWorktreePath, setSelectedWorktreePath] = useState<string>('');
-  const [useWorktree, setUseWorktree] = useState(false);
   const [adaptiveConcurrency, setAdaptiveConcurrency] = useState(false);
   const [batchConcurrency, setBatchConcurrency] = useState(8);
   const [batchMinConcurrency, setBatchMinConcurrency] = useState(1);
@@ -112,20 +105,18 @@ export function useBootstrapData() {
           setGithubAuthStatus(githubAuthStatusResult.value.status);
         }
 
-            const preferences: UiPreferences = preferencesResult.status === 'fulfilled'
+        const fallbackPreferences: UiPreferences = {
+          activeTab: 'graph',
+          observerShowFindings: false,
+          defaultProvider: '',
+          defaultModel: '',
+          adaptiveConcurrency: false,
+          batchConcurrency: 8,
+          batchMinConcurrency: 1,
+        };
+        const preferences = preferencesResult.status === 'fulfilled'
           ? preferencesResult.value.preferences
-          : {
-              activeTab: 'graph',
-              observerShowFindings: false,
-              defaultProvider: '',
-              defaultModel: '',
-              executionContext: 'workspace' as const,
-              selectedWorktreePath: undefined,
-              useWorktree: false,
-              adaptiveConcurrency: false,
-              batchConcurrency: 8,
-              batchMinConcurrency: 1,
-            };
+          : fallbackPreferences;
 
         if (preferencesResult.status === 'rejected') {
           bootstrapErrors.push(toErrorMessage(preferencesResult.reason));
@@ -143,22 +134,23 @@ export function useBootstrapData() {
             ? configured
             : '';
         })();
+
         const connectedProvider = providersState?.statuses.find((status) => status.source !== 'none')?.provider || '';
-        const defaultProvider = preferredProvider || connectedProvider || providersState?.defaults.provider || providersState?.providers[0]?.id || '';
+        const defaultProvider = preferredProvider
+          || connectedProvider
+          || providersState?.defaults.provider
+          || providersState?.providers[0]?.id
+          || '';
         const defaultModel = typeof preferences.defaultModel === 'string'
           ? preferences.defaultModel.trim()
           : '';
         const defaultWorkspace = workspacesState?.activeWorkspaceId || workspacesState?.workspaces[0]?.id || '';
-        const defaultExecutionContext: ExecutionContext = preferences.executionContext
-          ?? (preferences.useWorktree ? 'git-worktree' : 'workspace');
+
         const initialControls: SessionLlmControls = {
           provider: defaultProvider,
           model: defaultModel,
           workspaceId: defaultWorkspace,
           autoApprove: true,
-          executionContext: defaultExecutionContext,
-          selectedWorktreePath: preferences.selectedWorktreePath,
-          useWorktree: defaultExecutionContext === 'git-worktree',
           adaptiveConcurrency: preferences.adaptiveConcurrency,
           batchConcurrency: preferences.batchConcurrency,
           batchMinConcurrency: preferences.batchMinConcurrency,
@@ -169,9 +161,6 @@ export function useBootstrapData() {
         setWorkModel(initialControls.model);
         setWorkWorkspaceId(initialControls.workspaceId);
         setAutoApprove(initialControls.autoApprove);
-        setExecutionContext(initialControls.executionContext);
-        setSelectedWorktreePath(initialControls.selectedWorktreePath ?? '');
-        setUseWorktree(initialControls.useWorktree);
         setAdaptiveConcurrency(initialControls.adaptiveConcurrency);
         setBatchConcurrency(initialControls.batchConcurrency);
         setBatchMinConcurrency(initialControls.batchMinConcurrency);
@@ -190,14 +179,6 @@ export function useBootstrapData() {
 
     void bootstrap();
   }, []);
-
-  function toErrorMessage(error: unknown): string {
-    if (error instanceof Error) {
-      return error.message;
-    }
-
-    return String(error);
-  }
 
   return {
     providers,
@@ -220,12 +201,6 @@ export function useBootstrapData() {
     setWorkWorkspaceId,
     autoApprove,
     setAutoApprove,
-    executionContext,
-    setExecutionContext,
-    selectedWorktreePath,
-    setSelectedWorktreePath,
-    useWorktree,
-    setUseWorktree,
     adaptiveConcurrency,
     setAdaptiveConcurrency,
     batchConcurrency,
@@ -239,4 +214,12 @@ export function useBootstrapData() {
     setErrorMessage,
     bootstrapComplete,
   };
+}
+
+function toErrorMessage(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+
+  return String(error);
 }

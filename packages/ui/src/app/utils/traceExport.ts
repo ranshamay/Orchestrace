@@ -37,10 +37,6 @@ export function buildSessionTraceExport(
   lines.push('Orchestrace Chat Trace');
   lines.push(`Exported at: ${new Date().toISOString()}`);
   lines.push(`Run ID: ${session.id}`);
-  lines.push(`Creation reason: ${session.creationReason ?? 'unknown'}`);
-  if (session.sourceSessionId) {
-    lines.push(`Source session: ${session.sourceSessionId}`);
-  }
   lines.push(`Workspace: ${session.workspaceName} (${session.workspacePath})`);
   lines.push(`Provider/Model: ${session.provider}/${session.model}`);
   lines.push(`Status: ${session.status}`);
@@ -50,17 +46,9 @@ export function buildSessionTraceExport(
   lines.push(`LLM status: ${llmStatus.label}${llmStatus.detail ? ` - ${llmStatus.detail}` : ''}`);
   lines.push(`Created: ${session.createdAt}`);
   lines.push(`Updated: ${session.updatedAt}`);
-  lines.push(`Execution context: ${session.executionContext ?? (session.useWorktree ? 'git-worktree' : 'workspace')}`);
-  if (session.selectedWorktreePath) {
-    lines.push(`Selected worktree path: ${session.selectedWorktreePath}`);
-  }
-  lines.push(`Worktree enabled (legacy): ${session.useWorktree ? 'yes' : 'no'}`);
-  if (session.worktreePath) {
-    lines.push(`Worktree path: ${session.worktreePath}`);
-  }
-  if (session.worktreeBranch) {
-    lines.push(`Worktree branch: ${session.worktreeBranch}`);
-  }
+  lines.push('Worktree mode: native git worktree');
+  lines.push(`Worktree path: ${session.worktreePath}`);
+  lines.push(`Worktree branch: ${session.worktreeBranch}`);
   lines.push('');
 
   lines.push('Prompt:');

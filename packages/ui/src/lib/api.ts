@@ -33,24 +33,11 @@ export interface Workspace {
   path: string;
 }
 
-export type ExecutionContext = 'workspace' | 'git-worktree';
-export type SessionCreationReason = 'start' | 'retry';
-
-export interface GitWorktreeInfo {
-  path: string;
-  branch?: string;
-  detached: boolean;
-  isPrimary?: boolean;
-}
-
 export interface UiPreferences {
   activeTab: 'graph' | 'settings';
   observerShowFindings: boolean;
   defaultProvider: string;
   defaultModel: string;
-  executionContext: ExecutionContext;
-  selectedWorktreePath?: string;
-  useWorktree: boolean;
   adaptiveConcurrency: boolean;
   batchConcurrency: number;
   batchMinConcurrency: number;
@@ -59,13 +46,6 @@ export interface UiPreferences {
 export interface WorkspacesResponse {
   activeWorkspaceId?: string;
   workspaces: Workspace[];
-}
-
-export interface WorktreesResponse {
-  workspaceId: string;
-  workspaceName: string;
-  workspacePath: string;
-  worktrees: GitWorktreeInfo[];
 }
 
 export interface WorkSessionProgress {
@@ -98,6 +78,8 @@ export interface WorkSessionProgress {
   };
 }
 
+export type SessionCreationReason = 'start' | 'retry';
+
 export interface WorkSession {
   id: string;
   workspaceId: string;
@@ -107,14 +89,11 @@ export interface WorkSession {
   provider: string;
   model: string;
   autoApprove: boolean;
-  executionContext?: ExecutionContext;
-  selectedWorktreePath?: string;
-  useWorktree?: boolean;
   adaptiveConcurrency?: boolean;
   batchConcurrency?: number;
   batchMinConcurrency?: number;
-  worktreePath?: string;
-  worktreeBranch?: string;
+  worktreePath: string;
+  worktreeBranch: string;
   creationReason?: SessionCreationReason;
   sourceSessionId?: string;
   source?: 'user' | 'observer';
@@ -272,11 +251,6 @@ export async function fetchWorkspaces(): Promise<WorkspacesResponse> {
   return readJson(await fetch(`${API_BASE}/workspaces`));
 }
 
-export async function fetchWorktrees(workspaceId?: string): Promise<WorktreesResponse> {
-  const query = workspaceId ? `?workspaceId=${encodeURIComponent(workspaceId)}` : '';
-  return readJson(await fetch(`${API_BASE}/worktrees${query}`));
-}
-
 export async function fetchUiPreferences(): Promise<{ preferences: UiPreferences }> {
   return readJson(await fetch(`${API_BASE}/ui/preferences`));
 }
@@ -313,11 +287,8 @@ export async function startWork(payload: {
   workspaceId: string;
   prompt: string;
   provider: string;
-  model?: string;
+  model: string;
   autoApprove: boolean;
-  executionContext?: ExecutionContext;
-  selectedWorktreePath?: string;
-  useWorktree?: boolean;
   adaptiveConcurrency?: boolean;
   batchConcurrency?: number;
   batchMinConcurrency?: number;
@@ -349,18 +320,11 @@ export async function cancelWork(id: string): Promise<{ ok: boolean }> {
   return readJson(res);
 }
 
-export async function retryWork(
-  id: string,
-  payload?: { followUp?: string; followUpParts?: ChatContentPart[] },
-): Promise<{ id: string; sourceId: string }> {
+export async function retryWork(id: string): Promise<{ id: string; sourceId: string }> {
   const res = await fetch(`${API_BASE}/work/retry`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      id,
-      followUp: payload?.followUp,
-      followUpParts: payload?.followUpParts,
-    }),
+    body: JSON.stringify({ id }),
   });
   return readJson(res);
 }
@@ -370,18 +334,6 @@ export async function sendChatMessage(
   payload: { message: string; messageParts?: ChatContentPart[] },
 ): Promise<{ ok: boolean; messages: ChatMessage[] }> {
   const res = await fetch(`${API_BASE}/work/chat/send`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ id, message: payload.message, messageParts: payload.messageParts }),
-  });
-  return readJson(res);
-}
-
-export async function sendChatMessageStream(
-  id: string,
-  payload: { message: string; messageParts?: ChatContentPart[] },
-): Promise<{ ok: boolean; streamId: string; sessionId: string }> {
-  const res = await fetch(`${API_BASE}/work/chat/send-stream`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ id, message: payload.message, messageParts: payload.messageParts }),

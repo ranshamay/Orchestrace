@@ -29,7 +29,7 @@ A JSON-serializable directed acyclic graph where each node is a task with:
 - **Model config** — per-task provider/model/reasoning level override
 - **Validation** — shell commands and custom validators to gate completion
 - **Retry policy** — max retries + delay for failed validations
-- **Isolation flag** — whether to run in a separate git worktree
+- **Isolation execution** — runs execute in dedicated native git worktrees
 
 ### Execution Model
 
@@ -72,7 +72,7 @@ A JSON-serializable directed acyclic graph where each node is a task with:
 2. **Validation-driven** — Every task can have shell command gates. If `pnpm tsc --noEmit` fails, the task fails and retries with error context.
 3. **Dependency-aware** — Task B receives Task A's output as context automatically. The scheduler handles ordering.
 4. **Parallel by default** — Independent tasks run concurrently (configurable `maxParallel`). Dependent tasks wait.
-5. **Isolation for safety** — Tasks marked `isolated: true` get their own git worktree branch, merged back on success.
+5. **Isolation for safety** — Runs execute in dedicated git worktrees, merged back on success when configured.
 
 ---
 
@@ -98,8 +98,7 @@ orchestrace/
 │   │   └── types.ts      LlmAdapter interface, LlmRequest, LlmResult
 │   │
 │   ├── sandbox/        @orchestrace/sandbox
-│   │   ├── worktree.ts   Git worktree create/list/merge/cleanup
-│   │   └── container.ts  Docker container create/exec/copy/cleanup
+│   │   └── worktree.ts   Native git worktree create/list/merge/cleanup helpers
 │   │
 │   └── cli/            @orchestrace/cli
 │       └── index.ts      CLI entry point: `orchestrace run <plan.json>`
@@ -147,7 +146,7 @@ plan.json → CLI parses graph
 | **LLM Adapter** | ✓ | PiAiAdapter using `completeSimple()`. Supports reasoning levels. Auto-reads API keys from env. |
 | **LlmAdapter interface** | ✓ | `complete(request) → Promise<LlmResult>` — swappable for any provider. |
 | **Git worktrees** | ✓ | Create/list/merge/cleanup. Branch naming: `orchestrace/<taskId>`. |
-| **Docker containers** | ✓ | Create/exec/copy-to/copy-from/cleanup. Default: `node:22-slim`. |
+| **Runtime helpers** | ✓ | Native local runtime helper primitives. |
 | **CLI** | ✓ | `orchestrace run <plan.json>` with event logging and token usage summary. |
 | **Generalized flow** | ✓ | Mandatory plan → persist → approval → implement → verify loop per task. |
 | **Build pipeline** | ✓ | pnpm workspaces + Turbo. All 4 packages compile clean. |
@@ -160,7 +159,7 @@ plan.json → CLI parses graph
 | **Agent tools** | P0 | File read/write, terminal exec, git operations — the actual capabilities the LLM needs |
 | **Tool-use loop** | P0 | Convert LLM adapter from single-shot `completeSimple` to multi-turn tool-use with pi-ai |
 | **Planner agent** | P1 | Expand from per-task deep planning to full multi-task graph generation |
-| **Worktree integration** | P1 | Wire `isolated: true` tasks to actually use git worktrees in the scheduler |
+| **Worktree integration hardening** | P1 | Continue hardening scheduler/runtime behavior around native git worktree execution |
 | **Error context in retry** | P1 | Feed validation errors back into the retry prompt |
 | **AbortController support** | P2 | Wire `config.signal` to cancel in-flight LLM calls and child processes |
 | **Streaming output** | P2 | Use pi-ai `stream()` instead of `completeSimple()` for real-time output |
@@ -217,13 +216,13 @@ This uses pi-ai's `complete()` with `Tool[]` definitions. The LLM decides which 
 Tools execute in the task's working directory:
 - Normal tasks: `cwd` from config
 - Isolated tasks: worktree path
-- Container tasks: inside the Docker container
+- Runtime tasks: inside the native local worktree runtime
 
 ### Phase 2: Worktree Integration & Error Context (P1)
 
 #### 2.1 Wire Worktrees to Scheduler
 
-When a task has `isolated: true`:
+For native git worktree-backed execution:
 1. Before launch: `createWorktree(repoRoot, taskId)`
 2. Set tool execution `cwd` to worktree path
 3. On success: `mergeWorktree(handle, targetBranch)`
@@ -274,7 +273,7 @@ Switch from `completeSimple()` to `stream()` for real-time output:
 Wire `config.signal` through the entire chain:
 - Cancel in-flight LLM API calls
 - Kill running validation child processes
-- Clean up worktrees/containers on abort
+- Clean up worktrees on abort
 - CLI handles Ctrl+C gracefully
 
 #### 3.3 Remote Execution via SSH/EC2
@@ -318,7 +317,7 @@ Extend `@orchestrace/sandbox` with SSH-based execution:
 | Build | pnpm workspaces, Turborepo |
 | Test | Vitest 2.1.9 |
 | Lint | ESLint flat config |
-| Isolation | Git worktrees (local), Docker (cloud) |
+| Isolation | Native git worktrees (local) |
 | Package structure | Monorepo with 4 packages |
 
 ## Supported LLM Providers (via pi-ai)

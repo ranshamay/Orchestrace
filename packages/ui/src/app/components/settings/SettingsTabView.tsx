@@ -10,7 +10,6 @@ import {
   startGithubDeviceAuth,
   type GithubDeviceAuthSession,
   type ProviderInfo,
-  type GitWorktreeInfo,
   type Workspace,
   fetchObserverStatus,
   fetchObserverFindings,
@@ -49,11 +48,6 @@ type Props = {
   defaultModel: string;
   setDefaultProvider: (next: string) => void;
   setDefaultModel: (next: string) => void;
-  executionContext: 'workspace' | 'git-worktree';
-  setExecutionContext: (next: 'workspace' | 'git-worktree') => void;
-  selectedWorktreePath: string;
-  setSelectedWorktreePath: (next: string) => void;
-  availableWorktrees: GitWorktreeInfo[];
   observerShowFindings: boolean;
   setObserverShowFindings: (next: boolean) => void;
   onSettingsSaveStatus: (state: Exclude<SettingsSaveToastState, 'idle'>, message: string) => void;
@@ -68,11 +62,6 @@ export function SettingsTabView({
   defaultModel,
   setDefaultProvider,
   setDefaultModel,
-  executionContext,
-  setExecutionContext,
-  selectedWorktreePath,
-  setSelectedWorktreePath,
-  availableWorktrees,
   observerShowFindings,
   setObserverShowFindings,
   onSettingsSaveStatus,
@@ -503,41 +492,8 @@ export function SettingsTabView({
 
       <div className="mt-6 rounded-lg border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-700 dark:bg-slate-900">
         <h3 className="mb-3 text-xs font-bold uppercase tracking-widest text-slate-500 dark:text-slate-400">Execution</h3>
-        <div className="space-y-2">
-          <label className="flex flex-col gap-1 text-sm text-slate-700 dark:text-slate-200">
-            <span className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">Execution context</span>
-            <select
-              className="rounded border border-slate-200 px-2 py-1.5 text-sm dark:border-slate-700 dark:bg-slate-900"
-              value={executionContext}
-              onChange={(event) => setExecutionContext(event.target.value as 'workspace' | 'git-worktree')}
-            >
-              <option value="workspace">Workspace</option>
-              <option value="git-worktree">Git worktree</option>
-            </select>
-          </label>
-
-          {executionContext === 'git-worktree' && (
-            <label className="flex flex-col gap-1 text-sm text-slate-700 dark:text-slate-200">
-              <span className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">Git worktree path</span>
-              <select
-                className="rounded border border-slate-200 px-2 py-1.5 text-sm dark:border-slate-700 dark:bg-slate-900"
-                value={selectedWorktreePath}
-                onChange={(event) => setSelectedWorktreePath(event.target.value)}
-              >
-                <option value="">Auto-select first available</option>
-                {availableWorktrees.map((entry) => (
-                  <option key={entry.path} value={entry.path}>
-                    {entry.branch ? `${entry.branch} - ${entry.path}` : entry.path}
-                  </option>
-                ))}
-              </select>
-              {availableWorktrees.length === 0 && (
-                <span className="text-xs text-amber-700 dark:text-amber-300">
-                  No secondary git worktrees found. Create one with git worktree add.
-                </span>
-              )}
-            </label>
-          )}
+        <div className="text-sm text-slate-700 dark:text-slate-200">
+          Runs execute in a dedicated native git worktree.
         </div>
       </div>
 

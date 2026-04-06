@@ -32,7 +32,6 @@ export type {
   // Value types
   SessionConfig,
   WorkState,
-  ExecutionContext,
   SessionCreationReason,
   LlmSessionState,
   SessionLlmStatus,

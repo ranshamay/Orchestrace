@@ -4,7 +4,7 @@ import {
   cancelWork,
   deleteWork,
   fetchWorkAgent,
-  sendChatMessageStream,
+  sendChatMessage,
   startWork,
 } from '../../lib/api';
 import type { ComposerImageAttachment } from '../types';
@@ -27,9 +27,6 @@ export function useSessionActions(params: SessionActionsParams) {
     workProvider,
     workModel,
     autoApprove,
-    executionContext,
-    selectedWorktreePath,
-    useWorktree,
     adaptiveConcurrency,
     batchConcurrency,
     batchMinConcurrency,
@@ -45,71 +42,10 @@ export function useSessionActions(params: SessionActionsParams) {
 
   const hasComposerContent = composerText.trim().length > 0 || composerImages.length > 0;
 
-  const continueSelectedSession = useCallback(async (sessionId: string) => {
-    const payload = composePrompt(composerText, composerImages);
-    const contentParts = toComposerContentParts(composerText, composerImages);
-    const startedAt = new Date().toISOString();
-
-    setSessions(sessions.map((session) => {
-      if (session.id !== sessionId) {
-        return session;
-      }
-
-      return {
-        ...session,
-        status: 'running',
-        error: undefined,
-        llmStatus: {
-          state: 'analyzing',
-          label: 'Analyzing',
-          detail: 'Processing follow-up prompt.',
-          updatedAt: startedAt,
-        },
-      };
-    }));
-
-    setChatMessages([
-      ...chatMessages,
-      {
-        role: 'user',
-        content: payload.trim() || '(empty message)',
-        contentParts: composerImages.length > 0 ? contentParts : undefined,
-        time: startedAt,
-      },
-    ]);
-
-    await sendChatMessageStream(sessionId, {
-      message: payload,
-      messageParts: composerImages.length > 0 ? contentParts : undefined,
-    });
-
-    await refreshSessionsOnly({ setSessions });
-    const agentState = await fetchWorkAgent(sessionId);
-    setChatMessages(agentState.messages);
-    setTodos(agentState.todos);
-    setComposerText('');
-    setComposerImages([]);
-  }, [
-    chatMessages,
-    composerImages,
-    composerText,
-    setChatMessages,
-    setComposerImages,
-    setComposerText,
-    setSessions,
-    setTodos,
-    sessions,
-  ]);
-
-  const handleRun = useCallback(async () => {
-    if (!hasComposerContent || !workProvider || !workWorkspaceId) return;
+  const handleStartFromComposer = useCallback(async () => {
+    if (!hasComposerContent || !workProvider || !workModel || !workWorkspaceId) return;
     setErrorMessage('');
     try {
-      if (selectedSessionId) {
-        await continueSelectedSession(selectedSessionId);
-        return;
-      }
-
       const payload = composePrompt(composerText, composerImages);
       const runPrompt = selectedSession ? composeRunPromptWithContext(selectedSession.prompt, payload) : payload;
       const contentParts = toComposerContentParts(composerText, composerImages);
@@ -117,11 +53,8 @@ export function useSessionActions(params: SessionActionsParams) {
         workspaceId: workWorkspaceId,
         prompt: runPrompt,
         provider: workProvider,
-        ...(workModel ? { model: workModel } : {}),
+        model: workModel,
         autoApprove,
-        executionContext,
-        selectedWorktreePath: selectedWorktreePath || undefined,
-        useWorktree,
         adaptiveConcurrency,
         batchConcurrency,
         batchMinConcurrency,
@@ -141,21 +74,53 @@ export function useSessionActions(params: SessionActionsParams) {
     composerImages,
     composerText,
     adaptiveConcurrency,
-    executionContext,
-    continueSelectedSession,
     hasComposerContent,
     selectedSession,
-    selectedSessionId,
     setComposerImages,
     setComposerText,
     setErrorMessage,
     setSelectedSessionId,
     setSessions,
-    selectedWorktreePath,
-    useWorktree,
     workModel,
     workProvider,
     workWorkspaceId,
+  ]);
+
+  const handleSendChat = useCallback(async () => {
+    if (!hasComposerContent) return;
+    if (!selectedSessionId) {
+      await handleStartFromComposer();
+      return;
+    }
+    setErrorMessage('');
+    try {
+      const payload = composePrompt(composerText, composerImages);
+      const contentParts = toComposerContentParts(composerText, composerImages);
+      await sendChatMessage(selectedSessionId, {
+        message: payload,
+        messageParts: composerImages.length > 0 ? contentParts : undefined,
+      });
+      await refreshSessionsOnly({ setSessions });
+      const agentState = await fetchWorkAgent(selectedSessionId);
+      setChatMessages(agentState.messages);
+      setTodos(agentState.todos);
+      setComposerText('');
+      setComposerImages([]);
+    } catch (error) {
+      setErrorMessage(toErrorMessage(error));
+    }
+  }, [
+    composerImages,
+    composerText,
+    hasComposerContent,
+    handleStartFromComposer,
+    selectedSessionId,
+    setChatMessages,
+    setComposerImages,
+    setComposerText,
+    setErrorMessage,
+    setSessions,
+    setTodos,
   ]);
 
   const handleDelete = useCallback(async (targetSessionId?: string) => {
@@ -258,7 +223,8 @@ export function useSessionActions(params: SessionActionsParams) {
 
   return {
     hasComposerContent,
-    handleRun,
+    handleStartFromComposer,
+    handleSendChat,
     handleDelete,
     handleStop,
     handleRetry,
