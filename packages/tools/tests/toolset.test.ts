@@ -695,6 +695,14 @@ describe('subagent prompt enrichment', () => {
           {
             nodeId: 'n1',
             prompt: 'Analyze src/file.ts and summarize its exported symbols.',
+            reasoning: 'high',
+            contextPacket: {
+              objective: 'Document exported symbols and include confidence notes.',
+              relevantContext: ['Used for integration tests', 'Output consumed by CI summaries'],
+              requiredOutputSchema: '{ symbols: string[], notes: string[] }',
+              evidenceRequirements: ['Cite src/file.ts lines'],
+              boundaries: { writePolicy: 'none' },
+            },
           },
         ],
       },
@@ -733,9 +741,39 @@ describe('subagent prompt enrichment', () => {
       name: 'subagent_spawn_batch',
       arguments: {
         agents: [
-          { nodeId: 'n1', prompt: 'Inspect src/file.ts' },
-          { nodeId: 'n2', prompt: 'Inspect src/file.ts' },
-          { nodeId: 'n3', prompt: 'Inspect src/file.ts' },
+          {
+            nodeId: 'n1',
+            prompt: 'Inspect src/file.ts for exports and test impact.',
+            reasoning: 'high',
+            contextPacket: {
+              objective: 'Produce test-impact notes.',
+              relevantContext: ['Used by runtime entrypoint', 'Used by tests'],
+              requiredOutputSchema: '{ findings: string[] }',
+              evidenceRequirements: ['Cite file snippets'],
+            },
+          },
+          {
+            nodeId: 'n2',
+            prompt: 'Inspect src/file.ts for exports and test impact.',
+            reasoning: 'high',
+            contextPacket: {
+              objective: 'Produce test-impact notes.',
+              relevantContext: ['Used by runtime entrypoint', 'Used by tests'],
+              requiredOutputSchema: '{ findings: string[] }',
+              evidenceRequirements: ['Cite file snippets'],
+            },
+          },
+          {
+            nodeId: 'n3',
+            prompt: 'Inspect src/file.ts for exports and test impact.',
+            reasoning: 'high',
+            contextPacket: {
+              objective: 'Produce test-impact notes.',
+              relevantContext: ['Used by runtime entrypoint', 'Used by tests'],
+              requiredOutputSchema: '{ findings: string[] }',
+              evidenceRequirements: ['Cite file snippets'],
+            },
+          },
         ],
         concurrency: 4,
         adaptiveConcurrency: true,
@@ -782,5 +820,169 @@ describe('subagent prompt enrichment', () => {
     expect(parsed.runs.every((entry) => entry.promptChars > 0)).toBe(true);
     expect(parsed.runs.some((entry) => entry.nodeId === 'n2' && entry.status === 'failed')).toBe(true);
     expect(parsed.runs.some((entry) => entry.nodeId === 'n1' && entry.status === 'completed' && entry.usage?.input === 12)).toBe(true);
+  });
+});
+
+describe('subagent_spawn_batch guardrails', () => {
+  it('rejects low-complexity delegation', async () => {
+    const cwd = await makeWorkspace();
+    const runSubAgent = vi.fn(async () => ({ text: 'ok' }));
+
+    const toolset = createAgentToolset({
+      cwd,
+      phase: 'planning',
+      taskType: 'code',
+      graphId: 'g1',
+      taskId: 't1',
+      runSubAgent,
+    });
+
+    const result = await toolset.executeTool({
+      id: '1',
+      name: 'subagent_spawn_batch',
+      arguments: {
+        agents: [
+          {
+            nodeId: 'n1',
+            prompt: 'echo hello world',
+          },
+        ],
+      },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(runSubAgent).not.toHaveBeenCalled();
+
+    const parsed = JSON.parse(result.content) as {
+      reason: string;
+      message: string;
+      guidance: string;
+      score: number;
+      threshold: number;
+      requestedAgents: number;
+      allowedAgents: number;
+    };
+    expect(parsed.reason).toBe('low_complexity');
+    expect(parsed.message).toContain('complexity is too low');
+    expect(parsed.guidance).toContain('Handle this task directly');
+    expect(parsed.score).toBeLessThan(parsed.threshold);
+    expect(parsed.requestedAgents).toBe(1);
+    expect(parsed.allowedAgents).toBe(0);
+  });
+
+  it('rejects excessive agent count', async () => {
+    const cwd = await makeWorkspace();
+    const runSubAgent = vi.fn(async () => ({ text: 'ok' }));
+
+    const toolset = createAgentToolset({
+      cwd,
+      phase: 'planning',
+      taskType: 'code',
+      graphId: 'g1',
+      taskId: 't1',
+      runSubAgent,
+    });
+
+    const conciseAgent = {
+      prompt: 'Inspect quickly',
+      reasoning: 'low' as const,
+    };
+
+    const result = await toolset.executeTool({
+      id: '1',
+      name: 'subagent_spawn_batch',
+      arguments: {
+        agents: [
+          { nodeId: 'n1', ...conciseAgent },
+          { nodeId: 'n2', ...conciseAgent },
+          { nodeId: 'n3', ...conciseAgent },
+        ],
+      },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(runSubAgent).not.toHaveBeenCalled();
+
+    const parsed = JSON.parse(result.content) as {
+      reason: string;
+      message: string;
+      guidance: string;
+      requestedAgents: number;
+      allowedAgents: number;
+    };
+    expect(parsed.reason).toBe('too_many_agents');
+    expect(parsed.message).toContain('requested agent count exceeds complexity-adjusted limit');
+    expect(parsed.guidance).toContain('Reduce batch size');
+    expect(parsed.requestedAgents).toBe(3);
+    expect(parsed.allowedAgents).toBe(2);
+  });
+
+  it('allows sufficiently complex request', async () => {
+    const cwd = await makeWorkspace();
+    const runSubAgent = vi.fn(async (request: { nodeId?: string }) => ({
+      text: `ok:${request.nodeId ?? 'none'}`,
+      usage: { input: 10, output: 5, cost: 0.01 },
+    }));
+
+    const toolset = createAgentToolset({
+      cwd,
+      phase: 'planning',
+      taskType: 'code',
+      graphId: 'g1',
+      taskId: 't1',
+      runSubAgent,
+    });
+
+    const richAgent = {
+      prompt: 'Analyze src/file.ts and produce a dependency-impact report for downstream modules and tests.',
+      reasoning: 'high' as const,
+      contextPacket: {
+        objective: 'Produce dependency-impact report and prioritized risks.',
+        relevantContext: ['Used by CLI bootstrap', 'Impacts test fixtures'],
+        requiredOutputSchema: '{ risks: string[], changes: string[] }',
+        evidenceRequirements: ['Cite src/file.ts snippets'],
+        boundaries: { writePolicy: 'none' as const },
+      },
+    };
+
+    const result = await toolset.executeTool({
+      id: '1',
+      name: 'subagent_spawn_batch',
+      arguments: {
+        agents: [
+          { nodeId: 'n1', ...richAgent },
+          { nodeId: 'n2', ...richAgent },
+          { nodeId: 'n3', ...richAgent },
+        ],
+      },
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(runSubAgent).toHaveBeenCalledTimes(3);
+
+    const parsed = JSON.parse(result.content) as {
+      total: number;
+      completed: number;
+      failed: number;
+      runs: Array<{ nodeId?: string; status: 'completed' | 'failed' }>;
+      decomposition: {
+        totalPromptChars: number;
+        averagePromptChars: number;
+        maxPromptChars: number;
+        promptSoftLimitChars: number;
+        oversizedTasks: string[];
+      };
+    };
+
+    expect(parsed.total).toBe(3);
+    expect(parsed.completed).toBe(3);
+    expect(parsed.failed).toBe(0);
+    expect(parsed.runs).toHaveLength(3);
+    expect(parsed.runs.every((entry) => entry.status === 'completed')).toBe(true);
+    expect(parsed.decomposition.totalPromptChars).toBeGreaterThan(0);
+    expect(parsed.decomposition.averagePromptChars).toBeGreaterThan(0);
+    expect(parsed.decomposition.maxPromptChars).toBeGreaterThanOrEqual(parsed.decomposition.averagePromptChars);
+    expect(parsed.decomposition.promptSoftLimitChars).toBeGreaterThan(0);
+    expect(Array.isArray(parsed.decomposition.oversizedTasks)).toBe(true);
   });
 });
