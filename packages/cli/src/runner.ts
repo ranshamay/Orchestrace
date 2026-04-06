@@ -11,10 +11,12 @@
  * Exit codes: 0 = success, 1 = failure, 130 = cancelled
  */
 
+import { execFile, type ExecFileException } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
-import { orchestrate, PromptSectionName, renderPromptSections } from '@orchestrace/core';
-import type { DagEvent, TaskGraph } from '@orchestrace/core';
+import { promisify } from 'node:util';
+import { orchestrate, PromptSectionName, renderPromptSections, type TaskRouteCategory } from '@orchestrace/core';
+import type { DagEvent, TaskGraph, TaskOutput } from '@orchestrace/core';
 import { PiAiAdapter, ProviderAuthManager } from '@orchestrace/provider';
 import {
   DEFAULT_AGENT_TOOL_POLICY_VERSION,
@@ -31,6 +33,7 @@ import {
   shouldEmitLlmStatus,
   type LlmStatusEmissionState,
 } from './ui-server/llm-status-emission.js';
+import { extractShellCommand, resolveTaskRoute } from './task-routing.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -45,6 +48,7 @@ const TOOL_EVENT_PREVIEW_MAX_CHARS = resolvePositiveIntEnv(
   32_000,
 );
 const TRACE_LOG_STREAM_DELTAS = resolveBooleanEnv(process.env.ORCHESTRACE_TRACE_LOG_STREAM_DELTAS, true);
+const execFileAsync = promisify(execFile);
 
 // ---------------------------------------------------------------------------
 // Main
@@ -117,8 +121,7 @@ async function main(): Promise<void> {
   const agentGraph: SessionAgentGraphNode[] = [];
   const pendingNodeIds = new Map<string, string[]>();
 
-  // Build single-task graph
-  const graph = buildSingleTaskGraph(sessionId, config.prompt);
+  const route = resolveTaskRoute(config.prompt, process.env.ORCHESTRACE_TASK_ROUTE).result;
 
   // Helper to emit events
   async function emit(event: SessionEventInput): Promise<void> {
@@ -129,23 +132,42 @@ async function main(): Promise<void> {
     }
   }
 
-  try {
-    const outputs = await orchestrate(graph, {
-      llm,
-      cwd: config.workspacePath,
-      planOutputDir: join(config.workspacePath, '.orchestrace', 'plans'),
-      promptVersion: process.env.ORCHESTRACE_PROMPT_VERSION,
-      policyVersion: process.env.ORCHESTRACE_POLICY_VERSION ?? DEFAULT_AGENT_TOOL_POLICY_VERSION,
-      defaultModel: { provider: config.provider, model: config.model },
-      planningSystemPrompt: buildSystemPrompt(config, 'planning'),
-      implementationSystemPrompt: buildSystemPrompt(config, 'implementation'),
-      maxParallel: 1,
-      requirePlanApproval: !config.autoApprove,
-      onPlanApproval: async () => config.autoApprove,
-      signal: controller.signal,
-      resolveApiKey: async (providerId) => authManager.resolveApiKey(providerId),
+  void emit({
+    time: iso(),
+    type: 'session:dag-event',
+    payload: {
+      event: {
+        time: iso(),
+        runId: sessionId,
+        type: 'task:routing',
+        taskId: 'task',
+        message: `Route selected: ${route.category} (${route.strategy}, source=${route.source}, confidence=${route.confidence.toFixed(2)})`,
+      },
+    },
+  });
 
-      createToolset: ({ phase, task, graphId, provider: activeProvider, model: activeModel, reasoning }) => createAgentToolset({
+  // Build single-task graph (route-aware)
+  const graph = buildSingleTaskGraph(sessionId, config.prompt, route.category);
+
+  try {
+    const outputs = route.category === 'shell_command'
+      ? await runShellCommandRoute(config.prompt, config.workspacePath)
+      : await orchestrate(graph, {
+        llm,
+        cwd: config.workspacePath,
+        planOutputDir: join(config.workspacePath, '.orchestrace', 'plans'),
+        promptVersion: process.env.ORCHESTRACE_PROMPT_VERSION,
+        policyVersion: process.env.ORCHESTRACE_POLICY_VERSION ?? DEFAULT_AGENT_TOOL_POLICY_VERSION,
+        defaultModel: { provider: config.provider, model: config.model },
+        planningSystemPrompt: buildSystemPrompt(config, 'planning'),
+        implementationSystemPrompt: buildSystemPrompt(config, 'implementation'),
+        maxParallel: 1,
+        requirePlanApproval: !config.autoApprove,
+        onPlanApproval: async () => config.autoApprove,
+        signal: controller.signal,
+        resolveApiKey: async (providerId) => authManager.resolveApiKey(providerId),
+
+        createToolset: ({ phase, task, graphId, provider: activeProvider, model: activeModel, reasoning }) => createAgentToolset({
         cwd: config.workspacePath,
         phase,
         taskType: task.type,
@@ -745,11 +767,13 @@ function toUiEvent(runId: string, event: DagEvent, t: string): { time: string; r
   }
 }
 
-function buildSingleTaskGraph(id: string, prompt: string): TaskGraph {
+export function buildSingleTaskGraph(id: string, prompt: string, routeCategory: TaskRouteCategory = 'code_change'): TaskGraph {
   const raw = process.env.ORCHESTRACE_VERIFY_COMMANDS;
   const commands = raw
     ? raw.split(';').map((s) => s.trim()).filter(Boolean)
     : ['pnpm typecheck', 'pnpm test'];
+  const nodeType = routeCategory === 'refactor' ? 'refactor' : 'code';
+  const validationCommands = routeCategory === 'investigation' ? [] : commands;
 
   return {
     id: `ui-${id}`,
@@ -757,12 +781,57 @@ function buildSingleTaskGraph(id: string, prompt: string): TaskGraph {
     nodes: [{
       id: 'task',
       name: 'Execute UI prompt',
-      type: 'code',
+      type: nodeType,
       prompt,
       dependencies: [],
-      validation: { commands, maxRetries: 2, retryDelayMs: 0 },
+      validation: { commands: validationCommands, maxRetries: 2, retryDelayMs: 0 },
+      meta: { routeCategory },
     }],
   };
+}
+
+async function runShellCommandRoute(prompt: string, cwd: string): Promise<Map<string, TaskOutput>> {
+  const command = extractShellCommand(prompt);
+  const startedAt = Date.now();
+
+  if (!command) {
+    return new Map([
+      ['task', {
+        taskId: 'task',
+        status: 'failed',
+        durationMs: Date.now() - startedAt,
+        retries: 0,
+        error: 'Route shell_command selected, but no executable command was found in the prompt.',
+      }],
+    ]);
+  }
+
+  try {
+    const { stdout, stderr } = await execFileAsync('sh', ['-lc', command], { cwd });
+    const text = `${stdout ?? ''}${stderr ?? ''}`.trim();
+    return new Map([
+      ['task', {
+        taskId: 'task',
+        status: 'completed',
+        response: text || `Command executed: ${command}`,
+        durationMs: Date.now() - startedAt,
+        retries: 0,
+      }],
+    ]);
+  } catch (error) {
+    const err = error as ExecFileException;
+    const details = `${err.stdout ?? ''}${err.stderr ?? ''}`.trim();
+    return new Map([
+      ['task', {
+        taskId: 'task',
+        status: 'failed',
+        response: details || undefined,
+        durationMs: Date.now() - startedAt,
+        retries: 0,
+        error: err.message,
+      }],
+    ]);
+  }
 }
 
 function buildSystemPrompt(config: SessionConfig, phase: 'planning' | 'implementation'): string {
