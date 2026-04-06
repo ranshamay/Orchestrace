@@ -9,7 +9,6 @@ type Params = {
   workProvider: string;
   workModel: string;
   autoApprove: boolean;
-  useWorktree: boolean;
   adaptiveConcurrency: boolean;
   batchConcurrency: number;
   batchMinConcurrency: number;
@@ -18,7 +17,6 @@ type Params = {
   onChangeProvider: (provider: string) => void;
   onChangeModel: (model: string) => void;
   onChangeAutoApprove: (next: boolean) => void;
-  onChangeUseWorktree: (next: boolean) => void;
   onChangeAdaptiveConcurrency: (next: boolean) => void;
   onChangeBatchConcurrency: (next: number) => void;
   onChangeBatchMinConcurrency: (next: number) => void;
@@ -34,7 +32,6 @@ export function buildLlmModalProps(params: Params): LlmControlsModalProps {
     workProvider: params.workProvider,
     workModel: params.workModel,
     autoApprove: params.autoApprove,
-    useWorktree: params.useWorktree,
     adaptiveConcurrency: params.adaptiveConcurrency,
     batchConcurrency: params.batchConcurrency,
     batchMinConcurrency: params.batchMinConcurrency,
@@ -43,7 +40,6 @@ export function buildLlmModalProps(params: Params): LlmControlsModalProps {
     onChangeProvider: params.onChangeProvider,
     onChangeModel: params.onChangeModel,
     onChangeAutoApprove: params.onChangeAutoApprove,
-    onChangeUseWorktree: params.onChangeUseWorktree,
     onChangeAdaptiveConcurrency: params.onChangeAdaptiveConcurrency,
     onChangeBatchConcurrency: params.onChangeBatchConcurrency,
     onChangeBatchMinConcurrency: params.onChangeBatchMinConcurrency,

@@ -36,7 +36,7 @@ export default function App() {
     defaultLlmControls, setDefaultLlmControls,
     workProvider, setWorkProvider, workModel, setWorkModel,
     workWorkspaceId, setWorkWorkspaceId, autoApprove, setAutoApprove,
-    useWorktree, setUseWorktree, errorMessage, setErrorMessage,
+    errorMessage, setErrorMessage,
     adaptiveConcurrency, setAdaptiveConcurrency,
     bootstrapComplete,
     batchConcurrency, setBatchConcurrency,
@@ -59,7 +59,7 @@ export default function App() {
   const { setLlmControlsBySessionId, updateActiveLlmControls } = useLlmControls({
     selectedSessionId, selectedSession, defaultLlmControls, setDefaultLlmControls,
     workProvider, setWorkProvider, workModel, setWorkModel, workWorkspaceId, setWorkWorkspaceId,
-    autoApprove, setAutoApprove, useWorktree, setUseWorktree,
+    autoApprove, setAutoApprove,
     adaptiveConcurrency, setAdaptiveConcurrency,
     batchConcurrency, setBatchConcurrency,
     batchMinConcurrency, setBatchMinConcurrency,
@@ -73,7 +73,7 @@ export default function App() {
 
   const actions = useSessionActions({
     selectedSessionId, selectedSession, sessions, chatMessages, todos, composerText, composerImages,
-    workWorkspaceId, workProvider, workModel, autoApprove, useWorktree,
+    workWorkspaceId, workProvider, workModel, autoApprove,
     adaptiveConcurrency, batchConcurrency, batchMinConcurrency,
     setErrorMessage, setSessions, setSelectedSessionId, setChatMessages, setTodos,
     setComposerText, setComposerImages, setLlmControlsBySessionId,
@@ -87,14 +87,13 @@ export default function App() {
     }
 
     void updateUiPreferences({
-      useWorktree,
       adaptiveConcurrency,
       batchConcurrency,
       batchMinConcurrency,
     }).catch((error) => {
       setErrorMessage(error instanceof Error ? error.message : String(error));
     });
-  }, [adaptiveConcurrency, batchConcurrency, batchMinConcurrency, bootstrapComplete, setErrorMessage, useWorktree]);
+  }, [adaptiveConcurrency, batchConcurrency, batchMinConcurrency, bootstrapComplete, setErrorMessage]);
 
   const sessionSidebarProps = buildSessionSidebarProps({
     activeTab,
@@ -140,7 +139,6 @@ export default function App() {
     workProvider,
     workModel,
     autoApprove,
-    useWorktree,
     composerText,
     setComposerText,
     composerImages,
@@ -148,7 +146,6 @@ export default function App() {
     providers,
     providerStatuses,
     activeWorkspaceId,
-    onSetUseWorktree: (next) => updateActiveLlmControls({ useWorktree: next }),
   });
 
   const llmModalProps = buildLlmModalProps({
@@ -160,7 +157,6 @@ export default function App() {
     workProvider,
     workModel,
     autoApprove,
-    useWorktree,
     adaptiveConcurrency,
     batchConcurrency,
     batchMinConcurrency,
@@ -169,7 +165,6 @@ export default function App() {
     onChangeProvider: (provider) => updateActiveLlmControls({ provider, model: '' }),
     onChangeModel: (model) => updateActiveLlmControls({ model }),
     onChangeAutoApprove: (next) => updateActiveLlmControls({ autoApprove: next }),
-    onChangeUseWorktree: (next) => updateActiveLlmControls({ useWorktree: next }),
     onChangeAdaptiveConcurrency: (next) => updateActiveLlmControls({ adaptiveConcurrency: next }),
     onChangeBatchConcurrency: (next) => updateActiveLlmControls({ batchConcurrency: next }),
     onChangeBatchMinConcurrency: (next) => updateActiveLlmControls({ batchMinConcurrency: next }),

@@ -15,7 +15,6 @@ type Props = {
   workProvider: string;
   workModel: string;
   autoApprove: boolean;
-  useWorktree: boolean;
   composerText: string;
   setComposerText: (value: string) => void;
   composerImages: ComposerImageAttachment[];
@@ -38,7 +37,6 @@ export function ComposerPanel(props: Props) {
     workProvider,
     workModel,
     autoApprove,
-    useWorktree,
     composerText,
     setComposerText,
     composerImages,
@@ -57,7 +55,7 @@ export function ComposerPanel(props: Props) {
         <div className="truncate">Provider: <span className="font-mono">{workProvider || 'none'}</span></div>
         <div className="truncate">Model: <span className="font-mono">{workModel || 'none'}</span></div>
         <div>Auto-approve: <span className="font-mono">{autoApprove ? 'on' : 'off'}</span></div>
-        <div>Worktree: <span className="font-mono">{useWorktree ? 'on' : 'off'}</span></div>
+        <div>Worktree: <span className="font-mono">native</span></div>
       </div>
       {selectedSession && (
         <div className="mb-2 rounded border border-blue-200 bg-blue-50 px-2 py-1.5 text-[11px] text-blue-800 dark:border-blue-900/60 dark:bg-blue-950/40 dark:text-blue-200">

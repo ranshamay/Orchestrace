@@ -32,7 +32,6 @@ type Params = {
   workProvider: string;
   workModel: string;
   autoApprove: boolean;
-  useWorktree: boolean;
   composerText: string;
   setComposerText: (value: string) => void;
   composerImages: AppMainContentProps['composerImages'];
@@ -40,7 +39,6 @@ type Params = {
   providers: AppMainContentProps['providers'];
   providerStatuses: AppMainContentProps['providerStatuses'];
   activeWorkspaceId: string;
-  onSetUseWorktree: (next: boolean) => void;
 };
 
 export function buildMainContentProps(params: Params): AppMainContentProps {
@@ -75,7 +73,6 @@ export function buildMainContentProps(params: Params): AppMainContentProps {
     workProvider: params.workProvider,
     workModel: params.workModel,
     autoApprove: params.autoApprove,
-    useWorktree: params.useWorktree,
     composerText: params.composerText,
     setComposerText: params.setComposerText,
     composerImages: params.composerImages,
@@ -88,6 +85,5 @@ export function buildMainContentProps(params: Params): AppMainContentProps {
     providers: params.providers,
     providerStatuses: params.providerStatuses,
     activeWorkspaceId: params.activeWorkspaceId,
-    onSetUseWorktree: params.onSetUseWorktree,
   };
 }

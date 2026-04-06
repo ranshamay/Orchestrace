@@ -36,7 +36,6 @@ export type AppMainContentProps = {
   workProvider: string;
   workModel: string;
   autoApprove: boolean;
-  useWorktree: boolean;
   composerText: string;
   setComposerText: (value: string) => void;
   composerImages: ComposerImageAttachment[];
@@ -49,7 +48,6 @@ export type AppMainContentProps = {
   providers: ProviderInfo[];
   providerStatuses: Array<{ provider: string; source: string }>;
   activeWorkspaceId: string;
-  onSetUseWorktree: (next: boolean) => void;
 };
 
 export function AppMainContent(props: AppMainContentProps) {
@@ -60,8 +58,6 @@ export function AppMainContent(props: AppMainContentProps) {
         providerStatuses={props.providerStatuses}
         workspaces={props.workspaces}
         activeWorkspaceId={props.activeWorkspaceId}
-        useWorktree={props.useWorktree}
-        setUseWorktree={props.onSetUseWorktree}
       />
     );
   }
@@ -109,7 +105,6 @@ export function AppMainContent(props: AppMainContentProps) {
               workProvider={props.workProvider}
               workModel={props.workModel}
               autoApprove={props.autoApprove}
-              useWorktree={props.useWorktree}
               composerText={props.composerText}
               setComposerText={props.setComposerText}
               composerImages={props.composerImages}

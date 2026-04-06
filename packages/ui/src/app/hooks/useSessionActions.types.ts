@@ -21,7 +21,6 @@ export type SessionActionsParams = {
   workProvider: string;
   workModel: string;
   autoApprove: boolean;
-  useWorktree: boolean;
   adaptiveConcurrency: boolean;
   batchConcurrency: number;
   batchMinConcurrency: number;

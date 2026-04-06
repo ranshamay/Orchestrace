@@ -18,8 +18,6 @@ type Props = {
   providerStatuses: Array<{ provider: string; source: string }>;
   workspaces: Workspace[];
   activeWorkspaceId: string;
-  useWorktree: boolean;
-  setUseWorktree: (next: boolean) => void;
 };
 
 export function SettingsTabView({
@@ -27,8 +25,6 @@ export function SettingsTabView({
   providerStatuses,
   workspaces,
   activeWorkspaceId,
-  useWorktree,
-  setUseWorktree,
 }: Props) {
   const [githubOauthClientId, setGithubOauthClientId] = useState('');
   const [deviceAuthSessionId, setDeviceAuthSessionId] = useState('');
@@ -485,15 +481,9 @@ export function SettingsTabView({
 
       <div className="mt-6 rounded-lg border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-700 dark:bg-slate-900">
         <h3 className="mb-3 text-xs font-bold uppercase tracking-widest text-slate-500 dark:text-slate-400">Execution</h3>
-        <label className="flex items-center gap-2 text-sm text-slate-700 dark:text-slate-200">
-          <input
-            checked={useWorktree}
-            className="h-4 w-4"
-            onChange={(event) => setUseWorktree(event.target.checked)}
-            type="checkbox"
-          />
-          Create a dedicated git worktree for each new run
-        </label>
+        <div className="text-sm text-slate-700 dark:text-slate-200">
+          Runs execute in a dedicated native git worktree.
+        </div>
       </div>
     </div>
   );

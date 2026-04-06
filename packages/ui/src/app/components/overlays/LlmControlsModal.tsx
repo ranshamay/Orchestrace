@@ -9,7 +9,6 @@ export type LlmControlsModalProps = {
   workProvider: string;
   workModel: string;
   autoApprove: boolean;
-  useWorktree: boolean;
   adaptiveConcurrency: boolean;
   batchConcurrency: number;
   batchMinConcurrency: number;
@@ -18,7 +17,6 @@ export type LlmControlsModalProps = {
   onChangeProvider: (provider: string) => void;
   onChangeModel: (model: string) => void;
   onChangeAutoApprove: (next: boolean) => void;
-  onChangeUseWorktree: (next: boolean) => void;
   onChangeAdaptiveConcurrency: (next: boolean) => void;
   onChangeBatchConcurrency: (next: number) => void;
   onChangeBatchMinConcurrency: (next: number) => void;
@@ -34,7 +32,6 @@ export function LlmControlsModal(props: LlmControlsModalProps) {
     workProvider,
     workModel,
     autoApprove,
-    useWorktree,
     adaptiveConcurrency,
     batchConcurrency,
     batchMinConcurrency,
@@ -43,7 +40,6 @@ export function LlmControlsModal(props: LlmControlsModalProps) {
     onChangeProvider,
     onChangeModel,
     onChangeAutoApprove,
-    onChangeUseWorktree,
     onChangeAdaptiveConcurrency,
     onChangeBatchConcurrency,
     onChangeBatchMinConcurrency,
@@ -86,10 +82,9 @@ export function LlmControlsModal(props: LlmControlsModalProps) {
             Auto-approve
           </label>
 
-          <label className="md:col-span-2 flex items-center gap-2 rounded border border-slate-200 bg-white px-2 py-1.5 text-sm text-slate-600 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300">
-            <input checked={useWorktree} className="h-4 w-4" onChange={(event) => onChangeUseWorktree(event.target.checked)} type="checkbox" />
-            Use worktree for new runs
-          </label>
+          <div className="md:col-span-2 rounded border border-slate-200 bg-slate-50 px-2 py-1.5 text-sm text-slate-600 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-300">
+            Worktree mode: <span className="font-mono">native git worktree</span>
+          </div>
 
           <label className="md:col-span-2 flex items-center gap-2 rounded border border-slate-200 bg-white px-2 py-1.5 text-sm text-slate-600 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300">
             <input checked={adaptiveConcurrency} className="h-4 w-4" onChange={(event) => onChangeAdaptiveConcurrency(event.target.checked)} type="checkbox" />

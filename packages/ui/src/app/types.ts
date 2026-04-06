@@ -38,7 +38,6 @@ export type SessionLlmControls = {
   model: string;
   workspaceId: string;
   autoApprove: boolean;
-  useWorktree: boolean;
   adaptiveConcurrency: boolean;
   batchConcurrency: number;
   batchMinConcurrency: number;

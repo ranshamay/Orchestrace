@@ -186,7 +186,6 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     provider: string;
     model: string;
     autoApprove: boolean;
-    useWorktree?: boolean;
     adaptiveConcurrency?: boolean;
     batchConcurrency?: number;
     batchMinConcurrency?: number;
@@ -216,7 +215,6 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       : (prompt || summarizeChatContentParts(promptParts));
 
     const id = randomUUID();
-    const useWorktree = request.useWorktree ?? uiPreferences.useWorktree;
     const adaptiveConcurrency = request.adaptiveConcurrency ?? uiPreferences.adaptiveConcurrency;
     const batchConcurrency = normalizePositiveSetting(request.batchConcurrency, uiPreferences.batchConcurrency);
     const batchMinConcurrency = Math.min(
@@ -224,18 +222,16 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       normalizePositiveSetting(request.batchMinConcurrency, uiPreferences.batchMinConcurrency),
     );
 
-    let worktreeHandle: WorktreeHandle | undefined;
+    let worktreeHandle: WorktreeHandle;
     let executionPath = workspace.path;
-    if (useWorktree) {
-      try {
-        worktreeHandle = await createWorktree(workspace.path, `session-${id}`);
-        executionPath = worktreeHandle.path;
-      } catch (error) {
-        return {
-          error: `Failed to create worktree: ${toErrorMessage(error)}`,
-          statusCode: 500,
-        };
-      }
+    try {
+      worktreeHandle = await createWorktree(workspace.path, `session-${id}`);
+      executionPath = worktreeHandle.path;
+    } catch (error) {
+      return {
+        error: `Failed to create worktree: ${toErrorMessage(error)}`,
+        statusCode: 500,
+      };
     }
 
     const controller = new AbortController();
@@ -250,12 +246,11 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       provider: request.provider,
       model: request.model,
       autoApprove: request.autoApprove,
-      useWorktree,
       adaptiveConcurrency,
       batchConcurrency,
       batchMinConcurrency,
-      worktreePath: worktreeHandle?.path,
-      worktreeBranch: worktreeHandle?.branch,
+      worktreePath: worktreeHandle.path,
+      worktreeBranch: worktreeHandle.branch,
       createdAt,
       updatedAt: createdAt,
       status: 'running',
@@ -266,7 +261,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       events: [],
       agentGraph: [],
       controller,
-      cleanupWorktree: worktreeHandle ? () => worktreeHandle.cleanup() : undefined,
+      cleanupWorktree: () => worktreeHandle.cleanup(),
     };
 
     workSessions.set(id, session);
@@ -275,7 +270,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     uiStatePersistence.schedule();
     broadcastTodoUpdate(workStreamClients, id, sessionTodos.get(id) ?? []);
 
-    const graph = buildSingleTaskGraph(id, normalizedPrompt, useWorktree);
+    const graph = buildSingleTaskGraph(id, normalizedPrompt);
 
     void orchestrate(graph, {
       llm,
@@ -926,9 +921,6 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         const provider = asString(body.provider) || process.env.ORCHESTRACE_DEFAULT_PROVIDER || 'anthropic';
         const model = asString(body.model) || process.env.ORCHESTRACE_DEFAULT_MODEL || 'claude-sonnet-4-20250514';
         const autoApprove = Boolean(body.autoApprove);
-        const useWorktree = parseBooleanSetting(body.useWorktree)
-          ?? parseBooleanSetting(body.worktreeEnabled)
-          ?? parseBooleanSetting(body.enableWorktree);
         const adaptiveConcurrency = parseBooleanSetting(body.adaptiveConcurrency)
           ?? parseBooleanSetting(body.adaptiveToolConcurrency);
         const batchConcurrency = parsePositiveSetting(body.batchConcurrency)
@@ -942,7 +934,6 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           provider,
           model,
           autoApprove,
-          useWorktree,
           adaptiveConcurrency,
           batchConcurrency,
           batchMinConcurrency,
@@ -997,7 +988,6 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           provider: sourceSession.provider,
           model: sourceSession.model,
           autoApprove: sourceSession.autoApprove,
-          useWorktree: sourceSession.useWorktree,
           adaptiveConcurrency: sourceSession.adaptiveConcurrency,
           batchConcurrency: sourceSession.batchConcurrency,
           batchMinConcurrency: sourceSession.batchMinConcurrency,
@@ -1966,7 +1956,6 @@ function toPersistedSession(session: WorkSession): PersistedWorkSession {
     provider: session.provider,
     model: session.model,
     autoApprove: session.autoApprove,
-    useWorktree: session.useWorktree,
     adaptiveConcurrency: session.adaptiveConcurrency,
     batchConcurrency: session.batchConcurrency,
     batchMinConcurrency: session.batchMinConcurrency,
@@ -2001,7 +1990,6 @@ function hydratePersistedSession(session: PersistedWorkSession): WorkSession {
   return {
     ...session,
     promptParts: promptParts.length > 0 ? promptParts : undefined,
-    useWorktree: Boolean(session.useWorktree),
     adaptiveConcurrency: parseBooleanSetting(session.adaptiveConcurrency) ?? resolveAdaptiveConcurrencyDefault(),
     batchConcurrency: normalizePositiveSetting(session.batchConcurrency, resolveBatchConcurrencyDefault()),
     batchMinConcurrency: Math.min(
@@ -2409,7 +2397,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
 
-function buildSingleTaskGraph(id: string, prompt: string, isolated = false): TaskGraph {
+function buildSingleTaskGraph(id: string, prompt: string): TaskGraph {
   const verifyCommands = parseVerifyCommands();
 
   return {
@@ -2421,7 +2409,7 @@ function buildSingleTaskGraph(id: string, prompt: string, isolated = false): Tas
         name: 'Execute UI prompt',
         type: 'code',
         prompt,
-        isolated,
+        isolated: true,
         dependencies: [],
         validation: {
           commands: verifyCommands,
@@ -2535,17 +2523,10 @@ function parsePositiveInt(raw: string | undefined): number | undefined {
   return parsed;
 }
 
-function resolveUseWorktreeDefault(): boolean {
-  const raw = process.env.ORCHESTRACE_UI_USE_WORKTREE ?? process.env.ORCHESTRACE_USE_WORKTREE;
-  const parsed = parseBooleanSetting(raw);
-  return parsed ?? false;
-}
-
 function resolveUiPreferencesDefaults(): UiPreferences {
   const batchConcurrency = resolveBatchConcurrencyDefault();
   const batchMinConcurrency = Math.min(batchConcurrency, resolveBatchMinConcurrencyDefault());
   return {
-    useWorktree: resolveUseWorktreeDefault(),
     adaptiveConcurrency: resolveAdaptiveConcurrencyDefault(),
     batchConcurrency,
     batchMinConcurrency,
@@ -2564,7 +2545,6 @@ function normalizeUiPreferences(value: unknown, fallback: UiPreferences): UiPref
   );
 
   return {
-    useWorktree: parseBooleanSetting(value.useWorktree) ?? fallback.useWorktree,
     adaptiveConcurrency: parseBooleanSetting(value.adaptiveConcurrency) ?? fallback.adaptiveConcurrency,
     batchConcurrency,
     batchMinConcurrency,
@@ -3533,7 +3513,6 @@ function serializeWorkSession(session: WorkSession): Record<string, unknown> {
     provider: session.provider,
     model: session.model,
     autoApprove: session.autoApprove,
-    useWorktree: session.useWorktree,
     adaptiveConcurrency: session.adaptiveConcurrency,
     batchConcurrency: session.batchConcurrency,
     batchMinConcurrency: session.batchMinConcurrency,

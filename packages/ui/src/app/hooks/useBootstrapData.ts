@@ -34,7 +34,6 @@ export function useBootstrapData() {
     model: '',
     workspaceId: '',
     autoApprove: true,
-    useWorktree: false,
     adaptiveConcurrency: false,
     batchConcurrency: 8,
     batchMinConcurrency: 1,
@@ -44,7 +43,6 @@ export function useBootstrapData() {
   const [workModel, setWorkModel] = useState('');
   const [workWorkspaceId, setWorkWorkspaceId] = useState('');
   const [autoApprove, setAutoApprove] = useState(true);
-  const [useWorktree, setUseWorktree] = useState(false);
   const [adaptiveConcurrency, setAdaptiveConcurrency] = useState(false);
   const [batchConcurrency, setBatchConcurrency] = useState(8);
   const [batchMinConcurrency, setBatchMinConcurrency] = useState(1);
@@ -84,7 +82,6 @@ export function useBootstrapData() {
           model: providersState.defaults.model || '',
           workspaceId: defaultWorkspace,
           autoApprove: true,
-          useWorktree: preferencesResponse.preferences.useWorktree,
           adaptiveConcurrency: preferencesResponse.preferences.adaptiveConcurrency,
           batchConcurrency: preferencesResponse.preferences.batchConcurrency,
           batchMinConcurrency: preferencesResponse.preferences.batchMinConcurrency,
@@ -95,7 +92,6 @@ export function useBootstrapData() {
         setWorkModel(initialControls.model);
         setWorkWorkspaceId(initialControls.workspaceId);
         setAutoApprove(initialControls.autoApprove);
-        setUseWorktree(initialControls.useWorktree);
         setAdaptiveConcurrency(initialControls.adaptiveConcurrency);
         setBatchConcurrency(initialControls.batchConcurrency);
         setBatchMinConcurrency(initialControls.batchMinConcurrency);
@@ -130,8 +126,6 @@ export function useBootstrapData() {
     setWorkWorkspaceId,
     autoApprove,
     setAutoApprove,
-    useWorktree,
-    setUseWorktree,
     adaptiveConcurrency,
     setAdaptiveConcurrency,
     batchConcurrency,

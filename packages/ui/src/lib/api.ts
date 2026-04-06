@@ -34,7 +34,6 @@ export interface Workspace {
 }
 
 export interface UiPreferences {
-  useWorktree: boolean;
   adaptiveConcurrency: boolean;
   batchConcurrency: number;
   batchMinConcurrency: number;
@@ -54,7 +53,6 @@ export interface WorkSession {
   provider: string;
   model: string;
   autoApprove: boolean;
-  useWorktree?: boolean;
   adaptiveConcurrency?: boolean;
   batchConcurrency?: number;
   batchMinConcurrency?: number;
@@ -248,7 +246,6 @@ export async function startWork(payload: {
   provider: string;
   model: string;
   autoApprove: boolean;
-  useWorktree?: boolean;
   adaptiveConcurrency?: boolean;
   batchConcurrency?: number;
   batchMinConcurrency?: number;

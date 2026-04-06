@@ -46,7 +46,7 @@ export function buildSessionTraceExport(
   lines.push(`LLM status: ${llmStatus.label}${llmStatus.detail ? ` - ${llmStatus.detail}` : ''}`);
   lines.push(`Created: ${session.createdAt}`);
   lines.push(`Updated: ${session.updatedAt}`);
-  lines.push(`Worktree enabled: ${session.useWorktree ? 'yes' : 'no'}`);
+  lines.push('Worktree mode: native git worktree');
   if (session.worktreePath) {
     lines.push(`Worktree path: ${session.worktreePath}`);
   }

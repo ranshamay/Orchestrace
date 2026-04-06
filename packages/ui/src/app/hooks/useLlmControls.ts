@@ -15,8 +15,6 @@ type Params = {
   setWorkWorkspaceId: (value: string) => void;
   autoApprove: boolean;
   setAutoApprove: (value: boolean) => void;
-  useWorktree: boolean;
-  setUseWorktree: (value: boolean) => void;
   adaptiveConcurrency: boolean;
   setAdaptiveConcurrency: (value: boolean) => void;
   batchConcurrency: number;
@@ -39,8 +37,6 @@ export function useLlmControls(params: Params) {
     setWorkWorkspaceId,
     autoApprove,
     setAutoApprove,
-    useWorktree,
-    setUseWorktree,
     adaptiveConcurrency,
     setAdaptiveConcurrency,
     batchConcurrency,
@@ -56,7 +52,6 @@ export function useLlmControls(params: Params) {
     if (workModel !== controls.model) setWorkModel(controls.model);
     if (workWorkspaceId !== controls.workspaceId) setWorkWorkspaceId(controls.workspaceId);
     if (autoApprove !== controls.autoApprove) setAutoApprove(controls.autoApprove);
-    if (useWorktree !== controls.useWorktree) setUseWorktree(controls.useWorktree);
     if (adaptiveConcurrency !== controls.adaptiveConcurrency) setAdaptiveConcurrency(controls.adaptiveConcurrency);
     if (batchConcurrency !== controls.batchConcurrency) setBatchConcurrency(controls.batchConcurrency);
     if (batchMinConcurrency !== controls.batchMinConcurrency) setBatchMinConcurrency(controls.batchMinConcurrency);
@@ -69,11 +64,9 @@ export function useLlmControls(params: Params) {
     setAutoApprove,
     setBatchConcurrency,
     setBatchMinConcurrency,
-    setUseWorktree,
     setWorkModel,
     setWorkProvider,
     setWorkWorkspaceId,
-    useWorktree,
     workModel,
     workProvider,
     workWorkspaceId,
@@ -85,7 +78,6 @@ export function useLlmControls(params: Params) {
       model: patch.model ?? workModel,
       workspaceId: patch.workspaceId ?? workWorkspaceId,
       autoApprove: patch.autoApprove ?? autoApprove,
-      useWorktree: patch.useWorktree ?? useWorktree,
       adaptiveConcurrency: patch.adaptiveConcurrency ?? adaptiveConcurrency,
       batchConcurrency: patch.batchConcurrency ?? batchConcurrency,
       batchMinConcurrency: patch.batchMinConcurrency ?? batchMinConcurrency,
@@ -105,7 +97,6 @@ export function useLlmControls(params: Params) {
     batchMinConcurrency,
     selectedSessionId,
     setDefaultLlmControls,
-    useWorktree,
     workModel,
     workProvider,
     workWorkspaceId,
@@ -130,7 +121,6 @@ export function useLlmControls(params: Params) {
       model: selectedSession.model || defaultLlmControls.model,
       workspaceId: selectedSession.workspaceId || defaultLlmControls.workspaceId,
       autoApprove: selectedSession.autoApprove,
-      useWorktree: selectedSession.useWorktree ?? defaultLlmControls.useWorktree,
       adaptiveConcurrency: selectedSession.adaptiveConcurrency ?? defaultLlmControls.adaptiveConcurrency,
       batchConcurrency: selectedSession.batchConcurrency ?? defaultLlmControls.batchConcurrency,
       batchMinConcurrency: selectedSession.batchMinConcurrency ?? defaultLlmControls.batchMinConcurrency,

@@ -123,7 +123,6 @@ export interface WorkSession {
   provider: string;
   model: string;
   autoApprove: boolean;
-  useWorktree: boolean;
   adaptiveConcurrency: boolean;
   batchConcurrency: number;
   batchMinConcurrency: number;
@@ -152,7 +151,6 @@ export interface PersistedWorkSession {
   provider: string;
   model: string;
   autoApprove: boolean;
-  useWorktree?: boolean;
   adaptiveConcurrency?: boolean;
   batchConcurrency?: number;
   batchMinConcurrency?: number;
@@ -170,14 +168,12 @@ export interface PersistedWorkSession {
 }
 
 export interface UiPreferences {
-  useWorktree: boolean;
   adaptiveConcurrency: boolean;
   batchConcurrency: number;
   batchMinConcurrency: number;
 }
 
 export interface PersistedUiPreferences {
-  useWorktree?: boolean;
   adaptiveConcurrency?: boolean;
   batchConcurrency?: number;
   batchMinConcurrency?: number;
