@@ -5,7 +5,7 @@ import { GraphTabView } from './graph/GraphTabView';
 import { TimelinePanel } from './work/TimelinePanel';
 import { ComposerPanel } from './work/ComposerPanel';
 import { SettingsTabView } from './settings/SettingsTabView';
-import { LogsTabView } from './logs/LogsTabView';
+import { LogsTabView } from './work/LogsTabView';
 import { FloatingChatOverlay } from './layout/FloatingChatOverlay';
 
 export type AppMainContentProps = {
