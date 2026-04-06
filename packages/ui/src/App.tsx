@@ -64,7 +64,12 @@ export default function App() {
     batchConcurrency, setBatchConcurrency,
     batchMinConcurrency, setBatchMinConcurrency,
   });
-  const { currentModels } = useProviderModels(workProvider, workModel, setWorkModel);
+  const {
+    currentModels,
+    missingModelWarning,
+    confirmMissingModelSwitch,
+    dismissMissingModelWarning,
+  } = useProviderModels(workProvider, workModel, setWorkModel);
 
   const timelineItems = useMemo(() => buildTimelineItems(selectedSession, chatMessages), [chatMessages, selectedSession]);
   const latestTimelineKey = timelineItems[timelineItems.length - 1]?.key ?? '';
@@ -177,12 +182,23 @@ export default function App() {
     onChangeBatchMinConcurrency: (next) => updateActiveLlmControls({ batchMinConcurrency: next }),
   });
 
+  const warningMessage = missingModelWarning
+    ? `Model "${missingModelWarning.missingModel}" is not currently available for provider "${missingModelWarning.provider}".`
+    : '';
+  const warningActionLabel = missingModelWarning?.fallbackModel
+    ? `Switch to "${missingModelWarning.fallbackModel}"`
+    : '';
+
   return (
     <AppShell
       sessionSidebarProps={sessionSidebarProps}
       mainContentProps={mainContentProps}
       llmModalProps={llmModalProps}
       errorMessage={errorMessage}
+      warningMessage={warningMessage}
+      warningActionLabel={warningActionLabel}
+      onWarningConfirm={confirmMissingModelSwitch}
+      onWarningDismiss={dismissMissingModelWarning}
     />
   );
 }

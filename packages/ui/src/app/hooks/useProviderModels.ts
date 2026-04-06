@@ -1,5 +1,11 @@
-import { useEffect, useState, type Dispatch, type SetStateAction } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from 'react';
 import { fetchModels } from '../../lib/api';
+
+type MissingModelWarning = {
+  provider: string;
+  missingModel: string;
+  fallbackModel: string;
+};
 
 export function useProviderModels(
   workProvider: string,
@@ -7,6 +13,10 @@ export function useProviderModels(
   setWorkModel: Dispatch<SetStateAction<string>>,
 ) {
   const [providerModels, setProviderModels] = useState<Record<string, string[]>>({});
+  const [dismissedMissingKey, setDismissedMissingKey] = useState('');
+
+  const missingModelByProviderRef = useRef<Record<string, string>>({});
+  const confirmedFallbackByProviderRef = useRef<Record<string, string>>({});
 
   useEffect(() => {
     if (!workProvider) {
@@ -27,10 +37,8 @@ export function useProviderModels(
           [workProvider]: response.models,
         }));
 
-        if (response.models.length > 0) {
-          setWorkModel((current) => (current.length > 0 && response.models.includes(current)
-            ? current
-            : response.models[0]));
+        if (response.models.length > 0 && workModel.length === 0) {
+          setWorkModel(response.models[0]);
         }
       } catch {
         if (cancelled) {
@@ -49,26 +57,90 @@ export function useProviderModels(
     return () => {
       cancelled = true;
     };
-  }, [setWorkModel, workProvider]);
+  }, [setWorkModel, workModel.length, workProvider]);
+
+  const currentModels = useMemo(() => providerModels[workProvider] ?? [], [providerModels, workProvider]);
 
   useEffect(() => {
-    if (!workProvider) {
+    if (!workProvider || workModel.length === 0) {
       return;
     }
 
-    const models = providerModels[workProvider] ?? [];
-    if (models.length === 0) {
+    if (currentModels.includes(workModel)) {
+      const missingModel = missingModelByProviderRef.current[workProvider];
+      const confirmedFallback = confirmedFallbackByProviderRef.current[workProvider];
+
+      if (missingModel && confirmedFallback && workModel === confirmedFallback && currentModels.includes(missingModel)) {
+        setWorkModel(missingModel);
+        delete missingModelByProviderRef.current[workProvider];
+        delete confirmedFallbackByProviderRef.current[workProvider];
+      } else if (confirmedFallback && workModel !== confirmedFallback) {
+        delete missingModelByProviderRef.current[workProvider];
+        delete confirmedFallbackByProviderRef.current[workProvider];
+      }
+
       return;
     }
 
-    const hasSelectedModel = workModel.length > 0 && models.includes(workModel);
-    if (!hasSelectedModel) {
-      setWorkModel(models[0]);
+    missingModelByProviderRef.current[workProvider] = workModel;
+  }, [currentModels, setWorkModel, workModel, workProvider]);
+
+  const warningCandidate = useMemo<MissingModelWarning | null>(() => {
+    if (!workProvider || workModel.length === 0) {
+      return null;
     }
-  }, [providerModels, setWorkModel, workModel, workProvider]);
+
+    if (currentModels.length === 0 || currentModels.includes(workModel)) {
+      return null;
+    }
+
+    const fallbackModel = currentModels[0] ?? '';
+    return {
+      provider: workProvider,
+      missingModel: workModel,
+      fallbackModel,
+    };
+  }, [currentModels, workModel, workProvider]);
+
+  const warningKey = useMemo(() => {
+    if (!warningCandidate) {
+      return '';
+    }
+
+    return `${warningCandidate.provider}:${warningCandidate.missingModel}:${warningCandidate.fallbackModel}`;
+  }, [warningCandidate]);
+
+  const missingModelWarning = useMemo(() => {
+    if (!warningCandidate || warningKey === dismissedMissingKey) {
+      return null;
+    }
+
+    return warningCandidate;
+  }, [dismissedMissingKey, warningCandidate, warningKey]);
+
+  const confirmMissingModelSwitch = useCallback(() => {
+    if (!missingModelWarning || !missingModelWarning.fallbackModel) {
+      return;
+    }
+
+    confirmedFallbackByProviderRef.current[missingModelWarning.provider] = missingModelWarning.fallbackModel;
+    setDismissedMissingKey('');
+    setWorkModel(missingModelWarning.fallbackModel);
+  }, [missingModelWarning, setWorkModel]);
+
+  const dismissMissingModelWarning = useCallback(() => {
+    if (!warningKey) {
+      return;
+    }
+
+    setDismissedMissingKey(warningKey);
+  }, [warningKey]);
 
   return {
     providerModels,
-    currentModels: providerModels[workProvider] ?? [],
+    currentModels,
+    missingModelWarning,
+    confirmMissingModelSwitch,
+    dismissMissingModelWarning,
   };
 }

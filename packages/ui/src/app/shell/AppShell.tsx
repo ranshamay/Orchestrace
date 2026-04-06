@@ -5,7 +5,16 @@ import { ErrorToast } from '../components/overlays/ErrorToast';
 import { LlmControlsModal } from '../components/overlays/LlmControlsModal';
 import type { AppShellProps } from './types';
 
-export function AppShell({ sessionSidebarProps, mainContentProps, llmModalProps, errorMessage }: AppShellProps) {
+export function AppShell({
+  sessionSidebarProps,
+  mainContentProps,
+  llmModalProps,
+  errorMessage,
+  warningMessage,
+  warningActionLabel,
+  onWarningConfirm,
+  onWarningDismiss,
+}: AppShellProps) {
   return (
     <div className="flex h-screen w-screen flex-col overflow-hidden bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-100">
       <TopBar
@@ -31,6 +40,13 @@ export function AppShell({ sessionSidebarProps, mainContentProps, llmModalProps,
         </main>
       </div>
       <ErrorToast message={errorMessage} />
+      <ErrorToast
+        message={warningMessage}
+        tone="warning"
+        actionLabel={warningActionLabel}
+        onAction={onWarningConfirm}
+        onDismiss={onWarningDismiss}
+      />
       <LlmControlsModal {...llmModalProps} />
     </div>
   );

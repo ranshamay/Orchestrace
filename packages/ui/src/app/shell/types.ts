@@ -7,4 +7,8 @@ export type AppShellProps = {
   mainContentProps: AppMainContentProps;
   llmModalProps: LlmControlsModalProps;
   errorMessage: string;
+  warningMessage: string;
+  warningActionLabel: string;
+  onWarningConfirm: () => void;
+  onWarningDismiss: () => void;
 };
