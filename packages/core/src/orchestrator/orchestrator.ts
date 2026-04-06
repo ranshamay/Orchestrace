@@ -24,6 +24,20 @@ export interface PlanApprovalRequest {
   planPath: string;
 }
 
+export interface DirectExecutionConfig {
+  /** Enable conservative trivial-task fast path. Defaults to true. */
+  enabled?: boolean;
+  /** Hard token-length cap for considering direct execution. Defaults to 40. */
+  maxPromptTokens?: number;
+  /** Force execution mode for testing/rollback. */
+  forceMode?: 'direct' | 'planned';
+}
+
+export interface TaskComplexityDecision {
+  mode: 'direct' | 'planned';
+  reasons: string[];
+}
+
 export interface OrchestratorConfig extends RunnerConfig {
   /** LLM adapter for executing agent tasks. */
   llm: LlmAdapter;
@@ -62,6 +76,8 @@ export interface OrchestratorConfig extends RunnerConfig {
   promptVersion?: string;
   /** Replay policy version tag persisted into task outputs. */
   policyVersion?: string;
+  /** Conservative classifier config for direct execution fast path. */
+  directExecution?: DirectExecutionConfig;
 }
 
 type OrchestratorPhase = 'planning' | 'implementation';
@@ -70,6 +86,13 @@ const DEFAULT_ORCHESTRATOR_PROMPT_VERSION = 'orchestrator-prompts-v2';
 const MAX_PLANNING_ATTEMPTS = 3;
 const PLANNING_RETRY_BASE_DELAY_MS = 2_000;
 const RETRY_CONTEXT_MAX_CHARS = 2_000;
+const DEFAULT_DIRECT_EXECUTION_MAX_PROMPT_TOKENS = 40;
+const DIRECT_EXECUTION_ALLOWED_VERBS = ['run', 'execute', 'read', 'show', 'print', 'cat', 'list', 'echo'];
+const DIRECT_EXECUTION_DENY_PATTERNS = [
+  /\b(edit|modify|update|refactor|implement|fix|create|delete|remove|rename|commit|push|pr|pull request)\b/i,
+  /\b(write|file|patch|test|build|install|deploy|merge|branch)\b/i,
+  /\b(first|then|after|before|and also|step\s*\d+)\b/i,
+];
 
 /**
  * High-level orchestrator that wires the DAG scheduler to the LLM provider
@@ -97,6 +120,7 @@ export async function orchestrate(
     onEvent,
     promptVersion,
     policyVersion,
+    directExecution,
   } = config;
 
   const emit = onEvent ?? (() => {});
@@ -159,7 +183,17 @@ export async function orchestrate(
     const planningTokenDumpPath = join(taskTokenDumpDir, 'planning.jsonl');
     const implementationTokenDumpPath = join(taskTokenDumpDir, 'implementation.jsonl');
 
-    const planningAgent = await llm.spawnAgent({
+    const complexityDecision = classifyTaskComplexity(node, {
+      hasDependencies: context.depOutputs.size > 0,
+      config: directExecution,
+    });
+    replay.executionMode = complexityDecision.mode;
+
+    let approvedPlanText = '';
+    let persistedPlanPath: string | undefined;
+
+    if (complexityDecision.mode === 'planned') {
+      const planningAgent = await llm.spawnAgent({
       provider: model.provider,
       model: model.model,
       reasoning: model.reasoning,
@@ -366,11 +400,12 @@ export async function orchestrate(
       };
     }
 
-    const persistedPlanPath = await persistPlan({
+      approvedPlanText = planningResult.text;
+      persistedPlanPath = await persistPlan({
       baseDir: planOutputDir ?? join(cwd, '.orchestrace', 'plans'),
       graphId: graph.id,
       node,
-      plan: planningResult.text,
+      plan: approvedPlanText,
     });
     emit({ type: 'task:plan-persisted', taskId: node.id, path: persistedPlanPath });
 
@@ -381,7 +416,7 @@ export async function orchestrate(
         return {
           taskId: node.id,
           status: 'failed',
-          plan: planningResult.text,
+          plan: approvedPlanText,
           planPath: persistedPlanPath,
           tokenDumpDir: taskTokenDumpDir,
           error: 'Plan approval is required but no approval handler was provided.',
@@ -394,7 +429,7 @@ export async function orchestrate(
 
       const approved = await onPlanApproval({
         task: node,
-        plan: planningResult.text,
+        plan: approvedPlanText,
         planPath: persistedPlanPath,
       });
 
@@ -402,7 +437,7 @@ export async function orchestrate(
         return {
           taskId: node.id,
           status: 'failed',
-          plan: planningResult.text,
+          plan: approvedPlanText,
           planPath: persistedPlanPath,
           tokenDumpDir: taskTokenDumpDir,
           error: 'Plan was rejected by user approval gate.',
@@ -414,6 +449,12 @@ export async function orchestrate(
       }
 
       emit({ type: 'task:approved', taskId: node.id });
+    }
+    } else {
+      approvedPlanText = [
+        'Direct execution fast path selected for trivial single-step task.',
+        ...complexityDecision.reasons.map((reason) => `- ${reason}`),
+      ].join('\n');
     }
 
     const implAgent = await llm.spawnAgent({
@@ -468,7 +509,7 @@ export async function orchestrate(
       const implementationPrompt = buildImplementationPrompt({
         node,
         depOutputs: context.depOutputs,
-        approvedPlan: planningResult.text,
+        approvedPlan: approvedPlanText,
         attempt,
         previousResponse: lastResponse,
         previousFailureType: lastFailureType,
@@ -548,7 +589,7 @@ export async function orchestrate(
         return {
           taskId: node.id,
           status: 'failed',
-          plan: planningResult.text,
+          plan: approvedPlanText,
           planPath: persistedPlanPath,
           tokenDumpDir: taskTokenDumpDir,
           response: lastResponse,
@@ -599,7 +640,7 @@ export async function orchestrate(
       const output: TaskOutput = {
         taskId: node.id,
         status: 'completed',
-        plan: planningResult.text,
+        plan: approvedPlanText,
         planPath: persistedPlanPath,
         tokenDumpDir: taskTokenDumpDir,
         response: implResult.text,
@@ -651,7 +692,7 @@ export async function orchestrate(
     return {
       taskId: node.id,
       status: 'failed',
-      plan: planningResult.text,
+      plan: approvedPlanText,
       planPath: persistedPlanPath,
       tokenDumpDir: taskTokenDumpDir,
       response: lastResponse,
@@ -1101,6 +1142,62 @@ function shouldRetryAfterCompletionFailure(failureType: ReplayFailureType): bool
     || failureType === 'rate_limit'
     || failureType === 'tool_runtime'
     || failureType === 'empty_response';
+}
+
+function classifyTaskComplexity(
+  node: TaskNode,
+  params: {
+    hasDependencies: boolean;
+    config?: DirectExecutionConfig;
+  },
+): TaskComplexityDecision {
+  const reasons: string[] = [];
+  const modeOverride = params.config?.forceMode;
+  if (modeOverride === 'direct') {
+    return { mode: 'direct', reasons: ['forceMode=direct override applied.'] };
+  }
+  if (modeOverride === 'planned') {
+    return { mode: 'planned', reasons: ['forceMode=planned override applied.'] };
+  }
+
+  if (params.config?.enabled === false) {
+    return { mode: 'planned', reasons: ['direct execution fast path disabled by config.'] };
+  }
+
+  if (params.hasDependencies) {
+    return { mode: 'planned', reasons: ['task has dependency outputs; retain full planning path.'] };
+  }
+
+  const prompt = node.prompt.trim();
+  if (!prompt) {
+    return { mode: 'planned', reasons: ['empty prompt; retain full planning path.'] };
+  }
+
+  const tokenEstimate = prompt.split(/\s+/u).filter(Boolean).length;
+  const maxPromptTokens = params.config?.maxPromptTokens ?? DEFAULT_DIRECT_EXECUTION_MAX_PROMPT_TOKENS;
+  if (tokenEstimate > maxPromptTokens) {
+    return {
+      mode: 'planned',
+      reasons: [`prompt length (${tokenEstimate} tokens) exceeds direct threshold (${maxPromptTokens}).`],
+    };
+  }
+
+  if (/[\n;]|&&|\|\|/u.test(prompt)) {
+    return { mode: 'planned', reasons: ['prompt appears multi-step or compound.'] };
+  }
+
+  if (DIRECT_EXECUTION_DENY_PATTERNS.some((pattern) => pattern.test(prompt))) {
+    return { mode: 'planned', reasons: ['prompt includes edit/build/workflow intent requiring planning.'] };
+  }
+
+  const lowered = prompt.toLowerCase();
+  const startsWithAllowedVerb = DIRECT_EXECUTION_ALLOWED_VERBS.some((verb) => lowered.startsWith(`${verb} `));
+  if (!startsWithAllowedVerb) {
+    return { mode: 'planned', reasons: ['prompt does not match allowed direct-action verb pattern.'] };
+  }
+
+  reasons.push('short single-step prompt with read/run intent and no edit workflow markers.');
+  return { mode: 'direct', reasons };
 }
 
 function buildCompletionFailureRetryHint(params: {

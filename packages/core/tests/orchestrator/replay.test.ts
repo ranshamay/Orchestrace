@@ -6,7 +6,7 @@ import type { LlmAdapter, LlmAgent, LlmCompletionOptions, LlmPromptInput, LlmReq
 import { orchestrate } from '../../src/orchestrator/orchestrator.js';
 import type { DagEvent, TaskGraph } from '../../src/dag/types.js';
 
-function makeSingleNodeGraph(): TaskGraph {
+function makeSingleNodeGraph(prompt = 'Implement a tiny change.'): TaskGraph {
   return {
     id: 'graph-1',
     name: 'Replay Test Graph',
@@ -15,7 +15,7 @@ function makeSingleNodeGraph(): TaskGraph {
         id: 'task-1',
         name: 'Task 1',
         type: 'code',
-        prompt: 'Implement a tiny change.',
+        prompt,
         dependencies: [],
       },
     ],
@@ -147,6 +147,78 @@ function createAdapter(params: {
 }
 
 describe('orchestrate replay capture', () => {
+  it('bypasses planning for trivial task via direct execution fast path', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'orchestrace-replay-direct-'));
+    const events: DagEvent[] = [];
+
+    try {
+      const outputs = await orchestrate(makeSingleNodeGraph('echo hello world'), {
+        llm: createAdapter({}),
+        cwd,
+        requirePlanApproval: false,
+        planningSystemPrompt: 'planning',
+        implementationSystemPrompt: 'implementation',
+        directExecution: { enabled: true, maxPromptTokens: 40 },
+        onEvent: (event) => events.push(event),
+      });
+
+      const output = outputs.get('task-1');
+      expect(output?.status).toBe('completed');
+      expect(output?.replay?.executionMode).toBe('direct');
+      expect(output?.replay?.attempts.length).toBe(1);
+      expect(output?.replay?.attempts[0]?.phase).toBe('implementation');
+      expect(events.some((event) => event.type === 'task:planning')).toBe(false);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps non-trivial task on planning path', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'orchestrace-replay-planned-'));
+
+    try {
+      const outputs = await orchestrate(makeSingleNodeGraph('Implement a tiny change.'), {
+        llm: createAdapter({}),
+        cwd,
+        requirePlanApproval: false,
+        planningSystemPrompt: 'planning',
+        implementationSystemPrompt: 'implementation',
+        directExecution: { enabled: true, maxPromptTokens: 40 },
+      });
+
+      const output = outputs.get('task-1');
+      expect(output?.status).toBe('completed');
+      expect(output?.replay?.executionMode).toBe('planned');
+      expect(output?.replay?.attempts[0]?.phase).toBe('planning');
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('does not require planning coordination on trivial direct path', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'orchestrace-replay-direct-contract-'));
+
+    try {
+      const outputs = await orchestrate(makeSingleNodeGraph('echo hello world'), {
+        llm: createAdapter({ omitPlanningCoordination: true }),
+        cwd,
+        requirePlanApproval: false,
+        planningSystemPrompt: 'planning',
+        implementationSystemPrompt: 'implementation',
+        directExecution: { enabled: true, maxPromptTokens: 40 },
+        createToolset: () => ({ tools: [], executeTool: async () => ({ content: 'noop' }) }),
+      });
+
+      const output = outputs.get('task-1');
+      expect(output?.status).toBe('completed');
+      expect(output?.failureType).toBeUndefined();
+      expect(output?.replay?.executionMode).toBe('direct');
+      expect(output?.replay?.attempts.every((attempt) => attempt.phase !== 'planning')).toBe(true);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
   it('captures planning + implementation replay attempts on success', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'orchestrace-replay-success-'));
     const events: DagEvent[] = [];
