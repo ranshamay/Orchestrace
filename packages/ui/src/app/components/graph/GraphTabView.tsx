@@ -3,6 +3,7 @@ import type { FailureType, LlmSessionStatus, NodeTokenStream } from '../../types
 import { EntityGraphCard } from './EntityGraphCard';
 import { TodoChecklistCard } from './TodoChecklistCard';
 import { ObserverPanel } from '../observer/ObserverPanel';
+import { LogWatcherPanel } from '../observer/LogWatcherPanel';
 
 type Props = {
   selectedSession?: WorkSession;
@@ -45,6 +46,9 @@ export function GraphTabView({
             <ObserverPanel observerState={observerState} />
           </div>
         )}
+        <div className="mb-4">
+          <LogWatcherPanel />
+        </div>
         <EntityGraphCard
           isDark={isDark}
           selectedFailureType={selectedFailureType}

@@ -463,3 +463,44 @@ export async function fetchSessionObserver(sessionId: string): Promise<SessionOb
   const res = await fetch(`${API_BASE}/observer/session?id=${encodeURIComponent(sessionId)}`);
   return readJson(res);
 }
+
+// -- Log Watcher Types -------------------------------------------------------
+
+export type LogWatcherStatus = 'idle' | 'watching' | 'analyzing' | 'stopped';
+
+export type LogFindingCategory =
+  | 'error-pattern'
+  | 'performance'
+  | 'configuration'
+  | 'reliability'
+  | 'security';
+
+export interface LogFinding {
+  id: string;
+  category: LogFindingCategory;
+  severity: string;
+  title: string;
+  description: string;
+  suggestedFix: string;
+  relevantFiles?: string[];
+  logSnippet: string;
+  detectedAt: string;
+}
+
+export interface LogWatcherState {
+  status: LogWatcherStatus;
+  findings: LogFinding[];
+  analyzedBatches: number;
+  lastAnalyzedAt: string | null;
+  linesProcessed: number;
+}
+
+export async function fetchLogWatcherStatus(): Promise<{ state: LogWatcherState }> {
+  const res = await fetch(`${API_BASE}/logs/status`);
+  return readJson(res);
+}
+
+export async function fetchLogWatcherFindings(): Promise<{ findings: LogFinding[] }> {
+  const res = await fetch(`${API_BASE}/logs/findings`);
+  return readJson(res);
+}
