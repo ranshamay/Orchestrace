@@ -146,6 +146,13 @@ export default function App() {
     providers,
     providerStatuses,
     activeWorkspaceId,
+    copyTraceState: copyTraceState.sessionId === selectedSessionId ? copyTraceState.state : 'idle',
+    onCopyTrace: () => {
+      if (!selectedSessionId) return;
+      void actions.handleCopyTraceSession(selectedSessionId).then((state) => {
+        setCopyTraceState({ sessionId: selectedSessionId, state });
+      });
+    },
   });
 
   const llmModalProps = buildLlmModalProps({

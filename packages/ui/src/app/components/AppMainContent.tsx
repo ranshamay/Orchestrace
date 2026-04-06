@@ -48,6 +48,8 @@ export type AppMainContentProps = {
   providers: ProviderInfo[];
   providerStatuses: Array<{ provider: string; source: string }>;
   activeWorkspaceId: string;
+  copyTraceState: 'idle' | 'copied' | 'failed';
+  onCopyTrace: () => void;
 };
 
 export function AppMainContent(props: AppMainContentProps) {
@@ -75,8 +77,7 @@ export function AppMainContent(props: AppMainContentProps) {
       setTodoInput={props.setTodoInput}
       onAddTodo={props.onAddTodo}
       onToggleTodo={props.onToggleTodo}
-      onOpenLlmControls={props.onOpenLlmControls}
-      rightPane={(
+      chatOverlay={(
         <TimelinePanel
           selectedSessionId={props.selectedSessionId}
           selectedSession={props.selectedSession}
@@ -117,6 +118,8 @@ export function AppMainContent(props: AppMainContentProps) {
             />
           )}
           isDark={props.isDark}
+          copyTraceState={props.copyTraceState}
+          onCopyTrace={props.onCopyTrace}
         />
       )}
     />

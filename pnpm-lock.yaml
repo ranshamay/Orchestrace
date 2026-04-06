@@ -50,6 +50,9 @@ importers:
       '@orchestrace/provider':
         specifier: workspace:*
         version: link:../provider
+      '@orchestrace/sandbox':
+        specifier: workspace:*
+        version: link:../sandbox
       '@orchestrace/store':
         specifier: workspace:*
         version: link:../store

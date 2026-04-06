@@ -1,5 +1,7 @@
 import type { AppMainContentProps } from '../../components/AppMainContent';
 
+type CopyTraceState = 'idle' | 'copied' | 'failed';
+
 type Params = {
   activeTab: AppMainContentProps['activeTab'];
   selectedSessionId: string;
@@ -39,6 +41,8 @@ type Params = {
   providers: AppMainContentProps['providers'];
   providerStatuses: AppMainContentProps['providerStatuses'];
   activeWorkspaceId: string;
+  copyTraceState: CopyTraceState;
+  onCopyTrace: () => void;
 };
 
 export function buildMainContentProps(params: Params): AppMainContentProps {
@@ -85,5 +89,7 @@ export function buildMainContentProps(params: Params): AppMainContentProps {
     providers: params.providers,
     providerStatuses: params.providerStatuses,
     activeWorkspaceId: params.activeWorkspaceId,
+    copyTraceState: params.copyTraceState,
+    onCopyTrace: params.onCopyTrace,
   };
 }

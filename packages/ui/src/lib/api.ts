@@ -44,6 +44,38 @@ export interface WorkspacesResponse {
   workspaces: Workspace[];
 }
 
+export interface WorkSessionProgress {
+  percent: number;
+  planningPercent: number;
+  implementationPercent: number;
+  weightedOverallPercent: number;
+  source: 'graph+todos' | 'graph' | 'todos' | 'llm';
+  confidence: 'high' | 'medium' | 'low';
+  weights: {
+    planning: number;
+    implementation: number;
+    source: 'configured' | 'planning-only' | 'implementation-only' | 'fallback';
+  };
+  graphPercent?: number;
+  todoPercent?: number;
+  llmPercent?: number;
+  totals: {
+    todos: number;
+    todosDone: number;
+    todosInProgress: number;
+    todoWeightTotal: number;
+    todoWeightDone: number;
+    nodes: number;
+    nodesCompleted: number;
+    nodesRunning: number;
+    nodesFailed: number;
+    nodeWeightTotal: number;
+    nodeWeightCompleted: number;
+  };
+}
+
+export type SessionCreationReason = 'start' | 'retry';
+
 export interface WorkSession {
   id: string;
   workspaceId: string;
@@ -58,6 +90,8 @@ export interface WorkSession {
   batchMinConcurrency?: number;
   worktreePath?: string;
   worktreeBranch?: string;
+  creationReason?: SessionCreationReason;
+  sourceSessionId?: string;
   createdAt: string;
   updatedAt: string;
   status: string;
@@ -77,9 +111,11 @@ export interface WorkSession {
     id: string;
     name?: string;
     prompt: string;
+    weight?: number;
     dependencies: string[];
     status?: 'pending' | 'running' | 'completed' | 'failed';
   }>;
+  progress?: WorkSessionProgress;
   output?: { text?: string; planPath?: string; failureType?: string };
   error?: string;
 }
@@ -91,7 +127,9 @@ export interface WorkSessionsResponse {
 export interface AgentTodo {
   id: string;
   text: string;
+  status?: 'todo' | 'in_progress' | 'done';
   done: boolean;
+  weight?: number;
   createdAt: string;
   updatedAt: string;
 }
