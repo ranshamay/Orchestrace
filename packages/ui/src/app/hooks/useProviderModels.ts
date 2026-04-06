@@ -5,8 +5,29 @@ export function useProviderModels(
   workProvider: string,
   workModel: string,
   setWorkModel: Dispatch<SetStateAction<string>>,
+  preferredModelForProvider?: string,
 ) {
   const [providerModels, setProviderModels] = useState<Record<string, string[]>>({});
+
+  const resolveNextModel = (
+    models: string[],
+    currentModel: string,
+    preferredModel?: string,
+  ): string => {
+    if (models.length === 0) {
+      return '';
+    }
+
+    if (currentModel.length > 0 && models.includes(currentModel)) {
+      return currentModel;
+    }
+
+    if (preferredModel && models.includes(preferredModel)) {
+      return preferredModel;
+    }
+
+    return models[0];
+  };
 
   useEffect(() => {
     if (!workProvider) {
@@ -28,9 +49,7 @@ export function useProviderModels(
         }));
 
         if (response.models.length > 0) {
-          setWorkModel((current) => (current.length > 0 && response.models.includes(current)
-            ? current
-            : response.models[0]));
+          setWorkModel((current) => resolveNextModel(response.models, current, preferredModelForProvider));
         }
       } catch {
         if (cancelled) {
@@ -63,9 +82,9 @@ export function useProviderModels(
 
     const hasSelectedModel = workModel.length > 0 && models.includes(workModel);
     if (!hasSelectedModel) {
-      setWorkModel(models[0]);
+      setWorkModel((current) => resolveNextModel(models, current, preferredModelForProvider));
     }
-  }, [providerModels, setWorkModel, workModel, workProvider]);
+  }, [preferredModelForProvider, providerModels, setWorkModel, workModel, workProvider]);
 
   return {
     providerModels,

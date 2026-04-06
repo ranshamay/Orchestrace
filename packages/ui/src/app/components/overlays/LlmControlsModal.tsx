@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
 import type { ProviderInfo, Workspace } from '../../../lib/api';
 import { ModelAutocomplete } from '../ModelAutocomplete';
 
@@ -56,23 +56,34 @@ export function LlmControlsModal(props: LlmControlsModalProps) {
     return providers.filter((provider) => connectedProviderIds.has(provider.id));
   }, [providerStatuses, providers]);
 
+  const lastAutoProviderRef = useRef<string | null>(null);
+
   useEffect(() => {
     if (!isOpen) {
+      lastAutoProviderRef.current = null;
       return;
     }
 
     if (connectedProviders.length === 0) {
-      if (workProvider) {
+      if (workProvider && lastAutoProviderRef.current !== '') {
+        lastAutoProviderRef.current = '';
         onChangeProvider('');
       }
       return;
     }
 
     if (connectedProviders.some((provider) => provider.id === workProvider)) {
+      lastAutoProviderRef.current = workProvider;
       return;
     }
 
-    onChangeProvider(connectedProviders[0].id);
+    const nextProvider = connectedProviders[0].id;
+    if (lastAutoProviderRef.current === nextProvider) {
+      return;
+    }
+
+    lastAutoProviderRef.current = nextProvider;
+    onChangeProvider(nextProvider);
   }, [connectedProviders, isOpen, onChangeProvider, workProvider]);
 
   if (!isOpen) {

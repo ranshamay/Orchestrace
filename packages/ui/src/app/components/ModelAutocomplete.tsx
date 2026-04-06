@@ -97,7 +97,7 @@ export function ModelAutocomplete({
     }
   };
 
-  const displayValue = open ? query : value;
+  const displayValue = open && query.length > 0 ? query : value;
 
   return (
     <div ref={containerRef} className={`relative ${className}`}>
@@ -112,9 +112,10 @@ export function ModelAutocomplete({
           setQuery(event.target.value);
           if (!open) setOpen(true);
         }}
-        onFocus={() => {
+        onFocus={(event) => {
           setOpen(true);
           setQuery('');
+          event.currentTarget.select();
         }}
         onKeyDown={handleKeyDown}
         role="combobox"

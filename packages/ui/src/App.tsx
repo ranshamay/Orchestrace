@@ -181,7 +181,15 @@ export default function App() {
     });
   }, [defaultLlmControls.model, defaultLlmControls.provider, setActiveTab, setSessionSelection, updateActiveLlmControls]);
 
-  const { currentModels } = useProviderModels(workProvider, workModel, setWorkModel);
+  const preferredModelForProvider = workProvider === defaultLlmControls.provider
+    ? defaultLlmControls.model
+    : '';
+  const { currentModels } = useProviderModels(
+    workProvider,
+    workModel,
+    setWorkModel,
+    preferredModelForProvider,
+  );
 
   const timelineItems = useMemo(() => buildTimelineItems(selectedSession, chatMessages), [chatMessages, selectedSession]);
   const latestTimelineKey = timelineItems[timelineItems.length - 1]?.key ?? '';
