@@ -639,7 +639,18 @@ async function main(): Promise<void> {
       policyVersion: process.env.ORCHESTRACE_POLICY_VERSION ?? DEFAULT_AGENT_TOOL_POLICY_VERSION,
       enableTrivialTaskGate: trivialTaskGate.enabled,
       trivialTaskMaxPromptLength: trivialTaskGate.maxPromptLength,
-      defaultModel: { provider: config.provider, model: config.model },
+      defaultModel: {
+        provider: config.implementationProvider ?? config.provider,
+        model: config.implementationModel ?? config.model,
+      },
+      defaultPlanningModel: {
+        provider: config.planningProvider ?? config.provider,
+        model: config.planningModel ?? config.model,
+      },
+      defaultImplementationModel: {
+        provider: config.implementationProvider ?? config.provider,
+        model: config.implementationModel ?? config.model,
+      },
       planningSystemPrompt: buildSystemPrompt(config, 'planning'),
       implementationSystemPrompt: buildSystemPrompt(config, 'implementation'),
       quickStartMode,
@@ -650,9 +661,10 @@ async function main(): Promise<void> {
       signal: controller.signal,
       resolveApiKey: async (providerId) => authManager.resolveApiKey(providerId),
 
-      createToolset: ({ phase, task, graphId, provider: activeProvider, model: activeModel, reasoning }) => createAgentToolset({
+      createToolset: ({ phase, task, graphId, provider: activeProvider, model: activeModel, reasoning, taskRequiresWrites }) => createAgentToolset({
         cwd: config.workspacePath,
         phase,
+        taskRequiresWrites,
         taskType: task.type,
         graphId,
         taskId: task.id,
@@ -692,6 +704,7 @@ async function main(): Promise<void> {
           const subToolset = createAgentToolset({
             cwd: config.workspacePath,
             phase,
+            taskRequiresWrites,
             taskId: `${task.id}::subagent::${request.nodeId ?? toolCallId}`,
             taskType: task.type,
             graphId,
@@ -1415,6 +1428,13 @@ function buildSystemPrompt(config: SessionConfig, phase: 'planning' | 'implement
       'For transient tool or sub-agent failures (timeouts, aborts, rate limits), retry automatically before surfacing a blocker.',
     ];
 
+  const phaseProvider = phase === 'planning'
+    ? (config.planningProvider ?? config.provider)
+    : (config.implementationProvider ?? config.provider);
+  const phaseModel = phase === 'planning'
+    ? (config.planningModel ?? config.model)
+    : (config.implementationModel ?? config.model);
+
   return renderPromptSections([
     { name: PromptSectionName.Identity, lines: [
       `You are continuing an existing Orchestrace ${phase} session.`,
@@ -1428,7 +1448,7 @@ function buildSystemPrompt(config: SessionConfig, phase: 'planning' | 'implement
     { name: PromptSectionName.PhaseRules, lines: phaseRules },
     { name: PromptSectionName.SessionContext, lines: [
       `Workspace: ${config.workspacePath}`,
-      `Provider/Model: ${config.provider}/${config.model}`,
+      `Provider/Model: ${phaseProvider}/${phaseModel}`,
       `Original task prompt: ${config.prompt}`,
     ] },
   ]);

@@ -36,6 +36,8 @@ export type AppMainContentProps = {
   composerMode: ComposerMode;
   workspaces: Workspace[];
   workWorkspaceId: string;
+  workPlanningProvider: string;
+  workPlanningModel: string;
   workProvider: string;
   workModel: string;
   autoApprove: boolean;
@@ -50,10 +52,14 @@ export type AppMainContentProps = {
   providers: ProviderInfo[];
   providerStatuses: Array<{ provider: string; source: string }>;
   activeWorkspaceId: string;
-  defaultProvider: string;
-  defaultModel: string;
-  onSetDefaultProvider: (next: string) => void;
-  onSetDefaultModel: (next: string) => void;
+  defaultPlanningProvider: string;
+  defaultPlanningModel: string;
+  defaultImplementationProvider: string;
+  defaultImplementationModel: string;
+  onSetDefaultPlanningProvider: (next: string) => void;
+  onSetDefaultPlanningModel: (next: string) => void;
+  onSetDefaultImplementationProvider: (next: string) => void;
+  onSetDefaultImplementationModel: (next: string) => void;
   observerShowFindings: boolean;
   onSetObserverShowFindings: (next: boolean) => void;
   onSettingsSaveStatus: (state: Exclude<SettingsSaveToastState, 'idle'>, message: string) => void;
@@ -75,10 +81,14 @@ export function AppMainContent(props: AppMainContentProps) {
         providerStatuses={props.providerStatuses}
         workspaces={props.workspaces}
         activeWorkspaceId={props.activeWorkspaceId}
-        defaultProvider={props.defaultProvider}
-        defaultModel={props.defaultModel}
-        setDefaultProvider={props.onSetDefaultProvider}
-        setDefaultModel={props.onSetDefaultModel}
+        defaultPlanningProvider={props.defaultPlanningProvider}
+        defaultPlanningModel={props.defaultPlanningModel}
+        defaultImplementationProvider={props.defaultImplementationProvider}
+        defaultImplementationModel={props.defaultImplementationModel}
+        setDefaultPlanningProvider={props.onSetDefaultPlanningProvider}
+        setDefaultPlanningModel={props.onSetDefaultPlanningModel}
+        setDefaultImplementationProvider={props.onSetDefaultImplementationProvider}
+        setDefaultImplementationModel={props.onSetDefaultImplementationModel}
         observerShowFindings={props.observerShowFindings}
         setObserverShowFindings={props.onSetObserverShowFindings}
         onSettingsSaveStatus={props.onSettingsSaveStatus}
@@ -151,6 +161,8 @@ export function AppMainContent(props: AppMainContentProps) {
       observerState={props.observerState}
       workspaces={props.workspaces}
       workWorkspaceId={props.workWorkspaceId}
+      workPlanningProvider={props.workPlanningProvider}
+      workPlanningModel={props.workPlanningModel}
       workProvider={props.workProvider}
       workModel={props.workModel}
       autoApprove={props.autoApprove}

@@ -458,6 +458,12 @@ export class ObserverDaemon {
 }
 
 function sanitizeObserverConfig(config: ObserverConfig): ObserverConfig {
+  const provider = sanitizeNonEmptyString(config.provider, DEFAULT_OBSERVER_CONFIG.provider);
+  const model = sanitizeNonEmptyString(config.model, DEFAULT_OBSERVER_CONFIG.model);
+  const logWatcherProvider = sanitizeNonEmptyString(config.logWatcherProvider, provider);
+  const logWatcherModel = sanitizeNonEmptyString(config.logWatcherModel, model);
+  const fixProvider = sanitizeNonEmptyString(config.fixProvider, DEFAULT_OBSERVER_CONFIG.fixProvider);
+  const fixModel = sanitizeNonEmptyString(config.fixModel, DEFAULT_OBSERVER_CONFIG.fixModel);
   const categories = Array.isArray(config.assessmentCategories)
     ? config.assessmentCategories.filter((c): c is FindingCategory =>
       ALL_FINDING_CATEGORIES.includes(c as FindingCategory),
@@ -498,6 +504,12 @@ function sanitizeObserverConfig(config: ObserverConfig): ObserverConfig {
 
   return {
     ...config,
+    provider,
+    model,
+    logWatcherProvider,
+    logWatcherModel,
+    fixProvider,
+    fixModel,
     analysisCooldownMs,
     maxAnalysisPromptChars,
     maxSessionsPerAnalysisBatch,
@@ -573,6 +585,15 @@ function clampInt(value: unknown, min: number, max: number, fallback: number): n
   if (rounded < min) return min;
   if (rounded > max) return max;
   return rounded;
+}
+
+function sanitizeNonEmptyString(value: unknown, fallback: string): string {
+  if (typeof value !== 'string') {
+    return fallback;
+  }
+
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : fallback;
 }
 
 /**

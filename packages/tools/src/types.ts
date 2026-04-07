@@ -16,6 +16,7 @@ export interface AgentToolPermissions {
 export interface AgentToolsetOptions {
   cwd: string;
   phase?: AgentToolPhase;
+  taskRequiresWrites?: boolean;
   taskType?: string;
   graphId?: string;
   taskId?: string;

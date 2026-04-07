@@ -399,10 +399,15 @@ describe('search_files tool', () => {
   });
 });
 
-describe('git_status and git_diff intent gating', () => {
-  it('returns status output in a git repository when intent is provided', async () => {
+describe('git_status and git_diff session gating', () => {
+  it('returns status output in a git repository when task requires writes', async () => {
     const cwd = await makeWorkspace();
-    const toolset = createAgentToolset({ cwd, phase: 'implementation', taskType: 'code' });
+    const toolset = createAgentToolset({
+      cwd,
+      phase: 'implementation',
+      taskType: 'code',
+      taskRequiresWrites: true,
+    });
 
     const init = await toolset.executeTool({ id: '1', name: 'run_command', arguments: { command: 'git init' } });
     expect(init.isError).toBeFalsy();
@@ -410,49 +415,69 @@ describe('git_status and git_diff intent gating', () => {
     const status = await toolset.executeTool({
       id: '2',
       name: 'git_status',
-      arguments: { intent: 'write' },
+      arguments: {},
     });
     expect(status.isError).toBeFalsy();
     expect(status.content.toLowerCase()).toContain('##');
   });
 
-  it('returns an error outside git repositories even when intent is valid', async () => {
+  it('returns an error outside git repositories when task requires writes', async () => {
     const cwd = await makeWorkspace();
-    const toolset = createAgentToolset({ cwd, phase: 'implementation', taskType: 'code' });
+    const toolset = createAgentToolset({
+      cwd,
+      phase: 'implementation',
+      taskType: 'code',
+      taskRequiresWrites: true,
+    });
 
     const status = await toolset.executeTool({
       id: '2',
       name: 'git_status',
-      arguments: { intent: 'read_only' },
+      arguments: {},
     });
     expect(status.isError).toBe(true);
   });
 
-  it('rejects git_status calls when intent is missing', async () => {
+  it('rejects git_status calls for read-only task sessions', async () => {
     const cwd = await makeWorkspace();
-    const toolset = createAgentToolset({ cwd, phase: 'implementation', taskType: 'code' });
+    const toolset = createAgentToolset({
+      cwd,
+      phase: 'implementation',
+      taskType: 'code',
+      taskRequiresWrites: false,
+    });
 
     const status = await toolset.executeTool({ id: '1', name: 'git_status', arguments: {} });
     expect(status.isError).toBe(true);
-    expect(status.content).toContain('requires arguments.intent');
+    expect(status.content).toBe('Task classified as read-only during planning; git_status is not needed.');
   });
 
-  it('rejects git_diff calls when intent is invalid', async () => {
+  it('rejects git_diff calls for read-only task sessions', async () => {
     const cwd = await makeWorkspace();
-    const toolset = createAgentToolset({ cwd, phase: 'implementation', taskType: 'code' });
+    const toolset = createAgentToolset({
+      cwd,
+      phase: 'implementation',
+      taskType: 'code',
+      taskRequiresWrites: false,
+    });
 
     const diff = await toolset.executeTool({
       id: '1',
       name: 'git_diff',
-      arguments: { intent: 'invalid' },
+      arguments: {},
     });
     expect(diff.isError).toBe(true);
-    expect(diff.content).toContain('requires arguments.intent');
+    expect(diff.content).toBe('Task classified as read-only during planning; git_diff is not needed.');
   });
 
-  it('accepts git_diff calls when intent is valid', async () => {
+  it('accepts git_diff calls when task requires writes', async () => {
     const cwd = await makeWorkspace();
-    const toolset = createAgentToolset({ cwd, phase: 'implementation', taskType: 'code' });
+    const toolset = createAgentToolset({
+      cwd,
+      phase: 'implementation',
+      taskType: 'code',
+      taskRequiresWrites: true,
+    });
 
     const init = await toolset.executeTool({ id: '1', name: 'run_command', arguments: { command: 'git init' } });
     expect(init.isError).toBeFalsy();
@@ -460,7 +485,7 @@ describe('git_status and git_diff intent gating', () => {
     const diff = await toolset.executeTool({
       id: '2',
       name: 'git_diff',
-      arguments: { intent: 'read_only' },
+      arguments: {},
     });
     expect(diff.isError).toBeFalsy();
   });

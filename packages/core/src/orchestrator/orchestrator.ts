@@ -36,6 +36,10 @@ export interface OrchestratorConfig extends RunnerConfig {
   implementationSystemPrompt?: string;
   /** Backwards-compatible default system prompt. */
   systemPrompt?: string;
+  /** Optional default model for planning phase when a task does not override model. */
+  defaultPlanningModel?: ModelConfig;
+  /** Optional default model for implementation phase when a task does not override model. */
+  defaultImplementationModel?: ModelConfig;
   /** Directory for persisted plans. Defaults to <cwd>/.orchestrace/plans. */
   planOutputDir?: string;
   /** Require user approval before implementation. Defaults to true. */
@@ -54,6 +58,7 @@ export interface OrchestratorConfig extends RunnerConfig {
     model: string;
     reasoning?: 'minimal' | 'low' | 'medium' | 'high';
     attempt?: number;
+    taskRequiresWrites: boolean;
   }) => LlmToolset | undefined;
   /** Max implementation attempts per task. Defaults to validation.maxRetries + 1. */
   maxImplementationAttempts?: number;
@@ -103,6 +108,8 @@ export async function orchestrate(
     llm,
     cwd,
     systemPrompt,
+    defaultPlanningModel,
+    defaultImplementationModel,
     planningSystemPrompt,
     implementationSystemPrompt,
     planOutputDir,
@@ -154,13 +161,19 @@ export async function orchestrate(
     const start = Date.now();
     const node = originalNodesById.get(scheduledNode.id) ?? scheduledNode;
 
-    const model: ModelConfig = node.model ?? context.defaultModel ?? {
+    const fallbackModel: ModelConfig = node.model ?? context.defaultModel ?? {
       provider: 'anthropic',
       model: 'claude-sonnet-4-20250514',
     };
-    const apiKey = await resolveApiKey?.(model.provider);
-    const refreshApiKey = resolveApiKey
-      ? async () => resolveApiKey(model.provider)
+    const planningModel: ModelConfig = node.model ?? defaultPlanningModel ?? fallbackModel;
+    const implementationModel: ModelConfig = node.model ?? defaultImplementationModel ?? fallbackModel;
+    const planningApiKey = await resolveApiKey?.(planningModel.provider);
+    const implementationApiKey = await resolveApiKey?.(implementationModel.provider);
+    const planningRefreshApiKey = resolveApiKey
+      ? async () => resolveApiKey(planningModel.provider)
+      : undefined;
+    const implementationRefreshApiKey = resolveApiKey
+      ? async () => resolveApiKey(implementationModel.provider)
       : undefined;
 
     const usage = { input: 0, output: 0, cost: 0 };
@@ -170,9 +183,9 @@ export async function orchestrate(
       taskId: node.id,
       promptVersion: resolvedPromptVersion,
       policyVersion: policyVersion ?? 'default-v1',
-      provider: model.provider,
-      model: model.model,
-      reasoning: model.reasoning,
+      provider: implementationModel.provider,
+      model: implementationModel.model,
+      reasoning: implementationModel.reasoning,
       attempts: [],
     };
     const taskTokenDumpDir = join(
@@ -188,6 +201,7 @@ export async function orchestrate(
       maxPromptLength: trivialTaskMaxPromptLength,
     });
     const trivialClassification = classifyTrivialTaskNode(node, trivialTaskGate);
+    const taskRequiresWrites = resolveTaskRequiresWrites(node);
 
     let planningResult:
       | { text: string; usage?: { input: number; output: number; cost: number }; metadata?: { stopReason?: string; endpoint?: string } }
@@ -196,9 +210,9 @@ export async function orchestrate(
 
     if (!trivialClassification.isTrivial) {
       const planningAgent = await llm.spawnAgent({
-        provider: model.provider,
-        model: model.model,
-        reasoning: model.reasoning,
+        provider: planningModel.provider,
+        model: planningModel.model,
+        reasoning: planningModel.reasoning,
         systemPrompt:
           planningSystemPrompt
           ?? systemPrompt
@@ -207,9 +221,9 @@ export async function orchestrate(
             task: node,
             graphId: graph.id,
             cwd,
-            provider: model.provider,
-            model: model.model,
-            reasoning: model.reasoning,
+            provider: planningModel.provider,
+            model: planningModel.model,
+            reasoning: planningModel.reasoning,
           }),
         signal: context.signal,
         toolset: createToolset?.({
@@ -217,12 +231,13 @@ export async function orchestrate(
           task: node,
           graphId: graph.id,
           cwd,
-          provider: model.provider,
-          model: model.model,
-          reasoning: model.reasoning,
+          provider: planningModel.provider,
+          model: planningModel.model,
+          reasoning: planningModel.reasoning,
+          taskRequiresWrites,
         }),
-        apiKey,
-        refreshApiKey,
+        apiKey: planningApiKey,
+        refreshApiKey: planningRefreshApiKey,
       });
 
       emit({ type: 'task:planning', taskId: node.id });
@@ -306,9 +321,9 @@ export async function orchestrate(
             attempt: planningAttempt,
             startedAt: planningAttemptStart,
             completedAt: new Date().toISOString(),
-            provider: model.provider,
-            model: model.model,
-            reasoning: model.reasoning,
+            provider: planningModel.provider,
+            model: planningModel.model,
+            reasoning: planningModel.reasoning,
             error: planningError,
             failureType,
             toolCalls: planningToolCalls,
@@ -355,9 +370,9 @@ export async function orchestrate(
           attempt: planningAttempt,
           startedAt: planningAttemptStart,
           completedAt: new Date().toISOString(),
-          provider: model.provider,
-          model: model.model,
-          reasoning: model.reasoning,
+          provider: planningModel.provider,
+          model: planningModel.model,
+          reasoning: planningModel.reasoning,
           stopReason: planningResult.metadata?.stopReason,
           endpoint: planningResult.metadata?.endpoint,
           usage: planningResult.usage,
@@ -379,8 +394,8 @@ export async function orchestrate(
           taskId: node.id,
           agent: 'planning',
           attempt: planningAttempt,
-          provider: model.provider,
-          model: model.model,
+          provider: planningModel.provider,
+          model: planningModel.model,
           usage: planningResult.usage,
         });
 
@@ -502,9 +517,9 @@ export async function orchestrate(
     }
 
     const implAgent = await llm.spawnAgent({
-      provider: model.provider,
-      model: model.model,
-      reasoning: model.reasoning,
+      provider: implementationModel.provider,
+      model: implementationModel.model,
+      reasoning: implementationModel.reasoning,
       systemPrompt:
         implementationSystemPrompt
         ?? systemPrompt
@@ -513,9 +528,9 @@ export async function orchestrate(
           task: node,
           graphId: graph.id,
           cwd,
-          provider: model.provider,
-          model: model.model,
-          reasoning: model.reasoning,
+          provider: implementationModel.provider,
+          model: implementationModel.model,
+          reasoning: implementationModel.reasoning,
         }),
       signal: context.signal,
       toolset: createToolset?.({
@@ -523,12 +538,13 @@ export async function orchestrate(
         task: node,
         graphId: graph.id,
         cwd,
-        provider: model.provider,
-        model: model.model,
-        reasoning: model.reasoning,
+        provider: implementationModel.provider,
+        model: implementationModel.model,
+        reasoning: implementationModel.reasoning,
+        taskRequiresWrites,
       }),
-      apiKey,
-      refreshApiKey,
+      apiKey: implementationApiKey,
+      refreshApiKey: implementationRefreshApiKey,
     });
 
     const taskRetryBudget = Math.max(0, node.validation?.maxRetries ?? 0);
@@ -598,9 +614,9 @@ export async function orchestrate(
           attempt,
           startedAt: implementationAttemptStart,
           completedAt: new Date().toISOString(),
-          provider: model.provider,
-          model: model.model,
-          reasoning: model.reasoning,
+          provider: implementationModel.provider,
+          model: implementationModel.model,
+          reasoning: implementationModel.reasoning,
           error: implementationError,
           failureType,
           toolCalls: implementationToolCalls,
@@ -651,9 +667,9 @@ export async function orchestrate(
         attempt,
         startedAt: implementationAttemptStart,
         completedAt: new Date().toISOString(),
-        provider: model.provider,
-        model: model.model,
-        reasoning: model.reasoning,
+        provider: implementationModel.provider,
+        model: implementationModel.model,
+        reasoning: implementationModel.reasoning,
         stopReason: implResult.metadata?.stopReason,
         endpoint: implResult.metadata?.endpoint,
         usage: implResult.usage,
@@ -675,8 +691,8 @@ export async function orchestrate(
         taskId: node.id,
         agent: 'implementation',
         attempt,
-        provider: model.provider,
-        model: model.model,
+        provider: implementationModel.provider,
+        model: implementationModel.model,
         usage: implResult.usage,
       });
       lastResponse = implResult.text;
@@ -1117,6 +1133,21 @@ function delay(ms: number): Promise<void> {
 function truncateForRetry(text: string): string {
   if (text.length <= RETRY_CONTEXT_MAX_CHARS) return text;
   return text.slice(0, RETRY_CONTEXT_MAX_CHARS) + `\n... [truncated ${text.length - RETRY_CONTEXT_MAX_CHARS} chars]`;
+}
+
+function resolveTaskRequiresWrites(task: TaskNode): boolean {
+  const routeCategory = readTaskMetaString(task, 'routeCategory');
+  const routeStrategy = readTaskMetaString(task, 'routeStrategy');
+  if (routeCategory === 'investigation' || routeStrategy === 'read_only_analysis') {
+    return false;
+  }
+
+  return true;
+}
+
+function readTaskMetaString(task: TaskNode, key: string): string | undefined {
+  const value = task.meta?.[key];
+  return typeof value === 'string' ? value : undefined;
 }
 
 function createPlanningNoProgressAbortError(): Error {

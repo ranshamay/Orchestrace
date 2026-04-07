@@ -108,6 +108,10 @@ export interface SessionConfig {
   promptParts?: SessionChatContentPart[];
   provider: string;
   model: string;
+  planningProvider?: string;
+  planningModel?: string;
+  implementationProvider?: string;
+  implementationModel?: string;
   autoApprove: boolean;
   /** Enable quick-start planning mode that delegates within first few tool calls. */
   quickStartMode?: boolean;

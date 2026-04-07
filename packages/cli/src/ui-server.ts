@@ -85,6 +85,8 @@ const SUBAGENT_RETRY_MAX_ATTEMPTS = 2;
 const SUBAGENT_RETRY_BASE_DELAY_MS = 300;
 const CHAT_RETRY_MAX_ATTEMPTS = 2;
 const CHAT_RETRY_BASE_DELAY_MS = 300;
+const RETRY_CONTINUATION_MAX_CHARS = 4_000;
+const RETRY_OUTPUT_EXCERPT_MAX_CHARS = 1_200;
 const DEFAULT_CONTEXT_COMPACTION_MODEL = 'gpt-4.1-mini';
 const CONTEXT_COMPACTION_PROVIDER_ENV = 'ORCHESTRACE_CONTEXT_COMPACTION_PROVIDER';
 const CONTEXT_COMPACTION_MODEL_ENV = 'ORCHESTRACE_CONTEXT_COMPACTION_MODEL';
@@ -280,8 +282,12 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           workspacePath: c.workspacePath,
           prompt: c.prompt,
           promptParts: c.promptParts,
-          provider: c.provider,
-          model: c.model,
+          provider: c.implementationProvider ?? c.provider,
+          model: c.implementationModel ?? c.model,
+          planningProvider: c.planningProvider ?? c.provider,
+          planningModel: c.planningModel ?? c.model,
+          implementationProvider: c.implementationProvider ?? c.provider,
+          implementationModel: c.implementationModel ?? c.model,
           autoApprove: c.autoApprove,
           quickStartMode: c.quickStartMode,
           quickStartMaxPreDelegationToolCalls: c.quickStartMaxPreDelegationToolCalls,
@@ -990,6 +996,10 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       promptParts: session.promptParts ? cloneChatContentParts(session.promptParts) : undefined,
       provider: session.provider,
       model: session.model,
+      planningProvider: session.planningProvider,
+      planningModel: session.planningModel,
+      implementationProvider: session.implementationProvider,
+      implementationModel: session.implementationModel,
       autoApprove: session.autoApprove,
       quickStartMode: session.quickStartMode,
       quickStartMaxPreDelegationToolCalls: session.quickStartMaxPreDelegationToolCalls,
@@ -1427,6 +1437,10 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     promptParts?: SessionChatContentPart[];
     provider: string;
     model: string;
+    planningProvider?: string;
+    planningModel?: string;
+    implementationProvider?: string;
+    implementationModel?: string;
     autoApprove: boolean;
     quickStartMode?: boolean;
     quickStartMaxPreDelegationToolCalls?: number;
@@ -1444,29 +1458,45 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
   }): Promise<{ id: string; warnings?: string[] } | { error: string; statusCode: number }> {
     const promptParts = cloneChatContentParts(request.promptParts ?? []);
     const prompt = asString(request.prompt);
+    const implementationProvider = asString(request.implementationProvider) || request.provider;
+    const implementationModel = asString(request.implementationModel) || request.model;
+    const planningProvider = asString(request.planningProvider) || implementationProvider;
+    const planningModel = asString(request.planningModel) || implementationModel;
 
     const providerStatuses = await authManager.getAllStatus();
-    const providerStatus = providerStatuses.find((item) => item.provider === request.provider);
-    if (!providerStatus || providerStatus.source === 'none') {
-      return {
-        error: `Provider ${request.provider} is not connected. Connect it in Settings first.`,
-        statusCode: 400,
-      };
-    }
+    const phaseProviders: Array<{ phase: 'planning' | 'implementation'; provider: string }> = [
+      { phase: 'planning', provider: planningProvider },
+      { phase: 'implementation', provider: implementationProvider },
+    ];
 
-    try {
-      const apiKey = await authManager.resolveApiKey(request.provider);
-      if (!apiKey) {
+    for (const phaseConfig of phaseProviders) {
+      const providerStatus = providerStatuses.find((item) => item.provider === phaseConfig.provider);
+      if (!providerStatus || providerStatus.source === 'none') {
         return {
-          error: `Provider ${request.provider} is missing an API key. Connect it in Settings first.`,
+          error: `${phaseConfig.phase === 'planning' ? 'Planning' : 'Implementation'} provider ${phaseConfig.provider} is not connected. Connect it in Settings first.`,
           statusCode: 400,
         };
       }
-    } catch {
-      return {
-        error: `Provider ${request.provider} is missing an API key. Connect it in Settings first.`,
-        statusCode: 400,
-      };
+    }
+
+    const uniqueProviders = new Set([planningProvider, implementationProvider]);
+    for (const providerId of uniqueProviders) {
+      try {
+        const apiKey = await authManager.resolveApiKey(providerId);
+        if (apiKey) {
+          continue;
+        }
+
+        return {
+          error: `Provider ${providerId} is missing an API key. Connect it in Settings first.`,
+          statusCode: 400,
+        };
+      } catch {
+        return {
+          error: `Provider ${providerId} is missing an API key. Connect it in Settings first.`,
+          statusCode: 400,
+        };
+      }
     }
 
     const workspace = request.workspaceId
@@ -1611,8 +1641,12 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       workspacePath,
       prompt: normalizedPrompt,
       promptParts: promptParts.length > 0 ? cloneChatContentParts(promptParts) : undefined,
-      provider: request.provider,
-      model: request.model,
+      provider: implementationProvider,
+      model: implementationModel,
+      planningProvider,
+      planningModel,
+      implementationProvider,
+      implementationModel,
       autoApprove: request.autoApprove,
       quickStartMode,
       quickStartMaxPreDelegationToolCalls,
@@ -1646,7 +1680,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     sessionChats.set(id, createSessionChatThread(session, promptParts));
     sessionTodos.set(id, []);
     sessionSharedContextStores.set(id, new InMemorySharedContextStore());
-    sessionContextEngines.set(id, createSessionContextEngine(request.provider, request.model));
+    sessionContextEngines.set(id, createSessionContextEngine(implementationProvider, implementationModel));
     sessionContextStates.set(id, { turnsSinceLastCompaction: 0 });
     uiStatePersistence.schedule();
     broadcastTodoUpdate(workStreamClients, id, sessionTodos.get(id) ?? []);
@@ -1657,8 +1691,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         time: createdAt,
         type: 'session:chat-thread-created',
         payload: {
-          provider: request.provider,
-          model: request.model,
+          provider: implementationProvider,
+          model: implementationModel,
           workspacePath,
           taskPrompt: normalizedPrompt,
         },
@@ -1712,6 +1746,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
   });
 
   void observerDaemon.start().then(() => {
+    logWatcher.updateConfig(observerDaemon.getConfig());
     if (observerDaemon.getConfig().enabled) {
       logWatcher.start(backendLogger);
       console.log('[orchestrace][log-watcher] Started');
@@ -2206,19 +2241,44 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         const workspaceId = asString(body.workspaceId);
         const prompt = asString(body.prompt);
         const promptParts = parseChatContentParts(body.promptParts);
-        const provider = asString(body.provider) || process.env.ORCHESTRACE_DEFAULT_PROVIDER || 'anthropic';
-        const requestedModel = asString(body.model);
-        const modelResolution = resolveWorkStartModel({
-          provider,
-          requestedModel,
+        const legacyProvider = asString(body.provider);
+        const implementationProvider = asString(body.implementationProvider)
+          || legacyProvider
+          || process.env.ORCHESTRACE_DEFAULT_PROVIDER
+          || 'anthropic';
+        const planningProvider = asString(body.planningProvider) || implementationProvider;
+        const legacyRequestedModel = asString(body.model);
+        const requestedImplementationModel = asString(body.implementationModel) || legacyRequestedModel;
+        const requestedPlanningModel = asString(body.planningModel) || requestedImplementationModel;
+
+        const implementationModelResolution = resolveWorkStartModel({
+          provider: implementationProvider,
+          requestedModel: requestedImplementationModel,
           envFallbackModel: resolveDefaultModelFromEnv(),
         });
 
-        if (modelResolution.ok === false) {
-          sendJson(res, modelResolution.statusCode, {
-            error: modelResolution.error,
-            code: modelResolution.code,
-            details: modelResolution.details,
+        if (implementationModelResolution.ok === false) {
+          sendJson(res, implementationModelResolution.statusCode, {
+            error: implementationModelResolution.error,
+            code: implementationModelResolution.code,
+            phase: 'implementation',
+            details: implementationModelResolution.details,
+          });
+          return;
+        }
+
+        const planningModelResolution = resolveWorkStartModel({
+          provider: planningProvider,
+          requestedModel: requestedPlanningModel,
+          envFallbackModel: resolveDefaultModelFromEnv(),
+        });
+
+        if (planningModelResolution.ok === false) {
+          sendJson(res, planningModelResolution.statusCode, {
+            error: planningModelResolution.error,
+            code: planningModelResolution.code,
+            phase: 'planning',
+            details: planningModelResolution.details,
           });
           return;
         }
@@ -2253,8 +2313,12 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           workspaceId,
           prompt,
           promptParts,
-          provider,
-          model: modelResolution.model,
+          provider: implementationProvider,
+          model: implementationModelResolution.model,
+          planningProvider,
+          planningModel: planningModelResolution.model,
+          implementationProvider,
+          implementationModel: implementationModelResolution.model,
           autoApprove,
           quickStartMode,
           quickStartMaxPreDelegationToolCalls,
@@ -2303,8 +2367,13 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
 
         const followUpText = asString(body.followUp).trim();
         const followUpParts = parseChatContentParts(body.followUpParts);
+        const retryContext = buildRetryContinuationSummary({
+          session: sourceSession,
+          todos: sessionTodos.get(id) ?? [],
+        });
         const retryPrompt = mergeRetryPromptWithFollowUp({
           prompt: sourceSession.prompt,
+          retryContext,
           followUpText,
           followUpParts,
         });
@@ -3557,6 +3626,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       if (req.method === 'POST' && pathname === '/api/observer/config') {
         const body = await readJsonBody(req);
         await observerDaemon.updateConfig(body);
+        logWatcher.updateConfig(observerDaemon.getConfig());
         sendJson(res, 200, { config: observerDaemon.getConfig() });
         return;
       }
@@ -4075,6 +4145,10 @@ function toPersistedSession(session: WorkSession): PersistedWorkSession {
       : undefined,
     provider: session.provider,
     model: session.model,
+    planningProvider: session.planningProvider,
+    planningModel: session.planningModel,
+    implementationProvider: session.implementationProvider,
+    implementationModel: session.implementationModel,
     autoApprove: session.autoApprove,
     quickStartMode: session.quickStartMode,
     quickStartMaxPreDelegationToolCalls: session.quickStartMaxPreDelegationToolCalls,
@@ -4124,6 +4198,12 @@ function hydratePersistedSession(session: PersistedWorkSession): WorkSession {
 
   return {
     ...session,
+    planningProvider: asString(session.planningProvider) || asString(session.provider),
+    planningModel: asString(session.planningModel) || asString(session.model),
+    implementationProvider: asString(session.implementationProvider) || asString(session.provider),
+    implementationModel: asString(session.implementationModel) || asString(session.model),
+    provider: asString(session.implementationProvider) || asString(session.provider),
+    model: asString(session.implementationModel) || asString(session.model),
     promptParts: promptParts.length > 0 ? promptParts : undefined,
     quickStartMode: parseBooleanSetting(session.quickStartMode)
       ?? (parseBooleanSetting(process.env.ORCHESTRACE_QUICK_START_MODE) ?? false),
@@ -4807,11 +4887,21 @@ function resolveUiPreferencesDefaults(): UiPreferences {
   const batchConcurrency = resolveBatchConcurrencyDefault();
   const batchMinConcurrency = Math.min(batchConcurrency, resolveBatchMinConcurrencyDefault());
   const executionContext = resolveExecutionContextDefault();
+  const defaultProvider = resolveDefaultProviderPreferenceDefault();
+  const defaultModel = resolveDefaultModelPreferenceDefault();
+  const defaultPlanningProvider = resolveDefaultPlanningProviderPreferenceDefault(defaultProvider);
+  const defaultPlanningModel = resolveDefaultPlanningModelPreferenceDefault(defaultModel);
+  const defaultImplementationProvider = resolveDefaultImplementationProviderPreferenceDefault(defaultProvider);
+  const defaultImplementationModel = resolveDefaultImplementationModelPreferenceDefault(defaultModel);
   return {
     activeTab: resolveUiTabDefault(),
     observerShowFindings: resolveObserverShowFindingsDefault(),
-    defaultProvider: resolveDefaultProviderPreferenceDefault(),
-    defaultModel: resolveDefaultModelPreferenceDefault(),
+    defaultProvider: defaultImplementationProvider,
+    defaultModel: defaultImplementationModel,
+    defaultPlanningProvider,
+    defaultPlanningModel,
+    defaultImplementationProvider,
+    defaultImplementationModel,
     executionContext,
     selectedWorktreePath: asString(process.env.ORCHESTRACE_UI_SELECTED_WORKTREE_PATH) || undefined,
     useWorktree: executionContext === 'git-worktree',
@@ -4839,12 +4929,34 @@ function normalizeUiPreferences(value: unknown, fallback: UiPreferences): UiPref
   const selectedWorktreePath = asString(value.selectedWorktreePath)
     || asString(value.worktreePath)
     || fallback.selectedWorktreePath;
+  const legacyDefaultProvider = normalizeStringPreference(value.defaultProvider, fallback.defaultProvider);
+  const legacyDefaultModel = normalizeStringPreference(value.defaultModel, fallback.defaultModel);
+  const defaultPlanningProvider = normalizeStringPreference(
+    value.defaultPlanningProvider,
+    legacyDefaultProvider || fallback.defaultPlanningProvider,
+  );
+  const defaultPlanningModel = normalizeStringPreference(
+    value.defaultPlanningModel,
+    legacyDefaultModel || fallback.defaultPlanningModel,
+  );
+  const defaultImplementationProvider = normalizeStringPreference(
+    value.defaultImplementationProvider,
+    legacyDefaultProvider || fallback.defaultImplementationProvider,
+  );
+  const defaultImplementationModel = normalizeStringPreference(
+    value.defaultImplementationModel,
+    legacyDefaultModel || fallback.defaultImplementationModel,
+  );
 
   return {
     activeTab: normalizeUiTab(value.activeTab) ?? fallback.activeTab,
     observerShowFindings: parseBooleanSetting(value.observerShowFindings) ?? fallback.observerShowFindings,
-    defaultProvider: normalizeStringPreference(value.defaultProvider, fallback.defaultProvider),
-    defaultModel: normalizeStringPreference(value.defaultModel, fallback.defaultModel),
+    defaultProvider: defaultImplementationProvider,
+    defaultModel: defaultImplementationModel,
+    defaultPlanningProvider,
+    defaultPlanningModel,
+    defaultImplementationProvider,
+    defaultImplementationModel,
     executionContext,
     selectedWorktreePath,
     useWorktree: executionContext === 'git-worktree',
@@ -4873,6 +4985,22 @@ function resolveDefaultProviderPreferenceDefault(): string {
 
 function resolveDefaultModelPreferenceDefault(): string {
   return asString(process.env.ORCHESTRACE_UI_DEFAULT_MODEL) || '';
+}
+
+function resolveDefaultPlanningProviderPreferenceDefault(fallback: string): string {
+  return asString(process.env.ORCHESTRACE_UI_DEFAULT_PLANNING_PROVIDER) || fallback;
+}
+
+function resolveDefaultPlanningModelPreferenceDefault(fallback: string): string {
+  return asString(process.env.ORCHESTRACE_UI_DEFAULT_PLANNING_MODEL) || fallback;
+}
+
+function resolveDefaultImplementationProviderPreferenceDefault(fallback: string): string {
+  return asString(process.env.ORCHESTRACE_UI_DEFAULT_IMPLEMENTATION_PROVIDER) || fallback;
+}
+
+function resolveDefaultImplementationModelPreferenceDefault(fallback: string): string {
+  return asString(process.env.ORCHESTRACE_UI_DEFAULT_IMPLEMENTATION_MODEL) || fallback;
 }
 
 function normalizeUiTab(value: unknown): 'graph' | 'settings' | undefined {
@@ -6303,6 +6431,10 @@ function serializeWorkSession(session: WorkSession, todos: AgentTodoItem[] = [])
       : undefined,
     provider: session.provider,
     model: session.model,
+    planningProvider: session.planningProvider,
+    planningModel: session.planningModel,
+    implementationProvider: session.implementationProvider,
+    implementationModel: session.implementationModel,
     autoApprove: session.autoApprove,
     quickStartMode: session.quickStartMode,
     quickStartMaxPreDelegationToolCalls: session.quickStartMaxPreDelegationToolCalls,
@@ -6857,21 +6989,96 @@ type FollowUpSuggestionPhase = 'chat' | 'planning' | 'implementation';
 
 function mergeRetryPromptWithFollowUp(params: {
   prompt: string;
+  retryContext?: string;
   followUpText: string;
   followUpParts: SessionChatContentPart[];
 }): string {
-  const { prompt, followUpText, followUpParts } = params;
+  const { prompt, retryContext, followUpText, followUpParts } = params;
   const followUp = buildRetryFollowUpSummary({ followUpText, followUpParts });
-  if (!followUp) {
-    return prompt;
-  }
-
+  const mergedSections: string[] = [];
   const base = prompt.trim();
-  if (!base) {
-    return followUp;
+  if (base) {
+    mergedSections.push(base);
   }
 
-  return `${base}\n\n${followUp}`;
+  const continuation = retryContext?.trim();
+  if (continuation) {
+    mergedSections.push(continuation);
+  }
+
+  if (followUp) {
+    mergedSections.push(followUp);
+  }
+
+  return mergedSections.join('\n\n');
+}
+
+function buildRetryContinuationSummary(params: {
+  session: WorkSession;
+  todos: AgentTodoItem[];
+}): string {
+  const { session, todos } = params;
+  const lines: string[] = [
+    'Retry continuation context from previous attempt:',
+    'Continue from this state instead of restarting from scratch.',
+    `- Previous status: ${session.status}`,
+  ];
+
+  if (session.error) {
+    lines.push(`- Previous error: ${session.error}`);
+  }
+
+  const taskStatuses = Object.entries(session.taskStatus);
+  if (taskStatuses.length > 0) {
+    lines.push('', 'Task status snapshot:');
+    for (const [taskId, status] of taskStatuses.slice(0, 20)) {
+      lines.push(`- ${taskId}: ${status}`);
+    }
+    if (taskStatuses.length > 20) {
+      lines.push(`- ... (${taskStatuses.length - 20} more task status entries)`);
+    }
+  }
+
+  if (todos.length > 0) {
+    lines.push('', 'Todo snapshot:');
+    for (const todo of todos.slice(0, 30)) {
+      const status = todo.status ?? (todo.done ? 'done' : 'todo');
+      lines.push(`- [${status}] ${todo.id}: ${todo.text}`);
+    }
+    if (todos.length > 30) {
+      lines.push(`- ... (${todos.length - 30} more todo items)`);
+    }
+  }
+
+  if (session.agentGraph.length > 0) {
+    lines.push('', 'Agent graph snapshot:');
+    for (const node of session.agentGraph.slice(0, 20)) {
+      const deps = node.dependencies.length > 0 ? ` deps=${node.dependencies.join(',')}` : '';
+      lines.push(`- [${node.status ?? 'pending'}] ${node.id}${deps}`);
+    }
+    if (session.agentGraph.length > 20) {
+      lines.push(`- ... (${session.agentGraph.length - 20} more graph nodes)`);
+    }
+  }
+
+  if (session.output?.planPath) {
+    lines.push('', `Plan path from previous attempt: ${session.output.planPath}`);
+  }
+
+  if (session.output?.text) {
+    lines.push('', 'Previous output excerpt:');
+    lines.push(truncateRetryContinuation(session.output.text, RETRY_OUTPUT_EXCERPT_MAX_CHARS));
+  }
+
+  return truncateRetryContinuation(lines.join('\n'), RETRY_CONTINUATION_MAX_CHARS);
+}
+
+function truncateRetryContinuation(text: string, maxChars: number): string {
+  if (text.length <= maxChars) {
+    return text;
+  }
+
+  return `${text.slice(0, maxChars)}\n... [retry context truncated]`;
 }
 
 function mergeRetryPromptPartsWithFollowUp(params: {

@@ -353,6 +353,47 @@ describe('orchestrate replay capture', () => {
     }
   });
 
+  it('passes read-only classification to planning and implementation toolsets', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'orchestrace-replay-read-only-route-'));
+    const calls: Array<{ phase: 'planning' | 'implementation'; taskRequiresWrites: boolean }> = [];
+
+    try {
+      const outputs = await orchestrate({
+        id: 'graph-read-only-route',
+        name: 'Read-Only Route Graph',
+        nodes: [
+          {
+            id: 'task-1',
+            name: 'Investigation Task',
+            type: 'code',
+            prompt: 'Investigate flaky test behavior and summarize root cause.',
+            dependencies: [],
+            meta: { routeCategory: 'investigation' },
+          },
+        ],
+      }, {
+        llm: createAdapter({}),
+        cwd,
+        requirePlanApproval: false,
+        planningSystemPrompt: 'planning',
+        implementationSystemPrompt: 'implementation',
+        createToolset: (params) => {
+          calls.push({ phase: params.phase, taskRequiresWrites: params.taskRequiresWrites });
+          return { tools: [], executeTool: async () => ({ content: 'noop' }) };
+        },
+      });
+
+      const output = outputs.get('task-1');
+      expect(output?.status).toBe('completed');
+      expect(calls).toEqual([
+        { phase: 'planning', taskRequiresWrites: false },
+        { phase: 'implementation', taskRequiresWrites: false },
+      ]);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
   it('does not require sub-agent delegation for simple single-file planning tasks', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'orchestrace-replay-plan-simple-'));
 

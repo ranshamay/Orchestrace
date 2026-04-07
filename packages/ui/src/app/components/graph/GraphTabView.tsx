@@ -23,6 +23,8 @@ type Props = {
   observerState: SessionObserverState | null;
   workspaces: Workspace[];
   workWorkspaceId: string;
+  workPlanningProvider: string;
+  workPlanningModel: string;
   workProvider: string;
   workModel: string;
   autoApprove: boolean;
@@ -46,19 +48,27 @@ export function GraphTabView({
   observerState,
   workspaces,
   workWorkspaceId,
+  workPlanningProvider,
+  workPlanningModel,
   workProvider,
   workModel,
   autoApprove,
   composerMode,
 }: Props) {
+  const livePhase = (composerMode === 'planning' || composerMode === 'implementation')
+    ? composerMode
+    : selectedLlmStatus.phase;
+  const activeProvider = livePhase === 'planning' ? workPlanningProvider : workProvider;
+  const activeModel = livePhase === 'planning' ? workPlanningModel : workModel;
+
   return (
     <div className="relative flex h-full flex-1 flex-col">
       <div className="min-h-0 flex-1 overflow-auto bg-slate-50 p-4 dark:bg-slate-950">
         <div className="mb-4 flex flex-col gap-2">
           <div className="mb-2 grid grid-cols-2 gap-2 rounded border border-slate-200 bg-white px-3 py-2 text-xs text-slate-600 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-300">
             <div className="truncate">Workspace: <span className="font-mono">{workspaces.find((workspace) => workspace.id === workWorkspaceId)?.name ?? 'none'}</span></div>
-            <div className="truncate">Provider: <span className="font-mono">{workProvider || 'none'}</span></div>
-            <div className="truncate">Model: <span className="font-mono">{workModel || 'none'}</span></div>
+            <div className="truncate">Provider: <span className="font-mono">{activeProvider || 'none'}</span></div>
+            <div className="truncate">Model: <span className="font-mono">{activeModel || 'none'}</span></div>
             <div>Auto-approve: <span className="font-mono">{autoApprove ? 'on' : 'off'}</span></div>
           </div>
           <div className="mb-2 flex items-center justify-between rounded border border-slate-200 bg-white px-3 py-2 text-xs dark:border-slate-800 dark:bg-slate-900">

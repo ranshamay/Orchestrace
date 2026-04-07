@@ -29,6 +29,8 @@ type Params = {
   composerMode: AppMainContentProps['composerMode'];
   workspaces: AppMainContentProps['workspaces'];
   workWorkspaceId: string;
+  workPlanningProvider: string;
+  workPlanningModel: string;
   workProvider: string;
   workModel: string;
   autoApprove: boolean;
@@ -39,10 +41,14 @@ type Params = {
   providers: AppMainContentProps['providers'];
   providerStatuses: AppMainContentProps['providerStatuses'];
   activeWorkspaceId: string;
-  defaultProvider: string;
-  defaultModel: string;
-  onSetDefaultProvider: AppMainContentProps['onSetDefaultProvider'];
-  onSetDefaultModel: AppMainContentProps['onSetDefaultModel'];
+  defaultPlanningProvider: string;
+  defaultPlanningModel: string;
+  defaultImplementationProvider: string;
+  defaultImplementationModel: string;
+  onSetDefaultPlanningProvider: AppMainContentProps['onSetDefaultPlanningProvider'];
+  onSetDefaultPlanningModel: AppMainContentProps['onSetDefaultPlanningModel'];
+  onSetDefaultImplementationProvider: AppMainContentProps['onSetDefaultImplementationProvider'];
+  onSetDefaultImplementationModel: AppMainContentProps['onSetDefaultImplementationModel'];
   observerShowFindings: boolean;
   onSetObserverShowFindings: (next: boolean) => void;
   onSettingsSaveStatus: AppMainContentProps['onSettingsSaveStatus'];
@@ -81,6 +87,8 @@ export function buildMainContentProps(params: Params): AppMainContentProps {
     composerMode: params.composerMode,
     workspaces: params.workspaces,
     workWorkspaceId: params.workWorkspaceId,
+    workPlanningProvider: params.workPlanningProvider,
+    workPlanningModel: params.workPlanningModel,
     workProvider: params.workProvider,
     workModel: params.workModel,
     autoApprove: params.autoApprove,
@@ -95,10 +103,14 @@ export function buildMainContentProps(params: Params): AppMainContentProps {
     providers: params.providers,
     providerStatuses: params.providerStatuses,
     activeWorkspaceId: params.activeWorkspaceId,
-    defaultProvider: params.defaultProvider,
-    defaultModel: params.defaultModel,
-    onSetDefaultProvider: params.onSetDefaultProvider,
-    onSetDefaultModel: params.onSetDefaultModel,
+    defaultPlanningProvider: params.defaultPlanningProvider,
+    defaultPlanningModel: params.defaultPlanningModel,
+    defaultImplementationProvider: params.defaultImplementationProvider,
+    defaultImplementationModel: params.defaultImplementationModel,
+    onSetDefaultPlanningProvider: params.onSetDefaultPlanningProvider,
+    onSetDefaultPlanningModel: params.onSetDefaultPlanningModel,
+    onSetDefaultImplementationProvider: params.onSetDefaultImplementationProvider,
+    onSetDefaultImplementationModel: params.onSetDefaultImplementationModel,
     observerShowFindings: params.observerShowFindings,
     onSetObserverShowFindings: params.onSetObserverShowFindings,
     onSettingsSaveStatus: params.onSettingsSaveStatus,

@@ -7,6 +7,10 @@ type Params = {
   selectedSession?: WorkSession;
   defaultLlmControls: SessionLlmControls;
   setDefaultLlmControls: (next: SessionLlmControls) => void;
+  workPlanningProvider: string;
+  setWorkPlanningProvider: (value: string) => void;
+  workPlanningModel: string;
+  setWorkPlanningModel: (value: string) => void;
   workProvider: string;
   setWorkProvider: (value: string) => void;
   workModel: string;
@@ -29,6 +33,10 @@ export function useLlmControls(params: Params) {
     selectedSession,
     defaultLlmControls,
     setDefaultLlmControls,
+    workPlanningProvider,
+    setWorkPlanningProvider,
+    workPlanningModel,
+    setWorkPlanningModel,
     workProvider,
     setWorkProvider,
     workModel,
@@ -48,8 +56,10 @@ export function useLlmControls(params: Params) {
   const [llmControlsBySessionId, setLlmControlsBySessionId] = useState<Record<string, SessionLlmControls>>({});
 
   const applyWorkingControls = useCallback((controls: SessionLlmControls) => {
-    if (workProvider !== controls.provider) setWorkProvider(controls.provider);
-    if (workModel !== controls.model) setWorkModel(controls.model);
+    if (workPlanningProvider !== controls.planningProvider) setWorkPlanningProvider(controls.planningProvider);
+    if (workPlanningModel !== controls.planningModel) setWorkPlanningModel(controls.planningModel);
+    if (workProvider !== controls.implementationProvider) setWorkProvider(controls.implementationProvider);
+    if (workModel !== controls.implementationModel) setWorkModel(controls.implementationModel);
     if (workWorkspaceId !== controls.workspaceId) setWorkWorkspaceId(controls.workspaceId);
     if (autoApprove !== controls.autoApprove) setAutoApprove(controls.autoApprove);
     if (adaptiveConcurrency !== controls.adaptiveConcurrency) setAdaptiveConcurrency(controls.adaptiveConcurrency);
@@ -64,9 +74,13 @@ export function useLlmControls(params: Params) {
     setAutoApprove,
     setBatchConcurrency,
     setBatchMinConcurrency,
+    setWorkPlanningModel,
+    setWorkPlanningProvider,
     setWorkModel,
     setWorkProvider,
     setWorkWorkspaceId,
+    workPlanningModel,
+    workPlanningProvider,
     workModel,
     workProvider,
     workWorkspaceId,
@@ -74,8 +88,10 @@ export function useLlmControls(params: Params) {
 
   const updateActiveLlmControls = useCallback((patch: Partial<SessionLlmControls>) => {
     const next: SessionLlmControls = {
-      provider: patch.provider ?? workProvider,
-      model: patch.model ?? workModel,
+      planningProvider: patch.planningProvider ?? workPlanningProvider,
+      planningModel: patch.planningModel ?? workPlanningModel,
+      implementationProvider: patch.implementationProvider ?? workProvider,
+      implementationModel: patch.implementationModel ?? workModel,
       workspaceId: patch.workspaceId ?? workWorkspaceId,
       autoApprove: patch.autoApprove ?? autoApprove,
       adaptiveConcurrency: patch.adaptiveConcurrency ?? adaptiveConcurrency,
@@ -97,6 +113,8 @@ export function useLlmControls(params: Params) {
     batchMinConcurrency,
     selectedSessionId,
     setDefaultLlmControls,
+    workPlanningModel,
+    workPlanningProvider,
     workModel,
     workProvider,
     workWorkspaceId,
@@ -117,8 +135,18 @@ export function useLlmControls(params: Params) {
     if (!selectedSession) return;
 
     const sessionControls: SessionLlmControls = {
-      provider: selectedSession.provider || defaultLlmControls.provider,
-      model: selectedSession.model || defaultLlmControls.model,
+      planningProvider: selectedSession.planningProvider
+        || selectedSession.provider
+        || defaultLlmControls.planningProvider,
+      planningModel: selectedSession.planningModel
+        || selectedSession.model
+        || defaultLlmControls.planningModel,
+      implementationProvider: selectedSession.implementationProvider
+        || selectedSession.provider
+        || defaultLlmControls.implementationProvider,
+      implementationModel: selectedSession.implementationModel
+        || selectedSession.model
+        || defaultLlmControls.implementationModel,
       workspaceId: selectedSession.workspaceId || defaultLlmControls.workspaceId,
       autoApprove: selectedSession.autoApprove,
       adaptiveConcurrency: selectedSession.adaptiveConcurrency ?? defaultLlmControls.adaptiveConcurrency,

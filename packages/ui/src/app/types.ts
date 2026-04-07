@@ -47,8 +47,10 @@ export type ComposerImageAttachment = {
 };
 
 export type SessionLlmControls = {
-  provider: string;
-  model: string;
+  planningProvider: string;
+  planningModel: string;
+  implementationProvider: string;
+  implementationModel: string;
   workspaceId: string;
   autoApprove: boolean;
   adaptiveConcurrency: boolean;

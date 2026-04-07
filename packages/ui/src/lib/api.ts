@@ -38,6 +38,10 @@ export interface UiPreferences {
   observerShowFindings: boolean;
   defaultProvider: string;
   defaultModel: string;
+  defaultPlanningProvider: string;
+  defaultPlanningModel: string;
+  defaultImplementationProvider: string;
+  defaultImplementationModel: string;
   adaptiveConcurrency: boolean;
   batchConcurrency: number;
   batchMinConcurrency: number;
@@ -88,6 +92,10 @@ export interface WorkSession {
   prompt: string;
   provider: string;
   model: string;
+  planningProvider?: string;
+  planningModel?: string;
+  implementationProvider?: string;
+  implementationModel?: string;
   autoApprove: boolean;
   adaptiveConcurrency?: boolean;
   batchConcurrency?: number;
@@ -288,6 +296,10 @@ export async function startWork(payload: {
   prompt: string;
   provider: string;
   model: string;
+  planningProvider?: string;
+  planningModel?: string;
+  implementationProvider?: string;
+  implementationModel?: string;
   autoApprove: boolean;
   adaptiveConcurrency?: boolean;
   batchConcurrency?: number;
@@ -381,6 +393,8 @@ export interface ObserverStatusResponse {
     enabled: boolean;
     provider: string;
     model: string;
+    logWatcherProvider: string;
+    logWatcherModel: string;
     fixProvider: string;
     fixModel: string;
     analysisCooldownMs: number;

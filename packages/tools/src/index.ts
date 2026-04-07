@@ -164,14 +164,11 @@ async function executeToolCall(
     };
   }
 
-  if (call.name === 'git_status' || call.name === 'git_diff') {
-    const intent = (call.arguments as { intent?: unknown } | undefined)?.intent;
-    if (intent !== 'read_only' && intent !== 'write') {
-      return {
-        content: `Tool ${call.name} requires arguments.intent to be "read_only" or "write". Use "read_only" for no-write tasks and skip repo-state checks unless genuinely needed.`,
-        isError: true,
-      };
-    }
+  if ((call.name === 'git_status' || call.name === 'git_diff') && options.taskRequiresWrites === false) {
+    return {
+      content: `Task classified as read-only during planning; ${call.name} is not needed.`,
+      isError: true,
+    };
   }
 
   return tool.execute(call.arguments, signal);

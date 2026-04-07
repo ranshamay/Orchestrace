@@ -161,6 +161,10 @@ export interface WorkSession {
   promptParts?: SessionChatContentPart[];
   provider: string;
   model: string;
+  planningProvider: string;
+  planningModel: string;
+  implementationProvider: string;
+  implementationModel: string;
   autoApprove: boolean;
   quickStartMode?: boolean;
   quickStartMaxPreDelegationToolCalls?: number;
@@ -202,6 +206,10 @@ export interface PersistedWorkSession {
   promptParts?: SessionChatContentPart[];
   provider: string;
   model: string;
+  planningProvider?: string;
+  planningModel?: string;
+  implementationProvider?: string;
+  implementationModel?: string;
   autoApprove: boolean;
   quickStartMode?: boolean;
   quickStartMaxPreDelegationToolCalls?: number;
@@ -233,6 +241,10 @@ export interface UiPreferences {
   observerShowFindings: boolean;
   defaultProvider: string;
   defaultModel: string;
+  defaultPlanningProvider: string;
+  defaultPlanningModel: string;
+  defaultImplementationProvider: string;
+  defaultImplementationModel: string;
   executionContext: ExecutionContext;
   selectedWorktreePath?: string;
   useWorktree: boolean;
@@ -248,6 +260,10 @@ export interface PersistedUiPreferences {
   observerShowFindings?: boolean;
   defaultProvider?: string;
   defaultModel?: string;
+  defaultPlanningProvider?: string;
+  defaultPlanningModel?: string;
+  defaultImplementationProvider?: string;
+  defaultImplementationModel?: string;
   executionContext?: ExecutionContext;
   selectedWorktreePath?: string;
   useWorktree?: boolean;

@@ -119,7 +119,7 @@ Respond ONLY with valid JSON matching this schema:
 
 export class LogWatcher {
   private readonly llm: LlmAdapter;
-  private readonly config: ObserverConfig;
+  private config: ObserverConfig;
   private readonly resolveApiKey: (provider: string) => Promise<string | undefined>;
   private readonly onStateChange?: (state: LogWatcherState) => void;
   private readonly batchSize: number;
@@ -141,11 +141,16 @@ export class LogWatcher {
 
   constructor(options: LogWatcherOptions) {
     this.llm = options.llm;
-    this.config = options.config;
+    this.config = { ...options.config };
     this.resolveApiKey = options.resolveApiKey;
     this.onStateChange = options.onStateChange;
     this.batchSize = options.batchSize ?? 200;
     this.timeWindowMs = options.timeWindowMs ?? 120_000;
+  }
+
+  /** Update runtime config snapshot (called when observer config changes). */
+  updateConfig(config: ObserverConfig): void {
+    this.config = { ...config };
   }
 
   /** Start watching log lines from the backend logger. */
@@ -219,12 +224,13 @@ export class LogWatcher {
 
     try {
       const prompt = this.buildAnalysisPrompt(batch);
-      const provider = this.config.provider;
+      const provider = pickModelSetting(this.config.logWatcherProvider, this.config.provider);
+      const model = pickModelSetting(this.config.logWatcherModel, this.config.model);
       const apiKey = await this.resolveApiKey(provider);
 
       const result = await this.llm.complete({
         provider,
-        model: this.config.model,
+        model,
         systemPrompt: LOG_WATCHER_SYSTEM_PROMPT,
         prompt,
         signal: this.abortController.signal,
@@ -323,4 +329,13 @@ function validateLogCategory(cat: string): LogFindingCategory {
 function validateSeverity(sev: string): FindingSeverity {
   const valid: FindingSeverity[] = ['low', 'medium', 'high', 'critical'];
   return valid.includes(sev as FindingSeverity) ? (sev as FindingSeverity) : 'medium';
+}
+
+function pickModelSetting(value: unknown, fallback: string): string {
+  if (typeof value !== 'string') {
+    return fallback;
+  }
+
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : fallback;
 }

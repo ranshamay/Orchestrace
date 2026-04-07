@@ -51,6 +51,8 @@ export default function App() {
     providers, providerStatuses, workspaces, activeWorkspaceId,
     sessions, setSessions, selectedSessionId, setSelectedSessionId,
     defaultLlmControls, setDefaultLlmControls,
+    workPlanningProvider, setWorkPlanningProvider,
+    workPlanningModel, setWorkPlanningModel,
     workProvider, setWorkProvider, workModel, setWorkModel,
     workWorkspaceId, setWorkWorkspaceId, autoApprove, setAutoApprove,
     errorMessage, setErrorMessage,
@@ -146,6 +148,7 @@ export default function App() {
 
   const { setLlmControlsBySessionId, updateActiveLlmControls } = useLlmControls({
     selectedSessionId, selectedSession, defaultLlmControls, setDefaultLlmControls,
+    workPlanningProvider, setWorkPlanningProvider, workPlanningModel, setWorkPlanningModel,
     workProvider, setWorkProvider, workModel, setWorkModel, workWorkspaceId, setWorkWorkspaceId,
     autoApprove, setAutoApprove,
     adaptiveConcurrency, setAdaptiveConcurrency,
@@ -153,28 +156,53 @@ export default function App() {
     batchMinConcurrency, setBatchMinConcurrency,
   });
 
-  const setDefaultProvider = useCallback((nextProvider: string) => {
+  const setDefaultPlanningProvider = useCallback((nextProvider: string) => {
     const normalizedProvider = typeof nextProvider === 'string' ? nextProvider.trim() : '';
-    const resetModel = normalizedProvider !== defaultLlmControls.provider;
-    const nextModel = resetModel ? '' : defaultLlmControls.model;
+    const resetModel = normalizedProvider !== defaultLlmControls.planningProvider;
+    const nextModel = resetModel ? '' : defaultLlmControls.planningModel;
 
     setDefaultLlmControls((current) => ({
       ...current,
-      provider: normalizedProvider,
-      model: resetModel ? '' : current.model,
+      planningProvider: normalizedProvider,
+      planningModel: resetModel ? '' : current.planningModel,
     }));
 
     if (!selectedSessionId) {
-      updateActiveLlmControls({ provider: normalizedProvider, model: nextModel });
+      updateActiveLlmControls({ planningProvider: normalizedProvider, planningModel: nextModel });
     }
-  }, [defaultLlmControls.model, defaultLlmControls.provider, selectedSessionId, setDefaultLlmControls, updateActiveLlmControls]);
+  }, [defaultLlmControls.planningModel, defaultLlmControls.planningProvider, selectedSessionId, setDefaultLlmControls, updateActiveLlmControls]);
 
-  const setDefaultModel = useCallback((nextModel: string) => {
+  const setDefaultPlanningModel = useCallback((nextModel: string) => {
     const normalizedModel = typeof nextModel === 'string' ? nextModel.trim() : '';
-    setDefaultLlmControls((current) => ({ ...current, model: normalizedModel }));
+    setDefaultLlmControls((current) => ({ ...current, planningModel: normalizedModel }));
 
     if (!selectedSessionId) {
-      updateActiveLlmControls({ model: normalizedModel });
+      updateActiveLlmControls({ planningModel: normalizedModel });
+    }
+  }, [selectedSessionId, setDefaultLlmControls, updateActiveLlmControls]);
+
+  const setDefaultImplementationProvider = useCallback((nextProvider: string) => {
+    const normalizedProvider = typeof nextProvider === 'string' ? nextProvider.trim() : '';
+    const resetModel = normalizedProvider !== defaultLlmControls.implementationProvider;
+    const nextModel = resetModel ? '' : defaultLlmControls.implementationModel;
+
+    setDefaultLlmControls((current) => ({
+      ...current,
+      implementationProvider: normalizedProvider,
+      implementationModel: resetModel ? '' : current.implementationModel,
+    }));
+
+    if (!selectedSessionId) {
+      updateActiveLlmControls({ implementationProvider: normalizedProvider, implementationModel: nextModel });
+    }
+  }, [defaultLlmControls.implementationModel, defaultLlmControls.implementationProvider, selectedSessionId, setDefaultLlmControls, updateActiveLlmControls]);
+
+  const setDefaultImplementationModel = useCallback((nextModel: string) => {
+    const normalizedModel = typeof nextModel === 'string' ? nextModel.trim() : '';
+    setDefaultLlmControls((current) => ({ ...current, implementationModel: normalizedModel }));
+
+    if (!selectedSessionId) {
+      updateActiveLlmControls({ implementationModel: normalizedModel });
     }
   }, [selectedSessionId, setDefaultLlmControls, updateActiveLlmControls]);
 
@@ -182,24 +210,39 @@ export default function App() {
     setActiveTab('graph');
     setSessionSelection('');
     updateActiveLlmControls({
-      provider: defaultLlmControls.provider,
-      model: defaultLlmControls.model,
+      planningProvider: defaultLlmControls.planningProvider,
+      planningModel: defaultLlmControls.planningModel,
+      implementationProvider: defaultLlmControls.implementationProvider,
+      implementationModel: defaultLlmControls.implementationModel,
     });
-  }, [defaultLlmControls.model, defaultLlmControls.provider, setActiveTab, setSessionSelection, updateActiveLlmControls]);
+  }, [
+    defaultLlmControls.implementationModel,
+    defaultLlmControls.implementationProvider,
+    defaultLlmControls.planningModel,
+    defaultLlmControls.planningProvider,
+    setActiveTab,
+    setSessionSelection,
+    updateActiveLlmControls,
+  ]);
 
-  const preferredModelForProvider = workProvider === defaultLlmControls.provider
-    ? defaultLlmControls.model
-    : '';
+  const modalTargetsPlanningPhase = composerMode === 'planning';
+  const modalWorkProvider = modalTargetsPlanningPhase ? workPlanningProvider : workProvider;
+  const modalWorkModel = modalTargetsPlanningPhase ? workPlanningModel : workModel;
+  const modalSetWorkModel = modalTargetsPlanningPhase ? setWorkPlanningModel : setWorkModel;
+  const modalPreferredModelForProvider = modalTargetsPlanningPhase
+    ? (modalWorkProvider === defaultLlmControls.planningProvider ? defaultLlmControls.planningModel : '')
+    : (modalWorkProvider === defaultLlmControls.implementationProvider ? defaultLlmControls.implementationModel : '');
+
   const {
     currentModels,
     missingModelWarning,
     confirmMissingModelSwitch,
     dismissMissingModelWarning,
   } = useProviderModels(
-    workProvider,
-    workModel,
-    setWorkModel,
-    preferredModelForProvider,
+    modalWorkProvider,
+    modalWorkModel,
+    modalSetWorkModel,
+    modalPreferredModelForProvider,
   );
 
   const timelineItems = useMemo(() => buildTimelineItems(selectedSession, chatMessages), [chatMessages, selectedSession]);
@@ -209,7 +252,12 @@ export default function App() {
 
   const actions = useSessionActions({
     selectedSessionId, selectedSession, sessions, chatMessages, todos, composerText, composerImages,
-    workWorkspaceId, workProvider, workModel, autoApprove,
+    workWorkspaceId,
+    workPlanningProvider,
+    workPlanningModel,
+    workProvider,
+    workModel,
+    autoApprove,
     adaptiveConcurrency, batchConcurrency, batchMinConcurrency,
     setErrorMessage, setSessions, setSelectedSessionId, setChatMessages, setTodos,
     setComposerText, setComposerImages, setLlmControlsBySessionId,
@@ -232,8 +280,12 @@ export default function App() {
     const payload = {
       activeTab,
       observerShowFindings,
-      defaultProvider: defaultLlmControls.provider,
-      defaultModel: defaultLlmControls.model,
+      defaultProvider: defaultLlmControls.implementationProvider,
+      defaultModel: defaultLlmControls.implementationModel,
+      defaultPlanningProvider: defaultLlmControls.planningProvider,
+      defaultPlanningModel: defaultLlmControls.planningModel,
+      defaultImplementationProvider: defaultLlmControls.implementationProvider,
+      defaultImplementationModel: defaultLlmControls.implementationModel,
       adaptiveConcurrency,
       batchConcurrency,
       batchMinConcurrency,
@@ -261,8 +313,10 @@ export default function App() {
     batchConcurrency,
     batchMinConcurrency,
     bootstrapComplete,
-    defaultLlmControls.model,
-    defaultLlmControls.provider,
+    defaultLlmControls.implementationModel,
+    defaultLlmControls.implementationProvider,
+    defaultLlmControls.planningModel,
+    defaultLlmControls.planningProvider,
     onSettingsSaveStatus,
     observerShowFindings,
     setErrorMessage,
@@ -312,6 +366,8 @@ export default function App() {
     composerMode,
     workspaces,
     workWorkspaceId,
+    workPlanningProvider,
+    workPlanningModel,
     workProvider,
     workModel,
     autoApprove,
@@ -328,10 +384,14 @@ export default function App() {
     providers,
     providerStatuses,
     activeWorkspaceId,
-    defaultProvider: defaultLlmControls.provider,
-    defaultModel: defaultLlmControls.model,
-    onSetDefaultProvider: setDefaultProvider,
-    onSetDefaultModel: setDefaultModel,
+    defaultPlanningProvider: defaultLlmControls.planningProvider,
+    defaultPlanningModel: defaultLlmControls.planningModel,
+    defaultImplementationProvider: defaultLlmControls.implementationProvider,
+    defaultImplementationModel: defaultLlmControls.implementationModel,
+    onSetDefaultPlanningProvider: setDefaultPlanningProvider,
+    onSetDefaultPlanningModel: setDefaultPlanningModel,
+    onSetDefaultImplementationProvider: setDefaultImplementationProvider,
+    onSetDefaultImplementationModel: setDefaultImplementationModel,
     observerShowFindings,
     onSetObserverShowFindings: setObserverShowFindings,
     onSettingsSaveStatus,
@@ -353,16 +413,20 @@ export default function App() {
     workspaces,
     currentModels,
     workWorkspaceId,
-    workProvider,
-    workModel,
+    workProvider: modalWorkProvider,
+    workModel: modalWorkModel,
     autoApprove,
     adaptiveConcurrency,
     batchConcurrency,
     batchMinConcurrency,
     closeLlmControlsModal,
     onChangeWorkspace: (workspaceId) => updateActiveLlmControls({ workspaceId }),
-    onChangeProvider: (provider) => updateActiveLlmControls({ provider, model: '' }),
-    onChangeModel: (model) => updateActiveLlmControls({ model }),
+    onChangeProvider: (provider) => updateActiveLlmControls(modalTargetsPlanningPhase
+      ? { planningProvider: provider, planningModel: '' }
+      : { implementationProvider: provider, implementationModel: '' }),
+    onChangeModel: (model) => updateActiveLlmControls(modalTargetsPlanningPhase
+      ? { planningModel: model }
+      : { implementationModel: model }),
     onChangeAutoApprove: (next) => updateActiveLlmControls({ autoApprove: next }),
     onChangeAdaptiveConcurrency: (next) => updateActiveLlmControls({ adaptiveConcurrency: next }),
     onChangeBatchConcurrency: (next) => updateActiveLlmControls({ batchConcurrency: next }),

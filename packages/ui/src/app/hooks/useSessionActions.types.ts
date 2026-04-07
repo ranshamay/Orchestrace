@@ -18,6 +18,8 @@ export type SessionActionsParams = {
   composerText: string;
   composerImages: ComposerImageAttachment[];
   workWorkspaceId: string;
+  workPlanningProvider: string;
+  workPlanningModel: string;
   workProvider: string;
   workModel: string;
   autoApprove: boolean;

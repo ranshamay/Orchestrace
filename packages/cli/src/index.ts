@@ -25,10 +25,11 @@ const SUB_AGENT_READ_ONLY_TOOL_ALLOWLIST = [
 
 const GITHUB_PROVIDER_ID = 'github';
 
-function createReadOnlySubAgentToolset(cwd: string) {
+function createReadOnlySubAgentToolset(cwd: string, taskRequiresWrites?: boolean) {
   return createAgentToolset({
     cwd,
     phase: 'planning',
+    taskRequiresWrites,
     permissions: {
       allowWriteTools: false,
       allowRunCommand: false,
@@ -407,9 +408,10 @@ async function runGraph(
     requirePlanApproval: true,
     onPlanApproval: approvalGate,
     resolveApiKey: (providerId) => authManager.resolveApiKey(providerId),
-    createToolset: ({ phase, task, graphId, provider: activeProvider, model: activeModel, reasoning }) => createAgentToolset({
+    createToolset: ({ phase, task, graphId, provider: activeProvider, model: activeModel, reasoning, taskRequiresWrites }) => createAgentToolset({
       cwd,
       phase,
+      taskRequiresWrites,
       taskType: task.type,
       graphId,
       taskId: task.id,
@@ -420,7 +422,7 @@ async function runGraph(
       runSubAgent: async (request, _signal) => {
         const subProvider = request.provider ?? activeProvider;
         const subModel = request.model ?? activeModel;
-        const subAgentToolset = createReadOnlySubAgentToolset(cwd);
+        const subAgentToolset = createReadOnlySubAgentToolset(cwd, taskRequiresWrites);
         const subAgent = await llm.spawnAgent({
           provider: subProvider,
           model: subModel,

@@ -58,6 +58,10 @@ export interface ObserverConfig {
   provider: string;
   /** Model to use for the observer's own LLM analysis calls. */
   model: string;
+  /** Provider to use for backend log watcher analysis calls. */
+  logWatcherProvider: string;
+  /** Model to use for backend log watcher analysis calls. */
+  logWatcherModel: string;
   /** Provider to use when spawning fix sessions. */
   fixProvider: string;
   /** Model to use when spawning fix sessions. */
@@ -88,6 +92,8 @@ export const DEFAULT_OBSERVER_CONFIG: ObserverConfig = {
   enabled: false,
   provider: 'anthropic',
   model: 'claude-sonnet-4-20250514',
+  logWatcherProvider: 'anthropic',
+  logWatcherModel: 'claude-sonnet-4-20250514',
   fixProvider: 'anthropic',
   fixModel: 'claude-sonnet-4-20250514',
   fixAutoApprove: true,
