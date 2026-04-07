@@ -496,7 +496,7 @@ describe('orchestrate replay capture', () => {
           },
           planningBehavior: async ({ options, signal, planningCall }) => {
             if (planningCall === 1) {
-              for (let i = 0; i < 6; i += 1) {
+              for (let i = 0; i < 51; i += 1) {
                 if (signal?.aborted) {
                   throw signal.reason;
                 }
@@ -628,7 +628,7 @@ describe('orchestrate replay capture', () => {
       const outputs = await orchestrate(makeSingleNodeGraph(), {
         llm: createAdapter({
           planningBehavior: async ({ options, signal }) => {
-            for (let i = 0; i < 6; i += 1) {
+            for (let i = 0; i < 51; i += 1) {
               if (signal?.aborted) {
                 throw signal.reason;
               }

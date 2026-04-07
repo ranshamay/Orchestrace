@@ -1,6 +1,6 @@
 import type { DagEvent } from '@orchestrace/core';
 
-export const MAX_CONSECUTIVE_THINKING = 5;
+export const MAX_CONSECUTIVE_THINKING = 50;
 export const THINKING_CIRCUIT_BREAKER_NUDGE =
   'You appear to be stuck in planning. Please proceed with a concrete tool call or finalize your output.';
 

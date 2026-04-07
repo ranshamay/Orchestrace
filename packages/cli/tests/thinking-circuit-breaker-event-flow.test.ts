@@ -11,7 +11,7 @@ import {
 } from '../src/thinking-circuit-breaker.js';
 
 describe('thinking circuit breaker event-flow semantics', () => {
-  it('emits one nudge on 6th planning thinking cycle, then resets after tool call', () => {
+  it('emits one nudge on (MAX+1)th planning thinking cycle, then resets after tool call', () => {
     const state = createThinkingCircuitBreakerState();
     const emittedMessages: string[] = [];
 

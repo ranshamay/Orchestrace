@@ -79,7 +79,7 @@ const DEFAULT_ORCHESTRATOR_PROMPT_VERSION = 'orchestrator-prompts-v2';
 const MAX_PLANNING_ATTEMPTS = 3;
 const PLANNING_RETRY_BASE_DELAY_MS = 2_000;
 const RETRY_CONTEXT_MAX_CHARS = 2_000;
-const PLANNING_STALL_MAX_CONSECUTIVE_DELTAS = 5;
+const PLANNING_STALL_MAX_CONSECUTIVE_DELTAS = 50;
 const PLANNING_STALL_NUDGE =
   'You appear to be stuck in planning. Please proceed with a concrete tool call or finalize your output.';
 const PLANNING_STALL_ABORT_SENTINEL = '__orchestrace_planning_stall__';
