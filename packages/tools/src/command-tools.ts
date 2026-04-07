@@ -37,7 +37,8 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
         name: 'search_files',
         description: 'Search file contents using ripgrep within the workspace.',
         parameters: Type.Object({
-          query: Type.String({ description: 'Regex or plain-text search pattern passed to ripgrep.' }),
+          query: Type.String({ description: 'Search text/pattern passed to ripgrep. Treated as a literal string unless regex=true.' }),
+          regex: Type.Optional(Type.Boolean({ description: 'When true, interpret query as regex. Defaults to false (literal search via --fixed-strings).' })),
           path: Type.Optional(Type.String({ description: 'Relative path to search inside. Defaults to workspace root.' })),
           glob: Type.Optional(Type.String({ description: 'Optional glob include filter, e.g. src/**/*.ts' })),
           queryMode: Type.Optional(Type.Union([
@@ -51,6 +52,7 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
       execute: async (toolArgs, signal) => {
         const query = asRequiredString(toolArgs.query, 'query');
         const path = asString(toolArgs.path) ?? '.';
+        const regex = typeof toolArgs.regex === 'boolean' ? toolArgs.regex : false;
         const glob = asString(toolArgs.glob);
         const queryModeRaw = asString(toolArgs.queryMode) ?? 'regex';
         if (queryModeRaw !== 'regex' && queryModeRaw !== 'literal') {
@@ -63,9 +65,10 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
         const relTarget = toWorkspaceRelative(options.cwd, target);
 
         const args = ['-n', '--no-heading', '--color', 'never'];
-        if (queryModeRaw === 'literal') {
-          args.push('-F');
+        if (!regex) {
+          args.push('--fixed-strings');
         }
+        args.push(query, relTarget);
         if (glob) {
           args.push('--glob', glob);
         }
@@ -100,6 +103,10 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
         name: 'git_diff',
         description: 'Show git diff for current workspace changes.',
         parameters: Type.Object({
+          intent: Type.Union([
+            Type.Literal('read_only'),
+            Type.Literal('write'),
+          ], { description: 'Declared operation intent. Must be read_only or write.' }),
           staged: Type.Optional(Type.Boolean({ description: 'Show staged diff instead of unstaged.' })),
         }),
       },
@@ -124,7 +131,12 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
       tool: {
         name: 'git_status',
         description: 'Show concise git working tree status for the workspace.',
-        parameters: Type.Object({}),
+        parameters: Type.Object({
+          intent: Type.Union([
+            Type.Literal('read_only'),
+            Type.Literal('write'),
+          ], { description: 'Declared operation intent. Must be read_only or write.' }),
+        }),
       },
       execute: async (_toolArgs, signal) => {
         const result = await runCommand('git', ['status', '--short', '--branch'], {
