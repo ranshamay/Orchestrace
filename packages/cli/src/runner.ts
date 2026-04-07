@@ -142,11 +142,8 @@ async function main(): Promise<void> {
   process.on('SIGTERM', () => {
     cancelled = true;
     controller.abort();
-<<<<<<< HEAD
     resetThinkingCircuitBreaker(thinkingCircuitBreaker);
-=======
     void markCheckpointInterrupted(iso(), 'Received SIGTERM before session completion.');
->>>>>>> origin/main
     const llmStatus = makeLlmStatus('cancelled', 'Cancelled by user.');
     lastLlmStatusEmission = {
       key: llmStatusIdentityKey(llmStatus),
