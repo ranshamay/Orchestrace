@@ -1648,6 +1648,9 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
 
     const controller = new AbortController();
     const createdAt = now();
+    const relation = classifyWorkspacePathSessionIdRelation(id, workspacePath);
+    workspaceAssignment.workspacePathSessionIdRelation = relation.relation;
+    workspaceAssignment.workspacePathSessionId = relation.pathSessionId;
 
     const session: WorkSession = {
       id,
@@ -1671,6 +1674,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       trivialTaskMaxPromptLength,
       worktreePath: selectedWorktreePath,
       worktreeBranch: selectedWorktreeBranch,
+      workspaceAssignment,
       creationReason: request.creationReason ?? 'start',
       sourceSessionId: asString(request.sourceSessionId) || undefined,
       source: request.source,
@@ -1688,6 +1692,19 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     };
 
     workSessions.set(id, session);
+    console.log(
+      `[ui-server] session workspace assignment: ${JSON.stringify({
+        sessionId: id,
+        workspacePath,
+        executionContext,
+        assignmentSource: workspaceAssignment.assignmentSource,
+        reusedExistingWorktree: workspaceAssignment.reusedExistingWorktree ?? false,
+        cleanupApplied: workspaceAssignment.cleanupApplied ?? false,
+        cleanupDefaultBranch: workspaceAssignment.cleanupDefaultBranch,
+        workspacePathSessionIdRelation: workspaceAssignment.workspacePathSessionIdRelation,
+        workspacePathSessionId: workspaceAssignment.workspacePathSessionId,
+      })}`,
+    );
     sessionChats.set(id, createSessionChatThread(session, promptParts));
     sessionTodos.set(id, []);
     sessionSharedContextStores.set(id, new InMemorySharedContextStore());
