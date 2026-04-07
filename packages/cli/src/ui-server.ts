@@ -65,6 +65,7 @@ import type {
   ExecutionContext,
   SessionCreationReason,
   SessionWorkspaceAssignmentProvenance,
+  SessionWorktreePathSessionIdRelation,
 } from './ui-server/types.js';
 import { WorkspaceManager } from './workspace-manager.js';
 import { FileEventStore } from '@orchestrace/store';
@@ -74,7 +75,6 @@ import type {
   SessionConfig,
   SessionEventInput,
   SessionRecoveryDetectedPayload,
-  SessionWorktreePathSessionIdRelation,
 } from '@orchestrace/store';
 import { ObserverDaemon, SessionObserver, BackendLogger, LogWatcher } from './observer/index.js';
 
