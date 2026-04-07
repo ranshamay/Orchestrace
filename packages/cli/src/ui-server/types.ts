@@ -205,6 +205,8 @@ export interface WorkSession {
   output?: { text?: string; planPath?: string; failureType?: string };
   lastCheckpoint?: SessionCheckpointInfo;
   lastRecovery?: SessionRecoveryInfo;
+  /** Internal runner-only prompt override (not serialized to clients/persistence). */
+  executionPromptOverride?: string;
   controller: AbortController;
   /** Clean up an auto-created per-session worktree on session delete. Not persisted. */
   cleanupWorktree?: () => Promise<void>;

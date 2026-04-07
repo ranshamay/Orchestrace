@@ -1003,7 +1003,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       workspaceId: session.workspaceId,
       workspaceName: session.workspaceName,
       workspacePath: session.workspacePath,
-      prompt: session.prompt,
+      prompt: session.executionPromptOverride ?? session.prompt,
       promptParts: session.promptParts ? cloneChatContentParts(session.promptParts) : undefined,
       provider: session.provider,
       model: session.model,
@@ -1346,7 +1346,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
 
   async function retryWorkSessionInPlace(params: {
     id: string;
-    prompt: string;
+    displayPrompt: string;
+    executionPrompt: string;
     promptParts?: SessionChatContentPart[];
   }): Promise<{ id: string } | { error: string; statusCode: number }> {
     const session = workSessions.get(params.id);
@@ -1367,18 +1368,21 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     }
 
     const promptParts = cloneChatContentParts(params.promptParts ?? []);
-    const prompt = asString(params.prompt);
-    if (!prompt && promptParts.length === 0) {
+    const displayPrompt = asString(params.displayPrompt);
+    const executionPrompt = asString(params.executionPrompt);
+    if (!displayPrompt && promptParts.length === 0) {
       releaseWorkspacePathLock(session.workspacePath, session.id);
       return { error: 'Missing prompt', statusCode: 400 };
     }
 
-    const normalizedPrompt = promptParts.length > 0
-      ? compactInlineImageMarkdown(prompt || summarizeChatContentParts(promptParts))
-      : (prompt || summarizeChatContentParts(promptParts));
+    const normalizedDisplayPrompt = promptParts.length > 0
+      ? compactInlineImageMarkdown(displayPrompt || summarizeChatContentParts(promptParts))
+      : (displayPrompt || summarizeChatContentParts(promptParts));
+    const normalizedExecutionPrompt = executionPrompt.trim() || normalizedDisplayPrompt;
 
     const retryStartedAt = now();
-    session.prompt = normalizedPrompt;
+    session.prompt = normalizedDisplayPrompt;
+    session.executionPromptOverride = normalizedExecutionPrompt;
     session.promptParts = promptParts.length > 0 ? cloneChatContentParts(promptParts) : undefined;
     session.creationReason = 'retry';
     session.updatedAt = retryStartedAt;
@@ -1401,7 +1405,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
 
     const chatThread = sessionChats.get(session.id);
     if (chatThread) {
-      chatThread.taskPrompt = normalizedPrompt;
+      chatThread.taskPrompt = normalizedDisplayPrompt;
       chatThread.updatedAt = retryStartedAt;
     }
 
@@ -2447,12 +2451,18 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
 
         const followUpText = asString(body.followUp).trim();
         const followUpParts = parseChatContentParts(body.followUpParts);
+        const retryBasePrompt = stripRetryContinuationFromPrompt(sourceSession.prompt);
         const retryContext = buildRetryContinuationSummary({
           session: sourceSession,
           todos: sessionTodos.get(id) ?? [],
         });
-        const retryPrompt = mergeRetryPromptWithFollowUp({
-          prompt: sourceSession.prompt,
+        const retryDisplayPrompt = mergeRetryPromptWithFollowUp({
+          prompt: retryBasePrompt,
+          followUpText,
+          followUpParts,
+        });
+        const retryExecutionPrompt = mergeRetryPromptWithFollowUp({
+          prompt: retryBasePrompt,
           retryContext,
           followUpText,
           followUpParts,
@@ -2465,7 +2475,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
 
         const result = await retryWorkSessionInPlace({
           id,
-          prompt: retryPrompt,
+          displayPrompt: retryDisplayPrompt,
+          executionPrompt: retryExecutionPrompt,
           promptParts: retryPromptParts,
         });
 
@@ -7245,6 +7256,36 @@ function mergeRetryPromptWithFollowUp(params: {
   }
 
   return mergedSections.join('\n\n');
+}
+
+function stripRetryContinuationFromPrompt(prompt: string): string {
+  const source = asString(prompt);
+  if (!source) {
+    return source;
+  }
+
+  const marker = 'Retry continuation context from previous attempt:';
+  const followUpMarker = 'Follow-up request:';
+  let result = source;
+
+  while (true) {
+    const markerIndex = result.indexOf(marker);
+    if (markerIndex < 0) {
+      break;
+    }
+
+    const followUpIndex = result.indexOf(followUpMarker, markerIndex + marker.length);
+    if (followUpIndex < 0) {
+      result = result.slice(0, markerIndex).trimEnd();
+      break;
+    }
+
+    const prefix = result.slice(0, markerIndex).trimEnd();
+    const suffix = result.slice(followUpIndex).trimStart();
+    result = [prefix, suffix].filter((section) => section.length > 0).join('\n\n');
+  }
+
+  return result.trim();
 }
 
 function buildRetryContinuationSummary(params: {
