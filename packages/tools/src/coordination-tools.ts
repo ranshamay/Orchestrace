@@ -51,9 +51,6 @@ const SUBAGENT_PROMPT_SOFT_LIMIT_CHARS = 2200;
 const SUBAGENT_PROMPT_PREVIEW_MAX_CHARS = 220;
 const SUBAGENT_OUTPUT_PREVIEW_MAX_CHARS = 900;
 const SUBAGENT_MERGE_OUTPUT_PREVIEW_MAX_CHARS = 600;
-const SUBAGENT_BATCH_COMPLEXITY_MIN_SCORE = 4;
-const SUBAGENT_BATCH_COMPLEXITY_MAX_SCORE = 40;
-const SUBAGENT_BATCH_COMPLEXITY_MAX_AGENTS_CAP = 8;
 const COORDINATION_PERSIST_RAW_DEBUG_ENV = 'ORCHESTRACE_PERSIST_RAW_DEBUG';
 const COORDINATION_PERSIST_PROMPT_MAX_CHARS = 1_600;
 const COORDINATION_PERSIST_OUTPUT_MAX_CHARS = 1_000;
@@ -559,15 +556,6 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
           };
         }
 
-        const complexity = assessSubAgentBatchComplexity(requests);
-        const guardrailRejection = buildSubAgentBatchGuardrailRejection(complexity);
-        if (guardrailRejection) {
-          return {
-            content: JSON.stringify(guardrailRejection, null, 2),
-            isError: true,
-          };
-        }
-
         const state = await readCoordinationState(statePath);
 
         const cacheHits = new Map<number, {
@@ -1059,153 +1047,6 @@ function compactPromptPreview(prompt: string): string {
   }
 
   return `${compact.slice(0, SUBAGENT_PROMPT_PREVIEW_MAX_CHARS - 3)}...`;
-}
-
-function assessSubAgentBatchComplexity(requests: SubAgentRequest[]): SubAgentBatchComplexityAssessment {
-  const promptScore = clampWithMax(
-    requests.reduce((sum, request) => sum + scorePromptComplexity(request.prompt), 0),
-    16,
-  );
-  const reasoningScore = clampWithMax(
-    requests.reduce((sum, request) => sum + scoreReasoningComplexity(request.reasoning), 0),
-    12,
-  );
-  const contextScore = clampWithMax(
-    requests.reduce((sum, request) => sum + scoreContextComplexity(request.contextPacket), 0),
-    12,
-  );
-
-  const score = clampWithMax(promptScore + reasoningScore + contextScore, SUBAGENT_BATCH_COMPLEXITY_MAX_SCORE);
-  const maxAllowedAgents = deriveMaxAllowedAgentsForComplexity(score);
-
-  return {
-    score,
-    threshold: SUBAGENT_BATCH_COMPLEXITY_MIN_SCORE,
-    requestedAgents: requests.length,
-    maxAllowedAgents,
-    complexitySignals: {
-      promptScore,
-      reasoningScore,
-      contextScore,
-    },
-  };
-}
-
-function buildSubAgentBatchGuardrailRejection(
-  assessment: SubAgentBatchComplexityAssessment,
-): SubAgentBatchGuardrailRejection | undefined {
-  if (assessment.score < assessment.threshold) {
-    return {
-      reason: 'low_complexity',
-      message: 'Sub-agent batch delegation rejected: parent task complexity is too low for parallel decomposition.',
-      guidance: 'Handle this task directly (or use a single focused sub-agent only if strictly necessary).',
-      score: assessment.score,
-      threshold: assessment.threshold,
-      requestedAgents: assessment.requestedAgents,
-      allowedAgents: 0,
-    };
-  }
-
-  if (assessment.requestedAgents > assessment.maxAllowedAgents) {
-    return {
-      reason: 'too_many_agents',
-      message: 'Sub-agent batch delegation rejected: requested agent count exceeds complexity-adjusted limit.',
-      guidance: 'Reduce batch size or improve decomposition quality/context so complexity justifies additional agents.',
-      score: assessment.score,
-      threshold: assessment.threshold,
-      requestedAgents: assessment.requestedAgents,
-      allowedAgents: assessment.maxAllowedAgents,
-    };
-  }
-
-  return undefined;
-}
-
-function deriveMaxAllowedAgentsForComplexity(score: number): number {
-  if (score < SUBAGENT_BATCH_COMPLEXITY_MIN_SCORE) {
-    return 0;
-  }
-
-  if (score <= 11) {
-    return 2;
-  }
-
-  if (score <= 17) {
-    return 3;
-  }
-
-  if (score <= 24) {
-    return 4;
-  }
-
-  if (score <= 31) {
-    return 6;
-  }
-
-  return SUBAGENT_BATCH_COMPLEXITY_MAX_AGENTS_CAP;
-}
-
-function scorePromptComplexity(prompt: string): number {
-  const length = prompt.trim().length;
-  if (length < 120) {
-    return 1;
-  }
-
-  if (length < 280) {
-    return 2;
-  }
-
-  if (length < 520) {
-    return 3;
-  }
-
-  if (length < 900) {
-    return 4;
-  }
-
-  return 5;
-}
-
-function scoreReasoningComplexity(reasoning: SubAgentRequest['reasoning']): number {
-  if (reasoning === 'high') {
-    return 3;
-  }
-
-  if (reasoning === 'medium') {
-    return 2;
-  }
-
-  if (reasoning === 'low') {
-    return 1;
-  }
-
-  return 0;
-}
-
-function scoreContextComplexity(packet: SubAgentContextPacket | undefined): number {
-  if (!packet) {
-    return 0;
-  }
-
-  let score = 1;
-
-  if ((packet.relevantContext?.length ?? 0) >= 2) {
-    score += 1;
-  }
-
-  if ((packet.evidenceRequirements?.length ?? 0) > 0) {
-    score += 1;
-  }
-
-  if (packet.requiredOutputSchema) {
-    score += 1;
-  }
-
-  if (packet.boundaries?.writePolicy === 'scoped' || packet.boundaries?.writePolicy === 'full') {
-    score += 1;
-  }
-
-  return Math.min(score, 4);
 }
 
 function normalizeAgentToolPhase(value: unknown): AgentToolPhase | undefined {
