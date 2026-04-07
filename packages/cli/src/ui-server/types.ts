@@ -134,6 +134,8 @@ export interface WorkSession {
   adaptiveConcurrency: boolean;
   batchConcurrency: number;
   batchMinConcurrency: number;
+  enableTrivialTaskGate: boolean;
+  trivialTaskMaxPromptLength: number;
   worktreePath?: string;
   worktreeBranch?: string;
   creationReason: SessionCreationReason;
@@ -169,6 +171,8 @@ export interface PersistedWorkSession {
   adaptiveConcurrency?: boolean;
   batchConcurrency?: number;
   batchMinConcurrency?: number;
+  enableTrivialTaskGate?: boolean;
+  trivialTaskMaxPromptLength?: number;
   worktreePath?: string;
   worktreeBranch?: string;
   creationReason?: SessionCreationReason;
@@ -195,6 +199,8 @@ export interface UiPreferences {
   adaptiveConcurrency: boolean;
   batchConcurrency: number;
   batchMinConcurrency: number;
+  enableTrivialTaskGate: boolean;
+  trivialTaskMaxPromptLength: number;
 }
 
 export interface PersistedUiPreferences {
@@ -208,6 +214,8 @@ export interface PersistedUiPreferences {
   adaptiveConcurrency?: boolean;
   batchConcurrency?: number;
   batchMinConcurrency?: number;
+  enableTrivialTaskGate?: boolean;
+  trivialTaskMaxPromptLength?: number;
 }
 
 export interface PersistedUiState {

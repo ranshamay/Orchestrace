@@ -99,7 +99,21 @@ const SESSION_EVENT_HISTORY_LIMIT = 2_000;
 const TOOL_EVENT_PREVIEW_MAX_CHARS = parsePositiveSetting(process.env.ORCHESTRACE_TOOL_EVENT_PREVIEW_MAX_CHARS) ?? 200_000;
 const PHASE_PROGRESS_PLAN_WEIGHT_DEFAULT = 30;
 const PHASE_PROGRESS_IMPLEMENTATION_WEIGHT_DEFAULT = 70;
+const STARTUP_RECOVERY_MODE_ENV = 'ORCHESTRACE_RECOVERY_MODE';
+const SESSION_CHECKPOINT_FILE = 'checkpoint.json';
+const CHECKPOINT_STASH_PREFIX = 'orchestrace-checkpoint';
 const execFileAsync = promisify(execFile);
+
+type SessionCheckpointMetadata = {
+  sessionId: string;
+  workspacePath: string;
+  state: 'idle' | 'active' | 'completed' | 'failed' | 'cancelled' | 'interrupted';
+  createdAt: string;
+  updatedAt: string;
+  stashRef?: string;
+  stashMessage?: string;
+  checkpointName?: string;
+};
 
 type NativeGitWorktree = {
   path: string;
@@ -275,6 +289,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           adaptiveConcurrency: c.adaptiveConcurrency,
           batchConcurrency: c.batchConcurrency,
           batchMinConcurrency: c.batchMinConcurrency,
+          enableTrivialTaskGate: c.enableTrivialTaskGate ?? resolveTrivialTaskGateDefault(),
+          trivialTaskMaxPromptLength: c.trivialTaskMaxPromptLength ?? resolveTrivialTaskMaxPromptLengthDefault(),
           worktreePath: c.worktreePath,
           worktreeBranch: c.worktreeBranch,
           creationReason: c.creationReason,
@@ -602,6 +618,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
   }
   uiPreferences = normalizeUiPreferences(restoredUiPreferences, resolveUiPreferencesDefaults());
 
+  await detectStartupPartialChangesAndRecover();
   registerRestoredWorkspacePathLocks();
 
   for (const [sessionId, restoredSession] of workSessions.entries()) {
@@ -710,12 +727,135 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
 
   function registerRestoredWorkspacePathLocks(): void {
     for (const [sessionId, session] of workSessions.entries()) {
+      // Only lock paths for sessions that are still running — completed/failed/cancelled
+      // sessions no longer need to hold their workspace path lock.
+      if (session.status === 'completed' || session.status === 'failed' || session.status === 'cancelled') {
+        continue;
+      }
       const acquired = acquireWorkspacePathLock(session.workspacePath, sessionId);
       if (!acquired.ok) {
         console.warn(
           `[ui-server] Duplicate restored workspace path lock detected for session ${sessionId}; path already owned by ${acquired.ownerSessionId}.`,
         );
       }
+    }
+  }
+
+  async function readSessionCheckpointMetadata(sessionId: string): Promise<SessionCheckpointMetadata | undefined> {
+    try {
+      const checkpointPath = join(workspaceManager.getRootDir(), '.orchestrace', 'sessions', sessionId, SESSION_CHECKPOINT_FILE);
+      const raw = await readFile(checkpointPath, 'utf8');
+      const parsed = JSON.parse(raw) as Partial<SessionCheckpointMetadata>;
+      if (!parsed || typeof parsed !== 'object') return undefined;
+      if (typeof parsed.sessionId !== 'string' || typeof parsed.workspacePath !== 'string' || typeof parsed.state !== 'string') {
+        return undefined;
+      }
+      return parsed as SessionCheckpointMetadata;
+    } catch {
+      return undefined;
+    }
+  }
+
+  async function getWorkspaceDirtySummary(workspacePath: string): Promise<{
+    hasUncommittedChanges: boolean;
+    hasStagedChanges: boolean;
+    hasUntrackedChanges: boolean;
+    dirtySummary: string[];
+  }> {
+    const [unstaged, staged, untracked] = await Promise.all([
+      gitExec(workspacePath, ['diff', '--name-status']).catch(() => ''),
+      gitExec(workspacePath, ['diff', '--cached', '--name-status']).catch(() => ''),
+      gitExec(workspacePath, ['ls-files', '--others', '--exclude-standard']).catch(() => ''),
+    ]);
+    const unstagedLines = unstaged.split('\n').map((line) => line.trim()).filter(Boolean);
+    const stagedLines = staged.split('\n').map((line) => line.trim()).filter(Boolean);
+    const untrackedLines = untracked.split('\n').map((line) => line.trim()).filter(Boolean);
+    return {
+      hasUncommittedChanges: unstagedLines.length > 0,
+      hasStagedChanges: stagedLines.length > 0,
+      hasUntrackedChanges: untrackedLines.length > 0,
+      dirtySummary: [...unstagedLines, ...stagedLines, ...untrackedLines.map((line) => `?? ${line}`)].slice(0, 200),
+    };
+  }
+
+  async function maybeRollbackFromCheckpoint(workspacePath: string, checkpoint?: SessionCheckpointMetadata): Promise<boolean> {
+    const recoveryMode = (process.env[STARTUP_RECOVERY_MODE_ENV] ?? 'flag').trim().toLowerCase();
+    if (recoveryMode !== 'rollback') {
+      return false;
+    }
+    if (!checkpoint?.stashRef) {
+      return false;
+    }
+    if (!checkpoint.stashMessage?.includes(CHECKPOINT_STASH_PREFIX)) {
+      return false;
+    }
+
+    try {
+      await gitExec(workspacePath, ['stash', 'apply', '--index', checkpoint.stashRef]);
+      return true;
+    } catch (error) {
+      console.warn(`[ui-server] Failed startup rollback from checkpoint ${checkpoint.stashRef}: ${toErrorMessage(error)}`);
+      return false;
+    }
+  }
+
+  async function detectStartupPartialChangesAndRecover(): Promise<void> {
+    for (const [sessionId, session] of workSessions.entries()) {
+      const interrupted =
+        session.status === 'failed'
+        && typeof session.error === 'string'
+        && session.error.toLowerCase().includes('runner process exited');
+      if (!interrupted) {
+        continue;
+      }
+
+      const checkpoint = await readSessionCheckpointMetadata(sessionId);
+      const checkpointSuggestsRecovery = checkpoint && (checkpoint.state === 'active' || checkpoint.state === 'interrupted');
+
+      const rolledBack = checkpointSuggestsRecovery
+        ? await maybeRollbackFromCheckpoint(session.workspacePath, checkpoint)
+        : false;
+      const dirty = await getWorkspaceDirtySummary(session.workspacePath).catch((error) => {
+        console.warn(`[ui-server] Startup recovery probe failed for session ${sessionId}: ${toErrorMessage(error)}`);
+        return {
+          hasUncommittedChanges: false,
+          hasStagedChanges: false,
+          hasUntrackedChanges: false,
+          dirtySummary: [] as string[],
+        };
+      });
+
+      const hasDirty = dirty.hasUncommittedChanges || dirty.hasStagedChanges || dirty.hasUntrackedChanges;
+      if (!hasDirty && !rolledBack) {
+        continue;
+      }
+
+      const details = [
+        rolledBack ? 'Applied rollback from checkpoint stash.' : 'Detected partial local changes from prior interrupted session.',
+        ...dirty.dirtySummary.slice(0, 10),
+      ].join('\n');
+
+      const failureType = rolledBack ? 'startup-recovery-rollback' : 'startup-recovery-dirty';
+      const recoveredAt = now();
+      const error = rolledBack
+        ? `Recovered interrupted session from checkpoint (${checkpoint?.stashRef ?? 'unknown stash'}).`
+        : `Startup recovery detected uncommitted changes from interrupted session.\n${details}`;
+
+      session.error = error;
+      session.updatedAt = recoveredAt;
+      session.llmStatus = createLlmStatus('failed', recoveredAt, {
+        detail: error,
+        failureType,
+      });
+      session.output = {
+        ...session.output,
+        failureType,
+      };
+
+      emitSessionEvent(sessionId, { time: recoveredAt, type: 'session:error-change', payload: { error } });
+      emitSessionEvent(sessionId, { time: recoveredAt, type: 'session:llm-status-change', payload: { llmStatus: session.llmStatus } });
+      emitSessionEvent(sessionId, { time: recoveredAt, type: 'session:output-set', payload: { output: session.output } });
+      console.log(`[ui-server] Startup recovery ${rolledBack ? 'rollback' : 'dirty-flag'} for session ${sessionId}.`);
     }
   }
 
@@ -804,6 +944,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     adaptiveConcurrency?: boolean;
     batchConcurrency?: number;
     batchMinConcurrency?: number;
+    enableTrivialTaskGate?: boolean;
+    trivialTaskMaxPromptLength?: number;
     creationReason?: SessionCreationReason;
     sourceSessionId?: string;
     source?: 'user' | 'observer';
@@ -870,6 +1012,11 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       batchConcurrency,
       normalizePositiveSetting(request.batchMinConcurrency, uiPreferences.batchMinConcurrency),
     );
+    const enableTrivialTaskGate = request.enableTrivialTaskGate ?? uiPreferences.enableTrivialTaskGate;
+    const trivialTaskMaxPromptLength = normalizePositiveSetting(
+      request.trivialTaskMaxPromptLength,
+      uiPreferences.trivialTaskMaxPromptLength,
+    );
 
     let workspacePath = workspace.path;
     let executionContext: ExecutionContext = 'workspace';
@@ -907,7 +1054,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     // so a new session is never blocked by an existing one sharing the same path.
     let autoCreatedWorktreeCleanup: (() => Promise<void>) | undefined;
     let lockResult = acquireWorkspacePathLock(workspacePath, id);
-    if (!lockResult.ok && executionContext === 'git-worktree') {
+    if (!lockResult.ok && (executionContext === 'git-worktree' || isObserverSource)) {
       try {
         const sessionBranch = `orchestrace/session-${id}`;
         const sessionWorktreePath = join(workspace.path, '.worktrees', `session-${id}`);
@@ -940,6 +1087,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     }
 
     const duplicateSession = [...workSessions.values()].find((candidate) => {
+      // Only block on running sessions — completed/failed/cancelled sessions may share the same path.
+      if (candidate.status !== 'running') return false;
       const candidatePath = normalizeWorkspacePathForLock(candidate.workspacePath);
       const requestedPath = normalizeWorkspacePathForLock(workspacePath);
       return Boolean(candidatePath && requestedPath && candidatePath === requestedPath);
@@ -974,6 +1123,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       adaptiveConcurrency,
       batchConcurrency,
       batchMinConcurrency,
+      enableTrivialTaskGate,
+      trivialTaskMaxPromptLength,
       worktreePath: selectedWorktreePath,
       worktreeBranch: selectedWorktreeBranch,
       creationReason: request.creationReason ?? 'start',
@@ -1104,6 +1255,10 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
               obs.stop();
               sessionObservers.delete(id);
             }
+            // Release the workspace path lock so new sessions can use the same path.
+            releaseWorkspacePathLock(session.workspacePath, id);
+            // Notify the observer daemon: close the loop on findings (auto-resolve if PR opened)
+            observerDaemon.onFixSessionCompleted(id, newStatus, session.output?.text);
             broadcastWorkStream(workStreamClients, id, newStatus === 'completed' ? 'end' : 'error', {
               id,
               status: session.status,
@@ -1854,6 +2009,10 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           ?? parsePositiveSetting(body.toolBatchConcurrency);
         const batchMinConcurrency = parsePositiveSetting(body.batchMinConcurrency)
           ?? parsePositiveSetting(body.toolBatchMinConcurrency);
+        const enableTrivialTaskGate = parseBooleanSetting(body.enableTrivialTaskGate)
+          ?? parseBooleanSetting(body.trivialTaskGateEnabled);
+        const trivialTaskMaxPromptLength = parsePositiveSetting(body.trivialTaskMaxPromptLength)
+          ?? parsePositiveSetting(body.trivialPromptMaxLength);
         const result = await startWorkSession({
           workspaceId,
           prompt,
@@ -1867,6 +2026,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           adaptiveConcurrency,
           batchConcurrency,
           batchMinConcurrency,
+          enableTrivialTaskGate,
+          trivialTaskMaxPromptLength,
           creationReason: 'start',
         });
 
@@ -1928,6 +2089,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           adaptiveConcurrency: sourceSession.adaptiveConcurrency,
           batchConcurrency: sourceSession.batchConcurrency,
           batchMinConcurrency: sourceSession.batchMinConcurrency,
+          enableTrivialTaskGate: sourceSession.enableTrivialTaskGate,
+          trivialTaskMaxPromptLength: sourceSession.trivialTaskMaxPromptLength,
           creationReason: 'retry',
           sourceSessionId: id,
         });
@@ -3130,6 +3293,12 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         return;
       }
 
+      if (req.method === 'POST' && pathname === '/api/observer/spawn-all') {
+        const spawned = await observerDaemon.spawnAll();
+        sendJson(res, 200, { spawned });
+        return;
+      }
+
       // -- Log watcher API ---------------------------------------------------
       if (req.method === 'GET' && pathname === '/api/logs/stream') {
         res.writeHead(200, {
@@ -3639,6 +3808,8 @@ function toPersistedSession(session: WorkSession): PersistedWorkSession {
     adaptiveConcurrency: session.adaptiveConcurrency,
     batchConcurrency: session.batchConcurrency,
     batchMinConcurrency: session.batchMinConcurrency,
+    enableTrivialTaskGate: session.enableTrivialTaskGate,
+    trivialTaskMaxPromptLength: session.trivialTaskMaxPromptLength,
     worktreePath: session.worktreePath,
     worktreeBranch: session.worktreeBranch,
     creationReason: session.creationReason,
@@ -3690,6 +3861,11 @@ function hydratePersistedSession(session: PersistedWorkSession): WorkSession {
     batchMinConcurrency: Math.min(
       normalizePositiveSetting(session.batchConcurrency, resolveBatchConcurrencyDefault()),
       normalizePositiveSetting(session.batchMinConcurrency, resolveBatchMinConcurrencyDefault()),
+    ),
+    enableTrivialTaskGate: parseBooleanSetting(session.enableTrivialTaskGate) ?? resolveTrivialTaskGateDefault(),
+    trivialTaskMaxPromptLength: normalizePositiveSetting(
+      session.trivialTaskMaxPromptLength,
+      resolveTrivialTaskMaxPromptLengthDefault(),
     ),
     worktreePath: asString(session.worktreePath) || undefined,
     worktreeBranch: asString(session.worktreeBranch) || undefined,
@@ -4360,6 +4536,8 @@ function resolveUiPreferencesDefaults(): UiPreferences {
     adaptiveConcurrency: resolveAdaptiveConcurrencyDefault(),
     batchConcurrency,
     batchMinConcurrency,
+    enableTrivialTaskGate: resolveTrivialTaskGateDefault(),
+    trivialTaskMaxPromptLength: resolveTrivialTaskMaxPromptLengthDefault(),
   };
 }
 
@@ -4391,6 +4569,11 @@ function normalizeUiPreferences(value: unknown, fallback: UiPreferences): UiPref
     adaptiveConcurrency: parseBooleanSetting(value.adaptiveConcurrency) ?? fallback.adaptiveConcurrency,
     batchConcurrency,
     batchMinConcurrency,
+    enableTrivialTaskGate: parseBooleanSetting(value.enableTrivialTaskGate) ?? fallback.enableTrivialTaskGate,
+    trivialTaskMaxPromptLength: normalizePositiveSetting(
+      value.trivialTaskMaxPromptLength,
+      fallback.trivialTaskMaxPromptLength,
+    ),
   };
 }
 
@@ -4443,6 +4626,18 @@ function resolveBatchMinConcurrencyDefault(): number {
   return parsePositiveInt(process.env.ORCHESTRACE_UI_BATCH_MIN_CONCURRENCY)
     ?? parsePositiveInt(process.env.ORCHESTRACE_BATCH_MIN_CONCURRENCY)
     ?? DEFAULT_UI_BATCH_MIN_CONCURRENCY;
+}
+
+function resolveTrivialTaskGateDefault(): boolean {
+  const raw = process.env.ORCHESTRACE_UI_TRIVIAL_TASK_GATE_ENABLED
+    ?? process.env.ORCHESTRACE_TRIVIAL_TASK_GATE_ENABLED;
+  return parseBooleanSetting(raw) ?? false;
+}
+
+function resolveTrivialTaskMaxPromptLengthDefault(): number {
+  return parsePositiveInt(process.env.ORCHESTRACE_UI_TRIVIAL_TASK_MAX_PROMPT_LENGTH)
+    ?? parsePositiveInt(process.env.ORCHESTRACE_TRIVIAL_TASK_MAX_PROMPT_LENGTH)
+    ?? 120;
 }
 
 function normalizeLlmSessionState(raw: unknown): LlmSessionState {
@@ -5833,6 +6028,8 @@ function serializeWorkSession(session: WorkSession, todos: AgentTodoItem[] = [])
     adaptiveConcurrency: session.adaptiveConcurrency,
     batchConcurrency: session.batchConcurrency,
     batchMinConcurrency: session.batchMinConcurrency,
+    enableTrivialTaskGate: session.enableTrivialTaskGate,
+    trivialTaskMaxPromptLength: session.trivialTaskMaxPromptLength,
     worktreePath: session.worktreePath,
     worktreeBranch: session.worktreeBranch,
     creationReason: session.creationReason,
