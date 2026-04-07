@@ -751,7 +751,17 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
 
     const ownerSessionId = worktreePathLocks.get(lockKey);
     if (ownerSessionId && ownerSessionId !== sessionId) {
-      return { ok: false, ownerSessionId };
+      const ownerSession = workSessions.get(ownerSessionId);
+      if (!ownerSession || ownerSession.status !== 'running') {
+        worktreePathLocks.delete(lockKey);
+      } else {
+        return { ok: false, ownerSessionId };
+      }
+    }
+
+    const refreshedOwnerSessionId = worktreePathLocks.get(lockKey);
+    if (refreshedOwnerSessionId && refreshedOwnerSessionId !== sessionId) {
+      return { ok: false, ownerSessionId: refreshedOwnerSessionId };
     }
 
     worktreePathLocks.set(lockKey, sessionId);
@@ -1107,7 +1117,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     // so a new session is never blocked by an existing one sharing the same path.
     let autoCreatedWorktreeCleanup: (() => Promise<void>) | undefined;
     let lockResult = acquireWorkspacePathLock(workspacePath, id);
-    if (!lockResult.ok && (executionContext === 'git-worktree' || isObserverSource)) {
+    if (!lockResult.ok && (executionContext === 'git-worktree' || isObserverSource || request.creationReason === 'retry')) {
       try {
         const sessionBranch = `orchestrace/session-${id}`;
         const sessionWorktreePath = join(workspace.path, '.worktrees', `session-${id}`);
