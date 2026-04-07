@@ -373,7 +373,8 @@ export async function orchestrate(
           const wasPlanningNoProgressAbort = planningNoProgressTriggered || isPlanningNoProgressAbortError(error);
           const failureType = wasPlanningNoProgressAbort ? 'timeout' : resolveReplayFailureType(error);
           const planningError = wasPlanningNoProgressAbort
-            ? `Planning made no tool progress for ${Math.ceil(noProgressTimeoutMs / 1000)}s. ${PLANNING_NO_TOOL_PROGRESS_NUDGE}`
+            ? planningNoToolAbortReason
+              || `Planning made no tool progress for ${Math.ceil(noProgressTimeoutMs / 1000)}s. ${PLANNING_NO_TOOL_PROGRESS_NUDGE}`
             : error instanceof Error ? error.message : String(error);
           const failedPlanningAttempt: ReplayAttemptRecord = {
             phase: 'planning',
@@ -862,15 +863,28 @@ async function appendTokenDump(
   await appendFile(path, `${JSON.stringify(payload)}\n`, 'utf-8');
 }
 
-function buildPlanningPrompt(node: TaskNode, depOutputs: Map<string, TaskOutput>): string {
+function buildPlanningPrompt(
+  node: TaskNode,
+  depOutputs: Map<string, TaskOutput>,
+  attempt = 1,
+): string {
   const depContext = buildDependencyContext(depOutputs);
-  return renderPromptSections([
+  const retryDirective = attempt > 1
+    ? [
+        `Planning attempt: ${attempt}`,
+        'Previous planning attempt did not satisfy execution requirements.',
+        PLANNING_FIRST_TOOL_RETRY_DIRECTIVE,
+      ]
+    : [];
+
+  const sections: PromptSection[] = [
     {
       name: PromptSectionName.Goal,
       lines: [
         'Create a deep implementation plan for the following task.',
         'Optimize for maximum safe concurrency and explicit multi-stage execution.',
-        'Before each tool call and after each tool result, narrate your reasoning: what you learned, what you plan to do next, and why.',
+        'Within the first 1-2 thinking cycles, make a concrete tool call to gather grounding context before extended narration.',
+        'Before each tool call and after each tool result, narrate your reasoning briefly: what you learned, what you plan to do next, and why.',
       ],
     },
     {
