@@ -1,5 +1,6 @@
 import { classifyTaskPrompt, type TaskRouteCategory, type TaskRouteResult } from '@orchestrace/core';
 import type { TaskType } from '@orchestrace/core';
+import type { SessionConfig } from '@orchestrace/store';
 
 const SHELL_COMMAND_START = /^(pnpm|npm|yarn|node|npx|git|cat|echo|grep|find|sed|awk|curl|bash|zsh|python|make|docker|kubectl|ls|pwd)(?:\s|$)/i;
 
@@ -7,6 +8,12 @@ export interface ResolvedRoute {
   result: TaskRouteResult;
   nodeType: TaskType;
   validationEnabled: boolean;
+}
+
+export interface ShellCommandValidationResult {
+  ok: boolean;
+  command?: string;
+  reason?: string;
 }
 
 export function parseTaskRouteOverride(raw: string | undefined): TaskRouteCategory | undefined {
@@ -38,6 +45,32 @@ export function resolveTaskRoute(prompt: string, overrideRaw?: string): Resolved
     nodeType,
     validationEnabled: result.category !== 'investigation',
   };
+}
+
+export function coerceRouteForSessionSource(route: TaskRouteResult, source: SessionConfig['source']): TaskRouteResult {
+  if (source === 'observer' && route.category === 'shell_command') {
+    return {
+      category: 'code_change',
+      strategy: 'full_planning_pipeline',
+      confidence: route.confidence,
+      source: 'fallback',
+      reason: `Observer-sourced sessions cannot execute direct shell routes. Original routing (${route.strategy}) was coerced to full planning pipeline.`,
+    };
+  }
+
+  return route;
+}
+
+export function validateShellCommandPrompt(prompt: string): ShellCommandValidationResult {
+  const command = extractShellCommand(prompt);
+  if (!command) {
+    return {
+      ok: false,
+      reason: 'Direct shell execution requires a single executable command; multi-line or markdown-style prompts are not allowed.',
+    };
+  }
+
+  return { ok: true, command };
 }
 
 export function extractShellCommand(prompt: string): string | undefined {

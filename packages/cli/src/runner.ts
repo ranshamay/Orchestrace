@@ -51,7 +51,7 @@ import {
   shouldResetThinkingCircuitBreakerOnEvent,
   updateThinkingCircuitBreaker,
 } from './thinking-circuit-breaker.js';
-import { extractShellCommand, resolveTaskRoute } from './task-routing.js';
+import { coerceRouteForSessionSource, resolveTaskRoute, validateShellCommandPrompt } from './task-routing.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -168,7 +168,9 @@ async function main(): Promise<void> {
   // Local state for graph progress tracking
   const agentGraph: SessionAgentGraphNode[] = [];
   const pendingNodeIds = new Map<string, string[]>();
-  const route = resolveTaskRoute(config.prompt, process.env.ORCHESTRACE_TASK_ROUTE).result;
+  const resolvedRoute = resolveTaskRoute(config.prompt, process.env.ORCHESTRACE_TASK_ROUTE).result;
+  const route = coerceRouteForSessionSource(resolvedRoute, config.source);
+  const routeCoerced = route !== resolvedRoute;
   const effortClassification = classifyTaskEffort(config.prompt);
   const taskEffort: TaskEffort = (process.env.ORCHESTRACE_TASK_EFFORT as TaskEffort) || effortClassification.effort;
   let successfulEditFileResultsSinceCheckpoint = 0;
@@ -214,6 +216,22 @@ async function main(): Promise<void> {
       },
     },
   });
+
+  if (routeCoerced) {
+    void emit({
+      time: iso(),
+      type: 'session:dag-event',
+      payload: {
+        event: {
+          time: iso(),
+          runId: sessionId,
+          type: 'task:routing',
+          taskId: 'task',
+          message: `Route coercion applied: source=${config.source ?? 'user'} prevented direct shell execution (from ${resolvedRoute.category} to ${route.category}).`,
+        },
+      },
+    });
+  }
 
   void emit({
     time: iso(),
