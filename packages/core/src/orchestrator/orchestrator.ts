@@ -1241,7 +1241,7 @@ function buildPlanningContractError(
     : false;
   const hasSubAgentDelegation = hasSuccessfulToolCall(toolCalls, 'subagent_spawn')
     || hasSuccessfulToolCall(toolCalls, 'subagent_spawn_batch');
-  const requiresSubAgentDelegation = !isSimplePlanningTask(task);
+  const requiresSubAgentDelegation = !allowsZeroPlanningSubagents;
   const requiredTools = ['todo_set', 'agent_graph_set'];
   const missing = requiredTools.filter((toolName) => !hasSuccessfulToolCall(toolCalls, toolName));
   if (!allowsZeroPlanningSubagents && !hasSubAgentDelegation) {
