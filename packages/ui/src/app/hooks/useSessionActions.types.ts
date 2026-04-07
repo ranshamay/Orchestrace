@@ -22,6 +22,7 @@ export type SessionActionsParams = {
   workPlanningModel: string;
   workProvider: string;
   workModel: string;
+  planningNoToolGuardMode: 'enforce' | 'warn';
   autoApprove: boolean;
   adaptiveConcurrency: boolean;
   batchConcurrency: number;

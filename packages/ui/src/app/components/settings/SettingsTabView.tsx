@@ -137,10 +137,12 @@ type Props = {
   defaultPlanningModel: string;
   defaultImplementationProvider: string;
   defaultImplementationModel: string;
+  defaultPlanningNoToolGuardMode: 'enforce' | 'warn';
   setDefaultPlanningProvider: (next: string) => void;
   setDefaultPlanningModel: (next: string) => void;
   setDefaultImplementationProvider: (next: string) => void;
   setDefaultImplementationModel: (next: string) => void;
+  setDefaultPlanningNoToolGuardMode: (next: 'enforce' | 'warn') => void;
   observerShowFindings: boolean;
   setObserverShowFindings: (next: boolean) => void;
   onSettingsSaveStatus: (state: Exclude<SettingsSaveToastState, 'idle'>, message: string) => void;
@@ -155,10 +157,12 @@ export function SettingsTabView({
   defaultPlanningModel,
   defaultImplementationProvider,
   defaultImplementationModel,
+  defaultPlanningNoToolGuardMode,
   setDefaultPlanningProvider,
   setDefaultPlanningModel,
   setDefaultImplementationProvider,
   setDefaultImplementationModel,
+  setDefaultPlanningNoToolGuardMode,
   observerShowFindings,
   setObserverShowFindings,
   onSettingsSaveStatus,
@@ -448,6 +452,27 @@ export function SettingsTabView({
             Connect at least one provider below to select a default provider.
           </div>
         )}
+
+        <div className="mt-4 rounded border border-slate-200 p-3 dark:border-slate-700">
+          <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">Planning Guard</div>
+          <div className="mb-2 text-xs text-slate-600 dark:text-slate-300">
+            Choose whether no-tool planning guardrails should abort attempts or only emit warnings.
+          </div>
+          <label className="flex flex-col gap-1 text-sm text-slate-700 dark:text-slate-200">
+            <span className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">No-tool guard mode</span>
+            <select
+              className="rounded border border-slate-200 px-2 py-1.5 text-sm dark:border-slate-700 dark:bg-slate-900"
+              value={defaultPlanningNoToolGuardMode}
+              onChange={(event) => {
+                const next = event.target.value === 'warn' ? 'warn' : 'enforce';
+                setDefaultPlanningNoToolGuardMode(next);
+              }}
+            >
+              <option value="enforce">Enforce (abort stalled planning attempts)</option>
+              <option value="warn">Warn only (never abort from no-tool guards)</option>
+            </select>
+          </label>
+        </div>
       </div>
 
       <div className="mb-6 rounded-lg border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-700 dark:bg-slate-900">

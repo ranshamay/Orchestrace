@@ -152,6 +152,17 @@ export interface SessionRecoveryInfo {
   time: string;
 }
 
+export type SessionWorktreePathSessionIdRelation = 'match' | 'mismatch' | 'none';
+
+export interface SessionWorkspaceAssignmentProvenance {
+  assignmentSource: 'workspace-root' | 'selected-worktree' | 'fallback-worktree' | 'auto-created-worktree';
+  reusedExistingWorktree?: boolean;
+  cleanupApplied?: boolean;
+  cleanupDefaultBranch?: string;
+  workspacePathSessionIdRelation?: SessionWorktreePathSessionIdRelation;
+  workspacePathSessionId?: string;
+}
+
 export interface WorkSession {
   id: string;
   workspaceId: string;
@@ -166,6 +177,7 @@ export interface WorkSession {
   implementationProvider: string;
   implementationModel: string;
   autoApprove: boolean;
+  planningNoToolGuardMode: 'enforce' | 'warn';
   quickStartMode?: boolean;
   quickStartMaxPreDelegationToolCalls?: number;
   executionContext: ExecutionContext;
@@ -178,6 +190,7 @@ export interface WorkSession {
   trivialTaskMaxPromptLength: number;
   worktreePath?: string;
   worktreeBranch?: string;
+  workspaceAssignment?: SessionWorkspaceAssignmentProvenance;
   creationReason: SessionCreationReason;
   sourceSessionId?: string;
   source?: 'user' | 'observer';
@@ -211,6 +224,7 @@ export interface PersistedWorkSession {
   implementationProvider?: string;
   implementationModel?: string;
   autoApprove: boolean;
+  planningNoToolGuardMode?: 'enforce' | 'warn';
   quickStartMode?: boolean;
   quickStartMaxPreDelegationToolCalls?: number;
   executionContext?: ExecutionContext;
@@ -223,6 +237,7 @@ export interface PersistedWorkSession {
   trivialTaskMaxPromptLength?: number;
   worktreePath?: string;
   worktreeBranch?: string;
+  workspaceAssignment?: SessionWorkspaceAssignmentProvenance;
   creationReason?: SessionCreationReason;
   sourceSessionId?: string;
   createdAt: string;
@@ -245,6 +260,7 @@ export interface UiPreferences {
   defaultPlanningModel: string;
   defaultImplementationProvider: string;
   defaultImplementationModel: string;
+  planningNoToolGuardMode: 'enforce' | 'warn';
   executionContext: ExecutionContext;
   selectedWorktreePath?: string;
   useWorktree: boolean;
@@ -264,6 +280,7 @@ export interface PersistedUiPreferences {
   defaultPlanningModel?: string;
   defaultImplementationProvider?: string;
   defaultImplementationModel?: string;
+  planningNoToolGuardMode?: 'enforce' | 'warn';
   executionContext?: ExecutionContext;
   selectedWorktreePath?: string;
   useWorktree?: boolean;

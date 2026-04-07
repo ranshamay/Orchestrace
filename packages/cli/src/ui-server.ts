@@ -64,11 +64,18 @@ import type {
   LlmSessionState,
   ExecutionContext,
   SessionCreationReason,
+  SessionWorkspaceAssignmentProvenance,
+  SessionWorktreePathSessionIdRelation,
 } from './ui-server/types.js';
 import { WorkspaceManager } from './workspace-manager.js';
 import { FileEventStore } from '@orchestrace/store';
 import { materializeSession as materializeFromEvents } from '@orchestrace/store';
-import type { SessionCheckpointPayload, SessionConfig, SessionEventInput, SessionRecoveryDetectedPayload } from '@orchestrace/store';
+import type {
+  SessionCheckpointPayload,
+  SessionConfig,
+  SessionEventInput,
+  SessionRecoveryDetectedPayload,
+} from '@orchestrace/store';
 import { ObserverDaemon, SessionObserver, BackendLogger, LogWatcher } from './observer/index.js';
 
 const GITHUB_PROVIDER_ID = 'github';
@@ -289,6 +296,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           implementationProvider: c.implementationProvider ?? c.provider,
           implementationModel: c.implementationModel ?? c.model,
           autoApprove: c.autoApprove,
+          planningNoToolGuardMode: normalizePlanningNoToolGuardMode(c.planningNoToolGuardMode)
+            ?? resolvePlanningNoToolGuardModeDefault(),
           quickStartMode: c.quickStartMode,
           quickStartMaxPreDelegationToolCalls: c.quickStartMaxPreDelegationToolCalls,
           executionContext: c.executionContext ?? 'workspace',
@@ -531,6 +540,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
               provider: session.provider,
               model: session.model,
               autoApprove: session.autoApprove,
+              planningNoToolGuardMode: session.planningNoToolGuardMode,
               quickStartMode: session.quickStartMode,
               quickStartMaxPreDelegationToolCalls: session.quickStartMaxPreDelegationToolCalls,
               executionContext: session.executionContext,
@@ -541,6 +551,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
               batchMinConcurrency: session.batchMinConcurrency,
               worktreePath: session.worktreePath,
               worktreeBranch: session.worktreeBranch,
+              workspaceAssignment: session.workspaceAssignment,
               creationReason: session.creationReason,
               sourceSessionId: session.sourceSessionId,
             },
@@ -1001,6 +1012,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       implementationProvider: session.implementationProvider,
       implementationModel: session.implementationModel,
       autoApprove: session.autoApprove,
+      planningNoToolGuardMode: session.planningNoToolGuardMode,
       quickStartMode: session.quickStartMode,
       quickStartMaxPreDelegationToolCalls: session.quickStartMaxPreDelegationToolCalls,
       executionContext: session.executionContext,
@@ -1013,6 +1025,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       trivialTaskMaxPromptLength: session.trivialTaskMaxPromptLength,
       worktreePath: session.worktreePath,
       worktreeBranch: session.worktreeBranch,
+      workspaceAssignment: session.workspaceAssignment,
       creationReason: session.creationReason,
       sourceSessionId: session.sourceSessionId,
       source: session.source,
@@ -1442,6 +1455,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     implementationProvider?: string;
     implementationModel?: string;
     autoApprove: boolean;
+    planningNoToolGuardMode?: 'enforce' | 'warn';
     quickStartMode?: boolean;
     quickStartMaxPreDelegationToolCalls?: number;
     executionContext?: ExecutionContext;
@@ -1540,6 +1554,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       request.quickStartMaxPreDelegationToolCalls,
       parsePositiveSetting(process.env.ORCHESTRACE_QUICK_START_MAX_PRE_DELEGATION_TOOL_CALLS) ?? 3,
     );
+    const planningNoToolGuardMode = normalizePlanningNoToolGuardMode(request.planningNoToolGuardMode)
+      ?? uiPreferences.planningNoToolGuardMode;
     const enableTrivialTaskGate = request.enableTrivialTaskGate ?? uiPreferences.enableTrivialTaskGate;
     const trivialTaskMaxPromptLength = normalizePositiveSetting(
       request.trivialTaskMaxPromptLength,
@@ -1550,6 +1566,11 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     let executionContext: ExecutionContext = 'workspace';
     let selectedWorktreePath: string | undefined;
     let selectedWorktreeBranch: string | undefined;
+    let workspaceAssignment: SessionWorkspaceAssignmentProvenance = {
+      assignmentSource: 'workspace-root',
+      reusedExistingWorktree: false,
+      cleanupApplied: false,
+    };
     if (requestedExecutionContext === 'git-worktree') {
       try {
         const resolved = await resolveSessionWorkspacePath({
@@ -1561,6 +1582,23 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         executionContext = resolved.executionContext;
         selectedWorktreePath = resolved.selectedWorktreePath;
         selectedWorktreeBranch = resolved.worktreeBranch;
+        workspaceAssignment = {
+          assignmentSource: resolved.assignmentSource,
+          reusedExistingWorktree: resolved.reusedExistingWorktree,
+          cleanupApplied: false,
+        };
+        if (resolved.reusedExistingWorktree) {
+          try {
+            const cleanup = await cleanupReusedWorktree(workspace.path, workspacePath);
+            workspaceAssignment.cleanupApplied = true;
+            workspaceAssignment.cleanupDefaultBranch = cleanup.defaultBranch;
+          } catch (cleanupError) {
+            return {
+              error: `Failed to clean reused worktree before assignment: ${toErrorMessage(cleanupError)}`,
+              statusCode: 500,
+            };
+          }
+        }
       } catch (error) {
         return {
           error: toErrorMessage(error),
@@ -1593,6 +1631,11 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         workspacePath = sessionWorktreePath;
         selectedWorktreePath = sessionWorktreePath;
         selectedWorktreeBranch = sessionBranch;
+        workspaceAssignment = {
+          assignmentSource: 'auto-created-worktree',
+          reusedExistingWorktree: false,
+          cleanupApplied: false,
+        };
         autoCreatedWorktreeCleanup = async () => {
           await gitExec(workspace.path, ['worktree', 'remove', '--force', sessionWorktreePath]).catch(() => {});
           await gitExec(workspace.path, ['branch', '-D', sessionBranch]).catch(() => {});
@@ -1610,6 +1653,17 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       void autoCreatedWorktreeCleanup?.().catch(() => {});
       return {
         error: `Workspace path is currently in use by another session (${lockResult.ownerSessionId}). Select a different worktree path or wait for the session to be deleted.`,
+        statusCode: 409,
+      };
+    }
+
+    try {
+      await assertWorkspaceIsClean(workspacePath, getWorkspaceDirtySummary);
+    } catch (cleanStateError) {
+      releaseWorkspacePathLock(workspacePath, id);
+      void autoCreatedWorktreeCleanup?.().catch(() => {});
+      return {
+        error: toErrorMessage(cleanStateError),
         statusCode: 409,
       };
     }
@@ -1633,6 +1687,9 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
 
     const controller = new AbortController();
     const createdAt = now();
+    const relation = classifyWorkspacePathSessionIdRelation(id, workspacePath);
+    workspaceAssignment.workspacePathSessionIdRelation = relation.relation;
+    workspaceAssignment.workspacePathSessionId = relation.pathSessionId;
 
     const session: WorkSession = {
       id,
@@ -1648,6 +1705,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       implementationProvider,
       implementationModel,
       autoApprove: request.autoApprove,
+      planningNoToolGuardMode,
       quickStartMode,
       quickStartMaxPreDelegationToolCalls,
       executionContext,
@@ -1660,6 +1718,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       trivialTaskMaxPromptLength,
       worktreePath: selectedWorktreePath,
       worktreeBranch: selectedWorktreeBranch,
+      workspaceAssignment,
       creationReason: request.creationReason ?? 'start',
       sourceSessionId: asString(request.sourceSessionId) || undefined,
       source: request.source,
@@ -1677,6 +1736,19 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     };
 
     workSessions.set(id, session);
+    console.log(
+      `[ui-server] session workspace assignment: ${JSON.stringify({
+        sessionId: id,
+        workspacePath,
+        executionContext,
+        assignmentSource: workspaceAssignment.assignmentSource,
+        reusedExistingWorktree: workspaceAssignment.reusedExistingWorktree ?? false,
+        cleanupApplied: workspaceAssignment.cleanupApplied ?? false,
+        cleanupDefaultBranch: workspaceAssignment.cleanupDefaultBranch,
+        workspacePathSessionIdRelation: workspaceAssignment.workspacePathSessionIdRelation,
+        workspacePathSessionId: workspaceAssignment.workspacePathSessionId,
+      })}`,
+    );
     sessionChats.set(id, createSessionChatThread(session, promptParts));
     sessionTodos.set(id, []);
     sessionSharedContextStores.set(id, new InMemorySharedContextStore());
@@ -2292,6 +2364,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         const quickStartMode = parseBooleanSetting(body.quickStartMode)
           ?? parseBooleanSetting(body.quickStart)
           ?? parseBooleanSetting(body.enableQuickStart);
+        const planningNoToolGuardMode = normalizePlanningNoToolGuardMode(body.planningNoToolGuardMode)
+          ?? (parseBooleanSetting(body.planningNoToolWarnOnly) ? 'warn' : undefined);
         const quickStartMaxPreDelegationToolCalls = parsePositiveSetting(body.quickStartMaxPreDelegationToolCalls)
           ?? parsePositiveSetting(body.quickStartToolCallLimit)
           ?? parsePositiveSetting(body.maxPreDelegationToolCalls);
@@ -2325,6 +2399,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           implementationProvider,
           implementationModel: implementationModelResolution.model,
           autoApprove,
+          planningNoToolGuardMode,
           quickStartMode,
           quickStartMaxPreDelegationToolCalls,
           executionContext,
@@ -4155,6 +4230,7 @@ function toPersistedSession(session: WorkSession): PersistedWorkSession {
     implementationProvider: session.implementationProvider,
     implementationModel: session.implementationModel,
     autoApprove: session.autoApprove,
+    planningNoToolGuardMode: session.planningNoToolGuardMode,
     quickStartMode: session.quickStartMode,
     quickStartMaxPreDelegationToolCalls: session.quickStartMaxPreDelegationToolCalls,
     executionContext: session.executionContext,
@@ -4167,6 +4243,7 @@ function toPersistedSession(session: WorkSession): PersistedWorkSession {
     trivialTaskMaxPromptLength: session.trivialTaskMaxPromptLength,
     worktreePath: session.worktreePath,
     worktreeBranch: session.worktreeBranch,
+    workspaceAssignment: session.workspaceAssignment,
     creationReason: session.creationReason,
     sourceSessionId: session.sourceSessionId,
     createdAt: session.createdAt,
@@ -4210,6 +4287,8 @@ function hydratePersistedSession(session: PersistedWorkSession): WorkSession {
     provider: asString(session.implementationProvider) || asString(session.provider),
     model: asString(session.implementationModel) || asString(session.model),
     promptParts: promptParts.length > 0 ? promptParts : undefined,
+    planningNoToolGuardMode: normalizePlanningNoToolGuardMode(session.planningNoToolGuardMode)
+      ?? resolvePlanningNoToolGuardModeDefault(),
     quickStartMode: parseBooleanSetting(session.quickStartMode)
       ?? (parseBooleanSetting(process.env.ORCHESTRACE_QUICK_START_MODE) ?? false),
     quickStartMaxPreDelegationToolCalls: normalizePositiveSetting(
@@ -4236,6 +4315,24 @@ function hydratePersistedSession(session: PersistedWorkSession): WorkSession {
     ),
     worktreePath: asString(session.worktreePath) || undefined,
     worktreeBranch: asString(session.worktreeBranch) || undefined,
+    workspaceAssignment: isRecord(session.workspaceAssignment)
+      ? (() => {
+        const assignmentSource = normalizeWorkspaceAssignmentSource(session.workspaceAssignment.assignmentSource);
+        if (!assignmentSource) {
+          return undefined;
+        }
+        return {
+          assignmentSource,
+          reusedExistingWorktree: parseBooleanSetting(session.workspaceAssignment.reusedExistingWorktree) ?? undefined,
+          cleanupApplied: parseBooleanSetting(session.workspaceAssignment.cleanupApplied) ?? undefined,
+          cleanupDefaultBranch: asString(session.workspaceAssignment.cleanupDefaultBranch) || undefined,
+          workspacePathSessionIdRelation: normalizeWorkspacePathSessionIdRelation(
+            session.workspaceAssignment.workspacePathSessionIdRelation,
+          ),
+          workspacePathSessionId: asString(session.workspaceAssignment.workspacePathSessionId) || undefined,
+        };
+      })()
+      : undefined,
     creationReason: normalizeSessionCreationReason(session.creationReason),
     sourceSessionId: asString(session.sourceSessionId) || undefined,
     agentGraph: normalizeSessionAgentGraphNodes(session.agentGraph),
@@ -4866,6 +4963,29 @@ function normalizeSessionCreationReason(raw: unknown): SessionCreationReason {
   return 'start';
 }
 
+function normalizeWorkspaceAssignmentSource(
+  raw: unknown,
+): SessionWorkspaceAssignmentProvenance['assignmentSource'] | undefined {
+  const value = asString(raw).trim().toLowerCase();
+  if (
+    value === 'workspace-root'
+    || value === 'selected-worktree'
+    || value === 'fallback-worktree'
+    || value === 'auto-created-worktree'
+  ) {
+    return value;
+  }
+  return undefined;
+}
+
+function normalizeWorkspacePathSessionIdRelation(raw: unknown): SessionWorktreePathSessionIdRelation | undefined {
+  const value = asString(raw).trim().toLowerCase();
+  if (value === 'match' || value === 'mismatch' || value === 'none') {
+    return value;
+  }
+  return undefined;
+}
+
 function resolveExecutionContextDefault(): ExecutionContext {
   const fromEnv = normalizeExecutionContext(
     process.env.ORCHESTRACE_UI_EXECUTION_CONTEXT ?? process.env.ORCHESTRACE_EXECUTION_CONTEXT,
@@ -4898,6 +5018,7 @@ function resolveUiPreferencesDefaults(): UiPreferences {
   const defaultPlanningModel = resolveDefaultPlanningModelPreferenceDefault(defaultModel);
   const defaultImplementationProvider = resolveDefaultImplementationProviderPreferenceDefault(defaultProvider);
   const defaultImplementationModel = resolveDefaultImplementationModelPreferenceDefault(defaultModel);
+  const planningNoToolGuardMode = resolvePlanningNoToolGuardModeDefault();
   return {
     activeTab: resolveUiTabDefault(),
     observerShowFindings: resolveObserverShowFindingsDefault(),
@@ -4907,6 +5028,7 @@ function resolveUiPreferencesDefaults(): UiPreferences {
     defaultPlanningModel,
     defaultImplementationProvider,
     defaultImplementationModel,
+    planningNoToolGuardMode,
     executionContext,
     selectedWorktreePath: asString(process.env.ORCHESTRACE_UI_SELECTED_WORKTREE_PATH) || undefined,
     useWorktree: executionContext === 'git-worktree',
@@ -4952,6 +5074,9 @@ function normalizeUiPreferences(value: unknown, fallback: UiPreferences): UiPref
     value.defaultImplementationModel,
     legacyDefaultModel || fallback.defaultImplementationModel,
   );
+  const planningNoToolGuardMode = normalizePlanningNoToolGuardMode(value.planningNoToolGuardMode)
+    ?? (parseBooleanSetting(value.planningNoToolWarnOnly) ? 'warn' : undefined)
+    ?? fallback.planningNoToolGuardMode;
 
   return {
     activeTab: normalizeUiTab(value.activeTab) ?? fallback.activeTab,
@@ -4962,6 +5087,7 @@ function normalizeUiPreferences(value: unknown, fallback: UiPreferences): UiPref
     defaultPlanningModel,
     defaultImplementationProvider,
     defaultImplementationModel,
+    planningNoToolGuardMode,
     executionContext,
     selectedWorktreePath,
     useWorktree: executionContext === 'git-worktree',
@@ -5006,6 +5132,29 @@ function resolveDefaultImplementationProviderPreferenceDefault(fallback: string)
 
 function resolveDefaultImplementationModelPreferenceDefault(fallback: string): string {
   return asString(process.env.ORCHESTRACE_UI_DEFAULT_IMPLEMENTATION_MODEL) || fallback;
+}
+
+function resolvePlanningNoToolGuardModeDefault(): 'enforce' | 'warn' {
+  const envMode = normalizePlanningNoToolGuardMode(process.env.ORCHESTRACE_PLANNING_NO_TOOL_GUARD_MODE);
+  if (envMode) {
+    return envMode;
+  }
+
+  const warnOnly = parseBooleanSetting(process.env.ORCHESTRACE_PLANNING_NO_TOOL_WARN_ONLY);
+  if (warnOnly === true) {
+    return 'warn';
+  }
+
+  return 'enforce';
+}
+
+function normalizePlanningNoToolGuardMode(value: unknown): 'enforce' | 'warn' | undefined {
+  const normalized = asString(value).toLowerCase();
+  if (normalized === 'enforce' || normalized === 'warn') {
+    return normalized;
+  }
+
+  return undefined;
 }
 
 function normalizeUiTab(value: unknown): 'graph' | 'settings' | undefined {
@@ -6441,6 +6590,7 @@ function serializeWorkSession(session: WorkSession, todos: AgentTodoItem[] = [])
     implementationProvider: session.implementationProvider,
     implementationModel: session.implementationModel,
     autoApprove: session.autoApprove,
+    planningNoToolGuardMode: session.planningNoToolGuardMode,
     quickStartMode: session.quickStartMode,
     quickStartMaxPreDelegationToolCalls: session.quickStartMaxPreDelegationToolCalls,
     executionContext: session.executionContext,
@@ -6453,6 +6603,7 @@ function serializeWorkSession(session: WorkSession, todos: AgentTodoItem[] = [])
     trivialTaskMaxPromptLength: session.trivialTaskMaxPromptLength,
     worktreePath: session.worktreePath,
     worktreeBranch: session.worktreeBranch,
+    workspaceAssignment: session.workspaceAssignment,
     creationReason: session.creationReason,
     sourceSessionId: session.sourceSessionId,
     source: session.source,
@@ -6595,6 +6746,76 @@ async function gitExec(repoRoot: string, args: string[]): Promise<string> {
     maxBuffer: 1024 * 1024,
   });
   return stdout;
+}
+
+type SessionIdWorkspacePathRelation = {
+  relation: SessionWorktreePathSessionIdRelation;
+  pathSessionId?: string;
+};
+
+export function classifyWorkspacePathSessionIdRelation(sessionId: string, workspacePath: string): SessionIdWorkspacePathRelation {
+  const normalizedPath = workspacePath.replace(/\\/g, '/');
+  const match = normalizedPath.match(/(?:^|\/)session-([0-9a-fA-F-]{8,})(?:\/|$)/);
+  const pathSessionId = match?.[1]?.toLowerCase();
+  const normalizedSessionId = sessionId.trim().toLowerCase();
+  if (!pathSessionId) {
+    return { relation: 'none' };
+  }
+  return {
+    relation: pathSessionId === normalizedSessionId ? 'match' : 'mismatch',
+    pathSessionId,
+  };
+}
+
+export async function resolveDefaultBranch(repoRoot: string): Promise<string> {
+  const tryCommands: Array<string[]> = [
+    ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'],
+    ['rev-parse', '--abbrev-ref', 'origin/HEAD'],
+  ];
+
+  for (const args of tryCommands) {
+    try {
+      const raw = (await gitExec(repoRoot, args)).trim();
+      const normalized = raw.replace(/^origin\//, '').trim();
+      if (normalized) {
+        return normalized;
+      }
+    } catch {
+      // Try next strategy.
+    }
+  }
+
+  return 'main';
+}
+
+export async function cleanupReusedWorktree(repoRoot: string, workspacePath: string): Promise<{ defaultBranch: string }> {
+  const defaultBranch = await resolveDefaultBranch(repoRoot);
+  await gitExec(workspacePath, ['checkout', defaultBranch]);
+  await gitExec(workspacePath, ['clean', '-fdx']);
+  return { defaultBranch };
+}
+
+export async function assertWorkspaceIsClean(
+  workspacePath: string,
+  summarizeDirty: (workspacePath: string) => Promise<{
+    hasUncommittedChanges: boolean;
+    hasStagedChanges: boolean;
+    hasUntrackedChanges: boolean;
+    dirtySummary: string[];
+  }>,
+): Promise<void> {
+  const dirty = await summarizeDirty(workspacePath);
+  if (!dirty.hasUncommittedChanges && !dirty.hasStagedChanges && !dirty.hasUntrackedChanges) {
+    return;
+  }
+  const details = dirty.dirtySummary.slice(0, 20).join('\n');
+  throw new Error(
+    [
+      `Workspace is not clean at session start: ${workspacePath}`,
+      'Worktree/session assignment requires a clean state before runner launch.',
+      details ? `Detected changes:\n${details}` : undefined,
+    ].filter(Boolean).join('\n'),
+  );
 }
 
 async function inspectGitRecoveryState(workspacePath: string): Promise<SessionRecoveryInfo['git']> {
@@ -6748,11 +6969,15 @@ async function resolveSessionWorkspacePath(request: {
   executionContext: ExecutionContext;
   selectedWorktreePath?: string;
   worktreeBranch?: string;
+  assignmentSource: SessionWorkspaceAssignmentProvenance['assignmentSource'];
+  reusedExistingWorktree: boolean;
 }> {
   if (request.executionContext === 'workspace') {
     return {
       workspacePath: request.workspaceRoot,
       executionContext: 'workspace',
+      assignmentSource: 'workspace-root',
+      reusedExistingWorktree: false,
     };
   }
 
@@ -6782,6 +7007,8 @@ async function resolveSessionWorkspacePath(request: {
       executionContext: 'git-worktree',
       selectedWorktreePath: selected.path,
       worktreeBranch: selected.branch,
+      assignmentSource: 'selected-worktree',
+      reusedExistingWorktree: true,
     };
   }
 
@@ -6791,6 +7018,8 @@ async function resolveSessionWorkspacePath(request: {
     executionContext: 'git-worktree',
     selectedWorktreePath: fallback.path,
     worktreeBranch: fallback.branch,
+    assignmentSource: 'fallback-worktree',
+    reusedExistingWorktree: true,
   };
 }
 

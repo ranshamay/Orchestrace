@@ -42,6 +42,7 @@ export interface UiPreferences {
   defaultPlanningModel: string;
   defaultImplementationProvider: string;
   defaultImplementationModel: string;
+  planningNoToolGuardMode: 'enforce' | 'warn';
   adaptiveConcurrency: boolean;
   batchConcurrency: number;
   batchMinConcurrency: number;
@@ -97,6 +98,7 @@ export interface WorkSession {
   implementationProvider?: string;
   implementationModel?: string;
   autoApprove: boolean;
+  planningNoToolGuardMode?: 'enforce' | 'warn';
   adaptiveConcurrency?: boolean;
   batchConcurrency?: number;
   batchMinConcurrency?: number;
@@ -301,6 +303,7 @@ export async function startWork(payload: {
   implementationProvider?: string;
   implementationModel?: string;
   autoApprove: boolean;
+  planningNoToolGuardMode?: 'enforce' | 'warn';
   adaptiveConcurrency?: boolean;
   batchConcurrency?: number;
   batchMinConcurrency?: number;

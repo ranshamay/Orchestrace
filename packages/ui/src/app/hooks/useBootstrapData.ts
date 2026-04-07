@@ -36,6 +36,7 @@ export function useBootstrapData() {
     planningModel: '',
     implementationProvider: '',
     implementationModel: '',
+    planningNoToolGuardMode: 'enforce',
     workspaceId: '',
     autoApprove: true,
     adaptiveConcurrency: false,
@@ -48,6 +49,7 @@ export function useBootstrapData() {
   const [workProvider, setWorkProvider] = useState('');
   const [workModel, setWorkModel] = useState('');
   const [workWorkspaceId, setWorkWorkspaceId] = useState('');
+  const [planningNoToolGuardMode, setPlanningNoToolGuardMode] = useState<'enforce' | 'warn'>('enforce');
   const [autoApprove, setAutoApprove] = useState(true);
   const [adaptiveConcurrency, setAdaptiveConcurrency] = useState(false);
   const [batchConcurrency, setBatchConcurrency] = useState(8);
@@ -118,6 +120,7 @@ export function useBootstrapData() {
           defaultPlanningModel: '',
           defaultImplementationProvider: '',
           defaultImplementationModel: '',
+          planningNoToolGuardMode: 'enforce',
           adaptiveConcurrency: false,
           batchConcurrency: 8,
           batchMinConcurrency: 1,
@@ -166,6 +169,7 @@ export function useBootstrapData() {
           planningModel: defaultPlanningModel,
           implementationProvider: defaultImplementationProvider,
           implementationModel: defaultImplementationModel,
+          planningNoToolGuardMode: preferences.planningNoToolGuardMode === 'warn' ? 'warn' : 'enforce',
           workspaceId: defaultWorkspace,
           autoApprove: true,
           adaptiveConcurrency: preferences.adaptiveConcurrency,
@@ -174,10 +178,11 @@ export function useBootstrapData() {
         };
 
         setDefaultLlmControls(initialControls);
-          setWorkPlanningProvider(initialControls.planningProvider);
-          setWorkPlanningModel(initialControls.planningModel);
-          setWorkProvider(initialControls.implementationProvider);
-          setWorkModel(initialControls.implementationModel);
+        setWorkPlanningProvider(initialControls.planningProvider);
+        setWorkPlanningModel(initialControls.planningModel);
+        setWorkProvider(initialControls.implementationProvider);
+        setWorkModel(initialControls.implementationModel);
+        setPlanningNoToolGuardMode(initialControls.planningNoToolGuardMode);
         setWorkWorkspaceId(initialControls.workspaceId);
         setAutoApprove(initialControls.autoApprove);
         setAdaptiveConcurrency(initialControls.adaptiveConcurrency);
@@ -222,6 +227,8 @@ export function useBootstrapData() {
     setWorkModel,
     workWorkspaceId,
     setWorkWorkspaceId,
+    planningNoToolGuardMode,
+    setPlanningNoToolGuardMode,
     autoApprove,
     setAutoApprove,
     adaptiveConcurrency,

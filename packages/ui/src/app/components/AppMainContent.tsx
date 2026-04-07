@@ -40,6 +40,7 @@ export type AppMainContentProps = {
   workPlanningModel: string;
   workProvider: string;
   workModel: string;
+  planningNoToolGuardMode: 'enforce' | 'warn';
   autoApprove: boolean;
   composerText: string;
   setComposerText: (value: string) => void;
@@ -56,10 +57,12 @@ export type AppMainContentProps = {
   defaultPlanningModel: string;
   defaultImplementationProvider: string;
   defaultImplementationModel: string;
+  defaultPlanningNoToolGuardMode: 'enforce' | 'warn';
   onSetDefaultPlanningProvider: (next: string) => void;
   onSetDefaultPlanningModel: (next: string) => void;
   onSetDefaultImplementationProvider: (next: string) => void;
   onSetDefaultImplementationModel: (next: string) => void;
+  onSetDefaultPlanningNoToolGuardMode: (next: 'enforce' | 'warn') => void;
   observerShowFindings: boolean;
   onSetObserverShowFindings: (next: boolean) => void;
   onSettingsSaveStatus: (state: Exclude<SettingsSaveToastState, 'idle'>, message: string) => void;
@@ -85,10 +88,12 @@ export function AppMainContent(props: AppMainContentProps) {
         defaultPlanningModel={props.defaultPlanningModel}
         defaultImplementationProvider={props.defaultImplementationProvider}
         defaultImplementationModel={props.defaultImplementationModel}
+        defaultPlanningNoToolGuardMode={props.defaultPlanningNoToolGuardMode}
         setDefaultPlanningProvider={props.onSetDefaultPlanningProvider}
         setDefaultPlanningModel={props.onSetDefaultPlanningModel}
         setDefaultImplementationProvider={props.onSetDefaultImplementationProvider}
         setDefaultImplementationModel={props.onSetDefaultImplementationModel}
+        setDefaultPlanningNoToolGuardMode={props.onSetDefaultPlanningNoToolGuardMode}
         observerShowFindings={props.observerShowFindings}
         setObserverShowFindings={props.onSetObserverShowFindings}
         onSettingsSaveStatus={props.onSettingsSaveStatus}
@@ -165,6 +170,7 @@ export function AppMainContent(props: AppMainContentProps) {
       workPlanningModel={props.workPlanningModel}
       workProvider={props.workProvider}
       workModel={props.workModel}
+      planningNoToolGuardMode={props.planningNoToolGuardMode}
       autoApprove={props.autoApprove}
       composerMode={props.composerMode}
     />

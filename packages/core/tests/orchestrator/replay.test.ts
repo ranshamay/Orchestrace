@@ -621,11 +621,57 @@ describe('orchestrate replay capture', () => {
       expect(output?.status).toBe('completed');
       const planningAttempts = output?.replay?.attempts.filter((attempt) => attempt.phase === 'planning') ?? [];
       expect(planningAttempts.length).toBe(2);
-      expect(planningAttempts[0]?.error).toContain('without a tool call');
+      expect(planningAttempts[0]?.error?.toLowerCase()).toContain('no tool progress');
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }
   });
+
+  it('warn-only planning no-tool guard does not abort the planning attempt', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'orchestrace-replay-planning-stall-warn-only-'));
+    const events: DagEvent[] = [];
+
+    try {
+      const outputs = await orchestrate(makeSingleNodeGraph(), {
+        llm: createAdapter({
+          planningBehavior: async ({ options }) => {
+            for (let i = 0; i < 30; i += 1) {
+              options?.onTextDelta?.(`thinking-${i}`);
+              options?.onUsage?.({ input: 60, output: 45, cost: 0 });
+              await new Promise((resolve) => setTimeout(resolve, 2));
+            }
+
+            return {
+              text: 'Plan completed without tool calls in warn-only mode.',
+              usage: { input: 12, output: 7, cost: 0 },
+              metadata: { stopReason: 'end_turn', endpoint: 'https://example.test' },
+            };
+          },
+        }),
+        cwd,
+        requirePlanApproval: false,
+        planningSystemPrompt: 'planning',
+        implementationSystemPrompt: 'implementation',
+        planningNoToolProgressTimeoutMs: 20,
+        planningNoToolProgressCheckIntervalMs: 2,
+        planningNoToolGuardMode: 'warn',
+        onEvent: (event) => events.push(event),
+      });
+
+      const output = outputs.get('task-1');
+      expect(output?.status).toBe('completed');
+      const planningAttempts = output?.replay?.attempts.filter((attempt) => attempt.phase === 'planning') ?? [];
+      expect(planningAttempts.length).toBe(1);
+      expect(events.some((event) => {
+        return event.type === 'task:verification-failed'
+          && 'error' in event
+          && typeof event.error === 'string'
+          && event.error.includes('warn-only mode');
+      })).toBe(true);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  }, 15_000);
 
   it('does not trigger planning stall retry when tool calls reset the streak', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'orchestrace-replay-planning-stall-reset-'));
@@ -853,18 +899,22 @@ describe('orchestrate replay capture', () => {
     }
   });
 
-  it('retries planning after 3 consecutive thinking deltas without tool calls', async () => {
+  it('retries planning when no-tool progress guard aborts an enforced attempt', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'orchestrace-replay-thinking-cycle-guard-'));
 
     try {
       const outputs = await orchestrate(makeSingleNodeGraph(), {
         llm: createAdapter({
-          planningBehavior: async ({ options, planningCall }) => {
+          planningBehavior: async ({ options, planningCall, signal }) => {
             if (planningCall === 1) {
-              options?.onTextDelta?.('thinking-1');
-              options?.onTextDelta?.('thinking-2');
-              options?.onTextDelta?.('thinking-3');
-              throw new Error('expected cycle guard abort');
+              for (let i = 0; i < 100; i += 1) {
+                if (signal?.aborted) {
+                  throw signal.reason;
+                }
+                options?.onTextDelta?.(`thinking-${i}`);
+                await new Promise((resolve) => setTimeout(resolve, 2));
+              }
+              throw new Error('expected no-progress timeout abort');
             }
 
             options?.onToolCall?.({
@@ -918,13 +968,15 @@ describe('orchestrate replay capture', () => {
         requirePlanApproval: false,
         planningSystemPrompt: 'planning',
         implementationSystemPrompt: 'implementation',
+        planningNoToolProgressTimeoutMs: 20,
+        planningNoToolProgressCheckIntervalMs: 2,
       });
 
       const output = outputs.get('task-1');
       expect(output?.status).toBe('completed');
       const planningAttempts = output?.replay?.attempts.filter((attempt) => attempt.phase === 'planning') ?? [];
       expect(planningAttempts.length).toBe(2);
-      expect(planningAttempts[0]?.error).toContain('3 consecutive thinking cycles without a tool call');
+      expect(planningAttempts[0]?.error?.toLowerCase()).toContain('no tool progress');
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }
@@ -939,8 +991,11 @@ describe('orchestrate replay capture', () => {
           planningBehavior: async ({ options, signal }) => {
             options?.onUsage?.({ input: 2100, output: 0, cost: 0 });
             options?.onUsage?.({ input: 3200, output: 0, cost: 0 });
-            if (signal?.aborted) {
-              throw signal.reason;
+            for (let i = 0; i < 100; i += 1) {
+              if (signal?.aborted) {
+                throw signal.reason;
+              }
+              await new Promise((resolve) => setTimeout(resolve, 2));
             }
             throw new Error('expected token guard abort');
           },
@@ -959,7 +1014,7 @@ describe('orchestrate replay capture', () => {
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }
-  });
+  }, 15_000);
 
   it('includes granular planning contract guidance in planning prompt', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'orchestrace-replay-plan-prompt-'));

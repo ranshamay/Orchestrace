@@ -51,6 +51,7 @@ export type SessionLlmControls = {
   planningModel: string;
   implementationProvider: string;
   implementationModel: string;
+  planningNoToolGuardMode: 'enforce' | 'warn';
   workspaceId: string;
   autoApprove: boolean;
   adaptiveConcurrency: boolean;

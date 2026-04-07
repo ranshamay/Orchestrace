@@ -17,6 +17,8 @@ type Params = {
   setWorkModel: (value: string) => void;
   workWorkspaceId: string;
   setWorkWorkspaceId: (value: string) => void;
+  planningNoToolGuardMode: 'enforce' | 'warn';
+  setPlanningNoToolGuardMode: (value: 'enforce' | 'warn') => void;
   autoApprove: boolean;
   setAutoApprove: (value: boolean) => void;
   adaptiveConcurrency: boolean;
@@ -43,6 +45,8 @@ export function useLlmControls(params: Params) {
     setWorkModel,
     workWorkspaceId,
     setWorkWorkspaceId,
+    planningNoToolGuardMode,
+    setPlanningNoToolGuardMode,
     autoApprove,
     setAutoApprove,
     adaptiveConcurrency,
@@ -61,6 +65,9 @@ export function useLlmControls(params: Params) {
     if (workProvider !== controls.implementationProvider) setWorkProvider(controls.implementationProvider);
     if (workModel !== controls.implementationModel) setWorkModel(controls.implementationModel);
     if (workWorkspaceId !== controls.workspaceId) setWorkWorkspaceId(controls.workspaceId);
+    if (planningNoToolGuardMode !== controls.planningNoToolGuardMode) {
+      setPlanningNoToolGuardMode(controls.planningNoToolGuardMode);
+    }
     if (autoApprove !== controls.autoApprove) setAutoApprove(controls.autoApprove);
     if (adaptiveConcurrency !== controls.adaptiveConcurrency) setAdaptiveConcurrency(controls.adaptiveConcurrency);
     if (batchConcurrency !== controls.batchConcurrency) setBatchConcurrency(controls.batchConcurrency);
@@ -72,6 +79,7 @@ export function useLlmControls(params: Params) {
     batchMinConcurrency,
     setAdaptiveConcurrency,
     setAutoApprove,
+    setPlanningNoToolGuardMode,
     setBatchConcurrency,
     setBatchMinConcurrency,
     setWorkPlanningModel,
@@ -79,6 +87,7 @@ export function useLlmControls(params: Params) {
     setWorkModel,
     setWorkProvider,
     setWorkWorkspaceId,
+    planningNoToolGuardMode,
     workPlanningModel,
     workPlanningProvider,
     workModel,
@@ -92,6 +101,7 @@ export function useLlmControls(params: Params) {
       planningModel: patch.planningModel ?? workPlanningModel,
       implementationProvider: patch.implementationProvider ?? workProvider,
       implementationModel: patch.implementationModel ?? workModel,
+      planningNoToolGuardMode: patch.planningNoToolGuardMode ?? planningNoToolGuardMode,
       workspaceId: patch.workspaceId ?? workWorkspaceId,
       autoApprove: patch.autoApprove ?? autoApprove,
       adaptiveConcurrency: patch.adaptiveConcurrency ?? adaptiveConcurrency,
@@ -113,6 +123,7 @@ export function useLlmControls(params: Params) {
     batchMinConcurrency,
     selectedSessionId,
     setDefaultLlmControls,
+    planningNoToolGuardMode,
     workPlanningModel,
     workPlanningProvider,
     workModel,
@@ -147,6 +158,7 @@ export function useLlmControls(params: Params) {
       implementationModel: defaultLlmControls.implementationModel
         || selectedSession.implementationModel
         || selectedSession.model,
+      planningNoToolGuardMode: selectedSession.planningNoToolGuardMode ?? defaultLlmControls.planningNoToolGuardMode,
       workspaceId: selectedSession.workspaceId || defaultLlmControls.workspaceId,
       autoApprove: selectedSession.autoApprove,
       adaptiveConcurrency: selectedSession.adaptiveConcurrency ?? defaultLlmControls.adaptiveConcurrency,

@@ -99,6 +99,17 @@ export interface ContextCompactionState {
 
 // ---- Session configuration (written once at creation) -----------------------
 
+export type SessionWorktreePathSessionIdRelation = 'match' | 'mismatch' | 'none';
+
+export interface SessionWorkspaceAssignmentProvenance {
+  assignmentSource: 'workspace-root' | 'selected-worktree' | 'fallback-worktree' | 'auto-created-worktree';
+  reusedExistingWorktree?: boolean;
+  cleanupApplied?: boolean;
+  cleanupDefaultBranch?: string;
+  workspacePathSessionIdRelation?: SessionWorktreePathSessionIdRelation;
+  workspacePathSessionId?: string;
+}
+
 export interface SessionConfig {
   id: string;
   workspaceId: string;
@@ -113,6 +124,8 @@ export interface SessionConfig {
   implementationProvider?: string;
   implementationModel?: string;
   autoApprove: boolean;
+  /** Planning no-tool guard policy: `enforce` aborts stalled attempts, `warn` emits warnings only. */
+  planningNoToolGuardMode?: 'enforce' | 'warn';
   /** Enable quick-start planning mode that delegates within first few tool calls. */
   quickStartMode?: boolean;
   /** Max successful tool calls allowed before first successful sub-agent delegation in quick-start mode. */
@@ -127,6 +140,7 @@ export interface SessionConfig {
   trivialTaskMaxPromptLength?: number;
   worktreePath?: string;
   worktreeBranch?: string;
+  workspaceAssignment?: SessionWorkspaceAssignmentProvenance;
   creationReason: SessionCreationReason;
   sourceSessionId?: string;
   /** Session origin: 'user' (default) or 'observer' (auto-created by observer agent). */

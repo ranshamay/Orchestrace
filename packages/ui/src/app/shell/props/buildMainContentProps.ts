@@ -33,6 +33,7 @@ type Params = {
   workPlanningModel: string;
   workProvider: string;
   workModel: string;
+  planningNoToolGuardMode: 'enforce' | 'warn';
   autoApprove: boolean;
   composerText: string;
   setComposerText: (value: string) => void;
@@ -45,10 +46,12 @@ type Params = {
   defaultPlanningModel: string;
   defaultImplementationProvider: string;
   defaultImplementationModel: string;
+  defaultPlanningNoToolGuardMode: 'enforce' | 'warn';
   onSetDefaultPlanningProvider: AppMainContentProps['onSetDefaultPlanningProvider'];
   onSetDefaultPlanningModel: AppMainContentProps['onSetDefaultPlanningModel'];
   onSetDefaultImplementationProvider: AppMainContentProps['onSetDefaultImplementationProvider'];
   onSetDefaultImplementationModel: AppMainContentProps['onSetDefaultImplementationModel'];
+  onSetDefaultPlanningNoToolGuardMode: AppMainContentProps['onSetDefaultPlanningNoToolGuardMode'];
   observerShowFindings: boolean;
   onSetObserverShowFindings: (next: boolean) => void;
   onSettingsSaveStatus: AppMainContentProps['onSettingsSaveStatus'];
@@ -91,6 +94,7 @@ export function buildMainContentProps(params: Params): AppMainContentProps {
     workPlanningModel: params.workPlanningModel,
     workProvider: params.workProvider,
     workModel: params.workModel,
+    planningNoToolGuardMode: params.planningNoToolGuardMode,
     autoApprove: params.autoApprove,
     composerText: params.composerText,
     setComposerText: params.setComposerText,
@@ -107,10 +111,12 @@ export function buildMainContentProps(params: Params): AppMainContentProps {
     defaultPlanningModel: params.defaultPlanningModel,
     defaultImplementationProvider: params.defaultImplementationProvider,
     defaultImplementationModel: params.defaultImplementationModel,
+    defaultPlanningNoToolGuardMode: params.defaultPlanningNoToolGuardMode,
     onSetDefaultPlanningProvider: params.onSetDefaultPlanningProvider,
     onSetDefaultPlanningModel: params.onSetDefaultPlanningModel,
     onSetDefaultImplementationProvider: params.onSetDefaultImplementationProvider,
     onSetDefaultImplementationModel: params.onSetDefaultImplementationModel,
+    onSetDefaultPlanningNoToolGuardMode: params.onSetDefaultPlanningNoToolGuardMode,
     observerShowFindings: params.observerShowFindings,
     onSetObserverShowFindings: params.onSetObserverShowFindings,
     onSettingsSaveStatus: params.onSettingsSaveStatus,

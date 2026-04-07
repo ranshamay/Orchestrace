@@ -27,6 +27,7 @@ type Props = {
   workPlanningModel: string;
   workProvider: string;
   workModel: string;
+  planningNoToolGuardMode: 'enforce' | 'warn';
   autoApprove: boolean;
   composerMode: ComposerMode;
 };
@@ -52,6 +53,7 @@ export function GraphTabView({
   workPlanningModel,
   workProvider,
   workModel,
+  planningNoToolGuardMode,
   autoApprove,
   composerMode,
 }: Props) {
@@ -60,6 +62,7 @@ export function GraphTabView({
     : selectedLlmStatus.phase;
   const activeProvider = livePhase === 'planning' ? workPlanningProvider : workProvider;
   const activeModel = livePhase === 'planning' ? workPlanningModel : workModel;
+  const effectivePlanningNoToolGuardMode = selectedSession?.planningNoToolGuardMode ?? planningNoToolGuardMode;
 
   return (
     <div className="relative flex h-full flex-1 flex-col">
@@ -70,6 +73,7 @@ export function GraphTabView({
             <div className="truncate">Provider: <span className="font-mono">{activeProvider || 'none'}</span></div>
             <div className="truncate">Model: <span className="font-mono">{activeModel || 'none'}</span></div>
             <div>Auto-approve: <span className="font-mono">{autoApprove ? 'on' : 'off'}</span></div>
+            <div className="truncate">Planning guard: <span className={`rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${effectivePlanningNoToolGuardMode === 'warn' ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300' : 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300'}`}>{effectivePlanningNoToolGuardMode}</span></div>
           </div>
           <div className="mb-2 flex items-center justify-between rounded border border-slate-200 bg-white px-3 py-2 text-xs dark:border-slate-800 dark:bg-slate-900">
             <div className="text-slate-600 dark:text-slate-300">Composer mode: <span className={`rounded ml-2 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${composerModeBadgeClass(composerMode)}`}>{composerMode}</span></div>

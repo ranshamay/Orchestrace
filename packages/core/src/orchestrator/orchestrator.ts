@@ -80,9 +80,12 @@ export interface OrchestratorConfig extends RunnerConfig {
   planningNoToolProgressTimeoutMs?: number;
   /** Polling interval used for planning no-tool progress checks. Defaults to 1 second. */
   planningNoToolProgressCheckIntervalMs?: number;
+  /** Controls whether planning no-tool guards abort attempts (`enforce`) or emit warnings only (`warn`). */
+  planningNoToolGuardMode?: 'enforce' | 'warn';
 }
 
 type OrchestratorPhase = 'planning' | 'implementation';
+type PlanningNoToolGuardMode = 'enforce' | 'warn';
 
 const DEFAULT_ORCHESTRATOR_PROMPT_VERSION = 'orchestrator-prompts-v2';
 const MAX_PLANNING_ATTEMPTS = 3;
@@ -90,10 +93,10 @@ const PLANNING_RETRY_BASE_DELAY_MS = 2_000;
 const RETRY_CONTEXT_MAX_CHARS = 2_000;
 const PLANNING_NO_TOOL_PROGRESS_TIMEOUT_MS = 5 * 60_000;
 const PLANNING_NO_TOOL_PROGRESS_CHECK_INTERVAL_MS = 1_000;
+const DEFAULT_PLANNING_NO_TOOL_GUARD_MODE: PlanningNoToolGuardMode = 'enforce';
 const PLANNING_NO_TOOL_PROGRESS_NUDGE =
   'Planning did not make tool progress. Use a concrete tool call to advance the plan.';
 const PLANNING_NO_PROGRESS_ABORT_SENTINEL = '__orchestrace_planning_no_progress__';
-const PLANNING_NO_TOOL_THINKING_CYCLE_LIMIT = 3;
 const PLANNING_NO_TOOL_INITIAL_CUTOFF_MS = 20_000;
 const PLANNING_PRE_FIRST_TOOL_TOKEN_NUDGE_BUDGET = 2_000;
 const PLANNING_PRE_FIRST_TOOL_TOKEN_ABORT_BUDGET = 3_000;
@@ -134,6 +137,7 @@ export async function orchestrate(
     quickStartMaxPreDelegationToolCalls,
     planningNoToolProgressTimeoutMs,
     planningNoToolProgressCheckIntervalMs,
+    planningNoToolGuardMode,
   } = config;
 
   const emit = onEvent ?? (() => {});
@@ -213,6 +217,7 @@ export async function orchestrate(
       | { text: string; usage?: { input: number; output: number; cost: number }; metadata?: { stopReason?: string; endpoint?: string } }
       | undefined;
     let persistedPlanPath: string | undefined;
+    const resolvedPlanningNoToolGuardMode = normalizePlanningNoToolGuardMode(planningNoToolGuardMode);
 
     if (!trivialClassification.isTrivial) {
       const planningAgent = await llm.spawnAgent({
@@ -279,9 +284,11 @@ export async function orchestrate(
         const planningAttemptStartedAtMs = Date.now();
         let planningLastToolProgressAt = planningAttemptStartedAtMs;
         let sawPlanningToolCall = false;
-        let planningConsecutiveThinkingCyclesWithoutTool = 0;
         let planningPreFirstToolTokenUsage = 0;
         let planningPreFirstToolTokenNudged = false;
+        let planningPreFirstToolTokenHardWarningEmitted = false;
+        let planningNoToolInitialWarningEmitted = false;
+        let planningNoToolProgressWarningEmitted = false;
         let planningNoToolAbortReason = '';
 
         const planningNoProgressInterval = setInterval(() => {
@@ -290,33 +297,48 @@ export async function orchestrate(
           }
 
           if (!sawPlanningToolCall && Date.now() - planningAttemptStartedAtMs >= PLANNING_NO_TOOL_INITIAL_CUTOFF_MS) {
-            planningNoProgressTriggered = true;
-            planningNoToolAbortReason =
+            const message =
               `Planning made no initial tool call for ${Math.ceil(PLANNING_NO_TOOL_INITIAL_CUTOFF_MS / 1000)}s. ${PLANNING_FIRST_TOOL_RETRY_DIRECTIVE}`;
-            planningNoProgressAbortController();
-            return;
+            if (resolvedPlanningNoToolGuardMode === 'enforce') {
+              planningNoProgressTriggered = true;
+              planningNoToolAbortReason = message;
+              planningNoProgressAbortController();
+              return;
+            }
+
+            if (!planningNoToolInitialWarningEmitted) {
+              planningNoToolInitialWarningEmitted = true;
+              emit({
+                type: 'task:verification-failed',
+                taskId: node.id,
+                attempt: planningAttempt,
+                error: `Planning guard warning (warn-only mode): ${message}`,
+              });
+            }
           }
 
           if (Date.now() - planningLastToolProgressAt >= noProgressTimeoutMs) {
-            planningNoProgressTriggered = true;
-            planningNoProgressAbortController();
+            const message = `Planning made no tool progress for ${Math.ceil(noProgressTimeoutMs / 1000)}s. ${PLANNING_NO_TOOL_PROGRESS_NUDGE}`;
+            if (resolvedPlanningNoToolGuardMode === 'enforce') {
+              planningNoProgressTriggered = true;
+              planningNoToolAbortReason = message;
+              planningNoProgressAbortController();
+            } else if (!planningNoToolProgressWarningEmitted) {
+              planningNoToolProgressWarningEmitted = true;
+              planningLastToolProgressAt = Date.now();
+              emit({
+                type: 'task:verification-failed',
+                taskId: node.id,
+                attempt: planningAttempt,
+                error: `Planning guard warning (warn-only mode): ${message}`,
+              });
+            }
           }
         }, noProgressCheckIntervalMs);
 
         try {
           planningResult = await planningAgent.complete(planningPrompt, planningAttemptController.signal, {
             onTextDelta: (delta) => {
-              if (!sawPlanningToolCall) {
-                planningConsecutiveThinkingCyclesWithoutTool += 1;
-                if (planningConsecutiveThinkingCyclesWithoutTool >= PLANNING_NO_TOOL_THINKING_CYCLE_LIMIT) {
-                  planningNoProgressTriggered = true;
-                  planningNoToolAbortReason =
-                    `Planning emitted ${planningConsecutiveThinkingCyclesWithoutTool} consecutive thinking cycles without a tool call. ${PLANNING_FIRST_TOOL_RETRY_DIRECTIVE}`;
-                  planningNoProgressAbortController();
-                  return;
-                }
-              }
-
               emit({
                 type: 'task:stream-delta',
                 taskId: node.id,
@@ -344,16 +366,28 @@ export async function orchestrate(
               }
 
               if (planningPreFirstToolTokenUsage >= PLANNING_PRE_FIRST_TOOL_TOKEN_ABORT_BUDGET) {
-                planningNoProgressTriggered = true;
-                planningNoToolAbortReason =
+                const message =
                   `Planning consumed ${planningPreFirstToolTokenUsage} tokens before first tool call. ${PLANNING_FIRST_TOOL_RETRY_DIRECTIVE}`;
-                planningNoProgressAbortController();
+                if (resolvedPlanningNoToolGuardMode === 'enforce') {
+                  planningNoProgressTriggered = true;
+                  planningNoToolAbortReason = message;
+                  planningNoProgressAbortController();
+                } else if (!planningPreFirstToolTokenHardWarningEmitted) {
+                  planningPreFirstToolTokenHardWarningEmitted = true;
+                  emit({
+                    type: 'task:verification-failed',
+                    taskId: node.id,
+                    attempt: planningAttempt,
+                    error: `Planning guard warning (warn-only mode): ${message}`,
+                  });
+                }
               }
             },
             onToolCall: (event) => {
               planningLastToolProgressAt = Date.now();
               sawPlanningToolCall = true;
-              planningConsecutiveThinkingCyclesWithoutTool = 0;
+              planningNoToolInitialWarningEmitted = false;
+              planningNoToolProgressWarningEmitted = false;
               planningToolCalls.push(toReplayToolCallRecord(event));
               emit({
                 type: 'task:tool-call',
@@ -1238,6 +1272,10 @@ function createPlanningNoProgressAbortError(): Error {
   const error = new Error(PLANNING_NO_PROGRESS_ABORT_SENTINEL);
   (error as Error & { failureType?: ReplayFailureType }).failureType = 'empty_response';
   return error;
+}
+
+function normalizePlanningNoToolGuardMode(value: unknown): PlanningNoToolGuardMode {
+  return value === 'warn' ? 'warn' : DEFAULT_PLANNING_NO_TOOL_GUARD_MODE;
 }
 
 function isPlanningNoProgressAbortError(error: unknown): boolean {

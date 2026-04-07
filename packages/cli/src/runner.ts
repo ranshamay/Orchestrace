@@ -71,6 +71,7 @@ const AUTO_CHECKPOINT_GIT_TIMEOUT_MS = resolvePositiveIntEnv(process.env.ORCHEST
 const CHECKPOINT_STASH_PREFIX = 'orchestrace-checkpoint';
 const CHECKPOINT_METADATA_FILE = 'checkpoint.json';
 const execFileAsync = promisify(execFile);
+type PlanningNoToolGuardMode = 'enforce' | 'warn';
 
 type CheckpointLifecycleState = 'idle' | 'active' | 'completed' | 'failed' | 'cancelled' | 'interrupted';
 
@@ -177,6 +178,9 @@ async function main(): Promise<void> {
     ?? resolveBooleanEnv(process.env.ORCHESTRACE_QUICK_START_MODE, false);
   const quickStartMaxPreDelegationToolCalls = config.quickStartMaxPreDelegationToolCalls
     ?? resolvePositiveIntEnv(process.env.ORCHESTRACE_QUICK_START_MAX_PRE_DELEGATION_TOOL_CALLS, 3);
+  const planningNoToolGuardMode = normalizePlanningNoToolGuardMode(config.planningNoToolGuardMode)
+    ?? normalizePlanningNoToolGuardMode(process.env.ORCHESTRACE_PLANNING_NO_TOOL_GUARD_MODE)
+    ?? 'enforce';
   const checkpointFilePath = join(workspaceRoot, '.orchestrace', 'sessions', sessionId, CHECKPOINT_METADATA_FILE);
   const checkpointName = `${CHECKPOINT_STASH_PREFIX}:${sessionId}:${Date.now()}`;
   const checkpointState = {
@@ -655,6 +659,7 @@ async function main(): Promise<void> {
       implementationSystemPrompt: buildSystemPrompt(config, 'implementation'),
       quickStartMode,
       quickStartMaxPreDelegationToolCalls,
+      planningNoToolGuardMode,
       maxParallel: 1,
       requirePlanApproval: !config.autoApprove,
       onPlanApproval: async () => config.autoApprove,
@@ -1195,6 +1200,19 @@ function resolveBooleanEnv(raw: string | undefined, fallback: boolean): boolean 
   }
 
   return fallback;
+}
+
+function normalizePlanningNoToolGuardMode(value: unknown): PlanningNoToolGuardMode | undefined {
+  if (typeof value !== 'string') {
+    return undefined;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  if (normalized === 'enforce' || normalized === 'warn') {
+    return normalized;
+  }
+
+  return undefined;
 }
 
 function logDagEventTrace(sessionId: string, event: DagEvent): void {

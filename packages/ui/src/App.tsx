@@ -55,6 +55,7 @@ export default function App() {
     workPlanningModel, setWorkPlanningModel,
     workProvider, setWorkProvider, workModel, setWorkModel,
     workWorkspaceId, setWorkWorkspaceId, autoApprove, setAutoApprove,
+    planningNoToolGuardMode, setPlanningNoToolGuardMode,
     errorMessage, setErrorMessage,
     adaptiveConcurrency, setAdaptiveConcurrency,
     bootstrapComplete,
@@ -150,6 +151,7 @@ export default function App() {
     selectedSessionId, selectedSession, defaultLlmControls, setDefaultLlmControls,
     workPlanningProvider, setWorkPlanningProvider, workPlanningModel, setWorkPlanningModel,
     workProvider, setWorkProvider, workModel, setWorkModel, workWorkspaceId, setWorkWorkspaceId,
+    planningNoToolGuardMode, setPlanningNoToolGuardMode,
     autoApprove, setAutoApprove,
     adaptiveConcurrency, setAdaptiveConcurrency,
     batchConcurrency, setBatchConcurrency,
@@ -296,10 +298,12 @@ export default function App() {
       planningModel: defaultLlmControls.planningModel,
       implementationProvider: defaultLlmControls.implementationProvider,
       implementationModel: defaultLlmControls.implementationModel,
+      planningNoToolGuardMode: defaultLlmControls.planningNoToolGuardMode,
     });
   }, [
     defaultLlmControls.implementationModel,
     defaultLlmControls.implementationProvider,
+    defaultLlmControls.planningNoToolGuardMode,
     defaultLlmControls.planningModel,
     defaultLlmControls.planningProvider,
     setActiveTab,
@@ -339,6 +343,7 @@ export default function App() {
     workPlanningModel,
     workProvider,
     workModel,
+    planningNoToolGuardMode,
     autoApprove,
     adaptiveConcurrency, batchConcurrency, batchMinConcurrency,
     setErrorMessage, setSessions, setSelectedSessionId, setChatMessages, setTodos,
@@ -362,6 +367,7 @@ export default function App() {
     const payload = {
       activeTab,
       observerShowFindings,
+      planningNoToolGuardMode,
       adaptiveConcurrency,
       batchConcurrency,
       batchMinConcurrency,
@@ -391,8 +397,27 @@ export default function App() {
     bootstrapComplete,
     onSettingsSaveStatus,
     observerShowFindings,
+    planningNoToolGuardMode,
     setErrorMessage,
   ]);
+
+  const setDefaultPlanningNoToolGuardMode = useCallback((next: 'enforce' | 'warn') => {
+    const normalized = next === 'warn' ? 'warn' : 'enforce';
+    setDefaultLlmControls((current) => ({ ...current, planningNoToolGuardMode: normalized }));
+    setPlanningNoToolGuardMode(normalized);
+    setLlmControlsBySessionId((current) => {
+      const nextControls = { ...current };
+      for (const sessionId of Object.keys(nextControls)) {
+        const existing = nextControls[sessionId];
+        nextControls[sessionId] = {
+          ...existing,
+          planningNoToolGuardMode: normalized,
+        };
+      }
+      return nextControls;
+    });
+    updateActiveLlmControls({ planningNoToolGuardMode: normalized });
+  }, [setDefaultLlmControls, setLlmControlsBySessionId, setPlanningNoToolGuardMode, updateActiveLlmControls]);
 
   const sessionSidebarProps = buildSessionSidebarProps({
     activeTab,
@@ -442,6 +467,7 @@ export default function App() {
     workPlanningModel,
     workProvider,
     workModel,
+    planningNoToolGuardMode,
     autoApprove,
     composerText,
     setComposerText,
@@ -460,10 +486,12 @@ export default function App() {
     defaultPlanningModel: defaultLlmControls.planningModel,
     defaultImplementationProvider: defaultLlmControls.implementationProvider,
     defaultImplementationModel: defaultLlmControls.implementationModel,
+    defaultPlanningNoToolGuardMode: defaultLlmControls.planningNoToolGuardMode,
     onSetDefaultPlanningProvider: setDefaultPlanningProvider,
     onSetDefaultPlanningModel: setDefaultPlanningModel,
     onSetDefaultImplementationProvider: setDefaultImplementationProvider,
     onSetDefaultImplementationModel: setDefaultImplementationModel,
+    onSetDefaultPlanningNoToolGuardMode: setDefaultPlanningNoToolGuardMode,
     observerShowFindings,
     onSetObserverShowFindings: setObserverShowFindings,
     onSettingsSaveStatus,
