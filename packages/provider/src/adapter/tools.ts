@@ -11,6 +11,7 @@ import { formatToolPayload, toErrorMessage } from './utils.js';
 import { createTimeoutSignal } from './timeout.js';
 
 const MAX_TOOL_ROUNDS = resolveMaxToolRounds();
+const SUBAGENT_BATCH_RETRY_MAX_ATTEMPTS = resolveSubagentBatchRetryMaxAttempts();
 
 export async function executeWithOptionalTools(params: {
   model: ReturnType<typeof import('@mariozechner/pi-ai').getModel>;
@@ -117,6 +118,21 @@ function resolveMaxToolRounds(): number | undefined {
   return parsed;
 }
 
+function resolveSubagentBatchRetryMaxAttempts(): number {
+  const defaultAttempts = 2;
+  const raw = process.env.ORCHESTRACE_SUBAGENT_BATCH_RETRY_MAX_ATTEMPTS;
+  if (!raw) {
+    return defaultAttempts;
+  }
+
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return defaultAttempts;
+  }
+
+  return parsed;
+}
+
 async function executeToolCalls(
   toolset: LlmToolset,
   tools: Tool[],
@@ -131,6 +147,7 @@ async function executeToolCalls(
 
   for (const toolCall of toolCalls) {
     let payload: { content: string; isError: boolean; details?: unknown };
+    let validatedArgs: Record<string, unknown> | undefined;
 
     completionOptions?.onToolCall?.({
       type: 'started',
@@ -157,15 +174,13 @@ async function executeToolCalls(
     } else {
       try {
         coerceStringifiedArrayArgs(toolCall);
-        const validatedArgs = validateToolCall(tools, toolCall) as Record<string, unknown>;
-        const toolResult = await toolset.executeTool(
-          {
-            id: toolCall.id,
-            name: toolCall.name,
-            arguments: validatedArgs,
-          },
+        validatedArgs = validateToolCall(tools, toolCall) as Record<string, unknown>;
+        const toolResult = await executeToolWithSubagentBatchRetry({
+          toolset,
+          toolCall,
+          arguments: validatedArgs,
           signal,
-        );
+        });
 
         payload = {
           content: toolResult.content,
@@ -216,11 +231,222 @@ async function executeToolCalls(
     });
 
     if (payload.isError) {
-      retryPrompts.push(buildToolCallRetryMessage(toolCall, payload.content));
+      if (toolCall.name === 'subagent_spawn_batch') {
+        retryPrompts.push(buildSubagentBatchRetryMessage(toolCall, payload.content));
+      } else {
+        retryPrompts.push(buildToolCallRetryMessage(toolCall, payload.content));
+      }
     }
   }
 
   return { results, retryPrompts, hadErrors };
+}
+
+type ToolExecutionPayload = {
+  content: string;
+  isError?: boolean;
+  details?: unknown;
+};
+
+type ParsedSubagentBatchFailure = {
+  failedNodeIds: string[];
+  runs: Array<{ status?: string; nodeId?: string; id?: string; error?: string }>;
+};
+
+async function executeToolWithSubagentBatchRetry(params: {
+  toolset: LlmToolset;
+  toolCall: ToolCall;
+  arguments: Record<string, unknown>;
+  signal?: AbortSignal;
+}): Promise<ToolExecutionPayload> {
+  const { toolset, toolCall, arguments: toolArgs, signal } = params;
+
+  const first = await toolset.executeTool(
+    {
+      id: toolCall.id,
+      name: toolCall.name,
+      arguments: toolArgs,
+    },
+    signal,
+  );
+
+  if (toolCall.name !== 'subagent_spawn_batch' || !(first.isError ?? false)) {
+    return first;
+  }
+
+  const originalAgents = getSubagentBatchAgents(toolArgs);
+  if (originalAgents.length === 0) {
+    return first;
+  }
+
+  let attempt = 0;
+  let latest = first;
+
+  while (attempt < SUBAGENT_BATCH_RETRY_MAX_ATTEMPTS) {
+    const parsedFailure = parseSubagentBatchFailure(latest.content);
+    if (parsedFailure.failedNodeIds.length === 0) {
+      return latest;
+    }
+
+    const retryAgents = buildFailedSubagentRetryAgents(originalAgents, parsedFailure.failedNodeIds);
+    if (retryAgents.length === 0) {
+      return latest;
+    }
+
+    const retryArgs = {
+      ...toolArgs,
+      agents: retryAgents,
+    };
+
+    attempt += 1;
+    latest = await toolset.executeTool(
+      {
+        id: toolCall.id,
+        name: toolCall.name,
+        arguments: retryArgs,
+      },
+      signal,
+    );
+
+    if (!(latest.isError ?? false)) {
+      return latest;
+    }
+  }
+
+  return buildSubagentBatchFallbackResult(latest, originalAgents);
+}
+
+function getSubagentBatchAgents(args: Record<string, unknown>): Array<Record<string, unknown>> {
+  const agentsRaw = args.agents;
+  if (!Array.isArray(agentsRaw)) {
+    return [];
+  }
+
+  return agentsRaw.filter((entry): entry is Record<string, unknown> => Boolean(entry) && typeof entry === 'object');
+}
+
+function parseSubagentBatchFailure(content: string): ParsedSubagentBatchFailure {
+  try {
+    const parsed = JSON.parse(content) as Record<string, unknown>;
+    const failedNodeIds = normalizeStringArray(parsed.failedNodeIds);
+    const runs = Array.isArray(parsed.runs)
+      ? parsed.runs
+        .filter((entry): entry is Record<string, unknown> => Boolean(entry) && typeof entry === 'object')
+        .map((entry) => ({
+          status: typeof entry.status === 'string' ? entry.status : undefined,
+          nodeId: typeof entry.nodeId === 'string' ? entry.nodeId : undefined,
+          id: typeof entry.id === 'string' ? entry.id : undefined,
+          error: typeof entry.error === 'string' ? entry.error : undefined,
+        }))
+      : [];
+
+    if (failedNodeIds.length > 0) {
+      return { failedNodeIds: dedupeStrings(failedNodeIds), runs };
+    }
+
+    const derivedFailedNodeIds = runs
+      .filter((run) => run.status === 'failed')
+      .map((run) => run.nodeId ?? run.id)
+      .filter((value): value is string => typeof value === 'string' && value.length > 0);
+
+    return {
+      failedNodeIds: dedupeStrings(derivedFailedNodeIds),
+      runs,
+    };
+  } catch {
+    return { failedNodeIds: [], runs: [] };
+  }
+}
+
+function normalizeStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.filter((entry): entry is string => typeof entry === 'string' && entry.length > 0);
+}
+
+function dedupeStrings(values: string[]): string[] {
+  return [...new Set(values)];
+}
+
+function buildFailedSubagentRetryAgents(
+  originalAgents: Array<Record<string, unknown>>,
+  failedNodeIds: string[],
+): Array<Record<string, unknown>> {
+  const failedSet = new Set(failedNodeIds);
+  return originalAgents.filter((agent) => {
+    const nodeId = typeof agent.nodeId === 'string' ? agent.nodeId : undefined;
+    return nodeId ? failedSet.has(nodeId) : false;
+  });
+}
+
+function buildSubagentBatchRetryMessage(toolCall: ToolCall, errorContent: string): string {
+  const parsed = parseSubagentBatchFailure(errorContent);
+  const suffix = parsed.failedNodeIds.length > 0
+    ? `Failed nodeIds: ${parsed.failedNodeIds.join(', ')}.`
+    : 'Unable to parse failed nodeIds from batch result.';
+
+  return [
+    `Tool call ${toolCall.name} (${toolCall.id}) failed.`,
+    errorContent,
+    suffix,
+    'Retry subagent_spawn_batch once for all failed nodes together as a single batch request.',
+  ].join('\n');
+}
+
+function buildSubagentBatchFallbackResult(
+  latestFailure: ToolExecutionPayload,
+  originalAgents: Array<Record<string, unknown>>,
+): ToolExecutionPayload {
+  const parsedFailure = parseSubagentBatchFailure(latestFailure.content);
+  const failedNodes = parsedFailure.failedNodeIds.length > 0
+    ? parsedFailure.failedNodeIds
+    : originalAgents
+      .map((agent) => (typeof agent.nodeId === 'string' ? agent.nodeId : undefined))
+      .filter((value): value is string => Boolean(value));
+
+  const critical: string[] = [];
+  const nonCritical: string[] = [];
+
+  for (const nodeId of failedNodes) {
+    if (isNonCriticalResearchNode(nodeId)) {
+      nonCritical.push(nodeId);
+    } else {
+      critical.push(nodeId);
+    }
+  }
+
+  const fallback = {
+    status: 'fallback',
+    retryCap: SUBAGENT_BATCH_RETRY_MAX_ATTEMPTS,
+    failedNodeIds: failedNodes,
+    critical,
+    nonCritical,
+    inlineInstructions: critical.length > 0
+      ? 'Inline fallback required for critical nodes: continue by completing these nodes directly in the parent agent response and clearly mark degraded confidence.'
+      : undefined,
+    skippedNodes: nonCritical,
+    warning: nonCritical.length > 0
+      ? 'Skipped non-critical research nodes after retry exhaustion.'
+      : undefined,
+    lastFailure: latestFailure.content,
+  };
+
+  return {
+    content: JSON.stringify(fallback, null, 2),
+    isError: critical.length > 0,
+    details: {
+      fallback: true,
+      critical,
+      nonCritical,
+      retryCap: SUBAGENT_BATCH_RETRY_MAX_ATTEMPTS,
+    },
+  };
+}
+
+function isNonCriticalResearchNode(nodeId: string): boolean {
+  const normalized = nodeId.toLowerCase();
+  return normalized.includes('research') || normalized.includes('investigat') || normalized.includes('context');
 }
 
 function buildToolCallRetryMessage(toolCall: ToolCall, errorContent: string): string {

@@ -2,7 +2,9 @@ import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { Type } from '@mariozechner/pi-ai';
 import type { AgentToolsetOptions, RegisteredAgentTool } from './types.js';
+import type { FileReadCache } from './file-read-cache.js';
 import { resolveWorkspacePath, toWorkspaceRelative } from './path-utils.js';
+import { runCommand } from './command-tools/command-runner.js';
 
 interface FilesystemToolOptions extends AgentToolsetOptions {
   includeWriteTools: boolean;
@@ -18,6 +20,8 @@ const MAX_BATCH_ITEMS = 1000;
 const DEFAULT_BATCH_MIN_CONCURRENCY = 1;
 
 export function createFilesystemTools(options: FilesystemToolOptions): RegisteredAgentTool[] {
+  const resolveRevision = createRevisionResolver(options.cwd);
+  const fileReadCache = options.fileReadCache;
   const tools: RegisteredAgentTool[] = [
     {
       tool: {
@@ -63,7 +67,10 @@ export function createFilesystemTools(options: FilesystemToolOptions): Registere
         const startLine = asPositiveInteger(toolArgs.startLine) ?? 1;
         const endLine = asPositiveInteger(toolArgs.endLine);
         const maxChars = asPositiveInteger(toolArgs.maxChars) ?? DEFAULT_READ_MAX_CHARS;
-        const trimmed = await readWorkspaceFileSlice(target, { startLine, endLine, maxChars });
+        const trimmed = await readWorkspaceFileSlice(target, { startLine, endLine, maxChars }, {
+          fileReadCache,
+          resolveRevision,
+        });
 
         return {
           content: trimmed,
@@ -111,6 +118,9 @@ export function createFilesystemTools(options: FilesystemToolOptions): Registere
               startLine: request.startLine,
               endLine: request.endLine,
               maxChars: request.maxChars,
+            }, {
+              fileReadCache,
+              resolveRevision,
             });
             return {
               path: request.path,
@@ -177,6 +187,7 @@ export function createFilesystemTools(options: FilesystemToolOptions): Registere
 
           await mkdir(dirname(target), { recursive: true });
           await writeFile(target, content, 'utf-8');
+          invalidateCacheForPath(fileReadCache, target);
 
           return {
             content: `Wrote ${toWorkspaceRelative(options.cwd, target)} (${content.length} chars).`,
@@ -228,6 +239,7 @@ export function createFilesystemTools(options: FilesystemToolOptions): Registere
             try {
               await mkdir(dirname(target), { recursive: true });
               await writeFile(target, request.content, 'utf-8');
+              invalidateCacheForPath(fileReadCache, target);
               return {
                 path: request.path,
                 ok: true,
@@ -332,6 +344,7 @@ export function createFilesystemTools(options: FilesystemToolOptions): Registere
                 ? current.split(request.oldText).join(request.newText)
                 : current.replace(request.oldText, request.newText);
               await writeFile(target, updated, 'utf-8');
+              invalidateCacheForPath(fileReadCache, target);
 
               return {
                 path: request.path,
@@ -412,6 +425,7 @@ export function createFilesystemTools(options: FilesystemToolOptions): Registere
             : current.replace(oldText, newText);
 
           await writeFile(target, updated, 'utf-8');
+          invalidateCacheForPath(fileReadCache, target);
 
           return {
             content: replaceAll
@@ -452,6 +466,51 @@ async function readWorkspaceFileSlice(
     endLine?: number;
     maxChars: number;
   },
+  cacheOptions: {
+    fileReadCache?: FileReadCache;
+    resolveRevision: () => Promise<string>;
+  },
+): Promise<string> {
+  const normalized = {
+    startLine: Math.max(1, options.startLine),
+    endLine: options.endLine,
+    maxChars: options.maxChars,
+  };
+
+  if (cacheOptions.fileReadCache) {
+    const revision = await cacheOptions.resolveRevision();
+    const cached = cacheOptions.fileReadCache.get({
+      path: target,
+      revision,
+      startLine: normalized.startLine,
+      endLine: normalized.endLine,
+      maxChars: normalized.maxChars,
+    });
+    if (cached !== undefined) {
+      return cached;
+    }
+
+    const computed = await readWorkspaceFileSliceUncached(target, normalized);
+    cacheOptions.fileReadCache.set({
+      path: target,
+      revision,
+      startLine: normalized.startLine,
+      endLine: normalized.endLine,
+      maxChars: normalized.maxChars,
+    }, computed);
+    return computed;
+  }
+
+  return readWorkspaceFileSliceUncached(target, normalized);
+}
+
+async function readWorkspaceFileSliceUncached(
+  target: string,
+  options: {
+    startLine: number;
+    endLine?: number;
+    maxChars: number;
+  },
 ): Promise<string> {
   const content = await readFile(target, 'utf-8');
   const lines = content.split(/\r?\n/);
@@ -461,6 +520,35 @@ async function readWorkspaceFileSlice(
   return sliced.length > options.maxChars
     ? `${sliced.slice(0, options.maxChars)}\n... (truncated)`
     : sliced;
+}
+
+function createRevisionResolver(cwd: string): () => Promise<string> {
+  let cachedRevision: string | undefined;
+
+  return async () => {
+    if (cachedRevision) {
+      return cachedRevision;
+    }
+
+    try {
+      const result = await runCommand('git', ['rev-parse', 'HEAD'], {
+        cwd,
+        timeoutMs: 5_000,
+      });
+      const revision = result.exitCode === 0
+        ? result.stdout.trim()
+        : '';
+      cachedRevision = revision || 'no-git-revision';
+    } catch {
+      cachedRevision = 'no-git-revision';
+    }
+
+    return cachedRevision;
+  };
+}
+
+function invalidateCacheForPath(cache: FileReadCache | undefined, target: string): void {
+  cache?.invalidatePath(target);
 }
 
 function asReadBatchRequests(value: unknown): ReadBatchRequest[] {
