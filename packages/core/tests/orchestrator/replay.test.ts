@@ -621,7 +621,7 @@ describe('orchestrate replay capture', () => {
       expect(output?.status).toBe('completed');
       const planningAttempts = output?.replay?.attempts.filter((attempt) => attempt.phase === 'planning') ?? [];
       expect(planningAttempts.length).toBe(2);
-      expect(planningAttempts[0]?.error).toContain('no tool progress');
+      expect(planningAttempts[0]?.error).toContain('without a tool call');
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }
