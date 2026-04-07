@@ -30,13 +30,16 @@ export async function spawnFixSessions(
   config: ObserverConfig,
   startSession: StartSessionFn,
   activeFixSessionCount = 0,
+  ignoreLimit = false,
 ): Promise<number> {
   const pending = registry.getPending();
-  const limit = config.maxConcurrentFixSessions > 0 ? config.maxConcurrentFixSessions : Infinity;
+  const limit = ignoreLimit
+    ? Infinity
+    : (config.maxConcurrentFixSessions > 0 ? config.maxConcurrentFixSessions : Infinity);
   const canSpawn = Math.max(0, limit - activeFixSessionCount);
   if (canSpawn === 0) return 0;
 
-  const toSpawn = pending.slice(0, canSpawn);
+  const toSpawn = ignoreLimit ? pending : pending.slice(0, canSpawn);
   let spawned = 0;
 
   for (const finding of toSpawn) {

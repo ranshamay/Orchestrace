@@ -17,6 +17,7 @@ import { runDag } from '../dag/scheduler.js';
 import { validate } from '../validation/validator.js';
 import { PromptSectionName, renderPromptSections, type PromptSection } from '../prompt/sections.js';
 import type { LlmAdapter, LlmToolCallEvent, LlmToolset } from '@orchestrace/provider';
+import { classifyTrivialTaskNode, resolveTrivialTaskGateConfig } from './task-complexity.js';
 
 export interface PlanApprovalRequest {
   task: TaskNode;
@@ -62,6 +63,14 @@ export interface OrchestratorConfig extends RunnerConfig {
   promptVersion?: string;
   /** Replay policy version tag persisted into task outputs. */
   policyVersion?: string;
+  /** Enables conservative pre-planning trivial-task classification gate. */
+  enableTrivialTaskGate?: boolean;
+  /** Max normalized prompt length for trivial-task classification. */
+  trivialTaskMaxPromptLength?: number;
+  /** Enable quick-start planning mode that enforces early delegation. Defaults to false. */
+  quickStartMode?: boolean;
+  /** Max successful tool calls allowed before first successful sub-agent delegation. Defaults to 3 when quick-start is enabled. */
+  quickStartMaxPreDelegationToolCalls?: number;
 }
 
 type OrchestratorPhase = 'planning' | 'implementation';
@@ -97,6 +106,10 @@ export async function orchestrate(
     onEvent,
     promptVersion,
     policyVersion,
+    enableTrivialTaskGate,
+    trivialTaskMaxPromptLength,
+    quickStartMode,
+    quickStartMaxPreDelegationToolCalls,
   } = config;
 
   const emit = onEvent ?? (() => {});
@@ -159,14 +172,36 @@ export async function orchestrate(
     const planningTokenDumpPath = join(taskTokenDumpDir, 'planning.jsonl');
     const implementationTokenDumpPath = join(taskTokenDumpDir, 'implementation.jsonl');
 
-    const planningAgent = await llm.spawnAgent({
-      provider: model.provider,
-      model: model.model,
-      reasoning: model.reasoning,
-      systemPrompt:
-        planningSystemPrompt
-        ?? systemPrompt
-        ?? buildPhaseSystemPrompt({
+    const trivialTaskGate = resolveTrivialTaskGateConfig({
+      enabled: enableTrivialTaskGate,
+      maxPromptLength: trivialTaskMaxPromptLength,
+    });
+    const trivialClassification = classifyTrivialTaskNode(node, trivialTaskGate);
+
+    let planningResult:
+      | { text: string; usage?: { input: number; output: number; cost: number }; metadata?: { stopReason?: string; endpoint?: string } }
+      | undefined;
+    let persistedPlanPath: string | undefined;
+
+    if (!trivialClassification.isTrivial) {
+      const planningAgent = await llm.spawnAgent({
+        provider: model.provider,
+        model: model.model,
+        reasoning: model.reasoning,
+        systemPrompt:
+          planningSystemPrompt
+          ?? systemPrompt
+          ?? buildPhaseSystemPrompt({
+            phase: 'planning',
+            task: node,
+            graphId: graph.id,
+            cwd,
+            provider: model.provider,
+            model: model.model,
+            reasoning: model.reasoning,
+          }),
+        signal: context.signal,
+        toolset: createToolset?.({
           phase: 'planning',
           task: node,
           graphId: graph.id,
@@ -175,62 +210,97 @@ export async function orchestrate(
           model: model.model,
           reasoning: model.reasoning,
         }),
-      signal: context.signal,
-      toolset: createToolset?.({
-        phase: 'planning',
-        task: node,
-        graphId: graph.id,
-        cwd,
-        provider: model.provider,
-        model: model.model,
-        reasoning: model.reasoning,
-      }),
-      apiKey,
-      refreshApiKey,
-    });
+        apiKey,
+        refreshApiKey,
+      });
 
-    emit({ type: 'task:planning', taskId: node.id });
+      emit({ type: 'task:planning', taskId: node.id });
 
-    const planningPrompt = buildPlanningPrompt(node, context.depOutputs);
-    let planningResult;
-    let planningToolCalls: ReplayToolCallRecord[] = [];
+      const planningPrompt = buildPlanningPrompt(node, context.depOutputs);
+      let planningToolCalls: ReplayToolCallRecord[] = [];
 
-    for (let planningAttempt = 1; planningAttempt <= MAX_PLANNING_ATTEMPTS; planningAttempt++) {
-      planningToolCalls = [];
-      const planningAttemptStart = new Date().toISOString();
-      planningResult = undefined;
+      for (let planningAttempt = 1; planningAttempt <= MAX_PLANNING_ATTEMPTS; planningAttempt++) {
+        planningToolCalls = [];
+        const planningAttemptStart = new Date().toISOString();
+        planningResult = undefined;
 
-      try {
-        planningResult = await planningAgent.complete(planningPrompt, context.signal, {
-          onTextDelta: (delta) => {
+        try {
+          planningResult = await planningAgent.complete(planningPrompt, context.signal, {
+            onTextDelta: (delta) => {
+              emit({
+                type: 'task:stream-delta',
+                taskId: node.id,
+                phase: 'planning',
+                attempt: planningAttempt,
+                delta,
+              });
+            },
+            onToolCall: (event) => {
+              planningToolCalls.push(toReplayToolCallRecord(event));
+              emit({
+                type: 'task:tool-call',
+                taskId: node.id,
+                phase: 'planning',
+                attempt: planningAttempt,
+                toolCallId: event.toolCallId,
+                toolName: event.toolName,
+                status: event.type,
+                input: event.arguments,
+                output: event.result,
+                isError: event.isError,
+              });
+            },
+          });
+        } catch (error) {
+          const failureType = resolveReplayFailureType(error);
+          const planningError = error instanceof Error ? error.message : String(error);
+          const failedPlanningAttempt: ReplayAttemptRecord = {
+            phase: 'planning',
+            attempt: planningAttempt,
+            startedAt: planningAttemptStart,
+            completedAt: new Date().toISOString(),
+            provider: model.provider,
+            model: model.model,
+            reasoning: model.reasoning,
+            error: planningError,
+            failureType,
+            toolCalls: planningToolCalls,
+          };
+          replay.attempts.push(failedPlanningAttempt);
+          emit({
+            type: 'task:replay-attempt',
+            taskId: node.id,
+            phase: 'planning',
+            attempt: planningAttempt,
+            record: failedPlanningAttempt,
+          });
+
+          if (planningAttempt < MAX_PLANNING_ATTEMPTS && shouldRetryAfterCompletionFailure(failureType)) {
+            const delayMs = PLANNING_RETRY_BASE_DELAY_MS * (2 ** (planningAttempt - 1));
             emit({
-              type: 'task:stream-delta',
+              type: 'task:verification-failed',
               taskId: node.id,
-              phase: 'planning',
               attempt: planningAttempt,
-              delta,
+              error: `Planning attempt ${planningAttempt} failed (${failureType}), retrying in ${delayMs}ms: ${planningError}`,
             });
-          },
-          onToolCall: (event) => {
-            planningToolCalls.push(toReplayToolCallRecord(event));
-            emit({
-              type: 'task:tool-call',
-              taskId: node.id,
-              phase: 'planning',
-              attempt: planningAttempt,
-              toolCallId: event.toolCallId,
-              toolName: event.toolName,
-              status: event.type,
-              input: event.arguments,
-              output: event.result,
-              isError: event.isError,
-            });
-          },
-        });
-      } catch (error) {
-        const failureType = resolveReplayFailureType(error);
-        const planningError = error instanceof Error ? error.message : String(error);
-        const failedPlanningAttempt: ReplayAttemptRecord = {
+            await delay(delayMs);
+            continue;
+          }
+
+          return {
+            taskId: node.id,
+            status: 'failed',
+            tokenDumpDir: taskTokenDumpDir,
+            error: planningError,
+            failureType,
+            durationMs: Date.now() - start,
+            retries: planningAttempt - 1,
+            usage,
+            replay,
+          };
+        }
+
+        const completedPlanningAttempt: ReplayAttemptRecord = {
           phase: 'planning',
           attempt: planningAttempt,
           startedAt: planningAttemptStart,
@@ -238,182 +308,146 @@ export async function orchestrate(
           provider: model.provider,
           model: model.model,
           reasoning: model.reasoning,
-          error: planningError,
-          failureType,
+          stopReason: planningResult.metadata?.stopReason,
+          endpoint: planningResult.metadata?.endpoint,
+          usage: planningResult.usage,
+          textPreview: createTextPreview(planningResult.text),
           toolCalls: planningToolCalls,
         };
-        replay.attempts.push(failedPlanningAttempt);
+        replay.attempts.push(completedPlanningAttempt);
         emit({
           type: 'task:replay-attempt',
           taskId: node.id,
           phase: 'planning',
           attempt: planningAttempt,
-          record: failedPlanningAttempt,
+          record: completedPlanningAttempt,
         });
 
-        if (planningAttempt < MAX_PLANNING_ATTEMPTS && shouldRetryAfterCompletionFailure(failureType)) {
-          const delayMs = PLANNING_RETRY_BASE_DELAY_MS * (2 ** (planningAttempt - 1));
-          emit({
-            type: 'task:verification-failed',
-            taskId: node.id,
-            attempt: planningAttempt,
-            error: `Planning attempt ${planningAttempt} failed (${failureType}), retrying in ${delayMs}ms: ${planningError}`,
-          });
-          await delay(delayMs);
-          continue;
-        }
-
-        return {
+        mergeUsage(usage, planningResult.usage);
+        await appendTokenDump(planningTokenDumpPath, {
+          graphId: graph.id,
           taskId: node.id,
-          status: 'failed',
-          tokenDumpDir: taskTokenDumpDir,
-          error: planningError,
-          failureType,
-          durationMs: Date.now() - start,
-          retries: planningAttempt - 1,
-          usage,
-          replay,
-        };
-      }
+          agent: 'planning',
+          attempt: planningAttempt,
+          provider: model.provider,
+          model: model.model,
+          usage: planningResult.usage,
+        });
 
-      const completedPlanningAttempt: ReplayAttemptRecord = {
-        phase: 'planning',
-        attempt: planningAttempt,
-        startedAt: planningAttemptStart,
-        completedAt: new Date().toISOString(),
-        provider: model.provider,
-        model: model.model,
-        reasoning: model.reasoning,
-        stopReason: planningResult.metadata?.stopReason,
-        endpoint: planningResult.metadata?.endpoint,
-        usage: planningResult.usage,
-        textPreview: createTextPreview(planningResult.text),
-        toolCalls: planningToolCalls,
-      };
-      replay.attempts.push(completedPlanningAttempt);
-      emit({
-        type: 'task:replay-attempt',
-        taskId: node.id,
-        phase: 'planning',
-        attempt: planningAttempt,
-        record: completedPlanningAttempt,
-      });
+        if (createToolset) {
+          const planningContractError = buildPlanningContractError(planningToolCalls, {
+            quickStartMode,
+            quickStartMaxPreDelegationToolCalls,
+          });
+          if (planningContractError) {
+            completedPlanningAttempt.failureType = 'validation';
+            completedPlanningAttempt.error = planningContractError;
 
-      mergeUsage(usage, planningResult.usage);
-      await appendTokenDump(planningTokenDumpPath, {
-        graphId: graph.id,
-        taskId: node.id,
-        agent: 'planning',
-        attempt: planningAttempt,
-        provider: model.provider,
-        model: model.model,
-        usage: planningResult.usage,
-      });
-
-      if (createToolset) {
-        const planningContractError = buildPlanningContractError(planningToolCalls);
-        if (planningContractError) {
-          completedPlanningAttempt.failureType = 'validation';
-          completedPlanningAttempt.error = planningContractError;
-
-          if (planningAttempt < MAX_PLANNING_ATTEMPTS) {
-            const delayMs = PLANNING_RETRY_BASE_DELAY_MS * (2 ** (planningAttempt - 1));
+            if (planningAttempt < MAX_PLANNING_ATTEMPTS) {
+              const delayMs = PLANNING_RETRY_BASE_DELAY_MS * (2 ** (planningAttempt - 1));
+              emit({
+                type: 'task:verification-failed',
+                taskId: node.id,
+                attempt: planningAttempt,
+                error: `Planning contract failed (attempt ${planningAttempt}), retrying in ${delayMs}ms: ${planningContractError}`,
+              });
+              await delay(delayMs);
+              continue;
+            }
             emit({
               type: 'task:verification-failed',
               taskId: node.id,
               attempt: planningAttempt,
-              error: `Planning contract failed (attempt ${planningAttempt}), retrying in ${delayMs}ms: ${planningContractError}`,
+              error: planningContractError,
             });
-            await delay(delayMs);
-            continue;
+            return {
+              taskId: node.id,
+              status: 'failed',
+              tokenDumpDir: taskTokenDumpDir,
+              error: planningContractError,
+              failureType: 'validation',
+              durationMs: Date.now() - start,
+              retries: planningAttempt - 1,
+              usage,
+              replay,
+            };
           }
+        }
 
-          emit({
-            type: 'task:verification-failed',
-            taskId: node.id,
-            attempt: planningAttempt,
-            error: planningContractError,
-          });
+        // Planning succeeded — break out of retry loop
+        break;
+      }
+
+      if (!planningResult) {
+        return {
+          taskId: node.id,
+          status: 'failed',
+          tokenDumpDir: taskTokenDumpDir,
+          error: 'Planning failed after all retry attempts.',
+          failureType: 'unknown',
+          durationMs: Date.now() - start,
+          retries: MAX_PLANNING_ATTEMPTS,
+          usage,
+          replay,
+        };
+      }
+
+      persistedPlanPath = await persistPlan({
+        baseDir: planOutputDir ?? join(cwd, '.orchestrace', 'plans'),
+        graphId: graph.id,
+        node,
+        plan: planningResult.text,
+      });
+      emit({ type: 'task:plan-persisted', taskId: node.id, path: persistedPlanPath });
+
+      const needsApproval = requirePlanApproval ?? true;
+      if (needsApproval) {
+        emit({ type: 'task:approval-requested', taskId: node.id, path: persistedPlanPath });
+        if (!onPlanApproval) {
           return {
             taskId: node.id,
             status: 'failed',
+            plan: planningResult.text,
+            planPath: persistedPlanPath,
             tokenDumpDir: taskTokenDumpDir,
-            error: planningContractError,
-            failureType: 'validation',
+            error: 'Plan approval is required but no approval handler was provided.',
             durationMs: Date.now() - start,
-            retries: planningAttempt - 1,
+            retries: 0,
             usage,
             replay,
           };
         }
+
+        const approved = await onPlanApproval({
+          task: node,
+          plan: planningResult.text,
+          planPath: persistedPlanPath,
+        });
+
+        if (!approved) {
+          return {
+            taskId: node.id,
+            status: 'failed',
+            plan: planningResult.text,
+            planPath: persistedPlanPath,
+            tokenDumpDir: taskTokenDumpDir,
+            error: 'Plan was rejected by user approval gate.',
+            durationMs: Date.now() - start,
+            retries: 0,
+            usage,
+            replay,
+          };
+        }
+
+        emit({ type: 'task:approved', taskId: node.id });
       }
-
-      // Planning succeeded — break out of retry loop
-      break;
-    }
-
-    if (!planningResult) {
-      return {
-        taskId: node.id,
-        status: 'failed',
-        tokenDumpDir: taskTokenDumpDir,
-        error: 'Planning failed after all retry attempts.',
-        failureType: 'unknown',
-        durationMs: Date.now() - start,
-        retries: MAX_PLANNING_ATTEMPTS,
-        usage,
-        replay,
+    } else {
+      planningResult = {
+        text: [
+          'Trivial task gate routed this task to direct implementation.',
+          `Classification reasons: ${trivialClassification.reasons.join(', ')}`,
+        ].join('\n'),
       };
-    }
-
-    const persistedPlanPath = await persistPlan({
-      baseDir: planOutputDir ?? join(cwd, '.orchestrace', 'plans'),
-      graphId: graph.id,
-      node,
-      plan: planningResult.text,
-    });
-    emit({ type: 'task:plan-persisted', taskId: node.id, path: persistedPlanPath });
-
-    const needsApproval = requirePlanApproval ?? true;
-    if (needsApproval) {
-      emit({ type: 'task:approval-requested', taskId: node.id, path: persistedPlanPath });
-      if (!onPlanApproval) {
-        return {
-          taskId: node.id,
-          status: 'failed',
-          plan: planningResult.text,
-          planPath: persistedPlanPath,
-          tokenDumpDir: taskTokenDumpDir,
-          error: 'Plan approval is required but no approval handler was provided.',
-          durationMs: Date.now() - start,
-          retries: 0,
-          usage,
-          replay,
-        };
-      }
-
-      const approved = await onPlanApproval({
-        task: node,
-        plan: planningResult.text,
-        planPath: persistedPlanPath,
-      });
-
-      if (!approved) {
-        return {
-          taskId: node.id,
-          status: 'failed',
-          plan: planningResult.text,
-          planPath: persistedPlanPath,
-          tokenDumpDir: taskTokenDumpDir,
-          error: 'Plan was rejected by user approval gate.',
-          durationMs: Date.now() - start,
-          retries: 0,
-          usage,
-          replay,
-        };
-      }
-
-      emit({ type: 'task:approved', taskId: node.id });
     }
 
     const implAgent = await llm.spawnAgent({
@@ -468,7 +502,7 @@ export async function orchestrate(
       const implementationPrompt = buildImplementationPrompt({
         node,
         depOutputs: context.depOutputs,
-        approvedPlan: planningResult.text,
+        approvedPlan: planningResult?.text,
         attempt,
         previousResponse: lastResponse,
         previousFailureType: lastFailureType,
@@ -599,7 +633,7 @@ export async function orchestrate(
       const output: TaskOutput = {
         taskId: node.id,
         status: 'completed',
-        plan: planningResult.text,
+        plan: planningResult?.text,
         planPath: persistedPlanPath,
         tokenDumpDir: taskTokenDumpDir,
         response: implResult.text,
@@ -651,7 +685,7 @@ export async function orchestrate(
     return {
       taskId: node.id,
       status: 'failed',
-      plan: planningResult.text,
+      plan: planningResult?.text,
       planPath: persistedPlanPath,
       tokenDumpDir: taskTokenDumpDir,
       response: lastResponse,
@@ -777,7 +811,7 @@ function buildPlanningPrompt(node: TaskNode, depOutputs: Map<string, TaskOutput>
 function buildImplementationPrompt(params: {
   node: TaskNode;
   depOutputs: Map<string, TaskOutput>;
-  approvedPlan: string;
+  approvedPlan?: string;
   attempt: number;
   previousResponse: string;
   previousFailureType?: ReplayFailureType;
@@ -851,7 +885,7 @@ function buildImplementationPrompt(params: {
     },
     {
       name: PromptSectionName.ApprovedPlan,
-      lines: [approvedPlan],
+      lines: [approvedPlan ?? 'No pre-approved plan available. Execute directly and conservatively for this trivial task.'],
     },
     {
       name: PromptSectionName.DependencyContext,
@@ -914,6 +948,7 @@ function buildPhaseSystemPrompt(params: {
           'Read relevant files before editing and keep edits minimal in scope.',
           'Use todo and agent graph state as the execution backbone, updating progress continuously.',
           'Use subagent_spawn or subagent_spawn_batch for parallelizable slices and delegate only relevant context to each sub-agent.',
+          'search_files uses regex; characters like ( and ) need escaping as \\( and \\).',
           'Do not stop until todo list is done and agent graph nodes are completed or a real blocker remains.',
           'After validation passes, complete git finish-up: feature branch, commit, push, and PR creation/update via github_api (never gh CLI).',
           'After each push, query remote CI/check status via github_api and keep fixing/re-pushing until checks pass or a true blocker is reached.',
@@ -1141,7 +1176,13 @@ function buildCompletionFailureRetryHint(params: {
   }
 }
 
-function buildPlanningContractError(toolCalls: ReplayToolCallRecord[]): string | undefined {
+function buildPlanningContractError(
+  toolCalls: ReplayToolCallRecord[],
+  options?: {
+    quickStartMode?: boolean;
+    quickStartMaxPreDelegationToolCalls?: number;
+  },
+): string | undefined {
   const hasSubAgentDelegation = hasSuccessfulToolCall(toolCalls, 'subagent_spawn')
     || hasSuccessfulToolCall(toolCalls, 'subagent_spawn_batch');
   const requiredTools = ['todo_set', 'agent_graph_set'];
@@ -1157,7 +1198,10 @@ function buildPlanningContractError(toolCalls: ReplayToolCallRecord[]): string |
 
   const todoSetResult = latestSuccessfulToolCall(toolCalls, 'todo_set');
   if (todoSetResult) {
-    const todoValidation = validateWeightedListPayload(todoSetResult.input, 'items');
+    const todoValidation = validateWeightedListPayload(
+      resolveToolCallInputForValidation(toolCalls, 'todo_set', todoSetResult),
+      'items',
+    );
     if (todoValidation.sum === undefined) {
       contractIssues.push('todo_set must include numeric weight for each item.');
     } else if (!isWeightTotalValid(todoValidation.sum)) {
@@ -1172,7 +1216,10 @@ function buildPlanningContractError(toolCalls: ReplayToolCallRecord[]): string |
   let graphNodeIds = new Set<string>();
   const graphSetResult = latestSuccessfulToolCall(toolCalls, 'agent_graph_set');
   if (graphSetResult) {
-    const graphValidation = validateWeightedListPayload(graphSetResult.input, 'nodes');
+    const graphValidation = validateWeightedListPayload(
+      resolveToolCallInputForValidation(toolCalls, 'agent_graph_set', graphSetResult),
+      'nodes',
+    );
     graphNodeIds = graphValidation.ids;
     if (graphValidation.sum === undefined) {
       contractIssues.push('agent_graph_set must include numeric weight for each node.');
@@ -1193,6 +1240,20 @@ function buildPlanningContractError(toolCalls: ReplayToolCallRecord[]): string |
     }
   }
 
+  if (options?.quickStartMode) {
+    const maxPreDelegationToolCalls = normalizeQuickStartMaxPreDelegationToolCalls(options.quickStartMaxPreDelegationToolCalls);
+    const quickStartAssessment = assessQuickStartDelegation(toolCalls, maxPreDelegationToolCalls);
+    if (!quickStartAssessment.hasDelegation) {
+      contractIssues.push(
+        `quick-start mode requires a successful sub-agent delegation (subagent_spawn or subagent_spawn_batch) within the first ${maxPreDelegationToolCalls} successful tool call(s).`,
+      );
+    } else if (!quickStartAssessment.withinLimit) {
+      contractIssues.push(
+        `quick-start mode requires delegation within the first ${maxPreDelegationToolCalls} successful tool call(s), but first delegation occurred after ${quickStartAssessment.preDelegationSuccessfulToolCalls} successful call(s).`,
+      );
+    }
+  }
+
   if (contractIssues.length === 0) {
     return undefined;
   }
@@ -1209,6 +1270,48 @@ function hasSuccessfulToolCall(toolCalls: ReplayToolCallRecord[], toolName: stri
   return toolCalls.some((call) => call.status === 'result' && call.toolName === toolName && !call.isError);
 }
 
+function normalizeQuickStartMaxPreDelegationToolCalls(value: number | undefined): number {
+  if (Number.isFinite(value) && typeof value === 'number' && value >= 0) {
+    return Math.floor(value);
+  }
+
+  return 3;
+}
+
+function assessQuickStartDelegation(
+  toolCalls: ReplayToolCallRecord[],
+  maxPreDelegationToolCalls: number,
+): {
+  hasDelegation: boolean;
+  withinLimit: boolean;
+  preDelegationSuccessfulToolCalls: number;
+} {
+  let successfulToolCallCount = 0;
+
+  for (const call of toolCalls) {
+    if (call.status !== 'result' || call.isError) {
+      continue;
+    }
+
+    const isDelegationCall = call.toolName === 'subagent_spawn' || call.toolName === 'subagent_spawn_batch';
+    if (isDelegationCall) {
+      return {
+        hasDelegation: true,
+        withinLimit: successfulToolCallCount <= maxPreDelegationToolCalls,
+        preDelegationSuccessfulToolCalls: successfulToolCallCount,
+      };
+    }
+
+    successfulToolCallCount += 1;
+  }
+
+  return {
+    hasDelegation: false,
+    withinLimit: false,
+    preDelegationSuccessfulToolCalls: successfulToolCallCount,
+  };
+}
+
 function latestSuccessfulToolCall(
   toolCalls: ReplayToolCallRecord[],
   toolName: string,
@@ -1217,6 +1320,40 @@ function latestSuccessfulToolCall(
     const call = toolCalls[index];
     if (call.status === 'result' && call.toolName === toolName && !call.isError) {
       return call;
+    }
+  }
+
+  return undefined;
+}
+
+function resolveToolCallInputForValidation(
+  toolCalls: ReplayToolCallRecord[],
+  toolName: string,
+  successfulResultCall: ReplayToolCallRecord,
+): string | undefined {
+  if (successfulResultCall.input) {
+    return successfulResultCall.input;
+  }
+
+  if (successfulResultCall.toolCallId) {
+    for (let index = toolCalls.length - 1; index >= 0; index -= 1) {
+      const call = toolCalls[index];
+      if (call.toolCallId !== successfulResultCall.toolCallId) {
+        continue;
+      }
+      if (call.toolName !== toolName || call.status !== 'started') {
+        continue;
+      }
+      if (call.input) {
+        return call.input;
+      }
+    }
+  }
+
+  for (let index = toolCalls.length - 1; index >= 0; index -= 1) {
+    const call = toolCalls[index];
+    if (call.toolName === toolName && call.status === 'started' && call.input) {
+      return call.input;
     }
   }
 
