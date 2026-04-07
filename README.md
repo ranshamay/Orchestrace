@@ -53,7 +53,7 @@ pnpm --filter @orchestrace/cli dev workspace select another-repo
 # Run a plan
 pnpm --filter @orchestrace/cli dev run examples/feature-plan.json
 
-# Run a single prompt task with the generalized flow
+# Run a single prompt task with automatic routing (shell/investigation/code)
 pnpm --filter @orchestrace/cli dev task "Add structured logging to the scheduler"
 
 # Authenticate a provider (interactive)

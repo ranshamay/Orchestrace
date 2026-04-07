@@ -11,6 +11,8 @@ import type {
   SharedContextFact,
   ContextCompactionState,
   SessionOutput,
+  SessionCheckpointPayload,
+  SessionRecoveryDetectedPayload,
 } from './types.js';
 
 const MAX_EVENTS = 2_000; // Same trim limit as ui-server
@@ -49,6 +51,8 @@ export function materializeSession(events: SessionEvent[]): MaterializedSession 
     contextFacts: [],
     contextCompaction: { turnsSinceLastCompaction: 0 },
     lastHeartbeat: undefined,
+    lastCheckpoint: undefined,
+    lastRecovery: undefined,
     lastSeq: 0,
     createdAt: now,
     updatedAt: now,
@@ -162,6 +166,18 @@ export function applyEvent(state: MaterializedSession, event: SessionEvent): voi
     case 'session:runner-heartbeat':
       state.lastHeartbeat = event.time;
       break;
+
+    case 'session:checkpoint': {
+      const checkpoint: SessionCheckpointPayload = event.payload;
+      state.lastCheckpoint = { ...checkpoint, time: event.time };
+      break;
+    }
+
+    case 'session:recovery-detected': {
+      const recovery: SessionRecoveryDetectedPayload = event.payload;
+      state.lastRecovery = { ...recovery, time: event.time };
+      break;
+    }
 
     case 'session:stream-delta':
       // Stream deltas are transient — used for real-time SSE replay but
