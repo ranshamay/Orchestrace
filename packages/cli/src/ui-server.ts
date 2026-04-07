@@ -1527,6 +1527,11 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     let executionContext: ExecutionContext = 'workspace';
     let selectedWorktreePath: string | undefined;
     let selectedWorktreeBranch: string | undefined;
+    let workspaceAssignment: SessionWorkspaceAssignmentProvenance = {
+      assignmentSource: 'workspace-root',
+      reusedExistingWorktree: false,
+      cleanupApplied: false,
+    };
     if (requestedExecutionContext === 'git-worktree') {
       try {
         const resolved = await resolveSessionWorkspacePath({
@@ -6718,6 +6723,8 @@ async function resolveSessionWorkspacePath(request: {
       executionContext: 'git-worktree',
       selectedWorktreePath: selected.path,
       worktreeBranch: selected.branch,
+      assignmentSource: 'selected-worktree',
+      reusedExistingWorktree: true,
     };
   }
 
@@ -6727,6 +6734,8 @@ async function resolveSessionWorkspacePath(request: {
     executionContext: 'git-worktree',
     selectedWorktreePath: fallback.path,
     worktreeBranch: fallback.branch,
+    assignmentSource: 'fallback-worktree',
+    reusedExistingWorktree: true,
   };
 }
 
