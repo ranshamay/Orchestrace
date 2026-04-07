@@ -818,6 +818,14 @@ describe('subagent prompt enrichment', () => {
           {
             nodeId: 'n1',
             prompt: 'Analyze src/file.ts and summarize its exported symbols.',
+            reasoning: 'high',
+            contextPacket: {
+              objective: 'Document exported symbols and include confidence notes.',
+              relevantContext: ['Used for integration tests', 'Output consumed by CI summaries'],
+              requiredOutputSchema: '{ symbols: string[], notes: string[] }',
+              evidenceRequirements: ['Cite src/file.ts lines'],
+              boundaries: { writePolicy: 'none' },
+            },
           },
         ],
       },
@@ -856,9 +864,39 @@ describe('subagent prompt enrichment', () => {
       name: 'subagent_spawn_batch',
       arguments: {
         agents: [
-          { nodeId: 'n1', prompt: 'Inspect src/file.ts' },
-          { nodeId: 'n2', prompt: 'Inspect src/file.ts' },
-          { nodeId: 'n3', prompt: 'Inspect src/file.ts' },
+          {
+            nodeId: 'n1',
+            prompt: 'Inspect src/file.ts for exports and test impact.',
+            reasoning: 'high',
+            contextPacket: {
+              objective: 'Produce test-impact notes.',
+              relevantContext: ['Used by runtime entrypoint', 'Used by tests'],
+              requiredOutputSchema: '{ findings: string[] }',
+              evidenceRequirements: ['Cite file snippets'],
+            },
+          },
+          {
+            nodeId: 'n2',
+            prompt: 'Inspect src/file.ts for exports and test impact.',
+            reasoning: 'high',
+            contextPacket: {
+              objective: 'Produce test-impact notes.',
+              relevantContext: ['Used by runtime entrypoint', 'Used by tests'],
+              requiredOutputSchema: '{ findings: string[] }',
+              evidenceRequirements: ['Cite file snippets'],
+            },
+          },
+          {
+            nodeId: 'n3',
+            prompt: 'Inspect src/file.ts for exports and test impact.',
+            reasoning: 'high',
+            contextPacket: {
+              objective: 'Produce test-impact notes.',
+              relevantContext: ['Used by runtime entrypoint', 'Used by tests'],
+              requiredOutputSchema: '{ findings: string[] }',
+              evidenceRequirements: ['Cite file snippets'],
+            },
+          },
         ],
         concurrency: 4,
         adaptiveConcurrency: true,
