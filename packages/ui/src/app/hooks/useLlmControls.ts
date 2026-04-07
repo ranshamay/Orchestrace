@@ -135,18 +135,18 @@ export function useLlmControls(params: Params) {
     if (!selectedSession) return;
 
     const sessionControls: SessionLlmControls = {
-      planningProvider: selectedSession.planningProvider
-        || selectedSession.provider
-        || defaultLlmControls.planningProvider,
-      planningModel: selectedSession.planningModel
-        || selectedSession.model
-        || defaultLlmControls.planningModel,
-      implementationProvider: selectedSession.implementationProvider
-        || selectedSession.provider
-        || defaultLlmControls.implementationProvider,
-      implementationModel: selectedSession.implementationModel
-        || selectedSession.model
-        || defaultLlmControls.implementationModel,
+      planningProvider: defaultLlmControls.planningProvider
+        || selectedSession.planningProvider
+        || selectedSession.provider,
+      planningModel: defaultLlmControls.planningModel
+        || selectedSession.planningModel
+        || selectedSession.model,
+      implementationProvider: defaultLlmControls.implementationProvider
+        || selectedSession.implementationProvider
+        || selectedSession.provider,
+      implementationModel: defaultLlmControls.implementationModel
+        || selectedSession.implementationModel
+        || selectedSession.model,
       workspaceId: selectedSession.workspaceId || defaultLlmControls.workspaceId,
       autoApprove: selectedSession.autoApprove,
       adaptiveConcurrency: selectedSession.adaptiveConcurrency ?? defaultLlmControls.adaptiveConcurrency,

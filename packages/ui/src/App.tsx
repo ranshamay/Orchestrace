@@ -167,14 +167,17 @@ export default function App() {
       planningModel: resetModel ? '' : current.planningModel,
     }));
 
+    setWorkPlanningProvider(normalizedProvider);
+    setWorkPlanningModel(nextModel);
     updateActiveLlmControls({ planningProvider: normalizedProvider, planningModel: nextModel });
-  }, [defaultLlmControls.planningModel, defaultLlmControls.planningProvider, setDefaultLlmControls, updateActiveLlmControls]);
+  }, [defaultLlmControls.planningModel, defaultLlmControls.planningProvider, setDefaultLlmControls, setWorkPlanningModel, setWorkPlanningProvider, updateActiveLlmControls]);
 
   const setDefaultPlanningModel = useCallback((nextModel: string) => {
     const normalizedModel = typeof nextModel === 'string' ? nextModel.trim() : '';
     setDefaultLlmControls((current) => ({ ...current, planningModel: normalizedModel }));
+    setWorkPlanningModel(normalizedModel);
     updateActiveLlmControls({ planningModel: normalizedModel });
-  }, [setDefaultLlmControls, updateActiveLlmControls]);
+  }, [setDefaultLlmControls, setWorkPlanningModel, updateActiveLlmControls]);
 
   const setDefaultImplementationProvider = useCallback((nextProvider: string) => {
     const normalizedProvider = typeof nextProvider === 'string' ? nextProvider.trim() : '';
@@ -187,14 +190,17 @@ export default function App() {
       implementationModel: resetModel ? '' : current.implementationModel,
     }));
 
+    setWorkProvider(normalizedProvider);
+    setWorkModel(nextModel);
     updateActiveLlmControls({ implementationProvider: normalizedProvider, implementationModel: nextModel });
-  }, [defaultLlmControls.implementationModel, defaultLlmControls.implementationProvider, setDefaultLlmControls, updateActiveLlmControls]);
+  }, [defaultLlmControls.implementationModel, defaultLlmControls.implementationProvider, setDefaultLlmControls, setWorkModel, setWorkProvider, updateActiveLlmControls]);
 
   const setDefaultImplementationModel = useCallback((nextModel: string) => {
     const normalizedModel = typeof nextModel === 'string' ? nextModel.trim() : '';
     setDefaultLlmControls((current) => ({ ...current, implementationModel: normalizedModel }));
+    setWorkModel(normalizedModel);
     updateActiveLlmControls({ implementationModel: normalizedModel });
-  }, [setDefaultLlmControls, updateActiveLlmControls]);
+  }, [setDefaultLlmControls, setWorkModel, updateActiveLlmControls]);
 
   const handleStartNewSessionDraft = useCallback(() => {
     setActiveTab('graph');
