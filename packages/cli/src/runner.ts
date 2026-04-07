@@ -12,10 +12,20 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { execFile } from 'node:child_process';
+import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { orchestrate, PromptSectionName, renderPromptSections } from '@orchestrace/core';
+import { promisify } from 'node:util';
+import {
+  orchestrate,
+  PromptSectionName,
+  renderPromptSections,
+  classifyTrivialTaskPrompt,
+  extractSingleCommandFromPrompt,
+  resolveTrivialTaskGateConfig,
+} from '@orchestrace/core';
 import type { DagEvent, TaskGraph } from '@orchestrace/core';
-import { PiAiAdapter, ProviderAuthManager } from '@orchestrace/provider';
+import { PiAiAdapter, ProviderAuthManager, type LlmToolCall } from '@orchestrace/provider';
 import {
   DEFAULT_AGENT_TOOL_POLICY_VERSION,
   createAgentToolset,
@@ -45,6 +55,29 @@ const TOOL_EVENT_PREVIEW_MAX_CHARS = resolvePositiveIntEnv(
   32_000,
 );
 const TRACE_LOG_STREAM_DELTAS = resolveBooleanEnv(process.env.ORCHESTRACE_TRACE_LOG_STREAM_DELTAS, true);
+const CHECKPOINT_STASH_PREFIX = 'orchestrace-checkpoint';
+const CHECKPOINT_METADATA_FILE = 'checkpoint.json';
+const execFileAsync = promisify(execFile);
+
+type CheckpointLifecycleState = 'idle' | 'active' | 'completed' | 'failed' | 'cancelled' | 'interrupted';
+
+interface CheckpointMetadata {
+  sessionId: string;
+  workspacePath: string;
+  state: CheckpointLifecycleState;
+  createdAt: string;
+  updatedAt: string;
+  headShaBefore?: string;
+  stashRef?: string;
+  stashMessage?: string;
+  checkpointName?: string;
+  finalizedAt?: string;
+  hasUncommittedChanges?: boolean;
+  hasStagedChanges?: boolean;
+  hasUntrackedChanges?: boolean;
+  dirtySummary?: string[];
+  notes?: string;
+}
 
 // ---------------------------------------------------------------------------
 // Main
@@ -100,6 +133,7 @@ async function main(): Promise<void> {
   process.on('SIGTERM', () => {
     cancelled = true;
     controller.abort();
+    void markCheckpointInterrupted(iso(), 'Received SIGTERM before session completion.');
     const llmStatus = makeLlmStatus('cancelled', 'Cancelled by user.');
     lastLlmStatusEmission = {
       key: llmStatusIdentityKey(llmStatus),
@@ -123,6 +157,13 @@ async function main(): Promise<void> {
     ?? resolveBooleanEnv(process.env.ORCHESTRACE_QUICK_START_MODE, false);
   const quickStartMaxPreDelegationToolCalls = config.quickStartMaxPreDelegationToolCalls
     ?? resolvePositiveIntEnv(process.env.ORCHESTRACE_QUICK_START_MAX_PRE_DELEGATION_TOOL_CALLS, 3);
+  const checkpointFilePath = join(workspaceRoot, '.orchestrace', 'sessions', sessionId, CHECKPOINT_METADATA_FILE);
+  const checkpointName = `${CHECKPOINT_STASH_PREFIX}:${sessionId}:${Date.now()}`;
+  const checkpointState = {
+    status: 'idle' as CheckpointLifecycleState,
+    metadata: undefined as CheckpointMetadata | undefined,
+    finalized: false,
+  };
 
   // Helper to emit events
   async function emit(event: SessionEventInput): Promise<void> {
@@ -133,13 +174,322 @@ async function main(): Promise<void> {
     }
   }
 
+  async function runGit(args: string[]): Promise<string> {
+    const { stdout } = await execFileAsync('git', args, {
+      cwd: config.workspacePath,
+      timeout: 30_000,
+      maxBuffer: 1024 * 1024,
+    });
+    return stdout;
+  }
+
+  async function getGitHeadSha(): Promise<string | undefined> {
+    try {
+      const stdout = await runGit(['rev-parse', 'HEAD']);
+      const sha = stdout.trim();
+      return sha ? sha : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  async function getWorktreeDirtySummary(): Promise<{
+    hasUncommittedChanges: boolean;
+    hasStagedChanges: boolean;
+    hasUntrackedChanges: boolean;
+    dirtySummary: string[];
+  }> {
+    const [unstaged, staged, untracked] = await Promise.all([
+      runGit(['diff', '--name-status']).catch(() => ''),
+      runGit(['diff', '--cached', '--name-status']).catch(() => ''),
+      runGit(['ls-files', '--others', '--exclude-standard']).catch(() => ''),
+    ]);
+    const unstagedLines = unstaged.split('\n').map((line) => line.trim()).filter(Boolean);
+    const stagedLines = staged.split('\n').map((line) => line.trim()).filter(Boolean);
+    const untrackedLines = untracked.split('\n').map((line) => line.trim()).filter(Boolean);
+    return {
+      hasUncommittedChanges: unstagedLines.length > 0,
+      hasStagedChanges: stagedLines.length > 0,
+      hasUntrackedChanges: untrackedLines.length > 0,
+      dirtySummary: [...unstagedLines, ...stagedLines, ...untrackedLines.map((line) => `?? ${line}`)].slice(0, 200),
+    };
+  }
+
+  async function writeCheckpointMetadata(metadata: CheckpointMetadata): Promise<void> {
+    const dir = join(workspaceRoot, '.orchestrace', 'sessions', sessionId);
+    await mkdir(dir, { recursive: true });
+    const tempPath = `${checkpointFilePath}.tmp`;
+    await writeFile(tempPath, `${JSON.stringify(metadata, null, 2)}\n`, 'utf8');
+    await rename(tempPath, checkpointFilePath);
+  }
+
+  async function readCheckpointMetadata(): Promise<CheckpointMetadata | undefined> {
+    try {
+      const raw = await readFile(checkpointFilePath, 'utf8');
+      const parsed = JSON.parse(raw) as Partial<CheckpointMetadata>;
+      if (!parsed || typeof parsed !== 'object') {
+        return undefined;
+      }
+      if (typeof parsed.sessionId !== 'string' || typeof parsed.workspacePath !== 'string' || typeof parsed.state !== 'string') {
+        return undefined;
+      }
+      return parsed as CheckpointMetadata;
+    } catch {
+      return undefined;
+    }
+  }
+
+  function isMutatingToolCall(event: Extract<DagEvent, { type: 'task:tool-call' }>): boolean {
+    if (event.status !== 'started') return false;
+    const tool = event.toolName.trim();
+    const mutatingTools = new Set([
+      'write_file',
+      'write_files',
+      'edit_file',
+      'edit_files',
+      'run_command',
+      'run_command_batch',
+      'github_api',
+    ]);
+    if (mutatingTools.has(tool)) return true;
+    return tool.startsWith('functions.write_')
+      || tool.startsWith('functions.edit_')
+      || tool === 'functions.run_command'
+      || tool === 'functions.run_command_batch'
+      || tool === 'functions.github_api';
+  }
+
+  async function ensureCheckpointForMutatingBatch(trigger: Extract<DagEvent, { type: 'task:tool-call' }>, at: string): Promise<void> {
+    if (!isMutatingToolCall(trigger)) {
+      return;
+    }
+    if (checkpointState.status !== 'idle') {
+      return;
+    }
+
+    checkpointState.status = 'active';
+    const headShaBefore = await getGitHeadSha();
+    const stashMessage = checkpointName;
+    let stashRef: string | undefined;
+    try {
+      // Non-destructive checkpoint: capture current state without altering the worktree.
+      const stashCommit = (await runGit(['stash', 'create', stashMessage])).trim();
+      if (stashCommit) {
+        await runGit(['stash', 'store', '-m', stashMessage, stashCommit]);
+        const stashList = await runGit(['stash', 'list']);
+        const stashLine = stashList.split('\n').find((line) => line.includes(stashMessage));
+        stashRef = stashLine?.split(':', 1)[0]?.trim() ?? stashCommit;
+      }
+    } catch (error) {
+      console.warn(`[runner] Failed to create pre-edit checkpoint for ${sessionId}: ${errorMsg(error)}`);
+      checkpointState.status = 'idle';
+      return;
+    }
+
+    const metadata: CheckpointMetadata = {
+      sessionId,
+      workspacePath: config.workspacePath,
+      state: 'active',
+      createdAt: at,
+      updatedAt: at,
+      headShaBefore,
+      stashRef,
+      stashMessage,
+      checkpointName,
+      notes: `Created from tool ${trigger.toolName}.`,
+    };
+
+    try {
+      await writeCheckpointMetadata(metadata);
+      checkpointState.metadata = metadata;
+    } catch (error) {
+      console.warn(`[runner] Failed to persist checkpoint metadata for ${sessionId}: ${errorMsg(error)}`);
+    }
+  }
+
+  async function finalizeCheckpoint(state: Extract<CheckpointLifecycleState, 'completed' | 'failed' | 'cancelled'>, at: string): Promise<void> {
+    if (checkpointState.finalized) {
+      return;
+    }
+    checkpointState.finalized = true;
+
+    const existing = checkpointState.metadata ?? await readCheckpointMetadata();
+    if (!existing) {
+      return;
+    }
+
+    const dirty = await getWorktreeDirtySummary().catch(() => ({
+      hasUncommittedChanges: false,
+      hasStagedChanges: false,
+      hasUntrackedChanges: false,
+      dirtySummary: [] as string[],
+    }));
+
+    const next: CheckpointMetadata = {
+      ...existing,
+      state,
+      updatedAt: at,
+      finalizedAt: at,
+      hasUncommittedChanges: dirty.hasUncommittedChanges,
+      hasStagedChanges: dirty.hasStagedChanges,
+      hasUntrackedChanges: dirty.hasUntrackedChanges,
+      dirtySummary: dirty.dirtySummary,
+    };
+
+    checkpointState.status = state;
+    checkpointState.metadata = next;
+    await writeCheckpointMetadata(next).catch((error) => {
+      console.warn(`[runner] Failed to finalize checkpoint metadata for ${sessionId}: ${errorMsg(error)}`);
+    });
+  }
+
+  async function markCheckpointInterrupted(at: string, detail: string): Promise<void> {
+    const existing = checkpointState.metadata ?? await readCheckpointMetadata();
+    if (!existing) {
+      return;
+    }
+
+    const dirty = await getWorktreeDirtySummary().catch(() => ({
+      hasUncommittedChanges: false,
+      hasStagedChanges: false,
+      hasUntrackedChanges: false,
+      dirtySummary: [] as string[],
+    }));
+
+    const next: CheckpointMetadata = {
+      ...existing,
+      state: 'interrupted',
+      updatedAt: at,
+      hasUncommittedChanges: dirty.hasUncommittedChanges,
+      hasStagedChanges: dirty.hasStagedChanges,
+      hasUntrackedChanges: dirty.hasUntrackedChanges,
+      dirtySummary: dirty.dirtySummary,
+      notes: detail,
+    };
+
+    checkpointState.status = 'interrupted';
+    checkpointState.metadata = next;
+    await writeCheckpointMetadata(next).catch((error) => {
+      console.warn(`[runner] Failed to mark checkpoint interrupted for ${sessionId}: ${errorMsg(error)}`);
+    });
+
+    }
+
   try {
+    const trivialTaskGate = resolveTrivialTaskGateConfig({
+      enabled: config.enableTrivialTaskGate,
+      maxPromptLength: config.trivialTaskMaxPromptLength,
+    });
+    const trivialClassification = classifyTrivialTaskPrompt(config.prompt, trivialTaskGate);
+    console.info(
+      `[runner:${sessionId}] trivial-task-gate enabled=${trivialTaskGate.enabled} isTrivial=${trivialClassification.isTrivial} reasons=${trivialClassification.reasons.join(',')}`,
+    );
+
+    const trivialCommand = trivialClassification.isTrivial
+      ? extractSingleCommandFromPrompt(config.prompt)
+      : undefined;
+
+    if (trivialClassification.isTrivial && trivialCommand) {
+      const t = iso();
+      const llmStatus = makeLlmStatus('using-tools', 'Executing lightweight trivial command.', undefined, 'task', 'implementation');
+      lastLlmStatusEmission = {
+        key: llmStatusIdentityKey(llmStatus),
+        emittedAt: parseTimestamp(llmStatus.updatedAt),
+      };
+      await emit({ time: t, type: 'session:llm-status-change', payload: { llmStatus } });
+
+      const lightweightToolset = createAgentToolset({
+        cwd: config.workspacePath,
+        phase: 'implementation',
+        taskType: 'custom',
+        graphId: graph.id,
+        taskId: 'task',
+        provider: config.provider,
+        model: config.model,
+        adaptiveConcurrency: config.adaptiveConcurrency,
+        batchConcurrency: config.batchConcurrency,
+        batchMinConcurrency: config.batchMinConcurrency,
+        resolveGithubToken: () => githubAuthManager.resolveApiKey('github'),
+      });
+
+      const toolCallId = `lightweight-${randomUUID()}`;
+      const toolCall: LlmToolCall = {
+        id: toolCallId,
+        name: 'run_command',
+        arguments: { command: trivialCommand },
+      };
+
+      const started: Extract<DagEvent, { type: 'task:tool-call' }> = {
+        type: 'task:tool-call',
+        taskId: 'task',
+        phase: 'implementation',
+        attempt: 1,
+        toolCallId,
+        toolName: 'run_command',
+        status: 'started',
+        input: JSON.stringify({ command: trivialCommand }),
+      };
+      const startedUiEvent = toUiEvent(sessionId, started, t);
+      if (startedUiEvent) {
+        await emit({ time: t, type: 'session:dag-event', payload: { event: startedUiEvent } });
+      }
+
+      const toolResult = await lightweightToolset.executeTool(toolCall, controller.signal);
+      const resultEvent: Extract<DagEvent, { type: 'task:tool-call' }> = {
+        ...started,
+        status: 'result',
+        output: toolResult.content,
+        isError: toolResult.isError,
+      };
+      const resultUiEvent = toUiEvent(sessionId, resultEvent, iso());
+      if (resultUiEvent) {
+        await emit({ time: iso(), type: 'session:dag-event', payload: { event: resultUiEvent } });
+      }
+
+      const outputText = toolResult.content;
+      await emit({
+        time: iso(),
+        type: 'session:output-set',
+        payload: { output: { text: outputText } },
+      });
+
+      if (toolResult.isError) {
+        await emit({ time: iso(), type: 'session:error-change', payload: { error: outputText } });
+        const failedStatus = makeLlmStatus('failed', outputText, 'tool_runtime', 'task', 'implementation');
+        lastLlmStatusEmission = {
+          key: llmStatusIdentityKey(failedStatus),
+          emittedAt: parseTimestamp(failedStatus.updatedAt),
+        };
+        await emit({ time: iso(), type: 'session:llm-status-change', payload: { llmStatus: failedStatus } });
+        await emit({ time: iso(), type: 'session:status-change', payload: { status: 'failed' } });
+        clearInterval(heartbeatInterval);
+        process.exit(1);
+      }
+
+      const completedStatus = makeLlmStatus('completed', 'Lightweight trivial command completed.', undefined, 'task', 'implementation');
+      lastLlmStatusEmission = {
+        key: llmStatusIdentityKey(completedStatus),
+        emittedAt: parseTimestamp(completedStatus.updatedAt),
+      };
+      await emit({ time: iso(), type: 'session:llm-status-change', payload: { llmStatus: completedStatus } });
+      await emit({ time: iso(), type: 'session:status-change', payload: { status: 'completed' } });
+      await emit({
+        time: iso(),
+        type: 'session:chat-message',
+        payload: { message: { role: 'assistant', content: outputText, time: iso() } },
+      });
+      clearInterval(heartbeatInterval);
+      process.exit(0);
+    }
+
     const outputs = await orchestrate(graph, {
       llm,
       cwd: config.workspacePath,
       planOutputDir: join(config.workspacePath, '.orchestrace', 'plans'),
       promptVersion: process.env.ORCHESTRACE_PROMPT_VERSION,
       policyVersion: process.env.ORCHESTRACE_POLICY_VERSION ?? DEFAULT_AGENT_TOOL_POLICY_VERSION,
+      enableTrivialTaskGate: trivialTaskGate.enabled,
+      trivialTaskMaxPromptLength: trivialTaskGate.maxPromptLength,
       defaultModel: { provider: config.provider, model: config.model },
       planningSystemPrompt: buildSystemPrompt(config, 'planning'),
       implementationSystemPrompt: buildSystemPrompt(config, 'implementation'),
@@ -282,9 +632,12 @@ async function main(): Promise<void> {
         }
 
         // Checklist / graph from tool events (parsed from tool input)
-        if (event.type === 'task:tool-call' && event.status === 'started' && event.input) {
-          handleToolCallChecklist(event);
-          handleToolCallAgentGraph(event);
+        if (event.type === 'task:tool-call' && event.status === 'started') {
+          void ensureCheckpointForMutatingBatch(event, t);
+          if (event.input) {
+            handleToolCallChecklist(event);
+            handleToolCallAgentGraph(event);
+          }
         }
 
         // Graph progress from sub-agent tool calls
@@ -300,6 +653,7 @@ async function main(): Promise<void> {
     });
 
     if (cancelled) {
+      await finalizeCheckpoint('cancelled', iso());
       clearInterval(heartbeatInterval);
       process.exit(130);
     }
@@ -341,6 +695,8 @@ async function main(): Promise<void> {
       await emit({ time: t, type: 'session:status-change', payload: { status: 'completed' } });
     }
 
+    await finalizeCheckpoint(failed ? 'failed' : 'completed', t);
+
     // Write assistant response as chat message
     if (primaryOutput?.response) {
       await emit({ time: t, type: 'session:chat-message', payload: { message: { role: 'assistant', content: primaryOutput.response, time: t } } });
@@ -350,6 +706,7 @@ async function main(): Promise<void> {
     process.exit(failed ? 1 : 0);
   } catch (error) {
     if (cancelled) {
+      await markCheckpointInterrupted(iso(), 'Interrupted during cancellation path.');
       clearInterval(heartbeatInterval);
       process.exit(130);
     }
@@ -364,6 +721,7 @@ async function main(): Promise<void> {
     };
     await emit({ time: t, type: 'session:llm-status-change', payload: { llmStatus } });
     await emit({ time: t, type: 'session:status-change', payload: { status: 'failed' } });
+    await finalizeCheckpoint('failed', t);
 
     clearInterval(heartbeatInterval);
     process.exit(1);

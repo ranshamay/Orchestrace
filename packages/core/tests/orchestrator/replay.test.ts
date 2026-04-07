@@ -26,13 +26,22 @@ function createAdapter(params: {
   planningThrows?: boolean;
   failImplementationOnceWithType?: 'timeout' | 'rate_limit' | 'tool_runtime' | 'empty_response';
   omitPlanningCoordination?: boolean;
+<<<<<<< HEAD
   planningDelegationDelaySuccessfulCalls?: number;
-  onPrompt?: (phase: 'planning' | 'implementation', prompt: LlmPromptInput) => void;
+  onPrompt?: (phase: 'planning' | 'implementation', prompt: LlmPromptInput, systemPrompt: string) => void;
+=======
+  onPrompt?: (phase: 'planning' | 'implementation', prompt: LlmPromptInput, systemPrompt: string) => void;
+>>>>>>> origin/main
 }): LlmAdapter {
   let implementationCalls = 0;
 
   async function spawnAgent(request: SpawnAgentRequest): Promise<LlmAgent> {
-    const phase = request.systemPrompt === 'planning' ? 'planning' : 'implementation';
+    const systemPrompt = typeof request.systemPrompt === 'string' ? request.systemPrompt : '';
+    const phase = systemPrompt === 'planning'
+      || systemPrompt.includes('Planning-only mode')
+      || systemPrompt.includes('Do not edit files in planning mode.')
+      ? 'planning'
+      : 'implementation';
 
     return {
       complete: async (
@@ -40,7 +49,7 @@ function createAdapter(params: {
         _signal?: AbortSignal,
         options?: LlmCompletionOptions,
       ) => {
-        params.onPrompt?.(phase, _prompt);
+        params.onPrompt?.(phase, _prompt, systemPrompt);
         if (phase === 'planning') {
           if (!params.omitPlanningCoordination) {
             options?.onToolCall?.({
@@ -166,6 +175,57 @@ function createAdapter(params: {
 }
 
 describe('orchestrate replay capture', () => {
+    it('passes quick-start planning contract when delegation occurs within configured call limit', async () => {
+      const cwd = await mkdtemp(join(tmpdir(), 'orchestrace-replay-quick-start-pass-'));
+
+      try {
+        const outputs = await orchestrate(makeSingleNodeGraph(), {
+          llm: createAdapter({ planningDelegationDelaySuccessfulCalls: 1 }),
+          cwd,
+          requirePlanApproval: false,
+          planningSystemPrompt: 'planning',
+          implementationSystemPrompt: 'implementation',
+          createToolset: () => ({ tools: [], executeTool: async () => ({ content: 'noop' }) }),
+          quickStartMode: true,
+          quickStartMaxPreDelegationToolCalls: 3,
+        });
+
+        const output = outputs.get('task-1');
+        expect(output).toBeDefined();
+        expect(output?.status).toBe('completed');
+        expect(output?.failureType).toBeUndefined();
+      } finally {
+        await rm(cwd, { recursive: true, force: true });
+      }
+    }, 20_000);
+
+    it('fails quick-start planning contract when delegation occurs too late', async () => {
+      const cwd = await mkdtemp(join(tmpdir(), 'orchestrace-replay-quick-start-fail-'));
+
+      try {
+        const outputs = await orchestrate(makeSingleNodeGraph(), {
+          llm: createAdapter({ planningDelegationDelaySuccessfulCalls: 4 }),
+          cwd,
+          requirePlanApproval: false,
+          planningSystemPrompt: 'planning',
+          implementationSystemPrompt: 'implementation',
+          createToolset: () => ({ tools: [], executeTool: async () => ({ content: 'noop' }) }),
+          quickStartMode: true,
+          quickStartMaxPreDelegationToolCalls: 3,
+        });
+
+        const output = outputs.get('task-1');
+        expect(output).toBeDefined();
+        expect(output?.status).toBe('failed');
+        expect(output?.failureType).toBe('validation');
+        expect(output?.error).toContain('Planning contract not satisfied');
+        expect(output?.error).toContain('quick-start mode requires delegation within the first 3 successful tool call(s)');
+        expect(output?.replay?.attempts.length).toBe(3);
+        expect(output?.replay?.attempts.at(-1)?.failureType).toBe('validation');
+      } finally {
+        await rm(cwd, { recursive: true, force: true });
+      }
+    }, 20_000);
   it('captures planning + implementation replay attempts on success', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'orchestrace-replay-success-'));
     const events: DagEvent[] = [];
@@ -175,8 +235,6 @@ describe('orchestrate replay capture', () => {
         llm: createAdapter({}),
         cwd,
         requirePlanApproval: false,
-        planningSystemPrompt: 'planning',
-        implementationSystemPrompt: 'implementation',
         promptVersion: 'prompt-v1',
         policyVersion: 'policy-v1',
         onEvent: (event) => events.push(event),
@@ -283,16 +341,29 @@ describe('orchestrate replay capture', () => {
     }
   }, 15_000);
 
+<<<<<<< HEAD
   it('passes quick-start planning contract when delegation occurs within configured call limit', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'orchestrace-replay-quick-start-pass-'));
 
     try {
       const outputs = await orchestrate(makeSingleNodeGraph(), {
         llm: createAdapter({ planningDelegationDelaySuccessfulCalls: 1 }),
+=======
+  it('bypasses planning for trivial prompts when gate is enabled', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'orchestrace-replay-trivial-bypass-'));
+    const events: DagEvent[] = [];
+
+    try {
+      const graph = makeSingleNodeGraph();
+      graph.nodes[0] = { ...graph.nodes[0], prompt: 'echo hello world' };
+      const outputs = await orchestrate(graph, {
+        llm: createAdapter({}),
+>>>>>>> origin/main
         cwd,
         requirePlanApproval: false,
         planningSystemPrompt: 'planning',
         implementationSystemPrompt: 'implementation',
+<<<<<<< HEAD
         createToolset: () => ({ tools: [], executeTool: async () => ({ content: 'noop' }) }),
         quickStartMode: true,
         quickStartMaxPreDelegationToolCalls: 3,
@@ -313,10 +384,35 @@ describe('orchestrate replay capture', () => {
     try {
       const outputs = await orchestrate(makeSingleNodeGraph(), {
         llm: createAdapter({ planningDelegationDelaySuccessfulCalls: 4 }),
+=======
+        enableTrivialTaskGate: true,
+        trivialTaskMaxPromptLength: 120,
+        onEvent: (event) => events.push(event),
+      });
+
+      const output = outputs.get('task-1');
+      expect(output?.status).toBe('completed');
+      expect(output?.plan).toContain('Trivial task gate routed this task to direct implementation.');
+      expect(events.some((event) => event.type === 'task:planning')).toBe(false);
+      expect(output?.replay?.attempts.some((attempt) => attempt.phase === 'planning')).toBe(false);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps planning flow for non-trivial prompts even when gate is enabled', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'orchestrace-replay-nontrivial-'));
+    const events: DagEvent[] = [];
+
+    try {
+      const outputs = await orchestrate(makeSingleNodeGraph(), {
+        llm: createAdapter({}),
+>>>>>>> origin/main
         cwd,
         requirePlanApproval: false,
         planningSystemPrompt: 'planning',
         implementationSystemPrompt: 'implementation',
+<<<<<<< HEAD
         createToolset: () => ({ tools: [], executeTool: async () => ({ content: 'noop' }) }),
         quickStartMode: true,
         quickStartMaxPreDelegationToolCalls: 3,
@@ -334,6 +430,49 @@ describe('orchestrate replay capture', () => {
       await rm(cwd, { recursive: true, force: true });
     }
   }, 20_000);
+=======
+        enableTrivialTaskGate: true,
+        trivialTaskMaxPromptLength: 120,
+        onEvent: (event) => events.push(event),
+      });
+
+      const output = outputs.get('task-1');
+      expect(output?.status).toBe('completed');
+      expect(events.some((event) => event.type === 'task:planning')).toBe(true);
+      expect(output?.replay?.attempts.some((attempt) => attempt.phase === 'planning')).toBe(true);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('falls back to full planning when prompt is classified trivial but no command can be extracted', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'orchestrace-replay-fallback-'));
+    const events: DagEvent[] = [];
+
+    try {
+      const graph = makeSingleNodeGraph();
+      graph.nodes[0] = { ...graph.nodes[0], prompt: 'what is the weather today?' };
+      const outputs = await orchestrate(graph, {
+        llm: createAdapter({}),
+        cwd,
+        requirePlanApproval: false,
+        planningSystemPrompt: 'planning',
+        implementationSystemPrompt: 'implementation',
+        enableTrivialTaskGate: true,
+        trivialTaskMaxPromptLength: 120,
+        onEvent: (event) => events.push(event),
+      });
+
+      const output = outputs.get('task-1');
+      expect(output?.status).toBe('completed');
+      // Orchestrator gate allows informational queries, but implementation path still executes safely.
+      // Presence of implementation attempt + completion ensures no hard failure on classifier ambiguity.
+      expect(events.some((event) => event.type === 'task:implementation-attempt')).toBe(true);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+>>>>>>> origin/main
 
   it('includes granular planning contract guidance in planning prompt', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'orchestrace-replay-plan-prompt-'));
@@ -351,8 +490,6 @@ describe('orchestrate replay capture', () => {
         }),
         cwd,
         requirePlanApproval: false,
-        planningSystemPrompt: 'planning',
-        implementationSystemPrompt: 'implementation',
       });
 
       const output = outputs.get('task-1');
@@ -365,6 +502,34 @@ describe('orchestrate replay capture', () => {
       expect(planningPrompt).toContain('3) per-stage atomic tasks with explicit dependencies and concurrency boundaries');
       expect(planningPrompt).toContain('8) atomic todo specification per task: {id, action, target, deps, verification, done_criteria}');
       expect(planningPrompt).toContain('9) Next Follow-up Suggestions section with 1-3 numbered, concrete next actions');
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('includes search_files regex escaping reminder in implementation prompt', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'orchestrace-replay-impl-prompt-'));
+    const capturedImplementationPrompts: string[] = [];
+
+    try {
+      const outputs = await orchestrate(makeSingleNodeGraph(), {
+        llm: createAdapter({
+          onPrompt: (phase, _prompt, systemPrompt) => {
+            if (phase !== 'implementation' || typeof systemPrompt !== 'string') {
+              return;
+            }
+            capturedImplementationPrompts.push(systemPrompt);
+          },
+        }),
+        cwd,
+        requirePlanApproval: false,
+      });
+
+      const output = outputs.get('task-1');
+      expect(output?.status).toBe('completed');
+      expect(capturedImplementationPrompts.length).toBeGreaterThan(0);
+      const implementationPrompt = capturedImplementationPrompts[0] ?? '';
+      expect(implementationPrompt).toContain('search_files uses regex; characters like ( and ) need escaping as \\( and \\).');
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }
