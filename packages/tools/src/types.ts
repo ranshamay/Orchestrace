@@ -1,6 +1,7 @@
 import type { Tool } from '@mariozechner/pi-ai';
 import type { LlmToolResult } from '@orchestrace/provider';
 import type { SharedContextStore } from '@orchestrace/context';
+import type { FileReadCache } from './file-read-cache.js';
 
 export type AgentToolPhase = 'planning' | 'implementation' | 'chat';
 
@@ -32,6 +33,7 @@ export interface AgentToolsetOptions {
   resolveGithubToken?: () => Promise<string | undefined>;
   sharedContextStore?: SharedContextStore;
   agentId?: string;
+  fileReadCache?: FileReadCache;
 }
 
 export interface AgentModeController {
@@ -87,6 +89,11 @@ export interface SubAgentRequest {
   contextPacket?: SubAgentContextPacket;
 }
 
+export interface SubAgentFileSnippet {
+  path: string;
+  content: string;
+}
+
 export interface SubAgentContextPacket {
   objective: string;
   boundaries?: {
@@ -97,6 +104,7 @@ export interface SubAgentContextPacket {
   relevantContext?: string[];
   requiredOutputSchema?: string;
   evidenceRequirements?: string[];
+  fileSnippets?: SubAgentFileSnippet[];
 }
 
 export interface SubAgentEvidenceItem {
