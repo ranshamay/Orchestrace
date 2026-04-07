@@ -158,7 +158,7 @@ async function main(): Promise<void> {
     void emit({ time: iso(), type: 'session:status-change', payload: { status: 'cancelled' } });
   });
 
-  // Shared context store for this session
+  // Shared context and file-read cache for this session
   const sharedContextStore = new InMemorySharedContextStore();
   const fileReadCache = createFileReadCache();
   let lastLlmStatusEmission: LlmStatusEmissionState | undefined;
