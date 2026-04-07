@@ -64,11 +64,18 @@ import type {
   LlmSessionState,
   ExecutionContext,
   SessionCreationReason,
+  SessionWorkspaceAssignmentProvenance,
 } from './ui-server/types.js';
 import { WorkspaceManager } from './workspace-manager.js';
 import { FileEventStore } from '@orchestrace/store';
 import { materializeSession as materializeFromEvents } from '@orchestrace/store';
-import type { SessionCheckpointPayload, SessionConfig, SessionEventInput, SessionRecoveryDetectedPayload } from '@orchestrace/store';
+import type {
+  SessionCheckpointPayload,
+  SessionConfig,
+  SessionEventInput,
+  SessionRecoveryDetectedPayload,
+  SessionWorktreePathSessionIdRelation,
+} from '@orchestrace/store';
 import { ObserverDaemon, SessionObserver, BackendLogger, LogWatcher } from './observer/index.js';
 
 const GITHUB_PROVIDER_ID = 'github';
