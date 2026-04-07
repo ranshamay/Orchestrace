@@ -603,12 +603,14 @@ export function buildSingleTaskGraph(prompt: string, routeCategory: TaskRouteCat
 }
 
 async function runShellCommandRoute(prompt: string, cwd: string): Promise<number> {
-  const command = extractShellCommand(prompt);
+  const validation = validateShellExecutionPrompt(prompt);
 
-  if (!command) {
-    console.error('Route shell_command selected, but no executable command was found in the prompt.');
+  if (!validation.ok || !validation.command) {
+    console.error(validation.reason ?? 'Rejected shell execution due to invalid prompt.');
     return 1;
   }
+
+  const command = validation.command;
 
   try {
     const { stdout, stderr } = await execFileAsync('sh', ['-lc', command], { cwd });

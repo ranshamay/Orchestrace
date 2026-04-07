@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { extractShellCommand, parseTaskRouteOverride, resolveTaskRoute } from '../src/task-routing.js';
+import {
+  extractShellCommand,
+  parseTaskRouteOverride,
+  resolveTaskRoute,
+  validateShellExecutionPrompt,
+} from '../src/task-routing.js';
 
 describe('task routing config', () => {
   it('parses valid override values', () => {
@@ -49,5 +54,29 @@ describe('task routing config', () => {
     expect(route.result.category).toBe('code_change');
     expect(route.result.strategy).toBe('full_planning_pipeline');
     expect(extractShellCommand(prompt)).toBeUndefined();
+  });
+
+  it('rejects observer-style markdown prompts at shell execution boundary', () => {
+    const observerPrompt = [
+      '[Observer Fix] Task prompt passed directly as shell command',
+      '',
+      'Category: architecture | Severity: critical',
+      '',
+      '## Issue',
+      'Prompt text was executed via sh -lc.',
+      '',
+      '## Task',
+      'Route to coding agent prompt field.',
+    ].join('\n');
+
+    const validation = validateShellExecutionPrompt(observerPrompt);
+    expect(validation.ok).toBe(false);
+    expect(validation.reason).toContain('Rejected shell execution');
+  });
+
+  it('accepts single-line executable commands at shell execution boundary', () => {
+    const validation = validateShellExecutionPrompt('run git status');
+    expect(validation.ok).toBe(true);
+    expect(validation.command).toBe('git status');
   });
 });
