@@ -821,7 +821,7 @@ function buildPlanningPrompt(node: TaskNode, depOutputs: Map<string, TaskOutput>
         '3) per-stage atomic tasks with explicit dependencies and concurrency boundaries',
         '4) files likely to change',
         '5) verification strategy with explicit commands',
-        '6) rollback/risk notes',
+        '6) rollback/risk notes (required only when the plan includes file modifications or state-changing operations; otherwise state "N/A - read-only task")',
         '7) a sub-agent delegation map aligned to agent_graph_set nodes and minimal per-agent context',
         '8) atomic todo specification per task: {id, action, target, deps, verification, done_criteria}',
         '9) Next Follow-up Suggestions section with 1-3 numbered, concrete next actions',

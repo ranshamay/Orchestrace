@@ -762,6 +762,8 @@ describe('orchestrate replay capture', () => {
       expect(planningPrompt).toContain('Quick-start planning mode for well-scoped tasks: keep parent pre-delegation orientation to at most 3-4 calls and delegate within the first 2-3 calls whenever possible');
       expect(planningPrompt).toContain('Keep parent orientation lightweight (e.g., root list + manifest + git status) and push detailed file reading/search into sub-agent scopes');
       expect(planningPrompt).toContain('3) per-stage atomic tasks with explicit dependencies and concurrency boundaries');
+      expect(planningPrompt).toContain('6) rollback/risk notes (required only when the plan includes file modifications or state-changing operations; otherwise state "N/A - read-only task")');
+      // Phase-system heuristic guidance is validated via orchestrator source edits; planning prompt assertions stay scoped to planning prompt contract lines.
       expect(planningPrompt).toContain('8) atomic todo specification per task: {id, action, target, deps, verification, done_criteria}');
       expect(planningPrompt).toContain('9) Next Follow-up Suggestions section with 1-3 numbered, concrete next actions');
     } finally {
