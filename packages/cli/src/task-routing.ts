@@ -29,6 +29,7 @@ export function resolveTaskRoute(prompt: string, overrideRaw?: string): Resolved
 
 export function extractShellCommand(prompt: string): string | undefined {
   const normalized = prompt.trim();
+  if (normalized.includes('\n') || normalized.length > 200) return undefined;
   const command = normalized
     .replace(/^\$\s*/, '')
     .replace(/^(run|execute|exec|shell|command|cmd)\s+/i, '')

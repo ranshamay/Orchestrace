@@ -111,9 +111,10 @@ export function classifyTaskPrompt(prompt: string, options?: { forceCategory?: T
     };
   }
 
+  const isMultilineOrLong = normalized.includes('\n') || normalized.length > 200;
   const looksLikeShellPrefix = SHELL_PREFIXES.some((prefix) => normalized.startsWith(prefix));
   const hasShellHint = SHELL_COMMAND_PATTERNS.some((pattern) => pattern.test(normalized));
-  if (looksLikeShellPrefix || hasShellHint) {
+  if (!isMultilineOrLong && (looksLikeShellPrefix || hasShellHint)) {
     return {
       category: 'shell_command',
       strategy: strategyForTaskRoute('shell_command'),

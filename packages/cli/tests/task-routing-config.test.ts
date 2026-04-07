@@ -31,4 +31,14 @@ describe('task routing config', () => {
     expect(extractShellCommand('$ git status')).toBe('git status');
     expect(extractShellCommand('   ')).toBeUndefined();
   });
+
+  it('rejects multiline prompts in extractShellCommand', () => {
+    const multiline = '[Observer Fix] Auth check\nCategory: architecture\ngit worktree issue';
+    expect(extractShellCommand(multiline)).toBeUndefined();
+  });
+
+  it('rejects long prose prompts in extractShellCommand', () => {
+    const longPrompt = 'Add a provider authentication pre-flight check at session startup before any planning or tool execution begins. In the session runner initialization make a lightweight API call to validate credentials.';
+    expect(extractShellCommand(longPrompt)).toBeUndefined();
+  });
 });
