@@ -128,12 +128,16 @@ export interface WorkSession {
   provider: string;
   model: string;
   autoApprove: boolean;
+  quickStartMode?: boolean;
+  quickStartMaxPreDelegationToolCalls?: number;
   executionContext: ExecutionContext;
   selectedWorktreePath?: string;
   useWorktree: boolean;
   adaptiveConcurrency: boolean;
   batchConcurrency: number;
   batchMinConcurrency: number;
+  enableTrivialTaskGate: boolean;
+  trivialTaskMaxPromptLength: number;
   worktreePath?: string;
   worktreeBranch?: string;
   creationReason: SessionCreationReason;
@@ -163,12 +167,16 @@ export interface PersistedWorkSession {
   provider: string;
   model: string;
   autoApprove: boolean;
+  quickStartMode?: boolean;
+  quickStartMaxPreDelegationToolCalls?: number;
   executionContext?: ExecutionContext;
   selectedWorktreePath?: string;
   useWorktree?: boolean;
   adaptiveConcurrency?: boolean;
   batchConcurrency?: number;
   batchMinConcurrency?: number;
+  enableTrivialTaskGate?: boolean;
+  trivialTaskMaxPromptLength?: number;
   worktreePath?: string;
   worktreeBranch?: string;
   creationReason?: SessionCreationReason;
@@ -195,6 +203,8 @@ export interface UiPreferences {
   adaptiveConcurrency: boolean;
   batchConcurrency: number;
   batchMinConcurrency: number;
+  enableTrivialTaskGate: boolean;
+  trivialTaskMaxPromptLength: number;
 }
 
 export interface PersistedUiPreferences {
@@ -208,6 +218,8 @@ export interface PersistedUiPreferences {
   adaptiveConcurrency?: boolean;
   batchConcurrency?: number;
   batchMinConcurrency?: number;
+  enableTrivialTaskGate?: boolean;
+  trivialTaskMaxPromptLength?: number;
 }
 
 export interface PersistedUiState {
