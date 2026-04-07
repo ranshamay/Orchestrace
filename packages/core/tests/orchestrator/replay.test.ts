@@ -60,6 +60,17 @@ function createAdapter(params: {
     usage?: { input: number; output: number; cost: number };
     metadata?: { stopReason?: string; endpoint?: string };
   }>;
+  implementationBehavior?: (args: {
+    prompt: LlmPromptInput;
+    signal?: AbortSignal;
+    options?: LlmCompletionOptions;
+    implementationCall: number;
+    systemPrompt: string;
+  }) => Promise<{
+    text: string;
+    usage?: { input: number; output: number; cost: number };
+    metadata?: { stopReason?: string; endpoint?: string };
+  }>;
 }): LlmAdapter {
   let planningCalls = 0;
   let implementationCalls = 0;
@@ -164,6 +175,16 @@ function createAdapter(params: {
         }
 
         implementationCalls += 1;
+        if (params.implementationBehavior) {
+          return params.implementationBehavior({
+            prompt: _prompt,
+            signal: _signal,
+            options,
+            implementationCall: implementationCalls,
+            systemPrompt,
+          });
+        }
+
         if (params.failImplementationOnceWithType && implementationCalls === 1) {
           const error = new Error('LLM request timed out after 120000ms') as Error & { failureType?: string };
           error.failureType = params.failImplementationOnceWithType;
@@ -767,6 +788,174 @@ describe('orchestrate replay capture', () => {
       // Orchestrator gate allows informational queries, but implementation path still executes safely.
       // Presence of implementation attempt + completion ensures no hard failure on classifier ambiguity.
       expect(events.some((event) => event.type === 'task:implementation-attempt')).toBe(true);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('includes explicit first tool call guidance in planning prompt', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'orchestrace-replay-plan-first-tool-'));
+    const capturedPlanningPrompts: string[] = [];
+
+    try {
+      const outputs = await orchestrate(makeSingleNodeGraph(), {
+        llm: createAdapter({
+          onPrompt: (phase, prompt) => {
+            if (phase !== 'planning' || typeof prompt !== 'string') {
+              return;
+            }
+            capturedPlanningPrompts.push(prompt);
+          },
+        }),
+        cwd,
+        requirePlanApproval: false,
+      });
+
+      const output = outputs.get('task-1');
+      expect(output?.status).toBe('completed');
+      expect(capturedPlanningPrompts.length).toBeGreaterThan(0);
+      const planningPrompt = capturedPlanningPrompts[0] ?? '';
+      expect(planningPrompt).toContain('Within the first 1-2 thinking cycles, make a concrete tool call');
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('injects explicit retry directive into implementation retry prompts', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'orchestrace-replay-retry-directive-'));
+    const capturedImplementationPrompts: string[] = [];
+
+    try {
+      const outputs = await orchestrate(makeSingleNodeGraph(), {
+        llm: createAdapter({
+          failImplementationOnceWithType: 'timeout',
+          onPrompt: (phase, prompt) => {
+            if (phase !== 'implementation' || typeof prompt !== 'string') {
+              return;
+            }
+            capturedImplementationPrompts.push(prompt);
+          },
+        }),
+        cwd,
+        requirePlanApproval: false,
+        maxImplementationAttempts: 2,
+        planningSystemPrompt: 'planning',
+        implementationSystemPrompt: 'implementation',
+      });
+
+      const output = outputs.get('task-1');
+      expect(output?.status).toBe('completed');
+      expect(capturedImplementationPrompts.length).toBeGreaterThanOrEqual(2);
+      const retryPrompt = capturedImplementationPrompts[1] ?? '';
+      expect(retryPrompt).toContain('You must now call a tool. Start by running: pwd');
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('retries planning after 3 consecutive thinking deltas without tool calls', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'orchestrace-replay-thinking-cycle-guard-'));
+
+    try {
+      const outputs = await orchestrate(makeSingleNodeGraph(), {
+        llm: createAdapter({
+          planningBehavior: async ({ options, planningCall }) => {
+            if (planningCall === 1) {
+              options?.onTextDelta?.('thinking-1');
+              options?.onTextDelta?.('thinking-2');
+              options?.onTextDelta?.('thinking-3');
+              throw new Error('expected cycle guard abort');
+            }
+
+            options?.onToolCall?.({
+              type: 'started',
+              toolCallId: 'plan-todo-1',
+              toolName: 'todo_set',
+              arguments: '{"items":[{"id":"p1","title":"Plan","status":"in_progress","weight":100}]}',
+            });
+            options?.onToolCall?.({
+              type: 'result',
+              toolCallId: 'plan-todo-1',
+              toolName: 'todo_set',
+              result: 'Stored 1 todo item(s).',
+              isError: false,
+            });
+            options?.onToolCall?.({
+              type: 'started',
+              toolCallId: 'plan-graph-1',
+              toolName: 'agent_graph_set',
+              arguments: '{"nodes":[{"id":"a1","prompt":"Inspect docs","weight":100}]}',
+            });
+            options?.onToolCall?.({
+              type: 'result',
+              toolCallId: 'plan-graph-1',
+              toolName: 'agent_graph_set',
+              result: 'Stored agent dependency graph with 1 node(s).',
+              isError: false,
+            });
+            options?.onToolCall?.({
+              type: 'started',
+              toolCallId: 'plan-sub-1',
+              toolName: 'subagent_spawn',
+              arguments: '{"prompt":"Summarize planner constraints","nodeId":"a1"}',
+            });
+            options?.onToolCall?.({
+              type: 'result',
+              toolCallId: 'plan-sub-1',
+              toolName: 'subagent_spawn',
+              result: 'Sub-agent sub-1 completed.',
+              isError: false,
+            });
+
+            return {
+              text: 'Recovered plan after cycle guard retry.',
+              usage: { input: 12, output: 6, cost: 0 },
+              metadata: { stopReason: 'end_turn', endpoint: 'https://example.test' },
+            };
+          },
+        }),
+        cwd,
+        requirePlanApproval: false,
+        planningSystemPrompt: 'planning',
+        implementationSystemPrompt: 'implementation',
+      });
+
+      const output = outputs.get('task-1');
+      expect(output?.status).toBe('completed');
+      const planningAttempts = output?.replay?.attempts.filter((attempt) => attempt.phase === 'planning') ?? [];
+      expect(planningAttempts.length).toBe(2);
+      expect(planningAttempts[0]?.error).toContain('3 consecutive thinking cycles without a tool call');
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('fails planning early when pre-first-tool token budget is exceeded', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'orchestrace-replay-token-guard-'));
+
+    try {
+      const outputs = await orchestrate(makeSingleNodeGraph(), {
+        llm: createAdapter({
+          planningBehavior: async ({ options, signal }) => {
+            options?.onUsage?.({ input: 2100, output: 0, cost: 0 });
+            options?.onUsage?.({ input: 3200, output: 0, cost: 0 });
+            if (signal?.aborted) {
+              throw signal.reason;
+            }
+            throw new Error('expected token guard abort');
+          },
+        }),
+        cwd,
+        requirePlanApproval: false,
+        planningSystemPrompt: 'planning',
+        implementationSystemPrompt: 'implementation',
+      });
+
+      const output = outputs.get('task-1');
+      expect(output?.status).toBe('failed');
+      expect(output?.error).toContain('tokens before first tool call');
+      expect(output?.replay?.attempts.length).toBe(3);
+      expect(output?.replay?.attempts.every((attempt) => attempt.phase === 'planning')).toBe(true);
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }
