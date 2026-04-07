@@ -1,0 +1,34 @@
+import { describe, expect, it } from 'vitest';
+import { extractShellCommand, parseTaskRouteOverride, resolveTaskRoute } from '../src/task-routing.js';
+
+describe('task routing config', () => {
+  it('parses valid override values', () => {
+    expect(parseTaskRouteOverride('shell_command')).toBe('shell_command');
+    expect(parseTaskRouteOverride(' investigation ')).toBe('investigation');
+    expect(parseTaskRouteOverride('invalid')).toBeUndefined();
+  });
+
+  it('resolves shell command route with direct strategy', () => {
+    const route = resolveTaskRoute('run pnpm -w test');
+    expect(route.result.category).toBe('shell_command');
+    expect(route.result.strategy).toBe('direct_shell');
+  });
+
+  it('disables validation for investigation route', () => {
+    const route = resolveTaskRoute('investigate flaky tests and summarize root causes');
+    expect(route.result.category).toBe('investigation');
+    expect(route.validationEnabled).toBe(false);
+  });
+
+  it('maps refactor route to refactor task type', () => {
+    const route = resolveTaskRoute('refactor graph builder internals');
+    expect(route.result.category).toBe('refactor');
+    expect(route.nodeType).toBe('refactor');
+  });
+
+  it('extracts shell command from prompt directives', () => {
+    expect(extractShellCommand('run pnpm typecheck')).toBe('pnpm typecheck');
+    expect(extractShellCommand('$ git status')).toBe('git status');
+    expect(extractShellCommand('   ')).toBeUndefined();
+  });
+});
