@@ -41,7 +41,6 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
           regex: Type.Optional(Type.Boolean({ description: 'When true, interpret query as regex. Defaults to false (literal search via --fixed-strings).' })),
           path: Type.Optional(Type.String({ description: 'Relative path to search inside. Defaults to workspace root.' })),
           glob: Type.Optional(Type.String({ description: 'Optional glob include filter, e.g. src/**/*.ts' })),
-          regex: Type.Optional(Type.Boolean({ description: 'Interpret query as a regular expression. Defaults to false (literal search).' })),
         }),
       },
       execute: async (toolArgs, signal) => {
@@ -49,7 +48,6 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
         const path = asString(toolArgs.path) ?? '.';
         const regex = typeof toolArgs.regex === 'boolean' ? toolArgs.regex : false;
         const glob = asString(toolArgs.glob);
-        const regex = Boolean(toolArgs.regex);
         const target = resolveWorkspacePath(options.cwd, path);
         const relTarget = toWorkspaceRelative(options.cwd, target);
 
