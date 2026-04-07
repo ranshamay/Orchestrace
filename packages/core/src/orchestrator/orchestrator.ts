@@ -25,20 +25,6 @@ export interface PlanApprovalRequest {
   planPath: string;
 }
 
-export interface DirectExecutionConfig {
-  /** Enable conservative trivial-task fast path. Defaults to true. */
-  enabled?: boolean;
-  /** Hard token-length cap for considering direct execution. Defaults to 40. */
-  maxPromptTokens?: number;
-  /** Force execution mode for testing/rollback. */
-  forceMode?: 'direct' | 'planned';
-}
-
-export interface TaskComplexityDecision {
-  mode: 'direct' | 'planned';
-  reasons: string[];
-}
-
 export interface OrchestratorConfig extends RunnerConfig {
   /** LLM adapter for executing agent tasks. */
   llm: LlmAdapter;
@@ -632,7 +618,7 @@ export async function orchestrate(
         return {
           taskId: node.id,
           status: 'failed',
-          plan: approvedPlanText,
+          plan: planningResult.text,
           planPath: persistedPlanPath,
           tokenDumpDir: taskTokenDumpDir,
           response: lastResponse,
@@ -1206,62 +1192,6 @@ function shouldRetryAfterCompletionFailure(failureType: ReplayFailureType): bool
     || failureType === 'rate_limit'
     || failureType === 'tool_runtime'
     || failureType === 'empty_response';
-}
-
-function classifyTaskComplexity(
-  node: TaskNode,
-  params: {
-    hasDependencies: boolean;
-    config?: DirectExecutionConfig;
-  },
-): TaskComplexityDecision {
-  const reasons: string[] = [];
-  const modeOverride = params.config?.forceMode;
-  if (modeOverride === 'direct') {
-    return { mode: 'direct', reasons: ['forceMode=direct override applied.'] };
-  }
-  if (modeOverride === 'planned') {
-    return { mode: 'planned', reasons: ['forceMode=planned override applied.'] };
-  }
-
-  if (params.config?.enabled === false) {
-    return { mode: 'planned', reasons: ['direct execution fast path disabled by config.'] };
-  }
-
-  if (params.hasDependencies) {
-    return { mode: 'planned', reasons: ['task has dependency outputs; retain full planning path.'] };
-  }
-
-  const prompt = node.prompt.trim();
-  if (!prompt) {
-    return { mode: 'planned', reasons: ['empty prompt; retain full planning path.'] };
-  }
-
-  const tokenEstimate = prompt.split(/\s+/u).filter(Boolean).length;
-  const maxPromptTokens = params.config?.maxPromptTokens ?? DEFAULT_DIRECT_EXECUTION_MAX_PROMPT_TOKENS;
-  if (tokenEstimate > maxPromptTokens) {
-    return {
-      mode: 'planned',
-      reasons: [`prompt length (${tokenEstimate} tokens) exceeds direct threshold (${maxPromptTokens}).`],
-    };
-  }
-
-  if (/[\n;]|&&|\|\|/u.test(prompt)) {
-    return { mode: 'planned', reasons: ['prompt appears multi-step or compound.'] };
-  }
-
-  if (DIRECT_EXECUTION_DENY_PATTERNS.some((pattern) => pattern.test(prompt))) {
-    return { mode: 'planned', reasons: ['prompt includes edit/build/workflow intent requiring planning.'] };
-  }
-
-  const lowered = prompt.toLowerCase();
-  const startsWithAllowedVerb = DIRECT_EXECUTION_ALLOWED_VERBS.some((verb) => lowered.startsWith(`${verb} `));
-  if (!startsWithAllowedVerb) {
-    return { mode: 'planned', reasons: ['prompt does not match allowed direct-action verb pattern.'] };
-  }
-
-  reasons.push('short single-step prompt with read/run intent and no edit workflow markers.');
-  return { mode: 'direct', reasons };
 }
 
 function buildCompletionFailureRetryHint(params: {
