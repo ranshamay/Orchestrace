@@ -17,7 +17,6 @@ import {
   createFileReadCache,
   listAgentTools,
   type AgentToolPhase,
-  type SessionFileReadCache,
   type SubAgentRequest,
   type SubAgentResult,
 } from '@orchestrace/tools';
@@ -178,7 +177,6 @@ function createInheritedSubAgentToolset(
     batchMinConcurrency?: number;
     resolveGithubToken: () => Promise<string | undefined>;
     sharedContextStore?: import('@orchestrace/context').SharedContextStore;
-    fileReadCache?: SessionFileReadCache;
     agentId?: string;
     fileReadCache?: ReturnType<typeof createFileReadCache>;
   },
@@ -670,7 +668,6 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
 
   for (const [sessionId, restoredSession] of workSessions.entries()) {
     sessionSharedContextStores.set(sessionId, new InMemorySharedContextStore());
-    sessionFileReadCaches.set(sessionId, new Map());
     sessionContextEngines.set(sessionId, createSessionContextEngine(restoredSession.provider, restoredSession.model));
     sessionContextStates.set(sessionId, { turnsSinceLastCompaction: 0 });
   }
@@ -957,7 +954,6 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     sessionChats.delete(id);
     sessionTodos.delete(id);
     sessionSharedContextStores.delete(id);
-    sessionFileReadCaches.delete(id);
     sessionContextEngines.delete(id);
     sessionContextStates.delete(id);
     pendingSubagentNodeIdsBySession.delete(id);
@@ -1206,7 +1202,6 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     sessionChats.set(id, createSessionChatThread(session, promptParts));
     sessionTodos.set(id, []);
     sessionSharedContextStores.set(id, new InMemorySharedContextStore());
-    sessionFileReadCaches.set(id, new Map());
     sessionContextEngines.set(id, createSessionContextEngine(request.provider, request.model));
     sessionContextStates.set(id, { turnsSinceLastCompaction: 0 });
     uiStatePersistence.schedule();
@@ -2742,8 +2737,6 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
             const contextEngine = sessionContextEngines.get(session.id)
               ?? createSessionContextEngine(session.provider, session.model);
             sessionContextEngines.set(session.id, contextEngine);
-            const fileReadCache = sessionFileReadCaches.get(session.id) ?? new Map();
-            sessionFileReadCaches.set(session.id, fileReadCache);
             const contextState = sessionContextStates.get(session.id) ?? { turnsSinceLastCompaction: 0 };
 
             const managedContext = await buildManagedChatContinuationInput({
@@ -3140,8 +3133,6 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           const contextEngine = sessionContextEngines.get(session.id)
             ?? createSessionContextEngine(session.provider, session.model);
           sessionContextEngines.set(session.id, contextEngine);
-          const fileReadCache = sessionFileReadCaches.get(session.id) ?? new Map();
-          sessionFileReadCaches.set(session.id, fileReadCache);
           const contextState = sessionContextStates.get(session.id) ?? { turnsSinceLastCompaction: 0 };
 
           const managedContext = await buildManagedChatContinuationInput({
