@@ -1543,6 +1543,23 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         executionContext = resolved.executionContext;
         selectedWorktreePath = resolved.selectedWorktreePath;
         selectedWorktreeBranch = resolved.worktreeBranch;
+        workspaceAssignment = {
+          assignmentSource: resolved.assignmentSource,
+          reusedExistingWorktree: resolved.reusedExistingWorktree,
+          cleanupApplied: false,
+        };
+        if (resolved.reusedExistingWorktree) {
+          try {
+            const cleanup = await cleanupReusedWorktree(workspace.path, workspacePath);
+            workspaceAssignment.cleanupApplied = true;
+            workspaceAssignment.cleanupDefaultBranch = cleanup.defaultBranch;
+          } catch (cleanupError) {
+            return {
+              error: `Failed to clean reused worktree before assignment: ${toErrorMessage(cleanupError)}`,
+              statusCode: 500,
+            };
+          }
+        }
       } catch (error) {
         return {
           error: toErrorMessage(error),
@@ -1575,6 +1592,11 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         workspacePath = sessionWorktreePath;
         selectedWorktreePath = sessionWorktreePath;
         selectedWorktreeBranch = sessionBranch;
+        workspaceAssignment = {
+          assignmentSource: 'auto-created-worktree',
+          reusedExistingWorktree: false,
+          cleanupApplied: false,
+        };
         autoCreatedWorktreeCleanup = async () => {
           await gitExec(workspace.path, ['worktree', 'remove', '--force', sessionWorktreePath]).catch(() => {});
           await gitExec(workspace.path, ['branch', '-D', sessionBranch]).catch(() => {});
@@ -1592,6 +1614,17 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       void autoCreatedWorktreeCleanup?.().catch(() => {});
       return {
         error: `Workspace path is currently in use by another session (${lockResult.ownerSessionId}). Select a different worktree path or wait for the session to be deleted.`,
+        statusCode: 409,
+      };
+    }
+
+    try {
+      await assertWorkspaceIsClean(workspacePath);
+    } catch (cleanStateError) {
+      releaseWorkspacePathLock(workspacePath, id);
+      void autoCreatedWorktreeCleanup?.().catch(() => {});
+      return {
+        error: toErrorMessage(cleanStateError),
         statusCode: 409,
       };
     }
