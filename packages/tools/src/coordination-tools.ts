@@ -14,7 +14,6 @@ import type {
   TodoItem,
 } from './types.js';
 import { sanitizeForPathSegment } from './path-utils.js';
-import { readFullFileWithCache } from './file-read-cache.js';
 
 const todoStatusSchema = Type.Union([
   Type.Literal('todo'),

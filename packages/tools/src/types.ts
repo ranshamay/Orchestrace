@@ -32,7 +32,6 @@ export interface AgentToolsetOptions {
   modeController?: AgentModeController;
   resolveGithubToken?: () => Promise<string | undefined>;
   sharedContextStore?: SharedContextStore;
-  fileReadCache?: SessionFileReadCache;
   agentId?: string;
   fileReadCache?: FileReadCache;
 }

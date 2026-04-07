@@ -465,7 +465,6 @@ async function readWorkspaceFileSlice(
     startLine: number;
     endLine?: number;
     maxChars: number;
-    cache?: import('./file-read-cache.js').SessionFileReadCache;
   },
   cacheOptions: {
     fileReadCache?: FileReadCache;
@@ -513,7 +512,7 @@ async function readWorkspaceFileSliceUncached(
     maxChars: number;
   },
 ): Promise<string> {
-  const content = await readFullFileWithCache(target, { cache: options.cache });
+  const content = await readFile(target, 'utf-8');
   const lines = content.split(/\r?\n/);
   const from = Math.max(1, options.startLine);
   const to = options.endLine ? Math.min(options.endLine, lines.length) : lines.length;
