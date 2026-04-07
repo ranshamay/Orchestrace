@@ -7,6 +7,7 @@
     "build": "turbo build",
     "dev": "turbo dev",
     "test": "turbo run test",
+    "prestart": "pnpm --filter @orchestrace/cli... build",
     "evals": "pnpm --filter @orchestrace/evals run run",
     "evals:sample": "pnpm evals -- --results packages/evals/examples/sample-run-records.json --min-pass-rate 0.8",
     "evals:ci": "pnpm evals -- --replay-dir .orchestrace/runs --results packages/evals/examples/sample-run-records.json --changed-files .orchestrace/changed-files.txt --min-pass-rate 0.8",
