@@ -6586,7 +6586,7 @@ export function classifyWorkspacePathSessionIdRelation(sessionId: string, worksp
   };
 }
 
-async function resolveDefaultBranch(repoRoot: string): Promise<string> {
+export async function resolveDefaultBranch(repoRoot: string): Promise<string> {
   const tryCommands: Array<string[]> = [
     ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'],
     ['rev-parse', '--abbrev-ref', 'origin/HEAD'],
@@ -6607,14 +6607,14 @@ async function resolveDefaultBranch(repoRoot: string): Promise<string> {
   return 'main';
 }
 
-async function cleanupReusedWorktree(repoRoot: string, workspacePath: string): Promise<{ defaultBranch: string }> {
+export async function cleanupReusedWorktree(repoRoot: string, workspacePath: string): Promise<{ defaultBranch: string }> {
   const defaultBranch = await resolveDefaultBranch(repoRoot);
   await gitExec(workspacePath, ['checkout', defaultBranch]);
   await gitExec(workspacePath, ['clean', '-fdx']);
   return { defaultBranch };
 }
 
-async function assertWorkspaceIsClean(
+export async function assertWorkspaceIsClean(
   workspacePath: string,
   summarizeDirty: (workspacePath: string) => Promise<{
     hasUncommittedChanges: boolean;
