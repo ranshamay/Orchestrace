@@ -156,6 +156,22 @@ export default function App() {
     batchMinConcurrency, setBatchMinConcurrency,
   });
 
+  const persistPhaseDefaults = useCallback((next: {
+    planningProvider: string;
+    planningModel: string;
+    implementationProvider: string;
+    implementationModel: string;
+  }) => {
+    void updateUiPreferences({
+      defaultProvider: next.implementationProvider,
+      defaultModel: next.implementationModel,
+      defaultPlanningProvider: next.planningProvider,
+      defaultPlanningModel: next.planningModel,
+      defaultImplementationProvider: next.implementationProvider,
+      defaultImplementationModel: next.implementationModel,
+    }).catch(() => undefined);
+  }, []);
+
   const setDefaultPlanningProvider = useCallback((nextProvider: string) => {
     const normalizedProvider = typeof nextProvider === 'string' ? nextProvider.trim() : '';
     const resetModel = normalizedProvider !== defaultLlmControls.planningProvider;
@@ -181,8 +197,14 @@ export default function App() {
       }
       return next;
     });
+    persistPhaseDefaults({
+      planningProvider: normalizedProvider,
+      planningModel: nextModel,
+      implementationProvider: defaultLlmControls.implementationProvider,
+      implementationModel: defaultLlmControls.implementationModel,
+    });
     updateActiveLlmControls({ planningProvider: normalizedProvider, planningModel: nextModel });
-  }, [defaultLlmControls.planningModel, defaultLlmControls.planningProvider, setDefaultLlmControls, setLlmControlsBySessionId, setWorkPlanningModel, setWorkPlanningProvider, updateActiveLlmControls]);
+  }, [defaultLlmControls.implementationModel, defaultLlmControls.implementationProvider, defaultLlmControls.planningModel, defaultLlmControls.planningProvider, persistPhaseDefaults, setDefaultLlmControls, setLlmControlsBySessionId, setWorkPlanningModel, setWorkPlanningProvider, updateActiveLlmControls]);
 
   const setDefaultPlanningModel = useCallback((nextModel: string) => {
     const normalizedModel = typeof nextModel === 'string' ? nextModel.trim() : '';
@@ -199,8 +221,14 @@ export default function App() {
       }
       return next;
     });
+    persistPhaseDefaults({
+      planningProvider: defaultLlmControls.planningProvider,
+      planningModel: normalizedModel,
+      implementationProvider: defaultLlmControls.implementationProvider,
+      implementationModel: defaultLlmControls.implementationModel,
+    });
     updateActiveLlmControls({ planningModel: normalizedModel });
-  }, [setDefaultLlmControls, setLlmControlsBySessionId, setWorkPlanningModel, updateActiveLlmControls]);
+  }, [defaultLlmControls.implementationModel, defaultLlmControls.implementationProvider, defaultLlmControls.planningProvider, persistPhaseDefaults, setDefaultLlmControls, setLlmControlsBySessionId, setWorkPlanningModel, updateActiveLlmControls]);
 
   const setDefaultImplementationProvider = useCallback((nextProvider: string) => {
     const normalizedProvider = typeof nextProvider === 'string' ? nextProvider.trim() : '';
@@ -227,8 +255,14 @@ export default function App() {
       }
       return next;
     });
+    persistPhaseDefaults({
+      planningProvider: defaultLlmControls.planningProvider,
+      planningModel: defaultLlmControls.planningModel,
+      implementationProvider: normalizedProvider,
+      implementationModel: nextModel,
+    });
     updateActiveLlmControls({ implementationProvider: normalizedProvider, implementationModel: nextModel });
-  }, [defaultLlmControls.implementationModel, defaultLlmControls.implementationProvider, setDefaultLlmControls, setLlmControlsBySessionId, setWorkModel, setWorkProvider, updateActiveLlmControls]);
+  }, [defaultLlmControls.implementationModel, defaultLlmControls.implementationProvider, defaultLlmControls.planningModel, defaultLlmControls.planningProvider, persistPhaseDefaults, setDefaultLlmControls, setLlmControlsBySessionId, setWorkModel, setWorkProvider, updateActiveLlmControls]);
 
   const setDefaultImplementationModel = useCallback((nextModel: string) => {
     const normalizedModel = typeof nextModel === 'string' ? nextModel.trim() : '';
@@ -245,8 +279,14 @@ export default function App() {
       }
       return next;
     });
+    persistPhaseDefaults({
+      planningProvider: defaultLlmControls.planningProvider,
+      planningModel: defaultLlmControls.planningModel,
+      implementationProvider: defaultLlmControls.implementationProvider,
+      implementationModel: normalizedModel,
+    });
     updateActiveLlmControls({ implementationModel: normalizedModel });
-  }, [setDefaultLlmControls, setLlmControlsBySessionId, setWorkModel, updateActiveLlmControls]);
+  }, [defaultLlmControls.implementationProvider, defaultLlmControls.planningModel, defaultLlmControls.planningProvider, persistPhaseDefaults, setDefaultLlmControls, setLlmControlsBySessionId, setWorkModel, updateActiveLlmControls]);
 
   const handleStartNewSessionDraft = useCallback(() => {
     setActiveTab('graph');
@@ -322,12 +362,6 @@ export default function App() {
     const payload = {
       activeTab,
       observerShowFindings,
-      defaultProvider: defaultLlmControls.implementationProvider,
-      defaultModel: defaultLlmControls.implementationModel,
-      defaultPlanningProvider: defaultLlmControls.planningProvider,
-      defaultPlanningModel: defaultLlmControls.planningModel,
-      defaultImplementationProvider: defaultLlmControls.implementationProvider,
-      defaultImplementationModel: defaultLlmControls.implementationModel,
       adaptiveConcurrency,
       batchConcurrency,
       batchMinConcurrency,
@@ -355,10 +389,6 @@ export default function App() {
     batchConcurrency,
     batchMinConcurrency,
     bootstrapComplete,
-    defaultLlmControls.implementationModel,
-    defaultLlmControls.implementationProvider,
-    defaultLlmControls.planningModel,
-    defaultLlmControls.planningProvider,
     onSettingsSaveStatus,
     observerShowFindings,
     setErrorMessage,

@@ -93,6 +93,12 @@ const PLANNING_NO_TOOL_PROGRESS_CHECK_INTERVAL_MS = 1_000;
 const PLANNING_NO_TOOL_PROGRESS_NUDGE =
   'Planning did not make tool progress. Use a concrete tool call to advance the plan.';
 const PLANNING_NO_PROGRESS_ABORT_SENTINEL = '__orchestrace_planning_no_progress__';
+const PLANNING_NO_TOOL_THINKING_CYCLE_LIMIT = 3;
+const PLANNING_NO_TOOL_INITIAL_CUTOFF_MS = 20_000;
+const PLANNING_PRE_FIRST_TOOL_TOKEN_NUDGE_BUDGET = 2_000;
+const PLANNING_PRE_FIRST_TOOL_TOKEN_ABORT_BUDGET = 3_000;
+const PLANNING_FIRST_TOOL_RETRY_DIRECTIVE =
+  'You must now call a tool. Start by running: pwd (or an equivalent workspace-inspection tool), then continue the task.';
 
 /**
  * High-level orchestrator that wires the DAG scheduler to the LLM provider
@@ -242,10 +248,10 @@ export async function orchestrate(
 
       emit({ type: 'task:planning', taskId: node.id });
 
-      const planningPrompt = buildPlanningPrompt(node, context.depOutputs);
       let planningToolCalls: ReplayToolCallRecord[] = [];
 
       for (let planningAttempt = 1; planningAttempt <= MAX_PLANNING_ATTEMPTS; planningAttempt++) {
+        const planningPrompt = buildPlanningPrompt(node, context.depOutputs, planningAttempt);
         planningToolCalls = [];
         const planningAttemptStart = new Date().toISOString();
         planningResult = undefined;
@@ -270,9 +276,24 @@ export async function orchestrate(
         context.signal?.addEventListener('abort', abortPlanningAttemptOnParentCancel, { once: true });
 
         let planningNoProgressTriggered = false;
-        let planningLastToolProgressAt = Date.now();
+        const planningAttemptStartedAtMs = Date.now();
+        let planningLastToolProgressAt = planningAttemptStartedAtMs;
+        let sawPlanningToolCall = false;
+        let planningConsecutiveThinkingCyclesWithoutTool = 0;
+        let planningPreFirstToolTokenUsage = 0;
+        let planningPreFirstToolTokenNudged = false;
+        let planningNoToolAbortReason = '';
+
         const planningNoProgressInterval = setInterval(() => {
           if (planningAttemptController.signal.aborted) {
+            return;
+          }
+
+          if (!sawPlanningToolCall && Date.now() - planningAttemptStartedAtMs >= PLANNING_NO_TOOL_INITIAL_CUTOFF_MS) {
+            planningNoProgressTriggered = true;
+            planningNoToolAbortReason =
+              `Planning made no initial tool call for ${Math.ceil(PLANNING_NO_TOOL_INITIAL_CUTOFF_MS / 1000)}s. ${PLANNING_FIRST_TOOL_RETRY_DIRECTIVE}`;
+            planningNoProgressAbortController();
             return;
           }
 
@@ -285,6 +306,17 @@ export async function orchestrate(
         try {
           planningResult = await planningAgent.complete(planningPrompt, planningAttemptController.signal, {
             onTextDelta: (delta) => {
+              if (!sawPlanningToolCall) {
+                planningConsecutiveThinkingCyclesWithoutTool += 1;
+                if (planningConsecutiveThinkingCyclesWithoutTool >= PLANNING_NO_TOOL_THINKING_CYCLE_LIMIT) {
+                  planningNoProgressTriggered = true;
+                  planningNoToolAbortReason =
+                    `Planning emitted ${planningConsecutiveThinkingCyclesWithoutTool} consecutive thinking cycles without a tool call. ${PLANNING_FIRST_TOOL_RETRY_DIRECTIVE}`;
+                  planningNoProgressAbortController();
+                  return;
+                }
+              }
+
               emit({
                 type: 'task:stream-delta',
                 taskId: node.id,
@@ -293,8 +325,35 @@ export async function orchestrate(
                 delta,
               });
             },
+            onUsage: (streamUsage) => {
+              if (sawPlanningToolCall) {
+                return;
+              }
+              planningPreFirstToolTokenUsage = streamUsage.input + streamUsage.output;
+              if (
+                !planningPreFirstToolTokenNudged
+                && planningPreFirstToolTokenUsage >= PLANNING_PRE_FIRST_TOOL_TOKEN_NUDGE_BUDGET
+              ) {
+                planningPreFirstToolTokenNudged = true;
+                emit({
+                  type: 'task:verification-failed',
+                  taskId: node.id,
+                  attempt: planningAttempt,
+                  error: `Planning consumed ${planningPreFirstToolTokenUsage} tokens before first tool call. ${PLANNING_FIRST_TOOL_RETRY_DIRECTIVE}`,
+                });
+              }
+
+              if (planningPreFirstToolTokenUsage >= PLANNING_PRE_FIRST_TOOL_TOKEN_ABORT_BUDGET) {
+                planningNoProgressTriggered = true;
+                planningNoToolAbortReason =
+                  `Planning consumed ${planningPreFirstToolTokenUsage} tokens before first tool call. ${PLANNING_FIRST_TOOL_RETRY_DIRECTIVE}`;
+                planningNoProgressAbortController();
+              }
+            },
             onToolCall: (event) => {
               planningLastToolProgressAt = Date.now();
+              sawPlanningToolCall = true;
+              planningConsecutiveThinkingCyclesWithoutTool = 0;
               planningToolCalls.push(toReplayToolCallRecord(event));
               emit({
                 type: 'task:tool-call',
