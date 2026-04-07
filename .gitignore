@@ -9,3 +9,5 @@ auth.json
 .orchestrace/
 **/.orchestrace/
 coverage/
+.worktrees/
+worktrees/
