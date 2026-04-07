@@ -936,6 +936,7 @@ function buildPhaseSystemPrompt(params: {
           'Read relevant files before editing and keep edits minimal in scope.',
           'Use todo and agent graph state as the execution backbone, updating progress continuously.',
           'Use subagent_spawn or subagent_spawn_batch for parallelizable slices and delegate only relevant context to each sub-agent.',
+          'search_files uses regex; characters like ( and ) need escaping as \\( and \\).',
           'Do not stop until todo list is done and agent graph nodes are completed or a real blocker remains.',
           'After validation passes, complete git finish-up: feature branch, commit, push, and PR creation/update via github_api (never gh CLI).',
           'After each push, query remote CI/check status via github_api and keep fixing/re-pushing until checks pass or a true blocker is reached.',
