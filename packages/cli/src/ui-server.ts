@@ -239,7 +239,6 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
   const sessionContextEngines = new Map<string, ContextEngine>();
   const sessionContextStates = new Map<string, SessionContextState>();
   const pendingSubagentNodeIdsBySession = new Map<string, Map<string, string[]>>();
-  const sessionPlanningGuards = new Map<string, SessionPlanningGuardState>();
   const sessionObservers = new Map<string, SessionObserver>();
   const chatStreams = new Map<string, ChatTokenStream>();
   let uiPreferences = resolveUiPreferencesDefaults();
@@ -671,11 +670,6 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     sessionSharedContextStores.set(sessionId, new InMemorySharedContextStore());
     sessionContextEngines.set(sessionId, createSessionContextEngine(restoredSession.provider, restoredSession.model));
     sessionContextStates.set(sessionId, { turnsSinceLastCompaction: 0 });
-    sessionPlanningGuards.set(sessionId, {
-      planningToolCalls: 0,
-      consecutiveNonWriteToolCalls: 0,
-      forcedImplementation: false,
-    });
   }
 
   const uiStatePersistence = createUiStatePersistence(
@@ -963,7 +957,6 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     sessionContextEngines.delete(id);
     sessionContextStates.delete(id);
     pendingSubagentNodeIdsBySession.delete(id);
-    sessionPlanningGuards.delete(id);
 
     for (const [streamId, streamState] of [...chatStreams.entries()]) {
       if (streamState.sessionId !== id) {
@@ -1211,11 +1204,6 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     sessionSharedContextStores.set(id, new InMemorySharedContextStore());
     sessionContextEngines.set(id, createSessionContextEngine(request.provider, request.model));
     sessionContextStates.set(id, { turnsSinceLastCompaction: 0 });
-    sessionPlanningGuards.set(id, {
-      planningToolCalls: 0,
-      consecutiveNonWriteToolCalls: 0,
-      forcedImplementation: false,
-    });
     uiStatePersistence.schedule();
     broadcastTodoUpdate(workStreamClients, id, sessionTodos.get(id) ?? []);
 
@@ -2318,7 +2306,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         }
 
         const requestedMode = normalizeAgentToolPhase(asString(url.searchParams.get('mode')));
-        const mode = requestedMode ?? resolveSessionToolMode(session, sessionPlanningGuards);
+        const mode = requestedMode ?? resolveSessionToolMode(session);
         const tools = listAgentTools({
           cwd: session.workspacePath,
           phase: mode,
@@ -2696,7 +2684,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           payload: { message: userMessage },
         });
 
-        const continuationPhase = resolveSessionToolMode(session, sessionPlanningGuards);
+        const continuationPhase = resolveSessionToolMode(session);
         const previousSessionStatus = session.status;
         const chatStartedAt = now();
         session.status = 'running';
@@ -2952,14 +2940,6 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                     });
                   },
                   onToolCall: (toolEvent) => {
-                    enforcePlanningToolCallGuard({
-                      session,
-                      continuationPhase,
-                      toolEvent,
-                      sessionPlanningGuards,
-                      persistEvent: emitSessionEvent,
-                      uiStatePersistence,
-                    });
                     handleChatToolCallEvent(
                       session,
                       toolEvent,
@@ -3120,7 +3100,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         const userMessage = createSessionChatMessage('user', message, messageParts);
         thread.messages.push(userMessage);
         trimThreadMessages(thread);
-        const continuationPhase = resolveSessionToolMode(session, sessionPlanningGuards);
+        const continuationPhase = resolveSessionToolMode(session);
         const previousSessionStatus = session.status;
         const chatStartedAt = now();
         thread.updatedAt = chatStartedAt;
@@ -3284,14 +3264,6 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
             try {
               response = await chatAgent.complete(chatPrompt, undefined, {
                 onToolCall: (toolEvent) => {
-                  enforcePlanningToolCallGuard({
-                    session,
-                    continuationPhase,
-                    toolEvent,
-                    sessionPlanningGuards,
-                    persistEvent: emitSessionEvent,
-                    uiStatePersistence,
-                  });
                   handleChatToolCallEvent(
                     session,
                     toolEvent,
@@ -4835,108 +4807,7 @@ function hasImplementationGraphActivity(session: WorkSession): boolean {
   });
 }
 
-export function planningBudgetPercent(): number {
-  return Math.max(
-    1,
-    Math.min(95, parsePositiveSetting(process.env.ORCHESTRACE_PLANNING_BUDGET_PERCENT) ?? DEFAULT_PLANNING_BUDGET_PERCENT),
-  );
-}
-
-export function maxToolCallsWithoutWrite(): number {
-  return Math.max(1, parsePositiveSetting(process.env.ORCHESTRACE_MAX_TOOL_CALLS_WITHOUT_WRITE) ?? DEFAULT_MAX_TOOL_CALLS_WITHOUT_WRITE);
-}
-
-export function isSimpleSessionTaskPrompt(prompt: string): boolean {
-  const normalized = prompt.toLowerCase();
-  const referencesSingleFile = /relevant files?:\s*-\s*[^\n]+/i.test(prompt)
-    && !/relevant files?:[\s\S]*\n\s*-\s*[^\n]+\n\s*-\s*[^\n]+/i.test(prompt);
-  const explicitlySingleFile = /single-file|single file|one file|one-file/.test(normalized);
-  const focusedChange = /(one|single|small|minimal)\s+(change|edit|fix|policy)/.test(normalized);
-  const broadScope = /(multi-file|multiple files|across\s+\d+\s+files|repo-wide|cross-cutting|refactor|migration|architecture)/.test(normalized);
-
-  if (broadScope) {
-    return false;
-  }
-
-  return referencesSingleFile || explicitlySingleFile || focusedChange;
-}
-
-export function getSessionPlanningGuardState(
-  sessionPlanningGuards: Map<string, SessionPlanningGuardState>,
-  sessionId: string,
-): SessionPlanningGuardState {
-  const existing = sessionPlanningGuards.get(sessionId);
-  if (existing) {
-    return existing;
-  }
-
-  const created: SessionPlanningGuardState = {
-    planningToolCalls: 0,
-    consecutiveNonWriteToolCalls: 0,
-    forcedImplementation: false,
-  };
-  sessionPlanningGuards.set(sessionId, created);
-  return created;
-}
-
-export function enforcePlanningToolCallGuard(params: {
-  session: WorkSession;
-  continuationPhase: AgentToolPhase;
-  toolEvent: LlmToolCallEvent;
-  sessionPlanningGuards: Map<string, SessionPlanningGuardState>;
-  persistEvent: (sessionId: string, event: SessionEventInput) => void;
-  uiStatePersistence: { schedule: () => void; flush: () => Promise<void> };
-}): void {
-  if (params.toolEvent.type !== 'started') {
-    return;
-  }
-
-  const guard = getSessionPlanningGuardState(params.sessionPlanningGuards, params.session.id);
-  const isWriteTool = FILE_WRITE_TOOL_NAMES.has(params.toolEvent.toolName);
-  if (isWriteTool) {
-    guard.consecutiveNonWriteToolCalls = 0;
-    return;
-  }
-
-  guard.consecutiveNonWriteToolCalls += 1;
-  if (params.continuationPhase !== 'planning') {
-    return;
-  }
-
-  guard.planningToolCalls += 1;
-
-  const noWriteLimit = maxToolCallsWithoutWrite();
-  const planningBudgetLimit = Math.max(1, Math.ceil((noWriteLimit * planningBudgetPercent()) / 100));
-  const shouldForce = guard.consecutiveNonWriteToolCalls > noWriteLimit || guard.planningToolCalls > planningBudgetLimit;
-  if (!shouldForce || guard.forcedImplementation) {
-    return;
-  }
-
-  guard.forcedImplementation = true;
-  params.session.updatedAt = now();
-  params.session.llmStatus = createLlmStatus('implementing', params.session.updatedAt, {
-    detail: `Planning guard triggered after ${guard.consecutiveNonWriteToolCalls} non-write tool calls; forcing implementation mode.`,
-    taskId: 'chat',
-    phase: 'implementation',
-  });
-
-  params.persistEvent(params.session.id, {
-    time: params.session.updatedAt,
-    type: 'session:llm-status-change',
-    payload: { llmStatus: params.session.llmStatus },
-  });
-
-  params.uiStatePersistence.schedule();
-}
-
-function resolveSessionToolMode(
-  session: WorkSession,
-  sessionPlanningGuards?: Map<string, SessionPlanningGuardState>,
-): AgentToolPhase {
-  if (sessionPlanningGuards?.get(session.id)?.forcedImplementation) {
-    return 'implementation';
-  }
-
+function resolveSessionToolMode(session: WorkSession): AgentToolPhase {
   const phase = session.llmStatus.phase;
   if (phase === 'planning' || phase === 'implementation') {
     return phase;
@@ -7072,11 +6943,8 @@ function buildSessionSystemPrompt(session: WorkSession, phase: SessionPromptPhas
           'When planning, require atomic task granularity: one action per task with explicit done criteria and verification commands.',
           'Reject broad bundled tasks; split work into smaller units before finalizing the plan.',
           'When publishing agent_graph_set, use descriptive node ids/names instead of generic n1/n2 labels.',
-          'For non-simple planning requests, use subagent_spawn or subagent_spawn_batch with focused, task-relevant context per sub-agent.',
-          'For simple single-file tasks, skip sub-agent delegation and proceed directly to implementation planning.',
-          'Pass nodeId on each sub-agent request so graph progress stays visible and current when delegation is used.',
-          'Planning is budgeted: keep planning activity under 25% of session tool-call budget before transitioning to implementation.',
-          'A session guard may force implementation mode after excessive non-write tool calls; when that occurs, immediately continue with concrete code changes.',
+          'Planning requests must also use subagent_spawn or subagent_spawn_batch with focused, task-relevant context per sub-agent.',
+          'Pass nodeId on each sub-agent request so graph progress stays visible and current.',
           'When asked to inspect or change todos/agent graph, call the corresponding tools instead of simulating success.',
           'For reading multiple files, prefer read_files with concurrency over repeated one-by-one read_file calls.',
           'When calling todo tools, use canonical statuses only: todo, in_progress, done.',
@@ -7155,7 +7023,6 @@ function buildSessionSystemPrompt(session: WorkSession, phase: SessionPromptPhas
         `Workspace: ${session.workspacePath}`,
         `Provider/Model: ${session.provider}/${session.model}`,
         `Original task prompt: ${session.prompt}`,
-        `Detected task scope: ${isSimpleSessionTaskPrompt(session.prompt) ? 'simple-single-file' : 'non-simple'}`,
       ],
     },
   ];
