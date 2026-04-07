@@ -482,27 +482,22 @@ describe('orchestrate replay capture', () => {
     }
   });
 
-  it('retries planning with a stall nudge after too many consecutive planning deltas', async () => {
+  it('retries planning after no-tool-progress timeout and succeeds on the next attempt', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'orchestrace-replay-planning-stall-retry-'));
-    const planningPrompts: string[] = [];
 
     try {
       const outputs = await orchestrate(makeSingleNodeGraph(), {
         llm: createAdapter({
-          onPrompt: (phase, prompt) => {
-            if (phase === 'planning' && typeof prompt === 'string') {
-              planningPrompts.push(prompt);
-            }
-          },
           planningBehavior: async ({ options, signal, planningCall }) => {
             if (planningCall === 1) {
-              for (let i = 0; i < 51; i += 1) {
+              for (let i = 0; i < 100; i += 1) {
                 if (signal?.aborted) {
                   throw signal.reason;
                 }
                 options?.onTextDelta?.(`thinking-${i}`);
+                await new Promise((resolve) => setTimeout(resolve, 2));
               }
-              throw new Error('expected stall abort');
+              throw new Error('expected no-progress timeout abort');
             }
 
             options?.onToolCall?.({
@@ -556,16 +551,15 @@ describe('orchestrate replay capture', () => {
         requirePlanApproval: false,
         planningSystemPrompt: 'planning',
         implementationSystemPrompt: 'implementation',
+        planningNoToolProgressTimeoutMs: 20,
+        planningNoToolProgressCheckIntervalMs: 2,
       });
 
       const output = outputs.get('task-1');
       expect(output?.status).toBe('completed');
       const planningAttempts = output?.replay?.attempts.filter((attempt) => attempt.phase === 'planning') ?? [];
       expect(planningAttempts.length).toBe(2);
-      expect(planningAttempts[0]?.error).toContain('Planning appeared stuck');
-      expect(planningPrompts.length).toBeGreaterThanOrEqual(2);
-      expect(planningPrompts[0]).not.toContain('You appear to be stuck in planning');
-      expect(planningPrompts[1]).toContain('You appear to be stuck in planning. Please proceed with a concrete tool call or finalize your output.');
+      expect(planningAttempts[0]?.error).toContain('no tool progress');
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }
@@ -621,31 +615,34 @@ describe('orchestrate replay capture', () => {
     }
   });
 
-  it('fails after repeated planning stalls within retry budget', async () => {
+  it('fails after repeated no-tool-progress timeouts within retry budget', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'orchestrace-replay-planning-stall-fail-'));
 
     try {
       const outputs = await orchestrate(makeSingleNodeGraph(), {
         llm: createAdapter({
           planningBehavior: async ({ options, signal }) => {
-            for (let i = 0; i < 51; i += 1) {
+            for (let i = 0; i < 100; i += 1) {
               if (signal?.aborted) {
                 throw signal.reason;
               }
               options?.onTextDelta?.(`thinking-${i}`);
+              await new Promise((resolve) => setTimeout(resolve, 2));
             }
-            throw new Error('expected stall abort');
+            throw new Error('expected no-progress timeout abort');
           },
         }),
         cwd,
         requirePlanApproval: false,
         planningSystemPrompt: 'planning',
         implementationSystemPrompt: 'implementation',
+        planningNoToolProgressTimeoutMs: 20,
+        planningNoToolProgressCheckIntervalMs: 2,
       });
 
       const output = outputs.get('task-1');
       expect(output?.status).toBe('failed');
-      expect(output?.error).toContain('Planning appeared stuck');
+      expect(output?.error).toContain('no tool progress');
       expect(output?.replay?.attempts.length).toBe(3);
       expect(output?.replay?.attempts.every((attempt) => attempt.phase === 'planning')).toBe(true);
     } finally {

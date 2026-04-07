@@ -43,7 +43,6 @@ import {
   type LlmStatusEmissionState,
 } from './ui-server/llm-status-emission.js';
 import {
-  MAX_CONSECUTIVE_THINKING,
   THINKING_CIRCUIT_BREAKER_NUDGE,
   createThinkingCircuitBreakerState,
   isThinkingCycleEvent,
@@ -762,7 +761,7 @@ async function main(): Promise<void> {
         logDagEventTrace(sessionId, event);
 
         if (isThinkingCycleEvent(event)) {
-          const shouldEmitNudge = updateThinkingCircuitBreaker(thinkingCircuitBreaker, event, MAX_CONSECUTIVE_THINKING);
+          const shouldEmitNudge = updateThinkingCircuitBreaker(thinkingCircuitBreaker, event);
           if (shouldEmitNudge) {
             void emit({
               time: t,

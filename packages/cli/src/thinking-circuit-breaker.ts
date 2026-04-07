@@ -1,17 +1,17 @@
 import type { DagEvent } from '@orchestrace/core';
 
-export const MAX_CONSECUTIVE_THINKING = 50;
+export const THINKING_NO_TOOL_PROGRESS_NUDGE_MS = 30_000;
 export const THINKING_CIRCUIT_BREAKER_NUDGE =
   'You appear to be stuck in planning. Please proceed with a concrete tool call or finalize your output.';
 
 export type ThinkingCircuitBreakerState = {
-  consecutiveThinkingCycles: number;
+  lastToolProgressAtMs: number;
   nudgeEmittedForCurrentStreak: boolean;
 };
 
-export function createThinkingCircuitBreakerState(): ThinkingCircuitBreakerState {
+export function createThinkingCircuitBreakerState(nowMs = Date.now()): ThinkingCircuitBreakerState {
   return {
-    consecutiveThinkingCycles: 0,
+    lastToolProgressAtMs: nowMs,
     nudgeEmittedForCurrentStreak: false,
   };
 }
@@ -31,22 +31,22 @@ export function shouldResetThinkingCircuitBreakerOnEvent(event: DagEvent): boole
   return event.type === 'task:tool-call' || isTerminalDagEvent(event);
 }
 
-export function resetThinkingCircuitBreaker(state: ThinkingCircuitBreakerState): void {
-  state.consecutiveThinkingCycles = 0;
+export function resetThinkingCircuitBreaker(state: ThinkingCircuitBreakerState, nowMs = Date.now()): void {
+  state.lastToolProgressAtMs = nowMs;
   state.nudgeEmittedForCurrentStreak = false;
 }
 
 export function updateThinkingCircuitBreaker(
   state: ThinkingCircuitBreakerState,
   event: Extract<DagEvent, { type: 'task:stream-delta' }>,
-  maxConsecutiveThinking = MAX_CONSECUTIVE_THINKING,
+  nowMs = Date.now(),
+  noToolProgressNudgeMs = THINKING_NO_TOOL_PROGRESS_NUDGE_MS,
 ): boolean {
   if (event.phase !== 'planning') {
     return false;
   }
 
-  state.consecutiveThinkingCycles += 1;
-  const shouldTrip = state.consecutiveThinkingCycles > maxConsecutiveThinking;
+  const shouldTrip = nowMs - state.lastToolProgressAtMs >= noToolProgressNudgeMs;
   if (!shouldTrip || state.nudgeEmittedForCurrentStreak) {
     return false;
   }

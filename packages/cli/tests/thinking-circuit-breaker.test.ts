@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { DagEvent } from '@orchestrace/core';
 import {
-  MAX_CONSECUTIVE_THINKING,
+  THINKING_NO_TOOL_PROGRESS_NUDGE_MS,
   createThinkingCircuitBreakerState,
   isThinkingCycleEvent,
   resetThinkingCircuitBreaker,
@@ -20,59 +20,47 @@ function planningDelta(): Extract<DagEvent, { type: 'task:stream-delta' }> {
 }
 
 describe('thinking circuit breaker', () => {
-  it('trips only when consecutive planning thinking cycles exceed threshold', () => {
-    const state = createThinkingCircuitBreakerState();
+  it('trips only after planning sees no tool progress for the threshold duration', () => {
+    const state = createThinkingCircuitBreakerState(0);
 
-    for (let i = 0; i < MAX_CONSECUTIVE_THINKING; i += 1) {
-      expect(updateThinkingCircuitBreaker(state, planningDelta())).toBe(false);
-    }
-
-    expect(updateThinkingCircuitBreaker(state, planningDelta())).toBe(true);
+    expect(updateThinkingCircuitBreaker(state, planningDelta(), THINKING_NO_TOOL_PROGRESS_NUDGE_MS - 1)).toBe(false);
+    expect(updateThinkingCircuitBreaker(state, planningDelta(), THINKING_NO_TOOL_PROGRESS_NUDGE_MS)).toBe(true);
   });
 
   it('does not re-emit within same streak after tripping (anti-spam latch)', () => {
-    const state = createThinkingCircuitBreakerState();
+    const state = createThinkingCircuitBreakerState(0);
 
-    for (let i = 0; i <= MAX_CONSECUTIVE_THINKING; i += 1) {
-      updateThinkingCircuitBreaker(state, planningDelta());
-    }
-
-    expect(updateThinkingCircuitBreaker(state, planningDelta())).toBe(false);
-    expect(updateThinkingCircuitBreaker(state, planningDelta())).toBe(false);
+    expect(updateThinkingCircuitBreaker(state, planningDelta(), THINKING_NO_TOOL_PROGRESS_NUDGE_MS)).toBe(true);
+    expect(updateThinkingCircuitBreaker(state, planningDelta(), THINKING_NO_TOOL_PROGRESS_NUDGE_MS * 2)).toBe(false);
+    expect(updateThinkingCircuitBreaker(state, planningDelta(), THINKING_NO_TOOL_PROGRESS_NUDGE_MS * 3)).toBe(false);
   });
 
   it('resets after progress event and can trip again in a new streak', () => {
-    const state = createThinkingCircuitBreakerState();
+    const state = createThinkingCircuitBreakerState(0);
 
-    for (let i = 0; i <= MAX_CONSECUTIVE_THINKING; i += 1) {
-      updateThinkingCircuitBreaker(state, planningDelta());
-    }
+    updateThinkingCircuitBreaker(state, planningDelta(), THINKING_NO_TOOL_PROGRESS_NUDGE_MS);
 
     expect(state.nudgeEmittedForCurrentStreak).toBe(true);
 
-    resetThinkingCircuitBreaker(state);
+    resetThinkingCircuitBreaker(state, 10_000);
 
-    expect(state.consecutiveThinkingCycles).toBe(0);
+    expect(state.lastToolProgressAtMs).toBe(10_000);
     expect(state.nudgeEmittedForCurrentStreak).toBe(false);
 
-    for (let i = 0; i < MAX_CONSECUTIVE_THINKING; i += 1) {
-      expect(updateThinkingCircuitBreaker(state, planningDelta())).toBe(false);
-    }
-    expect(updateThinkingCircuitBreaker(state, planningDelta())).toBe(true);
+    expect(updateThinkingCircuitBreaker(state, planningDelta(), 10_000 + THINKING_NO_TOOL_PROGRESS_NUDGE_MS - 1)).toBe(false);
+    expect(updateThinkingCircuitBreaker(state, planningDelta(), 10_000 + THINKING_NO_TOOL_PROGRESS_NUDGE_MS)).toBe(true);
   });
 
   it('ignores implementation stream deltas for breaker counting', () => {
-    const state = createThinkingCircuitBreakerState();
+    const state = createThinkingCircuitBreakerState(0);
     const implementationDelta: Extract<DagEvent, { type: 'task:stream-delta' }> = {
       ...planningDelta(),
       phase: 'implementation',
     };
 
-    for (let i = 0; i < MAX_CONSECUTIVE_THINKING + 4; i += 1) {
-      expect(updateThinkingCircuitBreaker(state, implementationDelta)).toBe(false);
-    }
+    expect(updateThinkingCircuitBreaker(state, implementationDelta, THINKING_NO_TOOL_PROGRESS_NUDGE_MS * 4)).toBe(false);
 
-    expect(state.consecutiveThinkingCycles).toBe(0);
+    expect(state.lastToolProgressAtMs).toBe(0);
   });
 
   it('has explicit qualifiers for thinking and reset events', () => {
