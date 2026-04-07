@@ -21,10 +21,11 @@ import {
   PromptSectionName,
   renderPromptSections,
   classifyTrivialTaskPrompt,
+  classifyTaskEffort,
   extractSingleCommandFromPrompt,
   resolveTrivialTaskGateConfig,
 } from '@orchestrace/core';
-import type { DagEvent, TaskGraph, TaskOutput, TaskRouteCategory } from '@orchestrace/core';
+import type { DagEvent, TaskGraph, TaskOutput, TaskRouteCategory, TaskEffort } from '@orchestrace/core';
 import { PiAiAdapter, ProviderAuthManager, type LlmToolCall } from '@orchestrace/provider';
 import {
   DEFAULT_AGENT_TOOL_POLICY_VERSION,
@@ -168,6 +169,8 @@ async function main(): Promise<void> {
   const agentGraph: SessionAgentGraphNode[] = [];
   const pendingNodeIds = new Map<string, string[]>();
   const route = resolveTaskRoute(config.prompt, process.env.ORCHESTRACE_TASK_ROUTE).result;
+  const effortClassification = classifyTaskEffort(config.prompt);
+  const taskEffort: TaskEffort = (process.env.ORCHESTRACE_TASK_EFFORT as TaskEffort) || effortClassification.effort;
   let successfulEditFileResultsSinceCheckpoint = 0;
   const todoDoneCheckpointed = new Set<string>();
   let checkpointInFlight = false;
@@ -208,6 +211,20 @@ async function main(): Promise<void> {
         type: 'task:routing',
         taskId: 'task',
         message: `Route selected: ${route.category} (${route.strategy}, source=${route.source}, confidence=${route.confidence.toFixed(2)})`,
+      },
+    },
+  });
+
+  void emit({
+    time: iso(),
+    type: 'session:dag-event',
+    payload: {
+      event: {
+        time: iso(),
+        runId: sessionId,
+        type: 'task:routing',
+        taskId: 'task',
+        message: `Effort classified: ${taskEffort} (${effortClassification.reason})`,
       },
     },
   });
@@ -655,11 +672,12 @@ async function main(): Promise<void> {
         provider: config.implementationProvider ?? config.provider,
         model: config.implementationModel ?? config.model,
       },
-      planningSystemPrompt: buildSystemPrompt(config, 'planning'),
-      implementationSystemPrompt: buildSystemPrompt(config, 'implementation'),
+      planningSystemPrompt: buildSystemPrompt(config, 'planning', taskEffort),
+      implementationSystemPrompt: buildSystemPrompt(config, 'implementation', taskEffort),
       quickStartMode,
       quickStartMaxPreDelegationToolCalls,
       planningNoToolGuardMode,
+      taskEffort,
       maxParallel: 1,
       requirePlanApproval: !config.autoApprove,
       onPlanApproval: async () => config.autoApprove,
@@ -1396,55 +1414,90 @@ async function runShellCommandRoute(prompt: string, cwd: string): Promise<Map<st
   }
 }
 
-function buildSystemPrompt(config: SessionConfig, phase: 'planning' | 'implementation'): string {
+function buildSystemPrompt(config: SessionConfig, phase: 'planning' | 'implementation', effort: TaskEffort = 'high'): string {
   const quickStartMode = config.quickStartMode
     ?? resolveBooleanEnv(process.env.ORCHESTRACE_QUICK_START_MODE, false);
   const quickStartMaxPreDelegationToolCalls = config.quickStartMaxPreDelegationToolCalls
     ?? resolvePositiveIntEnv(process.env.ORCHESTRACE_QUICK_START_MAX_PRE_DELEGATION_TOOL_CALLS, 3);
 
+  const isLowEffort = effort === 'trivial' || effort === 'low';
+  const isMediumEffort = effort === 'medium';
+
   const phaseRules = phase === 'planning'
-    ? [
-      'Produce a concrete implementation plan with explicit staged execution and validation steps.',
-      'Do not perform direct code edits in planning mode.',
-      'Planning output must be highly granular and atomic: each task should represent one action and one completion outcome.',
-      'Split broad, multi-area, or multi-step tasks into smaller independent tasks before finalizing.',
-      'Each planned task must include explicit dependencies, concrete done criteria, and at least one verification command.',
-      'Planning must produce and maintain todo_set and agent_graph_set state.',
-      'todo_set items must include numeric weight values and the total todo weight must sum to 100.',
-      'agent_graph_set nodes must include numeric weight values and the total node weight must sum to 100.',
-      'Planning must use subagent_spawn or subagent_spawn_batch for focused parallel research and delegate only relevant context.',
-      'Quick-start mode for well-scoped tasks: keep parent pre-delegation orientation to at most 3-4 calls and delegate within the first 2-3 calls whenever possible.',
-      'Keep parent orientation lightweight and push detailed file reading/search into sub-agent scopes.',
-      'For independent nodes, use subagent_spawn_batch so work runs in parallel.',
-      'For multi-file inspection, use read_files with concurrency to reduce latency; avoid repeated single-file reads when possible.',
-      'Pass nodeId for each sub-agent request so graph status stays current.',
-      'Keep todo and dependency graph state synchronized.',
-      'Do not ask the user to continue after partial progress; continue autonomously until completion or a concrete blocker is reached.',
-      'For transient tool or sub-agent failures (timeouts, aborts, rate limits), retry automatically before surfacing a blocker.',
-      ...(quickStartMode
+    ? isMediumEffort
+      ? [
+        'Produce a focused implementation plan proportional to the task scope.',
+        'Do not perform direct code edits in planning mode.',
+        'Each planned task must include explicit done criteria and a verification command.',
+        'Planning must produce todo_set and agent_graph_set state.',
+        'todo_set items must include numeric weight values and the total todo weight must sum to 100.',
+        'agent_graph_set nodes must include numeric weight values and the total node weight must sum to 100.',
+        'Sub-agent delegation is OPTIONAL for medium-effort tasks. Only use subagent_spawn if the task genuinely benefits from parallel research.',
+        'Prefer doing focused investigation yourself rather than spawning sub-agents for straightforward work.',
+        'Do not ask the user to continue after partial progress; continue autonomously until completion or a concrete blocker is reached.',
+      ]
+      : [
+        'Produce a concrete implementation plan with explicit staged execution and validation steps.',
+        'Do not perform direct code edits in planning mode.',
+        'Planning output must be highly granular and atomic: each task should represent one action and one completion outcome.',
+        'Split broad, multi-area, or multi-step tasks into smaller independent tasks before finalizing.',
+        'Each planned task must include explicit dependencies, concrete done criteria, and at least one verification command.',
+        'Planning must produce and maintain todo_set and agent_graph_set state.',
+        'todo_set items must include numeric weight values and the total todo weight must sum to 100.',
+        'agent_graph_set nodes must include numeric weight values and the total node weight must sum to 100.',
+        'Planning must use subagent_spawn or subagent_spawn_batch for focused parallel research and delegate only relevant context.',
+        'Quick-start mode for well-scoped tasks: keep parent pre-delegation orientation to at most 3-4 calls and delegate within the first 2-3 calls whenever possible.',
+        'Keep parent orientation lightweight and push detailed file reading/search into sub-agent scopes.',
+        'For independent nodes, use subagent_spawn_batch so work runs in parallel.',
+        'For multi-file inspection, use read_files with concurrency to reduce latency; avoid repeated single-file reads when possible.',
+        'Pass nodeId for each sub-agent request so graph status stays current.',
+        'Keep todo and dependency graph state synchronized.',
+        'Do not ask the user to continue after partial progress; continue autonomously until completion or a concrete blocker is reached.',
+        'For transient tool or sub-agent failures (timeouts, aborts, rate limits), retry automatically before surfacing a blocker.',
+        ...(quickStartMode
+          ? [
+            `Quick-start mode is enabled: delegate focused discovery to sub-agents within the first 2-3 tool calls and no later than ${quickStartMaxPreDelegationToolCalls} successful pre-delegation tool call(s).`,
+            'Limit parent orientation to 3-4 initial tool calls (e.g., root listing, manifest read, git status) before delegating.',
+            'Push detailed file reads/searches into sub-agent scopes unless a direct blocker requires immediate local inspection.',
+          ]
+          : []),
+      ]
+    : isLowEffort
+      ? [
+        'This is a low-effort, focused task. Implement directly without sub-agents.',
+        'Read relevant files before editing. Keep edits minimal and scoped.',
+        'If a tool call fails, read the error, adjust arguments, and retry.',
+        'Run verification commands when validation criteria exist.',
+        'After changes, commit and push if code was modified.',
+        'Do not spawn sub-agents or create complex coordination structures for simple tasks.',
+      ]
+      : isMediumEffort
         ? [
-          `Quick-start mode is enabled: delegate focused discovery to sub-agents within the first 2-3 tool calls and no later than ${quickStartMaxPreDelegationToolCalls} successful pre-delegation tool call(s).`,
-          'Limit parent orientation to 3-4 initial tool calls (e.g., root listing, manifest read, git status) before delegating.',
-          'Push detailed file reads/searches into sub-agent scopes unless a direct blocker requires immediate local inspection.',
+          'Execute the planned work with minimal, scoped edits and verify outcomes.',
+          'Read before editing, and use tool output to adapt after failures.',
+          'Follow the todo list if one was created during planning.',
+          'Sub-agent delegation is OPTIONAL. Only use subagent_spawn if the remaining work genuinely benefits from parallelism.',
+          'Prefer doing focused work yourself rather than spawning sub-agents for straightforward changes.',
+          'Use github_api for GitHub REST/GraphQL operations; do not use gh CLI.',
+          'Iterate until validation passes or a true blocker is reached.',
+          'Do not ask the user to continue after partial progress; continue autonomously until completion or a concrete blocker is reached.',
         ]
-        : []),
-    ]
-    : [
-      'Execute approved work with minimal, scoped edits and verify outcomes.',
-      'Read before editing, and use tool output to adapt after failures.',
-      'Read todo_get and agent_graph_get before coding, then keep todo_update current while implementing.',
-      'Use subagent_spawn or subagent_spawn_batch to execute parallelizable slices with minimal relevant context per agent.',
-      'For independent nodes, use subagent_spawn_batch so work runs in parallel.',
-      'For multi-file inspection, use read_files with concurrency to reduce latency; avoid repeated single-file reads when possible.',
-      'Pass nodeId for each sub-agent request so graph status stays current.',
-      'Use github_api for GitHub REST/GraphQL operations; do not use gh CLI.',
-      'Iterate until validation passes or a true blocker is reached.',
-      'After each push or PR update, query remote CI/check status with github_api and keep fixing/re-pushing until checks pass or a true blocker is reached.',
-      'Do not stop at green checks alone: verify PR mergeability, required checks, and review state via github_api, then keep iterating until the PR is merge-ready or a true blocker is reached.',
-      'Always run `git fetch origin` before checking remote branch state, merge status, or pushing. Never trust local tracking refs without fetching first.',
-      'Do not ask the user to continue after partial progress; continue autonomously until completion or a concrete blocker is reached.',
-      'For transient tool or sub-agent failures (timeouts, aborts, rate limits), retry automatically before surfacing a blocker.',
-    ];
+        : [
+          'Execute approved work with minimal, scoped edits and verify outcomes.',
+          'Read before editing, and use tool output to adapt after failures.',
+          'Read todo_get and agent_graph_get before coding, then keep todo_update current while implementing.',
+          'Use subagent_spawn or subagent_spawn_batch to execute parallelizable slices with minimal relevant context per agent.',
+          'For independent nodes, use subagent_spawn_batch so work runs in parallel.',
+          'For multi-file inspection, use read_files with concurrency to reduce latency; avoid repeated single-file reads when possible.',
+          'Pass nodeId for each sub-agent request so graph status stays current.',
+          'Use github_api for GitHub REST/GraphQL operations; do not use gh CLI.',
+          'Iterate until validation passes or a true blocker is reached.',
+          'After each push or PR update, query remote CI/check status with github_api and keep fixing/re-pushing until checks pass or a true blocker is reached.',
+          'Do not stop at green checks alone: verify PR mergeability, required checks, and review state via github_api, then keep iterating until the PR is merge-ready or a true blocker is reached.',
+          'Always run `git fetch origin` before checking remote branch state, merge status, or pushing. Never trust local tracking refs without fetching first.',
+          'Do not ask the user to continue after partial progress; continue autonomously until completion or a concrete blocker is reached.',
+          'For transient tool or sub-agent failures (timeouts, aborts, rate limits), retry automatically before surfacing a blocker.',
+        ];
 
   const phaseProvider = phase === 'planning'
     ? (config.planningProvider ?? config.provider)

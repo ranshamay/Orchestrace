@@ -5,10 +5,13 @@ export { orchestrate } from './orchestrator/orchestrator.js';
 export {
   classifyTrivialTaskNode,
   classifyTrivialTaskPrompt,
+  classifyTaskEffort,
   extractSingleCommandFromPrompt,
   resolveTrivialTaskGateConfig,
 } from './orchestrator/task-complexity.js';
 export type {
+  TaskEffort,
+  TaskEffortClassification,
   TrivialTaskClassification,
   TrivialTaskGateConfig,
   TrivialTaskReason,

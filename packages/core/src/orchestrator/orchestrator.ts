@@ -17,7 +17,8 @@ import { runDag } from '../dag/scheduler.js';
 import { validate } from '../validation/validator.js';
 import { PromptSectionName, renderPromptSections, type PromptSection } from '../prompt/sections.js';
 import type { LlmAdapter, LlmToolCallEvent, LlmToolset } from '@orchestrace/provider';
-import { classifyTrivialTaskNode, resolveTrivialTaskGateConfig } from './task-complexity.js';
+import { classifyTrivialTaskNode, classifyTaskEffort, resolveTrivialTaskGateConfig } from './task-complexity.js';
+import type { TaskEffort } from './task-complexity.js';
 
 export interface PlanApprovalRequest {
   task: TaskNode;
@@ -82,6 +83,9 @@ export interface OrchestratorConfig extends RunnerConfig {
   planningNoToolProgressCheckIntervalMs?: number;
   /** Controls whether planning no-tool guards abort attempts (`enforce`) or emit warnings only (`warn`). */
   planningNoToolGuardMode?: 'enforce' | 'warn';
+  /** Override task effort classification. When set, controls execution strategy:
+   *  trivial/low = skip planning; medium = sub-agents optional; high = full orchestration. */
+  taskEffort?: TaskEffort;
 }
 
 type OrchestratorPhase = 'planning' | 'implementation';
@@ -138,6 +142,7 @@ export async function orchestrate(
     planningNoToolProgressTimeoutMs,
     planningNoToolProgressCheckIntervalMs,
     planningNoToolGuardMode,
+    taskEffort: configTaskEffort,
   } = config;
 
   const emit = onEvent ?? (() => {});
@@ -213,13 +218,19 @@ export async function orchestrate(
     const trivialClassification = classifyTrivialTaskNode(node, trivialTaskGate);
     const taskRequiresWrites = resolveTaskRequiresWrites(node);
 
+    // Resolve effective effort: explicit config > prompt classification
+    const effortClassification = classifyTaskEffort(node.prompt);
+    const effort: TaskEffort = configTaskEffort ?? effortClassification.effort;
+    // Skip planning for trivial/low effort tasks
+    const shouldSkipPlanning = trivialClassification.isTrivial || effort === 'trivial' || effort === 'low';
+
     let planningResult:
       | { text: string; usage?: { input: number; output: number; cost: number }; metadata?: { stopReason?: string; endpoint?: string } }
       | undefined;
     let persistedPlanPath: string | undefined;
     const resolvedPlanningNoToolGuardMode = normalizePlanningNoToolGuardMode(planningNoToolGuardMode);
 
-    if (!trivialClassification.isTrivial) {
+    if (!shouldSkipPlanning) {
       const planningAgent = await llm.spawnAgent({
         provider: planningModel.provider,
         model: planningModel.model,
@@ -256,7 +267,7 @@ export async function orchestrate(
       let planningToolCalls: ReplayToolCallRecord[] = [];
 
       for (let planningAttempt = 1; planningAttempt <= MAX_PLANNING_ATTEMPTS; planningAttempt++) {
-        const planningPrompt = buildPlanningPrompt(node, context.depOutputs, planningAttempt);
+        const planningPrompt = buildPlanningPrompt(node, context.depOutputs, planningAttempt, effort);
         planningToolCalls = [];
         const planningAttemptStart = new Date().toISOString();
         planningResult = undefined;
@@ -498,6 +509,7 @@ export async function orchestrate(
             task: node,
             quickStartMode,
             quickStartMaxPreDelegationToolCalls,
+            taskEffort: effort,
           });
           if (planningContractError) {
             completedPlanningAttempt.failureType = 'validation';
@@ -604,7 +616,9 @@ export async function orchestrate(
     } else {
       planningResult = {
         text: [
-          'Trivial task gate routed this task to direct implementation.',
+          effort === 'low'
+            ? `Low-effort task routed to direct implementation (effort: ${effort}, reason: ${effortClassification.reason}).`
+            : 'Trivial task gate routed this task to direct implementation.',
           `Classification reasons: ${trivialClassification.reasons.join(', ')}`,
         ].join('\n'),
       };
@@ -668,6 +682,7 @@ export async function orchestrate(
         previousResponse: lastResponse,
         previousFailureType: lastFailureType,
         previousValidationError: lastValidationError,
+        effort,
       });
 
       const implementationToolCalls: ReplayToolCallRecord[] = [];
@@ -901,6 +916,7 @@ function buildPlanningPrompt(
   node: TaskNode,
   depOutputs: Map<string, TaskOutput>,
   attempt = 1,
+  effort: TaskEffort = 'high',
 ): string {
   const depContext = buildDependencyContext(depOutputs);
   const retryDirective = attempt > 1
@@ -911,19 +927,37 @@ function buildPlanningPrompt(
       ]
     : [];
 
-  const sections: PromptSection[] = [
-    {
-      name: PromptSectionName.Goal,
-      lines: [
+  const isMedium = effort === 'medium';
+
+  const goalLines = isMedium
+    ? [
+        'Create a focused implementation plan for the following task.',
+        'Keep planning lightweight and proportional to task scope.',
+        'Within the first 1-2 thinking cycles, make a concrete tool call to gather grounding context before extended narration.',
+        'Before each tool call and after each tool result, narrate your reasoning briefly: what you learned, what you plan to do next, and why.',
+      ]
+    : [
         'Create a deep implementation plan for the following task.',
         'Optimize for maximum safe concurrency and explicit multi-stage execution.',
         'Within the first 1-2 thinking cycles, make a concrete tool call to gather grounding context before extended narration.',
         'Before each tool call and after each tool result, narrate your reasoning briefly: what you learned, what you plan to do next, and why.',
-      ],
-    },
-    {
-      name: PromptSectionName.Autonomy,
-      lines: [
+      ];
+
+  const autonomyLines = isMedium
+    ? [
+        'If a tool call fails, use the error details to correct arguments and retry instead of aborting.',
+        'Each planned task must include a concrete target, explicit done criteria, and at least one verification command.',
+        'You MUST use coordination tools during planning:',
+        '- todo_set (required) to create a concrete todo list',
+        '- todo_set items must include numeric weight per item, and the total weight must sum to exactly 100',
+        '- todo_set item ids must be unique, and dependsOn can only reference ids from the same todo_set payload',
+        '- todo_set item status values must be exactly one of: todo, in_progress, done',
+        '- agent_graph_set (required) to define the execution structure (may contain a single node for focused tasks)',
+        '- agent_graph_set nodes must include numeric weight per node, and the total node weight must sum to exactly 100',
+        'Sub-agent delegation is OPTIONAL for this task. Only use subagent_spawn/subagent_spawn_batch if the task genuinely benefits from parallel research.',
+        'Prefer doing focused investigation yourself rather than spawning sub-agents for small tasks.',
+      ]
+    : [
         'If a tool call fails, use the error details to correct arguments and retry instead of aborting.',
         'Decompose planning work into atomic tasks: each todo should represent one action and one completion outcome.',
         'Never bundle multiple actions in one task; split broad work into smaller tasks before finalizing the plan.',
@@ -948,11 +982,17 @@ function buildPlanningPrompt(
         '- ALWAYS use subagent_spawn_batch (not individual subagent_spawn calls) when multiple independent sub-agents can run concurrently',
         '- subagent_spawn/subagent_spawn_batch calls must include nodeId values that map back to agent_graph_set node ids when delegation is used',
         '- pass nodeId on each sub-agent request so graph progress can be tracked per node',
-      ],
-    },
-    {
-      name: PromptSectionName.OutputContract,
-      lines: [
+      ];
+
+  const outputContractLines = isMedium
+    ? [
+        'Your plan must include:',
+        '1) what needs to change and why',
+        '2) files likely to change',
+        '3) verification strategy with explicit commands',
+        '4) Next Follow-up Suggestions section with 1-3 numbered, concrete next actions',
+      ]
+    : [
         'Your plan must include:',
         '1) assumptions and constraints',
         '2) multi-stage execution waves (stage 1..N)',
@@ -963,7 +1003,20 @@ function buildPlanningPrompt(
         '7) a sub-agent delegation map aligned to agent_graph_set nodes and minimal per-agent context',
         '8) atomic todo specification per task: {id, action, target, deps, verification, done_criteria}',
         '9) Next Follow-up Suggestions section with 1-3 numbered, concrete next actions',
-      ],
+      ];
+
+  const sections: PromptSection[] = [
+    {
+      name: PromptSectionName.Goal,
+      lines: goalLines,
+    },
+    {
+      name: PromptSectionName.Autonomy,
+      lines: autonomyLines,
+    },
+    {
+      name: PromptSectionName.OutputContract,
+      lines: outputContractLines,
     },
     {
       name: PromptSectionName.TaskContext,
@@ -971,6 +1024,7 @@ function buildPlanningPrompt(
         `Task ID: ${node.id}`,
         `Task Name: ${node.name}`,
         `Task Type: ${node.type}`,
+        `Task Effort: ${effort}`,
         '',
         'Task Prompt:',
         node.prompt,
@@ -1000,6 +1054,7 @@ function buildImplementationPrompt(params: {
   previousResponse: string;
   previousFailureType?: ReplayFailureType;
   previousValidationError: string;
+  effort?: TaskEffort;
 }): string {
   const {
     node,
@@ -1009,6 +1064,7 @@ function buildImplementationPrompt(params: {
     previousResponse,
     previousFailureType,
     previousValidationError,
+    effort = 'high',
   } = params;
 
   const depContext = buildDependencyContext(depOutputs);
@@ -1029,34 +1085,66 @@ function buildImplementationPrompt(params: {
         ].join('\n')
       : '';
 
-  const sections: PromptSection[] = [
-    {
-      name: PromptSectionName.Goal,
-      lines: [
+  const isLowEffort = effort === 'trivial' || effort === 'low';
+  const isMediumEffort = effort === 'medium';
+
+  const goalLines = isLowEffort
+    ? [
+        'Implement the requested change directly.',
+        'This is a focused, low-complexity task — work efficiently without unnecessary ceremony.',
+        'Before each tool call and after each tool result, narrate your reasoning briefly.',
+      ]
+    : [
         'Execute the approved plan and implement the requested changes.',
         'You must satisfy validation criteria before considering the task complete.',
         'Before each tool call and after each tool result, narrate your reasoning: what you learned, what you plan to do next, and why.',
-      ],
+      ];
+
+  const autonomyLines = isLowEffort
+    ? [
+        'Implement the change directly. Do not spawn sub-agents for this focused task.',
+        'If a tool call fails, read the error details, adjust arguments, and retry.',
+        'Read relevant files before editing. Keep edits minimal and focused.',
+        'Run verification commands when the task has validation criteria.',
+        'After validation succeeds and if code was changed, commit changes and push.',
+      ]
+    : isMediumEffort
+      ? [
+          'If a tool call fails, read the error details, adjust arguments, and retry the tool call.',
+          'Follow the todo list if one was created during planning.',
+          'Sub-agent delegation is OPTIONAL. Only use subagent_spawn if the remaining work genuinely benefits from parallelism.',
+          'Prefer doing focused work yourself rather than spawning sub-agents for straightforward changes.',
+          'If sub-agents are used, pass nodeId so the execution graph stays current.',
+          'Before finishing, ensure all todos are done.',
+          'After validation succeeds, create/switch a feature branch, commit all changes, push the branch, and open/update a PR using github_api (never gh CLI).',
+          'If git/PR automation fails, read the exact error, retry with corrected command/flags, and continue.',
+        ]
+      : [
+          'Operate in multi-stage waves and maximize safe concurrency.',
+          'If a tool call fails, read the error details, adjust arguments, and retry the tool call.',
+          'Before coding, read todo_get and follow the todo list strictly.',
+          'Update todo states using todo_update as you progress.',
+          'Read agent_graph_get and spawn dependent sub-agents with subagent_spawn throughout execution.',
+          'ALWAYS use subagent_spawn_batch (not sequential subagent_spawn calls) when multiple independent nodes are ready to run in parallel.',
+          'Delegate only task-relevant context to each sub-agent; avoid sending full unrelated history.',
+          'Pass nodeId for each spawned sub-agent so the execution graph can reflect live progress.',
+          'Keep sub-agent outputs concise and integrate them into the main implementation.',
+          'Before finishing, ensure all todos are done and all agent graph nodes are completed (no failed nodes).',
+          'After validation succeeds, create/switch a feature branch, commit all changes, push the branch, and open/update a PR using github_api (never gh CLI).',
+          'After each push or PR update, probe remote CI/check status via github_api and continue until checks are green or a true blocker is reached.',
+          'Do not stop at green checks alone: verify PR mergeability, required checks, and review state via github_api, then keep iterating until the PR is merge-ready or a true blocker is reached.',
+          'If remote checks fail, inspect failing workflows/check-runs, fix root causes, rerun local validation, push again, and re-check CI.',
+          'If git/PR automation fails, read the exact error, retry with corrected command/flags, and continue from the same point.',
+        ];
+
+  const sections: PromptSection[] = [
+    {
+      name: PromptSectionName.Goal,
+      lines: goalLines,
     },
     {
       name: PromptSectionName.Autonomy,
-      lines: [
-        'Operate in multi-stage waves and maximize safe concurrency.',
-        'If a tool call fails, read the error details, adjust arguments, and retry the tool call.',
-        'Before coding, read todo_get and follow the todo list strictly.',
-        'Update todo states using todo_update as you progress.',
-        'Read agent_graph_get and spawn dependent sub-agents with subagent_spawn throughout execution.',
-        'ALWAYS use subagent_spawn_batch (not sequential subagent_spawn calls) when multiple independent nodes are ready to run in parallel.',
-        'Delegate only task-relevant context to each sub-agent; avoid sending full unrelated history.',
-        'Pass nodeId for each spawned sub-agent so the execution graph can reflect live progress.',
-        'Keep sub-agent outputs concise and integrate them into the main implementation.',
-        'Before finishing, ensure all todos are done and all agent graph nodes are completed (no failed nodes).',
-        'After validation succeeds, create/switch a feature branch, commit all changes, push the branch, and open/update a PR using github_api (never gh CLI).',
-        'After each push or PR update, probe remote CI/check status via github_api and continue until checks are green or a true blocker is reached.',
-        'Do not stop at green checks alone: verify PR mergeability, required checks, and review state via github_api, then keep iterating until the PR is merge-ready or a true blocker is reached.',
-        'If remote checks fail, inspect failing workflows/check-runs, fix root causes, rerun local validation, push again, and re-check CI.',
-        'If git/PR automation fails, read the exact error, retry with corrected command/flags, and continue from the same point.',
-      ],
+      lines: autonomyLines,
     },
     {
       name: PromptSectionName.TaskContext,
@@ -1398,17 +1486,20 @@ function buildPlanningContractError(
     task?: TaskNode;
     quickStartMode?: boolean;
     quickStartMaxPreDelegationToolCalls?: number;
+    taskEffort?: TaskEffort;
   },
 ): string | undefined {
   const allowsZeroPlanningSubagents = options?.task
     ? isFocusedTaskForZeroPlanningSubagents(options.task)
     : false;
+  // Medium effort tasks don't require sub-agent delegation
+  const effortAllowsNoSubagents = options?.taskEffort === 'medium';
   const hasSubAgentDelegation = hasSuccessfulToolCall(toolCalls, 'subagent_spawn')
     || hasSuccessfulToolCall(toolCalls, 'subagent_spawn_batch');
-  const requiresSubAgentDelegation = !allowsZeroPlanningSubagents;
+  const requiresSubAgentDelegation = !allowsZeroPlanningSubagents && !effortAllowsNoSubagents;
   const requiredTools = ['todo_set', 'agent_graph_set'];
   const missing = requiredTools.filter((toolName) => !hasSuccessfulToolCall(toolCalls, toolName));
-  if (!allowsZeroPlanningSubagents && !hasSubAgentDelegation) {
+  if (requiresSubAgentDelegation && !hasSubAgentDelegation) {
     missing.push('subagent_spawn or subagent_spawn_batch');
   }
 

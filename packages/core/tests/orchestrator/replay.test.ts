@@ -6,7 +6,7 @@ import type { LlmAdapter, LlmAgent, LlmCompletionOptions, LlmPromptInput, LlmReq
 import { orchestrate } from '../../src/orchestrator/orchestrator.js';
 import type { DagEvent, TaskGraph } from '../../src/dag/types.js';
 
-function makeSingleNodeGraph(prompt = 'Implement a tiny change.'): TaskGraph {
+function makeSingleNodeGraph(prompt = 'Perform a comprehensive multi-file refactoring across the entire core orchestrator module and the CLI runner package to completely restructure the internal execution pipeline, redesign the task scheduling layer, overhaul the validation subsystem, improve cross-package reliability guarantees, and update all downstream consumer packages to conform to the new architecture. This involves changes across packages/core, packages/cli, packages/provider, packages/store, and packages/tools, with coordination between multiple interdependent workstreams that must be staged carefully to avoid breaking existing functionality.'): TaskGraph {
   return {
     id: 'graph-1',
     name: 'Replay Test Graph',
@@ -398,6 +398,7 @@ describe('orchestrate replay capture', () => {
         requirePlanApproval: false,
         planningSystemPrompt: 'planning',
         implementationSystemPrompt: 'implementation',
+        taskEffort: 'high',
         createToolset: (params) => {
           calls.push({ phase: params.phase, taskRequiresWrites: params.taskRequiresWrites });
           return { tools: [], executeTool: async () => ({ content: 'noop' }) };
@@ -427,6 +428,7 @@ describe('orchestrate replay capture', () => {
           requirePlanApproval: false,
           planningSystemPrompt: 'planning',
           implementationSystemPrompt: 'implementation',
+          taskEffort: 'high',
           createToolset: () => ({ tools: [], executeTool: async () => ({ content: 'noop' }) }),
         },
       );
@@ -485,6 +487,7 @@ describe('orchestrate replay capture', () => {
 
     try {
       const outputs = await orchestrate(makeFocusedSingleNodeGraph(), {
+        taskEffort: 'high',
         llm: createAdapter({
           planningBehavior: async ({ options }) => {
             options?.onToolCall?.({
