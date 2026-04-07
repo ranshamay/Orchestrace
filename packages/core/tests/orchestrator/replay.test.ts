@@ -22,6 +22,27 @@ function makeSingleNodeGraph(): TaskGraph {
   };
 }
 
+function makeFocusedSingleNodeGraph(): TaskGraph {
+  return {
+    id: 'graph-focused',
+    name: 'Focused Replay Test Graph',
+    nodes: [
+      {
+        id: 'task-1',
+        name: 'Focused Task',
+        type: 'code',
+        prompt: [
+          'Enforce native git worktree usage behavior at session start in a known module.',
+          '',
+          '## Relevant Files',
+          '- packages/cli/src/ui-server.ts',
+        ].join('\n'),
+        dependencies: [],
+      },
+    ],
+  };
+}
+
 function createAdapter(params: {
   planningThrows?: boolean;
   failImplementationOnceWithType?: 'timeout' | 'rate_limit' | 'tool_runtime' | 'empty_response';
@@ -362,6 +383,70 @@ describe('orchestrate replay capture', () => {
       await rm(cwd, { recursive: true, force: true });
     }
   }, 15_000);
+
+  it('allows focused planning without subagent delegation when todo_set and agent_graph_set succeed', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'orchestrace-replay-focused-no-subagent-'));
+
+    try {
+      const outputs = await orchestrate(makeFocusedSingleNodeGraph(), {
+        llm: createAdapter({
+          planningBehavior: async ({ options }) => {
+            options?.onToolCall?.({
+              type: 'started',
+              toolCallId: 'plan-todo-1',
+              toolName: 'todo_set',
+              arguments: '{"items":[{"id":"p1","title":"Plan","status":"in_progress","weight":100}]}',
+            });
+            options?.onToolCall?.({
+              type: 'result',
+              toolCallId: 'plan-todo-1',
+              toolName: 'todo_set',
+              result: 'Stored 1 todo item(s).',
+              isError: false,
+            });
+            options?.onToolCall?.({
+              type: 'started',
+              toolCallId: 'plan-graph-1',
+              toolName: 'agent_graph_set',
+              arguments: '{"nodes":[{"id":"a1","prompt":"Inspect docs","weight":100}]}',
+            });
+            options?.onToolCall?.({
+              type: 'result',
+              toolCallId: 'plan-graph-1',
+              toolName: 'agent_graph_set',
+              result: 'Stored agent dependency graph with 1 node(s).',
+              isError: false,
+            });
+
+            return {
+              text: 'Focused plan without planning subagents.',
+              usage: { input: 10, output: 5, cost: 0 },
+              metadata: { stopReason: 'end_turn', endpoint: 'https://example.test' },
+            };
+          },
+        }),
+        cwd,
+        requirePlanApproval: false,
+        planningSystemPrompt: 'planning',
+        implementationSystemPrompt: 'implementation',
+        createToolset: () => ({ tools: [], executeTool: async () => ({ content: 'noop' }) }),
+      });
+
+      const output = outputs.get('task-1');
+      expect(output).toBeDefined();
+      expect(output?.status).toBe('completed');
+      expect(output?.failureType).toBeUndefined();
+
+      const planningAttempt = output?.replay?.attempts.find((attempt) => attempt.phase === 'planning');
+      expect(planningAttempt).toBeDefined();
+      expect(planningAttempt?.toolCalls.some((call) => call.toolName === 'todo_set')).toBe(true);
+      expect(planningAttempt?.toolCalls.some((call) => call.toolName === 'agent_graph_set')).toBe(true);
+      expect(planningAttempt?.toolCalls.some((call) => call.toolName === 'subagent_spawn')).toBe(false);
+      expect(planningAttempt?.toolCalls.some((call) => call.toolName === 'subagent_spawn_batch')).toBe(false);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
 
   it('retries planning with a stall nudge after too many consecutive planning deltas', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'orchestrace-replay-planning-stall-retry-'));

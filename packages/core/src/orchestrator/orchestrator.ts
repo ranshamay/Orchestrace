@@ -371,6 +371,7 @@ export async function orchestrate(
 
         if (createToolset) {
           const planningContractError = buildPlanningContractError(planningToolCalls, {
+            task: node,
             quickStartMode,
             quickStartMaxPreDelegationToolCalls,
           });
@@ -802,6 +803,7 @@ function buildPlanningPrompt(node: TaskNode, depOutputs: Map<string, TaskOutput>
         '- agent_graph_set node ids must be unique, and dependency ids can only reference nodes from the same payload',
         '- in agent_graph_set, provide descriptive node ids/names (avoid generic n1/n2 labels)',
         '- agent_graph_set nodes must map to atomic execution units with explicit dependency ids',
+        '- For focused tasks affecting fewer than 3 files with a specific known-module behavior change, planning may use zero sub-agent delegation.',
         '- subagent_spawn/subagent_spawn_batch (required) to delegate focused planning research with only relevant context per sub-agent',
         '- Quick-start planning mode for well-scoped tasks: keep parent pre-delegation orientation to at most 3-4 calls and delegate within the first 2-3 calls whenever possible',
         '- Keep parent orientation lightweight (e.g., root list + manifest + git status) and push detailed file reading/search into sub-agent scopes',
@@ -971,6 +973,7 @@ function buildPhaseSystemPrompt(params: {
           'agent_graph_set ids must be unique and dependency ids must resolve within the same payload.',
           'subagent delegation must include nodeId values that map to agent_graph_set node ids.',
           'Planning must include successful todo_set and agent_graph_set tool calls.',
+          'Focused tasks touching fewer than 3 known-module files may skip planning sub-agent delegation when todo_set and agent_graph_set are satisfied.',
           'Planning must include successful subagent_spawn or subagent_spawn_batch calls with focused context per sub-agent.',
           'Quick-start mode for well-scoped tasks: keep parent pre-delegation orientation to at most 3-4 tool calls and delegate within the first 2-3 calls whenever possible.',
           'Keep parent orientation lightweight and push detailed file reading/search into delegated sub-agent scopes.',
@@ -1228,15 +1231,19 @@ function buildCompletionFailureRetryHint(params: {
 function buildPlanningContractError(
   toolCalls: ReplayToolCallRecord[],
   options?: {
+    task?: TaskNode;
     quickStartMode?: boolean;
     quickStartMaxPreDelegationToolCalls?: number;
   },
 ): string | undefined {
+  const allowsZeroPlanningSubagents = options?.task
+    ? isFocusedTaskForZeroPlanningSubagents(options.task)
+    : false;
   const hasSubAgentDelegation = hasSuccessfulToolCall(toolCalls, 'subagent_spawn')
     || hasSuccessfulToolCall(toolCalls, 'subagent_spawn_batch');
   const requiredTools = ['todo_set', 'agent_graph_set'];
   const missing = requiredTools.filter((toolName) => !hasSuccessfulToolCall(toolCalls, toolName));
-  if (!hasSubAgentDelegation) {
+  if (!allowsZeroPlanningSubagents && !hasSubAgentDelegation) {
     missing.push('subagent_spawn or subagent_spawn_batch');
   }
 
@@ -1307,12 +1314,71 @@ function buildPlanningContractError(
     return undefined;
   }
 
+  const delegationGuidance = allowsZeroPlanningSubagents
+    ? 'Focused-task policy allows zero planning sub-agents for this task, but planning must still publish todo_set + agent_graph_set before implementation can begin.'
+    : 'Planning must publish todo_set + agent_graph_set and delegate focused work via subagent_spawn before implementation can begin.';
+
   return [
     'Planning contract not satisfied.',
     ...contractIssues,
-    'Planning must publish todo_set + agent_graph_set and delegate focused work via subagent_spawn before implementation can begin.',
+    delegationGuidance,
     'For well-scoped tasks, use quick-start behavior: keep parent orientation to 3-4 calls max, delegate within the first 2-3 calls when feasible, and push detailed discovery into sub-agents.',
   ].join(' ');
+}
+
+function isFocusedTaskForZeroPlanningSubagents(task: TaskNode): boolean {
+  const prompt = task.prompt ?? '';
+  const affectedFiles = extractPromptFilePaths(prompt);
+  if (affectedFiles.length === 0 || affectedFiles.length >= 3) {
+    return false;
+  }
+
+  const hasKnownModuleReference = affectedFiles.some((filePath) => /(^|\/)(packages\/|src\/|apps\/|services\/)/i.test(filePath))
+    || /\b(ui-server\.ts|runner\.ts|orchestrator\.ts)\b/i.test(prompt);
+  if (!hasKnownModuleReference) {
+    return false;
+  }
+
+  return /\b(behavior|change|fix|enforce|update|adjust|modify|regression|policy|logic)\b/i.test(prompt);
+}
+
+function extractPromptFilePaths(prompt: string): string[] {
+  const lines = prompt.split(/\r?\n/);
+  const paths = new Set<string>();
+  let inRelevantFilesSection = false;
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (/^#{1,6}\s+/.test(trimmed) && !/^#{1,6}\s+relevant files\b/i.test(trimmed)) {
+      inRelevantFilesSection = false;
+    }
+
+    if (/^(?:#{1,6}\s+)?relevant files\b:?/i.test(trimmed)) {
+      inRelevantFilesSection = true;
+      continue;
+    }
+
+    if (inRelevantFilesSection) {
+      const bulletMatch = trimmed.match(/^(?:[-*•]|\d+\.)\s+`?([A-Za-z0-9._\/-]+\.[A-Za-z0-9_-]+)`?/);
+      if (bulletMatch?.[1]) {
+        paths.add(normalizePromptPath(bulletMatch[1]));
+      }
+    }
+  }
+
+  const inlinePathRegex = /(?:^|[\s`"'])([A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)+\.[A-Za-z0-9_-]+)(?=$|[\s`"',):;])/g;
+  for (const match of prompt.matchAll(inlinePathRegex)) {
+    const path = match[1]?.trim();
+    if (path) {
+      paths.add(normalizePromptPath(path));
+    }
+  }
+
+  return [...paths];
+}
+
+function normalizePromptPath(filePath: string): string {
+  return filePath.replace(/^\.\//, '').trim();
 }
 
 function hasSuccessfulToolCall(toolCalls: ReplayToolCallRecord[], toolName: string): boolean {
