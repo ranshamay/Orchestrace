@@ -1621,7 +1621,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     }
 
     try {
-      await assertWorkspaceIsClean(workspacePath);
+      await assertWorkspaceIsClean(workspacePath, getWorkspaceDirtySummary);
     } catch (cleanStateError) {
       releaseWorkspacePathLock(workspacePath, id);
       void autoCreatedWorktreeCleanup?.().catch(() => {});
@@ -6572,7 +6572,7 @@ type SessionIdWorkspacePathRelation = {
   pathSessionId?: string;
 };
 
-function classifyWorkspacePathSessionIdRelation(sessionId: string, workspacePath: string): SessionIdWorkspacePathRelation {
+export function classifyWorkspacePathSessionIdRelation(sessionId: string, workspacePath: string): SessionIdWorkspacePathRelation {
   const normalizedPath = workspacePath.replace(/\\/g, '/');
   const match = normalizedPath.match(/(?:^|\/)session-([0-9a-fA-F-]{8,})(?:\/|$)/);
   const pathSessionId = match?.[1]?.toLowerCase();
@@ -6614,8 +6614,16 @@ async function cleanupReusedWorktree(repoRoot: string, workspacePath: string): P
   return { defaultBranch };
 }
 
-async function assertWorkspaceIsClean(workspacePath: string): Promise<void> {
-  const dirty = await getWorkspaceDirtySummary(workspacePath);
+async function assertWorkspaceIsClean(
+  workspacePath: string,
+  summarizeDirty: (workspacePath: string) => Promise<{
+    hasUncommittedChanges: boolean;
+    hasStagedChanges: boolean;
+    hasUntrackedChanges: boolean;
+    dirtySummary: string[];
+  }>,
+): Promise<void> {
+  const dirty = await summarizeDirty(workspacePath);
   if (!dirty.hasUncommittedChanges && !dirty.hasStagedChanges && !dirty.hasUntrackedChanges) {
     return;
   }
