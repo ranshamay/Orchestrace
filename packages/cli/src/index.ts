@@ -11,7 +11,7 @@ import { DEFAULT_AGENT_TOOL_POLICY_VERSION, createAgentToolset } from '@orchestr
 import { createInterface } from 'node:readline/promises';
 import { promisify } from 'node:util';
 import { startUiServer } from './ui-server.js';
-import { extractShellCommand, resolveTaskRoute } from './task-routing.js';
+import { resolveTaskRoute, validateShellExecutionPrompt } from './task-routing.js';
 import { WorkspaceManager } from './workspace-manager.js';
 import type { WorkspaceEntry } from './workspace-manager.js';
 

@@ -173,7 +173,11 @@ async function main(): Promise<void> {
   const agentGraph: SessionAgentGraphNode[] = [];
   const pendingNodeIds = new Map<string, string[]>();
   const promptForRoutingAndEffort = stripRetryContinuationContext(config.prompt);
-  const route = resolveTaskRoute(promptForRoutingAndEffort, process.env.ORCHESTRACE_TASK_ROUTE).result;
+  const route = resolveTaskRouteForSource(
+    promptForRoutingAndEffort,
+    config.source,
+    process.env.ORCHESTRACE_TASK_ROUTE,
+  ).result;
   const effortClassification = classifyTaskEffort(promptForRoutingAndEffort);
   const taskEffort: TaskEffort = (process.env.ORCHESTRACE_TASK_EFFORT as TaskEffort) || effortClassification.effort;
   let successfulEditFileResultsSinceCheckpoint = 0;
@@ -1376,20 +1380,22 @@ function buildSingleTaskGraph(id: string, prompt: string, routeCategory: TaskRou
 }
 
 async function runShellCommandRoute(prompt: string, cwd: string): Promise<Map<string, TaskOutput>> {
-  const command = extractShellCommand(prompt);
+  const validation = validateShellExecutionPrompt(prompt);
   const startedAt = Date.now();
 
-  if (!command) {
+  if (!validation.ok || !validation.command) {
     return new Map([
       ['task', {
         taskId: 'task',
         status: 'failed',
         durationMs: Date.now() - startedAt,
         retries: 0,
-        error: 'Route shell_command selected, but no executable command was found in the prompt.',
+        error: validation.reason ?? 'Rejected shell execution due to invalid prompt.',
       }],
     ]);
   }
+
+  const command = validation.command;
 
   try {
     const { stdout, stderr } = await execFileAsync('sh', ['-lc', command], { cwd });
