@@ -46,4 +46,29 @@ describe('task-router', () => {
     expect(strategyForTaskRoute('code_change')).toBe('full_planning_pipeline');
     expect(strategyForTaskRoute('refactor')).toBe('full_planning_pipeline');
   });
+
+  it('does not classify multiline prompts as shell commands even with shell tokens', () => {
+    const multiline = 'Add provider auth pre-flight check.\ngit worktree should be validated.\nbash scripts need updating.';
+    const result = classifyTaskPrompt(multiline);
+    expect(result.category).not.toBe('shell_command');
+  });
+
+  it('does not classify long prose prompts as shell commands even with shell tokens', () => {
+    const longPrompt = 'Investigate why git authentication fails after 20 minutes of expensive session work including planning and sub-agent spawning and file reading before the provider returns a 401 error indicating the token expired';
+    const result = classifyTaskPrompt(longPrompt);
+    expect(result.category).not.toBe('shell_command');
+  });
+
+  it('does not classify natural language prompts that only mention git/worktree as shell commands', () => {
+    const prompt = 'we want to make sure we will use git worktrees natively each new session when implementation starts';
+    const result = classifyTaskPrompt(prompt);
+    expect(result.category).not.toBe('shell_command');
+    expect(result.strategy).toBe('full_planning_pipeline');
+  });
+
+  it('still classifies short single-line shell commands correctly', () => {
+    expect(classifyTaskPrompt('git status').category).toBe('shell_command');
+    expect(classifyTaskPrompt('run pnpm test').category).toBe('shell_command');
+    expect(classifyTaskPrompt('$ npm install').category).toBe('shell_command');
+  });
 });

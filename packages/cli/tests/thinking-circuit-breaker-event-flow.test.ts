@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { DagEvent } from '@orchestrace/core';
 import {
-  MAX_CONSECUTIVE_THINKING,
+  THINKING_NO_TOOL_PROGRESS_NUDGE_MS,
   THINKING_CIRCUIT_BREAKER_NUDGE,
   createThinkingCircuitBreakerState,
   isThinkingCycleEvent,
@@ -11,8 +11,8 @@ import {
 } from '../src/thinking-circuit-breaker.js';
 
 describe('thinking circuit breaker event-flow semantics', () => {
-  it('emits one nudge on 6th planning thinking cycle, then resets after tool call', () => {
-    const state = createThinkingCircuitBreakerState();
+  it('emits one nudge after planning makes no tool progress for the configured duration, then resets after tool call', () => {
+    const state = createThinkingCircuitBreakerState(0);
     const emittedMessages: string[] = [];
 
     const planningDelta = (): DagEvent => ({
@@ -34,36 +34,32 @@ describe('thinking circuit breaker event-flow semantics', () => {
       input: '{}',
     };
 
-    const process = (event: DagEvent): void => {
+    const process = (event: DagEvent, nowMs: number): void => {
       if (isThinkingCycleEvent(event)) {
-        if (updateThinkingCircuitBreaker(state, event, MAX_CONSECUTIVE_THINKING)) {
+        if (updateThinkingCircuitBreaker(state, event, nowMs)) {
           emittedMessages.push(THINKING_CIRCUIT_BREAKER_NUDGE);
         }
       } else if (shouldResetThinkingCircuitBreakerOnEvent(event)) {
-        resetThinkingCircuitBreaker(state);
+        resetThinkingCircuitBreaker(state, nowMs);
       }
     };
 
-    for (let i = 0; i < MAX_CONSECUTIVE_THINKING; i += 1) {
-      process(planningDelta());
-    }
+    process(planningDelta(), THINKING_NO_TOOL_PROGRESS_NUDGE_MS - 1);
     expect(emittedMessages).toHaveLength(0);
 
-    process(planningDelta());
+    process(planningDelta(), THINKING_NO_TOOL_PROGRESS_NUDGE_MS);
     expect(emittedMessages).toEqual([THINKING_CIRCUIT_BREAKER_NUDGE]);
 
-    process(planningDelta());
-    process(planningDelta());
+    process(planningDelta(), THINKING_NO_TOOL_PROGRESS_NUDGE_MS * 2);
+    process(planningDelta(), THINKING_NO_TOOL_PROGRESS_NUDGE_MS * 3);
     expect(emittedMessages).toHaveLength(1);
 
-    process(toolCall);
+    process(toolCall, THINKING_NO_TOOL_PROGRESS_NUDGE_MS * 4);
 
-    for (let i = 0; i < MAX_CONSECUTIVE_THINKING; i += 1) {
-      process(planningDelta());
-    }
+    process(planningDelta(), THINKING_NO_TOOL_PROGRESS_NUDGE_MS * 4 + THINKING_NO_TOOL_PROGRESS_NUDGE_MS - 1);
     expect(emittedMessages).toHaveLength(1);
 
-    process(planningDelta());
+    process(planningDelta(), THINKING_NO_TOOL_PROGRESS_NUDGE_MS * 5);
     expect(emittedMessages).toHaveLength(2);
   });
 });

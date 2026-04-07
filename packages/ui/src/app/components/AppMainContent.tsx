@@ -4,8 +4,8 @@ import type { SettingsSaveToastState } from './overlays/SettingsSaveToast';
 import { GraphTabView } from './graph/GraphTabView';
 import { TimelinePanel } from './work/TimelinePanel';
 import { ComposerPanel } from './work/ComposerPanel';
+import { LogsTabView } from './work/LogsTabView';
 import { SettingsTabView } from './settings/SettingsTabView';
-import { LogWatcherPanel } from './observer/LogWatcherPanel';
 import { FloatingChatOverlay } from './layout/FloatingChatOverlay';
 
 export type AppMainContentProps = {
@@ -65,7 +65,7 @@ export type AppMainContentProps = {
 
 export function AppMainContent(props: AppMainContentProps) {
   if (props.activeTab === 'logs') {
-    return <LogWatcherPanel />;
+    return <LogsTabView />;
   }
 
   if (props.activeTab === 'settings') {

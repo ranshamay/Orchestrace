@@ -13,6 +13,7 @@ import {
   type Workspace,
   fetchObserverStatus,
   fetchObserverFindings,
+  fetchObserverFailedSessions,
   fetchModels,
   enableObserver,
   disableObserver,
@@ -20,6 +21,7 @@ import {
   triggerObserverAnalysis,
   type ObserverStatusResponse,
   type ObserverFinding,
+  type ObserverFailedSessionMonitor,
 } from '../../../lib/api';
 import type { SettingsSaveToastState } from '../overlays/SettingsSaveToast';
 import { ModelAutocomplete } from '../ModelAutocomplete';
@@ -730,6 +732,7 @@ function ObserverSection({
 }: ObserverSectionProps) {
   const [status, setStatus] = useState<ObserverStatusResponse | null>(null);
   const [findings, setFindings] = useState<ObserverFinding[]>([]);
+  const [failedSessions, setFailedSessions] = useState<ObserverFailedSessionMonitor[]>([]);
   const [loading, setLoading] = useState(true);
   const [toggling, setToggling] = useState(false);
   const [triggering, setTriggering] = useState(false);
@@ -759,12 +762,14 @@ function ObserverSection({
 
   const refresh = useCallback(async () => {
     try {
-      const [statusRes, findingsRes] = await Promise.all([
+      const [statusRes, findingsRes, failedSessionsRes] = await Promise.all([
         fetchObserverStatus(),
         fetchObserverFindings(),
+        fetchObserverFailedSessions(),
       ]);
       setStatus(statusRes);
       setFindings(findingsRes.findings);
+      setFailedSessions(failedSessionsRes.sessions);
 
       const firstConnectedProviderId = connectedProviders[0]?.id ?? '';
       const nextAnalysisProvider = connectedProviders.some((provider) => provider.id === statusRes.config.provider)
@@ -1309,6 +1314,43 @@ function ObserverSection({
                   : canSaveConfig
                     ? 'Changes are saved automatically.'
                     : 'Complete required fields to save changes.'}
+              </div>
+            )}
+          </div>
+
+          {/* Failed session monitor */}
+          <div className="mb-4 rounded border border-slate-200 p-3 dark:border-slate-700">
+            <h4 className="mb-2 text-[11px] font-bold uppercase tracking-wide text-slate-500 dark:text-slate-400">Failed Sessions Monitor</h4>
+            {failedSessions.length === 0 ? (
+              <div className="text-[11px] text-slate-500 dark:text-slate-400">
+                No failed user sessions detected.
+              </div>
+            ) : (
+              <div className="max-h-64 space-y-2 overflow-y-auto">
+                {failedSessions.map((session) => (
+                  <div key={session.sessionId} className="rounded border border-slate-200 p-2 text-xs dark:border-slate-700">
+                    <div className="mb-1 flex flex-wrap items-center gap-2">
+                      <span className={`rounded px-1.5 py-0.5 text-[9px] font-semibold uppercase ${session.observer.analyzed ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300' : 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300'}`}>
+                        {session.observer.analyzed ? 'analyzed' : 'queued'}
+                      </span>
+                      <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[9px] font-semibold uppercase text-slate-700 dark:bg-slate-800 dark:text-slate-300">
+                        {session.workspaceName}
+                      </span>
+                      <span className="font-mono text-[10px] text-slate-500 dark:text-slate-400">{session.sessionId.slice(0, 12)}</span>
+                    </div>
+                    <div className="line-clamp-2 text-slate-700 dark:text-slate-200">{session.prompt}</div>
+                    <div className="mt-1 flex flex-wrap gap-2 text-[10px] text-slate-500 dark:text-slate-400">
+                      <span>findings: {session.observer.findings}</span>
+                      <span>pending: {session.observer.fixStatusCounts.pending}</span>
+                      <span>spawned: {session.observer.fixStatusCounts.spawned}</span>
+                      <span>completed: {session.observer.fixStatusCounts.completed}</span>
+                      <span>failed: {session.observer.fixStatusCounts.failed}</span>
+                      {session.observer.latestFindingAt && (
+                        <span>last finding: {new Date(session.observer.latestFindingAt).toLocaleTimeString()}</span>
+                      )}
+                    </div>
+                  </div>
+                ))}
               </div>
             )}
           </div>

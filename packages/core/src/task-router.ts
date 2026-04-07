@@ -21,9 +21,9 @@ const SHELL_PREFIXES = [
 ] as const;
 
 const SHELL_COMMAND_PATTERNS = [
-  /(?:^|\s)(pnpm|npm|yarn|node|npx|git|cat|echo|grep|find|sed|awk|curl|bash|zsh|python|make|docker|kubectl)(?:\s|$)/,
-  /^ls(?:\s|$)/,
-  /^pwd(?:\s|$)/,
+  /^(?:\$\s*)?(pnpm|npm|yarn|node|npx|git|cat|echo|grep|find|sed|awk|curl|bash|zsh|python|make|docker|kubectl)(?:\s|$)/,
+  /^(?:\$\s*)?ls(?:\s|$)/,
+  /^(?:\$\s*)?pwd(?:\s|$)/,
 ] as const;
 
 const INVESTIGATION_HINTS = [
@@ -111,9 +111,10 @@ export function classifyTaskPrompt(prompt: string, options?: { forceCategory?: T
     };
   }
 
+  const isMultilineOrLong = normalized.includes('\n') || normalized.length > 200;
   const looksLikeShellPrefix = SHELL_PREFIXES.some((prefix) => normalized.startsWith(prefix));
   const hasShellHint = SHELL_COMMAND_PATTERNS.some((pattern) => pattern.test(normalized));
-  if (looksLikeShellPrefix || hasShellHint) {
+  if (!isMultilineOrLong && (looksLikeShellPrefix || hasShellHint)) {
     return {
       category: 'shell_command',
       strategy: strategyForTaskRoute('shell_command'),

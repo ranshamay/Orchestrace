@@ -166,6 +166,11 @@ export class ObserverDaemon {
     return this.registry.getAll();
   }
 
+  /** Get analyzed session ids (for API). */
+  getAnalyzedSessionIds(): string[] {
+    return [...this.state.analyzedSessions];
+  }
+
   /** Check if a session was created by the observer. */
   isObserverSession(sessionId: string): boolean {
     return this.state.observerSessionIds.has(sessionId) || this.registry.isObserverSession(sessionId);

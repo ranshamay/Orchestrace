@@ -71,6 +71,10 @@ export interface OrchestratorConfig extends RunnerConfig {
   quickStartMode?: boolean;
   /** Max successful tool calls allowed before first successful sub-agent delegation. Defaults to 3 when quick-start is enabled. */
   quickStartMaxPreDelegationToolCalls?: number;
+  /** Abort a planning attempt only after prolonged no-tool progress. Defaults to 5 minutes. */
+  planningNoToolProgressTimeoutMs?: number;
+  /** Polling interval used for planning no-tool progress checks. Defaults to 1 second. */
+  planningNoToolProgressCheckIntervalMs?: number;
 }
 
 type OrchestratorPhase = 'planning' | 'implementation';
@@ -79,10 +83,11 @@ const DEFAULT_ORCHESTRATOR_PROMPT_VERSION = 'orchestrator-prompts-v2';
 const MAX_PLANNING_ATTEMPTS = 3;
 const PLANNING_RETRY_BASE_DELAY_MS = 2_000;
 const RETRY_CONTEXT_MAX_CHARS = 2_000;
-const PLANNING_STALL_MAX_CONSECUTIVE_DELTAS = 5;
-const PLANNING_STALL_NUDGE =
-  'You appear to be stuck in planning. Please proceed with a concrete tool call or finalize your output.';
-const PLANNING_STALL_ABORT_SENTINEL = '__orchestrace_planning_stall__';
+const PLANNING_NO_TOOL_PROGRESS_TIMEOUT_MS = 5 * 60_000;
+const PLANNING_NO_TOOL_PROGRESS_CHECK_INTERVAL_MS = 1_000;
+const PLANNING_NO_TOOL_PROGRESS_NUDGE =
+  'Planning did not make tool progress. Use a concrete tool call to advance the plan.';
+const PLANNING_NO_PROGRESS_ABORT_SENTINEL = '__orchestrace_planning_no_progress__';
 
 /**
  * High-level orchestrator that wires the DAG scheduler to the LLM provider
@@ -114,6 +119,8 @@ export async function orchestrate(
     trivialTaskMaxPromptLength,
     quickStartMode,
     quickStartMaxPreDelegationToolCalls,
+    planningNoToolProgressTimeoutMs,
+    planningNoToolProgressCheckIntervalMs,
   } = config;
 
   const emit = onEvent ?? (() => {});
@@ -221,18 +228,25 @@ export async function orchestrate(
       emit({ type: 'task:planning', taskId: node.id });
 
       const planningPrompt = buildPlanningPrompt(node, context.depOutputs);
-      let planningAttemptPrompt = planningPrompt;
       let planningToolCalls: ReplayToolCallRecord[] = [];
 
       for (let planningAttempt = 1; planningAttempt <= MAX_PLANNING_ATTEMPTS; planningAttempt++) {
         planningToolCalls = [];
         const planningAttemptStart = new Date().toISOString();
         planningResult = undefined;
+        const noProgressTimeoutMs = Math.max(
+          1,
+          planningNoToolProgressTimeoutMs ?? PLANNING_NO_TOOL_PROGRESS_TIMEOUT_MS,
+        );
+        const noProgressCheckIntervalMs = Math.max(
+          1,
+          planningNoToolProgressCheckIntervalMs ?? PLANNING_NO_TOOL_PROGRESS_CHECK_INTERVAL_MS,
+        );
 
         const planningAttemptController = new AbortController();
-        const planningStallAbortController = () => {
+        const planningNoProgressAbortController = () => {
           if (!planningAttemptController.signal.aborted) {
-            planningAttemptController.abort(createPlanningStallAbortError());
+            planningAttemptController.abort(createPlanningNoProgressAbortError());
           }
         };
         const abortPlanningAttemptOnParentCancel = () => {
@@ -240,19 +254,22 @@ export async function orchestrate(
         };
         context.signal?.addEventListener('abort', abortPlanningAttemptOnParentCancel, { once: true });
 
-        let planningConsecutiveTextDeltas = 0;
-        let planningStallTriggered = false;
+        let planningNoProgressTriggered = false;
+        let planningLastToolProgressAt = Date.now();
+        const planningNoProgressInterval = setInterval(() => {
+          if (planningAttemptController.signal.aborted) {
+            return;
+          }
+
+          if (Date.now() - planningLastToolProgressAt >= noProgressTimeoutMs) {
+            planningNoProgressTriggered = true;
+            planningNoProgressAbortController();
+          }
+        }, noProgressCheckIntervalMs);
 
         try {
-          planningResult = await planningAgent.complete(planningAttemptPrompt, planningAttemptController.signal, {
+          planningResult = await planningAgent.complete(planningPrompt, planningAttemptController.signal, {
             onTextDelta: (delta) => {
-              planningConsecutiveTextDeltas += 1;
-              if (planningConsecutiveTextDeltas > PLANNING_STALL_MAX_CONSECUTIVE_DELTAS) {
-                planningStallTriggered = true;
-                planningStallAbortController();
-                return;
-              }
-
               emit({
                 type: 'task:stream-delta',
                 taskId: node.id,
@@ -262,7 +279,7 @@ export async function orchestrate(
               });
             },
             onToolCall: (event) => {
-              planningConsecutiveTextDeltas = 0;
+              planningLastToolProgressAt = Date.now();
               planningToolCalls.push(toReplayToolCallRecord(event));
               emit({
                 type: 'task:tool-call',
@@ -279,10 +296,10 @@ export async function orchestrate(
             },
           });
         } catch (error) {
-          const failureType = resolveReplayFailureType(error);
-          const wasPlanningStallAbort = planningStallTriggered || isPlanningStallAbortError(error);
-          const planningError = wasPlanningStallAbort
-            ? `Planning appeared stuck after ${PLANNING_STALL_MAX_CONSECUTIVE_DELTAS + 1} consecutive thinking cycles without tool calls. ${PLANNING_STALL_NUDGE}`
+          const wasPlanningNoProgressAbort = planningNoProgressTriggered || isPlanningNoProgressAbortError(error);
+          const failureType = wasPlanningNoProgressAbort ? 'timeout' : resolveReplayFailureType(error);
+          const planningError = wasPlanningNoProgressAbort
+            ? `Planning made no tool progress for ${Math.ceil(noProgressTimeoutMs / 1000)}s. ${PLANNING_NO_TOOL_PROGRESS_NUDGE}`
             : error instanceof Error ? error.message : String(error);
           const failedPlanningAttempt: ReplayAttemptRecord = {
             phase: 'planning',
@@ -307,9 +324,6 @@ export async function orchestrate(
 
           if (planningAttempt < MAX_PLANNING_ATTEMPTS && shouldRetryAfterCompletionFailure(failureType)) {
             const delayMs = PLANNING_RETRY_BASE_DELAY_MS * (2 ** (planningAttempt - 1));
-            if (wasPlanningStallAbort) {
-              planningAttemptPrompt = withPlanningStallNudge(planningPrompt);
-            }
             emit({
               type: 'task:verification-failed',
               taskId: node.id,
@@ -332,6 +346,7 @@ export async function orchestrate(
             replay,
           };
         } finally {
+          clearInterval(planningNoProgressInterval);
           context.signal?.removeEventListener('abort', abortPlanningAttemptOnParentCancel);
         }
 
@@ -1104,18 +1119,14 @@ function truncateForRetry(text: string): string {
   return text.slice(0, RETRY_CONTEXT_MAX_CHARS) + `\n... [truncated ${text.length - RETRY_CONTEXT_MAX_CHARS} chars]`;
 }
 
-function withPlanningStallNudge(basePrompt: string): string {
-  return `${basePrompt}\n\n[Planning Stall Recovery]\n${PLANNING_STALL_NUDGE}`;
-}
-
-function createPlanningStallAbortError(): Error {
-  const error = new Error(PLANNING_STALL_ABORT_SENTINEL);
+function createPlanningNoProgressAbortError(): Error {
+  const error = new Error(PLANNING_NO_PROGRESS_ABORT_SENTINEL);
   (error as Error & { failureType?: ReplayFailureType }).failureType = 'empty_response';
   return error;
 }
 
-function isPlanningStallAbortError(error: unknown): boolean {
-  return error instanceof Error && error.message === PLANNING_STALL_ABORT_SENTINEL;
+function isPlanningNoProgressAbortError(error: unknown): boolean {
+  return error instanceof Error && error.message === PLANNING_NO_PROGRESS_ABORT_SENTINEL;
 }
 
 function toReplayToolCallRecord(event: LlmToolCallEvent): ReplayToolCallRecord {
