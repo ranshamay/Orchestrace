@@ -6467,6 +6467,68 @@ async function gitExec(repoRoot: string, args: string[]): Promise<string> {
   return stdout;
 }
 
+type SessionIdWorkspacePathRelation = {
+  relation: SessionWorktreePathSessionIdRelation;
+  pathSessionId?: string;
+};
+
+function classifyWorkspacePathSessionIdRelation(sessionId: string, workspacePath: string): SessionIdWorkspacePathRelation {
+  const normalizedPath = workspacePath.replace(/\\/g, '/');
+  const match = normalizedPath.match(/(?:^|\/)session-([0-9a-fA-F-]{8,})(?:\/|$)/);
+  const pathSessionId = match?.[1]?.toLowerCase();
+  const normalizedSessionId = sessionId.trim().toLowerCase();
+  if (!pathSessionId) {
+    return { relation: 'none' };
+  }
+  return {
+    relation: pathSessionId === normalizedSessionId ? 'match' : 'mismatch',
+    pathSessionId,
+  };
+}
+
+async function resolveDefaultBranch(repoRoot: string): Promise<string> {
+  const tryCommands: Array<string[]> = [
+    ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'],
+    ['rev-parse', '--abbrev-ref', 'origin/HEAD'],
+  ];
+
+  for (const args of tryCommands) {
+    try {
+      const raw = (await gitExec(repoRoot, args)).trim();
+      const normalized = raw.replace(/^origin\//, '').trim();
+      if (normalized) {
+        return normalized;
+      }
+    } catch {
+      // Try next strategy.
+    }
+  }
+
+  return 'main';
+}
+
+async function cleanupReusedWorktree(repoRoot: string, workspacePath: string): Promise<{ defaultBranch: string }> {
+  const defaultBranch = await resolveDefaultBranch(repoRoot);
+  await gitExec(workspacePath, ['checkout', defaultBranch]);
+  await gitExec(workspacePath, ['clean', '-fdx']);
+  return { defaultBranch };
+}
+
+async function assertWorkspaceIsClean(workspacePath: string): Promise<void> {
+  const dirty = await getWorkspaceDirtySummary(workspacePath);
+  if (!dirty.hasUncommittedChanges && !dirty.hasStagedChanges && !dirty.hasUntrackedChanges) {
+    return;
+  }
+  const details = dirty.dirtySummary.slice(0, 20).join('\n');
+  throw new Error(
+    [
+      `Workspace is not clean at session start: ${workspacePath}`,
+      'Worktree/session assignment requires a clean state before runner launch.',
+      details ? `Detected changes:\n${details}` : undefined,
+    ].filter(Boolean).join('\n'),
+  );
+}
+
 async function inspectGitRecoveryState(workspacePath: string): Promise<SessionRecoveryInfo['git']> {
   const fallback: SessionRecoveryInfo['git'] = {
     cwd: workspacePath,
@@ -6618,11 +6680,15 @@ async function resolveSessionWorkspacePath(request: {
   executionContext: ExecutionContext;
   selectedWorktreePath?: string;
   worktreeBranch?: string;
+  assignmentSource: SessionWorkspaceAssignmentProvenance['assignmentSource'];
+  reusedExistingWorktree: boolean;
 }> {
   if (request.executionContext === 'workspace') {
     return {
       workspacePath: request.workspaceRoot,
       executionContext: 'workspace',
+      assignmentSource: 'workspace-root',
+      reusedExistingWorktree: false,
     };
   }
 
