@@ -1389,20 +1389,22 @@ function buildSingleTaskGraph(id: string, prompt: string, routeCategory: TaskRou
 }
 
 async function runShellCommandRoute(prompt: string, cwd: string): Promise<Map<string, TaskOutput>> {
-  const command = extractShellCommand(prompt);
+  const validation = validateShellCommandPrompt(prompt);
   const startedAt = Date.now();
 
-  if (!command) {
+  if (!validation.ok || !validation.command) {
     return new Map([
       ['task', {
         taskId: 'task',
         status: 'failed',
         durationMs: Date.now() - startedAt,
         retries: 0,
-        error: 'Route shell_command selected, but no executable command was found in the prompt.',
+        error: validation.reason ?? 'Route shell_command selected, but prompt failed shell-execution safety checks.',
       }],
     ]);
   }
+
+  const command = validation.command;
 
   try {
     const { stdout, stderr } = await execFileAsync('sh', ['-lc', command], { cwd });

@@ -11,7 +11,7 @@ import { DEFAULT_AGENT_TOOL_POLICY_VERSION, createAgentToolset } from '@orchestr
 import { createInterface } from 'node:readline/promises';
 import { promisify } from 'node:util';
 import { startUiServer } from './ui-server.js';
-import { extractShellCommand, resolveTaskRoute } from './task-routing.js';
+import { resolveTaskRoute, validateShellCommandPrompt } from './task-routing.js';
 import { WorkspaceManager } from './workspace-manager.js';
 import type { WorkspaceEntry } from './workspace-manager.js';
 
@@ -603,12 +603,14 @@ export function buildSingleTaskGraph(prompt: string, routeCategory: TaskRouteCat
 }
 
 async function runShellCommandRoute(prompt: string, cwd: string): Promise<number> {
-  const command = extractShellCommand(prompt);
+  const validation = validateShellCommandPrompt(prompt);
 
-  if (!command) {
-    console.error('Route shell_command selected, but no executable command was found in the prompt.');
+  if (!validation.ok || !validation.command) {
+    console.error(validation.reason ?? 'Route shell_command selected, but prompt failed shell-execution safety checks.');
     return 1;
   }
+
+  const command = validation.command;
 
   try {
     const { stdout, stderr } = await execFileAsync('sh', ['-lc', command], { cwd });
