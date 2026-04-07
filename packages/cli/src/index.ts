@@ -3,7 +3,7 @@ import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { resolve } from 'node:path';
 import { config as loadDotEnv } from 'dotenv';
-import { orchestrate } from '@orchestrace/core';
+import { orchestrate, type TaskRouteCategory } from '@orchestrace/core';
 import type { TaskGraph, DagEvent, PlanApprovalRequest, TaskOutput } from '@orchestrace/core';
 import { PiAiAdapter, ProviderAuthManager } from '@orchestrace/provider';
 import type { ProviderInfo } from '@orchestrace/provider';
@@ -11,6 +11,7 @@ import { DEFAULT_AGENT_TOOL_POLICY_VERSION, createAgentToolset } from '@orchestr
 import { createInterface } from 'node:readline/promises';
 import { promisify } from 'node:util';
 import { startUiServer } from './ui-server.js';
+import { extractShellCommand, resolveTaskRoute } from './task-routing.js';
 import { WorkspaceManager } from './workspace-manager.js';
 import type { WorkspaceEntry } from './workspace-manager.js';
 
@@ -131,7 +132,7 @@ orchestrace — DAG-based agent orchestration
 
 Usage:
   orchestrace run <plan.json>   Execute a task graph from a JSON plan file
-  orchestrace task <prompt>     Run a single prompt task using the generalized flow
+  orchestrace task <prompt>     Run a single prompt task with automatic routing (shell/investigation/code)
   orchestrace replay list [--limit 20]   List persisted replay runs
   orchestrace replay show <runId> [--task <taskId>]  Show persisted replay artifacts
   orchestrace workspace         Manage registered workspaces and active workspace
@@ -280,7 +281,15 @@ Environment variables:
       process.exit(1);
     }
 
-    const graph = buildSingleTaskGraph(taskPrompt);
+    const route = resolveTaskRoute(taskPrompt, process.env.ORCHESTRACE_TASK_ROUTE).result;
+    console.log(`[route] category=${route.category} strategy=${route.strategy} source=${route.source} confidence=${route.confidence.toFixed(2)} reason=${route.reason}`);
+
+    if (route.category === 'shell_command') {
+      const code = await runShellCommandRoute(taskPrompt, workspace.path);
+      process.exit(code);
+    }
+
+    const graph = buildSingleTaskGraph(taskPrompt, route.category);
     const code = await runGraph(graph, {
       autoApprove,
       autoPush,
@@ -561,28 +570,58 @@ function previewText(text: string | undefined, maxChars = 1500): string | undefi
   return compact.length > maxChars ? `${compact.slice(0, maxChars - 3)}...` : compact;
 }
 
-function buildSingleTaskGraph(prompt: string): TaskGraph {
+export function buildSingleTaskGraph(prompt: string, routeCategory: TaskRouteCategory = 'code_change'): TaskGraph {
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
   const verifyCommands = parseVerifyCommands();
+  const nodeType = routeCategory === 'refactor' ? 'refactor' : 'code';
+  const graphName = routeCategory === 'investigation' ? 'Single Prompt Investigation Task' : 'Single Prompt Task';
+  const validationCommands = routeCategory === 'investigation' ? [] : verifyCommands;
 
   return {
     id: `task-${timestamp}`,
-    name: 'Single Prompt Task',
+    name: graphName,
     nodes: [
       {
         id: 'task',
         name: 'Execute prompt task',
-        type: 'code',
+        type: nodeType,
         prompt,
         dependencies: [],
         validation: {
-          commands: verifyCommands,
+          commands: validationCommands,
           maxRetries: 2,
           retryDelayMs: 0,
+        },
+        meta: {
+          routeCategory,
         },
       },
     ],
   };
+}
+
+async function runShellCommandRoute(prompt: string, cwd: string): Promise<number> {
+  const command = extractShellCommand(prompt);
+
+  if (!command) {
+    console.error('Route shell_command selected, but no executable command was found in the prompt.');
+    return 1;
+  }
+
+  try {
+    const { stdout, stderr } = await execFileAsync('sh', ['-lc', command], { cwd });
+    if (stdout) {
+      process.stdout.write(stdout);
+    }
+    if (stderr) {
+      process.stderr.write(stderr);
+    }
+    return 0;
+  } catch (error) {
+    const details = error instanceof Error ? error.message : String(error);
+    console.error(`Shell command failed: ${details}`);
+    return 1;
+  }
 }
 
 function parseVerifyCommands(): string[] {

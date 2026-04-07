@@ -13,10 +13,11 @@ export type {
   AgentToolsetOptions,
   SubAgentContextPacket,
   SubAgentEvidenceItem,
+  SubAgentFileSnippet,
   SubAgentRequest,
   SubAgentResult,
 } from './types.js';
-export type { SessionFileReadCache, FileReadCacheEntry } from './file-read-cache.js';
+export { createFileReadCache } from './file-read-cache.js';
 export { DEFAULT_AGENT_TOOL_POLICY_VERSION } from './policy.js';
 
 export interface AgentToolDescriptor {
@@ -161,6 +162,16 @@ async function executeToolCall(
       content: `Unknown tool: ${call.name}`,
       isError: true,
     };
+  }
+
+  if (call.name === 'git_status' || call.name === 'git_diff') {
+    const intent = (call.arguments as { intent?: unknown } | undefined)?.intent;
+    if (intent !== 'read_only' && intent !== 'write') {
+      return {
+        content: `Tool ${call.name} requires arguments.intent to be "read_only" or "write". Use "read_only" for no-write tasks and skip repo-state checks unless genuinely needed.`,
+        isError: true,
+      };
+    }
   }
 
   return tool.execute(call.arguments, signal);

@@ -8,6 +8,7 @@ import type {
   RegisteredAgentTool,
   SubAgentContextPacket,
   SubAgentEvidenceItem,
+  SubAgentFileSnippet,
   SubAgentRequest,
   SubAgentResult,
   TodoItem,
@@ -66,10 +67,26 @@ const subAgentContextPacketSchema = Type.Object({
   relevantContext: Type.Optional(Type.Array(Type.String())),
   requiredOutputSchema: Type.Optional(Type.String()),
   evidenceRequirements: Type.Optional(Type.Array(Type.String())),
+  fileSnippets: Type.Optional(Type.Array(
+    Type.Object({
+      path: Type.String({ minLength: 1 }),
+      content: Type.String(),
+    }),
+  )),
 });
 
 interface CoordinationToolsOptions extends AgentToolsetOptions {
   includeSubAgentTool: boolean;
+}
+
+interface CachedSubAgentMergePayload {
+  summary: string;
+  actions: string[];
+  evidence: SubAgentEvidenceItem[];
+  risks: string[];
+  openQuestions: string[];
+  patchIntent: string[];
+  artifact?: unknown;
 }
 
 interface SubAgentRunRecord {
@@ -84,12 +101,30 @@ interface SubAgentRunRecord {
   finishedAt?: string;
   outputPreview?: string;
   error?: string;
+  promptPreview?: string;
+  usage?: UsageTotals;
+  usageReported?: boolean;
+  mergePayload?: CachedSubAgentMergePayload;
 }
 
 interface UsageTotals {
   input: number;
   output: number;
   cost: number;
+}
+
+interface SubAgentBatchRunResult {
+  id: string;
+  nodeId?: string;
+  status: 'completed' | 'failed';
+  promptChars: number;
+  promptPreview: string;
+  outputPreview?: string;
+  mergePayload?: CachedSubAgentMergePayload;
+  usage?: UsageTotals;
+  usageReported?: boolean;
+  error?: string;
+  cacheHit?: boolean;
 }
 
 interface CoordinationState {
@@ -350,7 +385,9 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
 
         let request: SubAgentRequest;
         try {
-          request = await buildSubAgentRequestFromToolArgs(options.cwd, toolArgs, options.fileReadCache);
+          request = await buildSubAgentRequestFromToolArgs(options.cwd, toolArgs, {
+            fileReadCache: options.fileReadCache,
+          });
         } catch (error) {
           return {
             content: error instanceof Error ? error.message : String(error),
@@ -385,6 +422,10 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
             current.status = 'completed';
             current.finishedAt = now();
             current.outputPreview = preview;
+            current.promptPreview = compactPromptPreview(request.prompt);
+            current.usage = usage;
+            current.usageReported = Boolean(result.usage);
+            current.mergePayload = mergePayload;
           }
           latest.updatedAt = now();
           await writeCoordinationState(statePath, latest);
@@ -409,6 +450,11 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
           if (current) {
             current.status = 'failed';
             current.finishedAt = now();
+            current.outputPreview = undefined;
+            current.promptPreview = undefined;
+            current.usage = undefined;
+            current.usageReported = undefined;
+            current.mergePayload = undefined;
             current.error = message;
           }
           latest.updatedAt = now();
@@ -500,7 +546,9 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
           requests = await mapWithConcurrency(
             requestInputs,
             concurrency,
-            async (entry) => buildSubAgentRequestFromToolArgs(options.cwd, entry, options.fileReadCache),
+            async (entry) => buildSubAgentRequestFromToolArgs(options.cwd, entry, {
+              fileReadCache: options.fileReadCache,
+            }),
           );
         } catch (error) {
           return {
@@ -510,8 +558,51 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
         }
 
         const state = await readCoordinationState(statePath);
+
+        const cacheHits = new Map<number, {
+          request: SubAgentRequest;
+          record: SubAgentRunRecord;
+          run: SubAgentBatchRunResult;
+        }>();
+        const misses: Array<{ request: SubAgentRequest; requestIndex: number }> = [];
+
+        requests.forEach((request, requestIndex) => {
+          const nodeId = request.nodeId?.trim();
+          if (!nodeId) {
+            misses.push({ request, requestIndex });
+            return;
+          }
+
+          const cachedRecord = findLatestCompletedSubAgentByNodeId(state.subAgents, nodeId);
+          if (!cachedRecord || !cachedRecord.mergePayload) {
+            misses.push({ request, requestIndex });
+            return;
+          }
+
+          const promptPreview = cachedRecord.promptPreview ?? compactPromptPreview(request.prompt);
+          const usage = usageOrZero(cachedRecord.usage);
+          const usageReported = cachedRecord.usageReported ?? Boolean(cachedRecord.usage);
+
+          cacheHits.set(requestIndex, {
+            request,
+            record: cachedRecord,
+            run: {
+              id: cachedRecord.id,
+              nodeId,
+              status: 'completed',
+              promptChars: request.prompt.length,
+              promptPreview,
+              outputPreview: cachedRecord.outputPreview ?? cachedRecord.mergePayload.summary,
+              mergePayload: cachedRecord.mergePayload,
+              usage,
+              usageReported,
+              cacheHit: true,
+            },
+          });
+        });
+
         const startIndex = state.subAgents.length;
-        const records: SubAgentRunRecord[] = requests.map((request, index) => ({
+        const records: SubAgentRunRecord[] = misses.map(({ request }, index) => ({
           id: `sub-${startIndex + index + 1}`,
           nodeId: request.nodeId,
           prompt: request.prompt,
@@ -522,12 +613,14 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
           startedAt: now(),
         }));
 
-        state.subAgents.push(...records);
-        state.updatedAt = now();
-        await writeCoordinationState(statePath, state);
+        if (records.length > 0) {
+          state.subAgents.push(...records);
+          state.updatedAt = now();
+          await writeCoordinationState(statePath, state);
+        }
 
-        const mapper = async (record: SubAgentRunRecord, index: number) => {
-          const request = requests[index];
+        const mapper = async (record: SubAgentRunRecord, index: number): Promise<SubAgentBatchRunResult> => {
+          const request = misses[index].request;
           try {
             const result = await options.runSubAgent?.(request, signal);
             const mergePayload = buildSubAgentMergePayload(result ?? { text: '' }, record.id, request);
@@ -541,6 +634,7 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
               mergePayload,
               usage: usageOrZero(result?.usage),
               usageReported: Boolean(result?.usage),
+              cacheHit: false as const,
             };
           } catch (error) {
             return {
@@ -550,23 +644,53 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
               promptChars: request.prompt.length,
               promptPreview: compactPromptPreview(request.prompt),
               error: error instanceof Error ? error.message : String(error),
+              cacheHit: false as const,
             };
           }
         };
 
-        const batchRun = adaptiveConcurrency
-          ? await mapWithAdaptiveConcurrency(records, {
-              initialConcurrency: concurrency,
-              minConcurrency,
-              maxConcurrency: SUBAGENT_BATCH_MAX_CONCURRENCY,
-            }, mapper, (result) => result.status === 'failed')
-          : {
-              results: await mapWithConcurrency(records, concurrency, mapper),
-              finalConcurrency: concurrency,
-              windows: 1,
-            };
+        const batchRun = records.length === 0
+          ? { results: [], finalConcurrency: 0, windows: 0 }
+          : adaptiveConcurrency
+            ? await mapWithAdaptiveConcurrency(records, {
+                initialConcurrency: concurrency,
+                minConcurrency,
+                maxConcurrency: SUBAGENT_BATCH_MAX_CONCURRENCY,
+              }, mapper, (result) => result.status === 'failed')
+            : {
+                results: await mapWithConcurrency(records, concurrency, mapper),
+                finalConcurrency: concurrency,
+                windows: 1,
+              };
 
-        const settled = batchRun.results;
+        const settledByRequestIndex = new Map<number, SubAgentBatchRunResult>();
+        batchRun.results.forEach((result, missIndex) => {
+          const requestIndex = misses[missIndex].requestIndex;
+          settledByRequestIndex.set(requestIndex, result);
+        });
+
+        const settled = requests.map((_, requestIndex) => {
+          const cached = cacheHits.get(requestIndex);
+          if (cached) {
+            return cached.run;
+          }
+
+          const executed = settledByRequestIndex.get(requestIndex);
+          if (executed) {
+            return executed;
+          }
+
+          return {
+            id: `unknown-${requestIndex + 1}`,
+            nodeId: requests[requestIndex].nodeId,
+            status: 'failed' as const,
+            promptChars: requests[requestIndex].prompt.length,
+            promptPreview: compactPromptPreview(requests[requestIndex].prompt),
+            error: 'Missing sub-agent execution result.',
+            cacheHit: false as const,
+          };
+        });
+
         const usageTotals = settled.reduce<UsageTotals>((totals, entry) => {
           if (entry.status !== 'completed' || !entry.usage) {
             return totals;
@@ -583,25 +707,35 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
         const maxPromptChars = promptSizes.length > 0 ? Math.max(...promptSizes) : 0;
         const oversized = settled.filter((entry) => (entry.promptChars ?? 0) > SUBAGENT_PROMPT_SOFT_LIMIT_CHARS);
 
-        const latest = await readCoordinationState(statePath);
-        for (const result of settled) {
-          const current = latest.subAgents.find((entry) => entry.id === result.id);
-          if (!current) {
-            continue;
+        if (records.length > 0) {
+          const latest = await readCoordinationState(statePath);
+          for (const result of settled) {
+            const current = latest.subAgents.find((entry) => entry.id === result.id);
+            if (!current) {
+              continue;
+            }
+
+            current.status = result.status;
+            current.finishedAt = now();
+            current.promptPreview = result.promptPreview;
+            current.usage = result.usage;
+            current.usageReported = result.usageReported;
+            if (result.status === 'completed') {
+              current.outputPreview = result.outputPreview;
+              current.mergePayload = result.mergePayload;
+              current.error = undefined;
+            } else {
+              current.outputPreview = undefined;
+              current.mergePayload = undefined;
+              current.usage = undefined;
+              current.usageReported = undefined;
+              current.error = result.error;
+            }
           }
 
-          current.status = result.status;
-          current.finishedAt = now();
-          if (result.status === 'completed') {
-            current.outputPreview = result.outputPreview;
-            current.error = undefined;
-          } else {
-            current.error = result.error;
-          }
+          latest.updatedAt = now();
+          await writeCoordinationState(statePath, latest);
         }
-
-        latest.updatedAt = now();
-        await writeCoordinationState(statePath, latest);
 
         const failedCount = settled.filter((entry) => entry.status === 'failed').length;
         const failedNodeIds = settled
@@ -618,6 +752,10 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
           failed: failedCount,
           failedNodeIds,
           usage: usageTotals,
+          cacheHitCount: cacheHits.size,
+          cacheMissCount: misses.length,
+          cachedNodeIds: Array.from(cacheHits.values()).map((entry) => entry.record.nodeId ?? entry.record.id),
+          dispatchedNodeIds: misses.map(({ request }, index) => request.nodeId ?? records[index]?.id ?? `sub-${startIndex + index + 1}`),
           decomposition: {
             totalPromptChars,
             averagePromptChars: settled.length > 0 ? Math.round(totalPromptChars / settled.length) : 0,
@@ -700,7 +838,9 @@ function usageOrZero(usage: { input: number; output: number; cost: number } | un
 async function buildSubAgentRequestFromToolArgs(
   cwd: string,
   toolArgs: Record<string, unknown>,
-  fileReadCache?: import('./file-read-cache.js').SessionFileReadCache,
+  options?: {
+    fileReadCache?: AgentToolsetOptions['fileReadCache'];
+  },
 ): Promise<SubAgentRequest> {
   const packet = normalizeSubAgentContextPacket(toolArgs.contextPacket);
   const legacyPrompt = optionalString(toolArgs.prompt) ?? '';
@@ -712,7 +852,10 @@ async function buildSubAgentRequestFromToolArgs(
   const prompt = await enrichDelegationPromptWithFileSnippets(
     cwd,
     buildSubAgentPrompt(legacyPrompt, packet),
-    fileReadCache,
+    {
+      providedSnippets: packet?.fileSnippets,
+      fileReadCache: options?.fileReadCache,
+    },
   );
 
   return {
@@ -760,6 +903,7 @@ function normalizeSubAgentContextPacket(value: unknown): SubAgentContextPacket |
     relevantContext: optionalStringArray(value.relevantContext),
     requiredOutputSchema: optionalString(value.requiredOutputSchema),
     evidenceRequirements: optionalStringArray(value.evidenceRequirements),
+    fileSnippets: normalizeFileSnippets(value.fileSnippets),
   };
 }
 
@@ -982,12 +1126,27 @@ function sanitizeCoordinationStateForPersistence(state: CoordinationState): Coor
     subAgents: state.subAgents.map((record) => ({
       ...record,
       prompt: sanitizePersistedText(record.prompt, COORDINATION_PERSIST_PROMPT_MAX_CHARS),
+      promptPreview: record.promptPreview
+        ? sanitizePersistedText(record.promptPreview, SUBAGENT_PROMPT_PREVIEW_MAX_CHARS)
+        : record.promptPreview,
       outputPreview: record.outputPreview
         ? sanitizePersistedText(record.outputPreview, COORDINATION_PERSIST_OUTPUT_MAX_CHARS)
         : record.outputPreview,
       error: record.error
         ? sanitizePersistedText(record.error, COORDINATION_PERSIST_OUTPUT_MAX_CHARS)
         : record.error,
+      mergePayload: record.mergePayload
+        ? {
+            ...record.mergePayload,
+            summary: sanitizePersistedText(record.mergePayload.summary, COORDINATION_PERSIST_OUTPUT_MAX_CHARS),
+            actions: record.mergePayload.actions.map((item) => sanitizePersistedText(item, 320)).slice(0, 24),
+            risks: record.mergePayload.risks.map((item) => sanitizePersistedText(item, 320)).slice(0, 24),
+            openQuestions: record.mergePayload.openQuestions.map((item) => sanitizePersistedText(item, 320)).slice(0, 24),
+            patchIntent: record.mergePayload.patchIntent
+              .map((item) => sanitizePersistedText(item, 320))
+              .slice(0, 24),
+          }
+        : record.mergePayload,
     })),
   };
 }
@@ -1100,8 +1259,12 @@ function normalizeSubAgentRecords(value: unknown): SubAgentRunRecord[] {
       reasoning: normalizeReasoning(entry.reasoning),
       startedAt: optionalString(entry.startedAt) ?? now(),
       finishedAt: optionalString(entry.finishedAt),
+      promptPreview: optionalString(entry.promptPreview),
       outputPreview: optionalString(entry.outputPreview),
       error: optionalString(entry.error),
+      usage: normalizeUsageTotals(entry.usage),
+      usageReported: asBoolean(entry.usageReported),
+      mergePayload: normalizeCachedSubAgentMergePayload(entry.mergePayload),
     });
   }
 
@@ -1111,6 +1274,66 @@ function normalizeSubAgentRecords(value: unknown): SubAgentRunRecord[] {
 function normalizeSubAgentStatus(value: unknown): SubAgentRunRecord['status'] | undefined {
   if (value === 'running' || value === 'completed' || value === 'failed') {
     return value;
+  }
+
+  return undefined;
+}
+
+function normalizeUsageTotals(value: unknown): UsageTotals | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+
+  const input = asNumber(value.input);
+  const output = asNumber(value.output);
+  const cost = asNumber(value.cost);
+  if (input === undefined || output === undefined || cost === undefined) {
+    return undefined;
+  }
+
+  return { input, output, cost };
+}
+
+function normalizeCachedSubAgentMergePayload(value: unknown): CachedSubAgentMergePayload | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+
+  const summary = optionalString(value.summary);
+  if (!summary) {
+    return undefined;
+  }
+
+  return {
+    summary,
+    actions: optionalStringArray(value.actions) ?? [],
+    evidence: normalizeSubAgentEvidence(value.evidence),
+    risks: optionalStringArray(value.risks) ?? [],
+    openQuestions: optionalStringArray(value.openQuestions) ?? [],
+    patchIntent: Array.isArray(value.patchIntent)
+      ? normalizeStringList(value.patchIntent)
+      : normalizeStringList([value.patchIntent]),
+    artifact: value.artifact,
+  };
+}
+
+function findLatestCompletedSubAgentByNodeId(records: SubAgentRunRecord[], nodeId: string): SubAgentRunRecord | undefined {
+  const normalizedNodeId = nodeId.trim();
+  if (!normalizedNodeId) {
+    return undefined;
+  }
+
+  for (let index = records.length - 1; index >= 0; index -= 1) {
+    const record = records[index];
+    if (record.status !== 'completed') {
+      continue;
+    }
+
+    if ((record.nodeId ?? '').trim() !== normalizedNodeId) {
+      continue;
+    }
+
+    return record;
   }
 
   return undefined;
@@ -1176,6 +1399,14 @@ function optionalString(value: unknown): string | undefined {
   return trimmed.length > 0 ? trimmed : undefined;
 }
 
+function asNumber(value: unknown): number | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return undefined;
+  }
+
+  return value;
+}
+
 function optionalStringArray(value: unknown): string[] | undefined {
   if (!Array.isArray(value)) {
     return undefined;
@@ -1211,19 +1442,46 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 async function enrichDelegationPromptWithFileSnippets(
   cwd: string,
   prompt: string,
-  fileReadCache?: import('./file-read-cache.js').SessionFileReadCache,
+  options?: {
+    providedSnippets?: SubAgentFileSnippet[];
+    fileReadCache?: AgentToolsetOptions['fileReadCache'];
+  },
 ): Promise<string> {
   const trimmed = prompt.trim();
   if (!trimmed || trimmed.includes(SUBAGENT_CONTEXT_MARKER)) {
     return prompt;
   }
 
-  const filePaths = extractCandidateFilePaths(trimmed);
-  if (filePaths.length === 0) {
-    return prompt;
+  const providedSnippets = normalizeFileSnippets(options?.providedSnippets) ?? [];
+  const snippetByPath = new Map<string, SubAgentFileSnippet>();
+  for (const snippet of providedSnippets) {
+    const normalizedPath = normalizePromptPath(snippet.path);
+    if (!normalizedPath || snippetByPath.has(normalizedPath)) {
+      continue;
+    }
+    snippetByPath.set(normalizedPath, {
+      path: normalizedPath,
+      content: trimText(snippet.content.trim(), SUBAGENT_CONTEXT_MAX_CHARS_PER_FILE),
+    });
   }
 
-  const snippets = await collectFileSnippets(cwd, filePaths, fileReadCache);
+  const extractedPaths = extractCandidateFilePaths(trimmed);
+  const missingPaths = extractedPaths.filter((filePath) => !snippetByPath.has(filePath));
+  if (missingPaths.length > 0 && snippetByPath.size < SUBAGENT_CONTEXT_MAX_FILES) {
+    const fallbackSnippets = await collectFileSnippets(cwd, missingPaths, {
+      fileReadCache: options?.fileReadCache,
+    });
+    for (const snippet of fallbackSnippets) {
+      if (snippetByPath.size >= SUBAGENT_CONTEXT_MAX_FILES) {
+        break;
+      }
+      if (!snippetByPath.has(snippet.path)) {
+        snippetByPath.set(snippet.path, snippet);
+      }
+    }
+  }
+
+  const snippets = [...snippetByPath.values()].slice(0, SUBAGENT_CONTEXT_MAX_FILES);
   if (snippets.length === 0) {
     return prompt;
   }
@@ -1254,7 +1512,7 @@ function extractCandidateFilePaths(prompt: string): string[] {
       continue;
     }
 
-    const normalized = candidate.replace(/^\.\//, '');
+    const normalized = normalizePromptPath(candidate);
     if (normalized) {
       unique.add(normalized);
     }
@@ -1263,11 +1521,37 @@ function extractCandidateFilePaths(prompt: string): string[] {
   return [...unique];
 }
 
+function normalizeFileSnippets(value: unknown): SubAgentFileSnippet[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+
+  const snippets: SubAgentFileSnippet[] = [];
+  for (const entry of value) {
+    if (!isRecord(entry)) {
+      continue;
+    }
+
+    const path = normalizePromptPath(entry.path);
+    const content = optionalString(entry.content);
+    if (!path || content === undefined) {
+      continue;
+    }
+
+    snippets.push({ path, content });
+  }
+
+  return snippets.length > 0 ? snippets : undefined;
+}
+
 async function collectFileSnippets(
   cwd: string,
   filePaths: string[],
-  fileReadCache?: import('./file-read-cache.js').SessionFileReadCache,
-): Promise<Array<{ path: string; content: string }>> {
+  options?: {
+    fileReadCache?: AgentToolsetOptions['fileReadCache'];
+  },
+): Promise<SubAgentFileSnippet[]> {
+  const revision = await resolveRevision(cwd);
   const candidates = filePaths.map((filePath, index) => ({ filePath, index }));
   const results = await mapWithConcurrency(candidates, SUBAGENT_SNIPPET_READ_CONCURRENCY, async (candidate) => {
     const absolutePath = resolve(cwd, candidate.filePath);
@@ -1275,16 +1559,35 @@ async function collectFileSnippets(
       return undefined;
     }
 
+    const relativePath = toPosixPath(relative(cwd, absolutePath));
     try {
-      const content = await readFullFileWithCache(absolutePath, { cache: fileReadCache });
+      const cached = options?.fileReadCache?.get({
+        path: absolutePath,
+        revision,
+        startLine: 1,
+        endLine: undefined,
+        maxChars: SUBAGENT_CONTEXT_MAX_CHARS_PER_FILE,
+      });
+      const content = cached ?? await readFile(absolutePath, 'utf-8');
       if (content.includes('\u0000')) {
         return undefined;
       }
 
+      const trimmedContent = trimText(content.trim(), SUBAGENT_CONTEXT_MAX_CHARS_PER_FILE);
+      if (!cached) {
+        options?.fileReadCache?.set({
+          path: absolutePath,
+          revision,
+          startLine: 1,
+          endLine: undefined,
+          maxChars: SUBAGENT_CONTEXT_MAX_CHARS_PER_FILE,
+        }, trimmedContent);
+      }
+
       return {
         index: candidate.index,
-        path: toPosixPath(relative(cwd, absolutePath)),
-        content: trimText(content.trim(), SUBAGENT_CONTEXT_MAX_CHARS_PER_FILE),
+        path: relativePath,
+        content: trimmedContent,
       };
     } catch {
       return undefined;
@@ -1296,6 +1599,41 @@ async function collectFileSnippets(
     .sort((a, b) => a.index - b.index)
     .slice(0, SUBAGENT_CONTEXT_MAX_FILES)
     .map((entry) => ({ path: entry.path, content: entry.content }));
+}
+
+function normalizePromptPath(path: unknown): string | undefined {
+  if (typeof path !== 'string') {
+    return undefined;
+  }
+
+  const trimmed = path.trim().replace(/^\.\//, '');
+  return trimmed.length > 0 ? toPosixPath(trimmed) : undefined;
+}
+
+const revisionByCwd = new Map<string, string>();
+
+async function resolveRevision(cwd: string): Promise<string> {
+  const existing = revisionByCwd.get(cwd);
+  if (existing) {
+    return existing;
+  }
+
+  try {
+    const { runCommand } = await import('./command-tools/command-runner.js');
+    const result = await runCommand('git', ['rev-parse', 'HEAD'], {
+      cwd,
+      timeoutMs: 5_000,
+    });
+    const revision = result.exitCode === 0
+      ? result.stdout.trim()
+      : '';
+    const normalized = revision || 'no-git-revision';
+    revisionByCwd.set(cwd, normalized);
+    return normalized;
+  } catch {
+    revisionByCwd.set(cwd, 'no-git-revision');
+    return 'no-git-revision';
+  }
 }
 
 function isWithinDirectory(path: string, cwd: string): boolean {

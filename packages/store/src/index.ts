@@ -28,6 +28,8 @@ export type {
   SessionContextFactPayload,
   SessionContextCompactionPayload,
   SessionRunnerHeartbeatPayload,
+  SessionCheckpointPayload,
+  SessionRecoveryDetectedPayload,
   SessionStreamDeltaPayload,
   // Value types
   SessionConfig,

@@ -111,6 +111,7 @@ export interface TaskReplayRecord {
   provider: string;
   model: string;
   reasoning?: 'minimal' | 'low' | 'medium' | 'high';
+  executionMode?: 'planned' | 'direct';
   attempts: ReplayAttemptRecord[];
 }
 
