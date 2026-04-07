@@ -289,6 +289,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           adaptiveConcurrency: c.adaptiveConcurrency,
           batchConcurrency: c.batchConcurrency,
           batchMinConcurrency: c.batchMinConcurrency,
+          enableTrivialTaskGate: c.enableTrivialTaskGate ?? resolveTrivialTaskGateDefault(),
+          trivialTaskMaxPromptLength: c.trivialTaskMaxPromptLength ?? resolveTrivialTaskMaxPromptLengthDefault(),
           worktreePath: c.worktreePath,
           worktreeBranch: c.worktreeBranch,
           creationReason: c.creationReason,
@@ -725,6 +727,11 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
 
   function registerRestoredWorkspacePathLocks(): void {
     for (const [sessionId, session] of workSessions.entries()) {
+      // Only lock paths for sessions that are still running — completed/failed/cancelled
+      // sessions no longer need to hold their workspace path lock.
+      if (session.status === 'completed' || session.status === 'failed' || session.status === 'cancelled') {
+        continue;
+      }
       const acquired = acquireWorkspacePathLock(session.workspacePath, sessionId);
       if (!acquired.ok) {
         console.warn(
@@ -937,6 +944,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     adaptiveConcurrency?: boolean;
     batchConcurrency?: number;
     batchMinConcurrency?: number;
+    enableTrivialTaskGate?: boolean;
+    trivialTaskMaxPromptLength?: number;
     creationReason?: SessionCreationReason;
     sourceSessionId?: string;
     source?: 'user' | 'observer';
@@ -1003,6 +1012,11 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       batchConcurrency,
       normalizePositiveSetting(request.batchMinConcurrency, uiPreferences.batchMinConcurrency),
     );
+    const enableTrivialTaskGate = request.enableTrivialTaskGate ?? uiPreferences.enableTrivialTaskGate;
+    const trivialTaskMaxPromptLength = normalizePositiveSetting(
+      request.trivialTaskMaxPromptLength,
+      uiPreferences.trivialTaskMaxPromptLength,
+    );
 
     let workspacePath = workspace.path;
     let executionContext: ExecutionContext = 'workspace';
@@ -1040,7 +1054,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     // so a new session is never blocked by an existing one sharing the same path.
     let autoCreatedWorktreeCleanup: (() => Promise<void>) | undefined;
     let lockResult = acquireWorkspacePathLock(workspacePath, id);
-    if (!lockResult.ok && executionContext === 'git-worktree') {
+    if (!lockResult.ok && (executionContext === 'git-worktree' || isObserverSource)) {
       try {
         const sessionBranch = `orchestrace/session-${id}`;
         const sessionWorktreePath = join(workspace.path, '.worktrees', `session-${id}`);
@@ -1073,6 +1087,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     }
 
     const duplicateSession = [...workSessions.values()].find((candidate) => {
+      // Only block on running sessions — completed/failed/cancelled sessions may share the same path.
+      if (candidate.status !== 'running') return false;
       const candidatePath = normalizeWorkspacePathForLock(candidate.workspacePath);
       const requestedPath = normalizeWorkspacePathForLock(workspacePath);
       return Boolean(candidatePath && requestedPath && candidatePath === requestedPath);
@@ -1107,6 +1123,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       adaptiveConcurrency,
       batchConcurrency,
       batchMinConcurrency,
+      enableTrivialTaskGate,
+      trivialTaskMaxPromptLength,
       worktreePath: selectedWorktreePath,
       worktreeBranch: selectedWorktreeBranch,
       creationReason: request.creationReason ?? 'start',
@@ -1237,6 +1255,10 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
               obs.stop();
               sessionObservers.delete(id);
             }
+            // Release the workspace path lock so new sessions can use the same path.
+            releaseWorkspacePathLock(session.workspacePath, id);
+            // Notify the observer daemon: close the loop on findings (auto-resolve if PR opened)
+            observerDaemon.onFixSessionCompleted(id, newStatus, session.output?.text);
             broadcastWorkStream(workStreamClients, id, newStatus === 'completed' ? 'end' : 'error', {
               id,
               status: session.status,
@@ -1987,6 +2009,10 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           ?? parsePositiveSetting(body.toolBatchConcurrency);
         const batchMinConcurrency = parsePositiveSetting(body.batchMinConcurrency)
           ?? parsePositiveSetting(body.toolBatchMinConcurrency);
+        const enableTrivialTaskGate = parseBooleanSetting(body.enableTrivialTaskGate)
+          ?? parseBooleanSetting(body.trivialTaskGateEnabled);
+        const trivialTaskMaxPromptLength = parsePositiveSetting(body.trivialTaskMaxPromptLength)
+          ?? parsePositiveSetting(body.trivialPromptMaxLength);
         const result = await startWorkSession({
           workspaceId,
           prompt,
@@ -2000,6 +2026,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           adaptiveConcurrency,
           batchConcurrency,
           batchMinConcurrency,
+          enableTrivialTaskGate,
+          trivialTaskMaxPromptLength,
           creationReason: 'start',
         });
 
@@ -2061,6 +2089,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           adaptiveConcurrency: sourceSession.adaptiveConcurrency,
           batchConcurrency: sourceSession.batchConcurrency,
           batchMinConcurrency: sourceSession.batchMinConcurrency,
+          enableTrivialTaskGate: sourceSession.enableTrivialTaskGate,
+          trivialTaskMaxPromptLength: sourceSession.trivialTaskMaxPromptLength,
           creationReason: 'retry',
           sourceSessionId: id,
         });
@@ -3263,6 +3293,12 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         return;
       }
 
+      if (req.method === 'POST' && pathname === '/api/observer/spawn-all') {
+        const spawned = await observerDaemon.spawnAll();
+        sendJson(res, 200, { spawned });
+        return;
+      }
+
       // -- Log watcher API ---------------------------------------------------
       if (req.method === 'GET' && pathname === '/api/logs/stream') {
         res.writeHead(200, {
@@ -3772,6 +3808,8 @@ function toPersistedSession(session: WorkSession): PersistedWorkSession {
     adaptiveConcurrency: session.adaptiveConcurrency,
     batchConcurrency: session.batchConcurrency,
     batchMinConcurrency: session.batchMinConcurrency,
+    enableTrivialTaskGate: session.enableTrivialTaskGate,
+    trivialTaskMaxPromptLength: session.trivialTaskMaxPromptLength,
     worktreePath: session.worktreePath,
     worktreeBranch: session.worktreeBranch,
     creationReason: session.creationReason,
@@ -3823,6 +3861,11 @@ function hydratePersistedSession(session: PersistedWorkSession): WorkSession {
     batchMinConcurrency: Math.min(
       normalizePositiveSetting(session.batchConcurrency, resolveBatchConcurrencyDefault()),
       normalizePositiveSetting(session.batchMinConcurrency, resolveBatchMinConcurrencyDefault()),
+    ),
+    enableTrivialTaskGate: parseBooleanSetting(session.enableTrivialTaskGate) ?? resolveTrivialTaskGateDefault(),
+    trivialTaskMaxPromptLength: normalizePositiveSetting(
+      session.trivialTaskMaxPromptLength,
+      resolveTrivialTaskMaxPromptLengthDefault(),
     ),
     worktreePath: asString(session.worktreePath) || undefined,
     worktreeBranch: asString(session.worktreeBranch) || undefined,
@@ -4493,6 +4536,8 @@ function resolveUiPreferencesDefaults(): UiPreferences {
     adaptiveConcurrency: resolveAdaptiveConcurrencyDefault(),
     batchConcurrency,
     batchMinConcurrency,
+    enableTrivialTaskGate: resolveTrivialTaskGateDefault(),
+    trivialTaskMaxPromptLength: resolveTrivialTaskMaxPromptLengthDefault(),
   };
 }
 
@@ -4524,6 +4569,11 @@ function normalizeUiPreferences(value: unknown, fallback: UiPreferences): UiPref
     adaptiveConcurrency: parseBooleanSetting(value.adaptiveConcurrency) ?? fallback.adaptiveConcurrency,
     batchConcurrency,
     batchMinConcurrency,
+    enableTrivialTaskGate: parseBooleanSetting(value.enableTrivialTaskGate) ?? fallback.enableTrivialTaskGate,
+    trivialTaskMaxPromptLength: normalizePositiveSetting(
+      value.trivialTaskMaxPromptLength,
+      fallback.trivialTaskMaxPromptLength,
+    ),
   };
 }
 
@@ -4576,6 +4626,18 @@ function resolveBatchMinConcurrencyDefault(): number {
   return parsePositiveInt(process.env.ORCHESTRACE_UI_BATCH_MIN_CONCURRENCY)
     ?? parsePositiveInt(process.env.ORCHESTRACE_BATCH_MIN_CONCURRENCY)
     ?? DEFAULT_UI_BATCH_MIN_CONCURRENCY;
+}
+
+function resolveTrivialTaskGateDefault(): boolean {
+  const raw = process.env.ORCHESTRACE_UI_TRIVIAL_TASK_GATE_ENABLED
+    ?? process.env.ORCHESTRACE_TRIVIAL_TASK_GATE_ENABLED;
+  return parseBooleanSetting(raw) ?? false;
+}
+
+function resolveTrivialTaskMaxPromptLengthDefault(): number {
+  return parsePositiveInt(process.env.ORCHESTRACE_UI_TRIVIAL_TASK_MAX_PROMPT_LENGTH)
+    ?? parsePositiveInt(process.env.ORCHESTRACE_TRIVIAL_TASK_MAX_PROMPT_LENGTH)
+    ?? 120;
 }
 
 function normalizeLlmSessionState(raw: unknown): LlmSessionState {
@@ -5966,6 +6028,8 @@ function serializeWorkSession(session: WorkSession, todos: AgentTodoItem[] = [])
     adaptiveConcurrency: session.adaptiveConcurrency,
     batchConcurrency: session.batchConcurrency,
     batchMinConcurrency: session.batchMinConcurrency,
+    enableTrivialTaskGate: session.enableTrivialTaskGate,
+    trivialTaskMaxPromptLength: session.trivialTaskMaxPromptLength,
     worktreePath: session.worktreePath,
     worktreeBranch: session.worktreeBranch,
     creationReason: session.creationReason,
