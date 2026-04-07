@@ -169,15 +169,38 @@ export default function App() {
 
     setWorkPlanningProvider(normalizedProvider);
     setWorkPlanningModel(nextModel);
+    setLlmControlsBySessionId((current) => {
+      const next = { ...current };
+      for (const sessionId of Object.keys(next)) {
+        const existing = next[sessionId];
+        next[sessionId] = {
+          ...existing,
+          planningProvider: normalizedProvider,
+          planningModel: nextModel,
+        };
+      }
+      return next;
+    });
     updateActiveLlmControls({ planningProvider: normalizedProvider, planningModel: nextModel });
-  }, [defaultLlmControls.planningModel, defaultLlmControls.planningProvider, setDefaultLlmControls, setWorkPlanningModel, setWorkPlanningProvider, updateActiveLlmControls]);
+  }, [defaultLlmControls.planningModel, defaultLlmControls.planningProvider, setDefaultLlmControls, setLlmControlsBySessionId, setWorkPlanningModel, setWorkPlanningProvider, updateActiveLlmControls]);
 
   const setDefaultPlanningModel = useCallback((nextModel: string) => {
     const normalizedModel = typeof nextModel === 'string' ? nextModel.trim() : '';
     setDefaultLlmControls((current) => ({ ...current, planningModel: normalizedModel }));
     setWorkPlanningModel(normalizedModel);
+    setLlmControlsBySessionId((current) => {
+      const next = { ...current };
+      for (const sessionId of Object.keys(next)) {
+        const existing = next[sessionId];
+        next[sessionId] = {
+          ...existing,
+          planningModel: normalizedModel,
+        };
+      }
+      return next;
+    });
     updateActiveLlmControls({ planningModel: normalizedModel });
-  }, [setDefaultLlmControls, setWorkPlanningModel, updateActiveLlmControls]);
+  }, [setDefaultLlmControls, setLlmControlsBySessionId, setWorkPlanningModel, updateActiveLlmControls]);
 
   const setDefaultImplementationProvider = useCallback((nextProvider: string) => {
     const normalizedProvider = typeof nextProvider === 'string' ? nextProvider.trim() : '';
@@ -192,15 +215,38 @@ export default function App() {
 
     setWorkProvider(normalizedProvider);
     setWorkModel(nextModel);
+    setLlmControlsBySessionId((current) => {
+      const next = { ...current };
+      for (const sessionId of Object.keys(next)) {
+        const existing = next[sessionId];
+        next[sessionId] = {
+          ...existing,
+          implementationProvider: normalizedProvider,
+          implementationModel: nextModel,
+        };
+      }
+      return next;
+    });
     updateActiveLlmControls({ implementationProvider: normalizedProvider, implementationModel: nextModel });
-  }, [defaultLlmControls.implementationModel, defaultLlmControls.implementationProvider, setDefaultLlmControls, setWorkModel, setWorkProvider, updateActiveLlmControls]);
+  }, [defaultLlmControls.implementationModel, defaultLlmControls.implementationProvider, setDefaultLlmControls, setLlmControlsBySessionId, setWorkModel, setWorkProvider, updateActiveLlmControls]);
 
   const setDefaultImplementationModel = useCallback((nextModel: string) => {
     const normalizedModel = typeof nextModel === 'string' ? nextModel.trim() : '';
     setDefaultLlmControls((current) => ({ ...current, implementationModel: normalizedModel }));
     setWorkModel(normalizedModel);
+    setLlmControlsBySessionId((current) => {
+      const next = { ...current };
+      for (const sessionId of Object.keys(next)) {
+        const existing = next[sessionId];
+        next[sessionId] = {
+          ...existing,
+          implementationModel: normalizedModel,
+        };
+      }
+      return next;
+    });
     updateActiveLlmControls({ implementationModel: normalizedModel });
-  }, [setDefaultLlmControls, setWorkModel, updateActiveLlmControls]);
+  }, [setDefaultLlmControls, setLlmControlsBySessionId, setWorkModel, updateActiveLlmControls]);
 
   const handleStartNewSessionDraft = useCallback(() => {
     setActiveTab('graph');

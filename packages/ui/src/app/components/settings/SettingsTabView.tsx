@@ -45,14 +45,12 @@ function useConnectedDefaultProviderModels(params: {
   connectedDefaultProviders: ProviderInfo[];
   provider: string;
   model: string;
-  setProvider: (next: string) => void;
   setModel: (next: string) => void;
 }) {
   const {
     connectedDefaultProviders,
     provider,
     model,
-    setProvider,
     setModel,
   } = params;
 
@@ -108,21 +106,6 @@ function useConnectedDefaultProviderModels(params: {
       return;
     }
 
-    if (connectedDefaultProviders.some((entry) => entry.id === provider)) {
-      return;
-    }
-
-    setProvider('');
-  }, [connectedDefaultProviders, provider, setProvider]);
-
-  useEffect(() => {
-    if (!provider) {
-      if (model) {
-        setModel('');
-      }
-      return;
-    }
-
     if (loading) {
       return;
     }
@@ -132,9 +115,6 @@ function useConnectedDefaultProviderModels(params: {
     }
 
     if (models.length === 0) {
-      if (model) {
-        setModel('');
-      }
       return;
     }
 
@@ -209,7 +189,6 @@ export function SettingsTabView({
     connectedDefaultProviders,
     provider: defaultPlanningProvider,
     model: defaultPlanningModel,
-    setProvider: setDefaultPlanningProvider,
     setModel: setDefaultPlanningModel,
   });
 
@@ -217,7 +196,6 @@ export function SettingsTabView({
     connectedDefaultProviders,
     provider: defaultImplementationProvider,
     model: defaultImplementationModel,
-    setProvider: setDefaultImplementationProvider,
     setModel: setDefaultImplementationModel,
   });
 
