@@ -4217,14 +4217,22 @@ function hydratePersistedSession(session: PersistedWorkSession): WorkSession {
     worktreePath: asString(session.worktreePath) || undefined,
     worktreeBranch: asString(session.worktreeBranch) || undefined,
     workspaceAssignment: isRecord(session.workspaceAssignment)
-      ? {
-        assignmentSource: asString(session.workspaceAssignment.assignmentSource) as SessionWorkspaceAssignmentProvenance['assignmentSource'],
-        reusedExistingWorktree: parseBooleanSetting(session.workspaceAssignment.reusedExistingWorktree) ?? undefined,
-        cleanupApplied: parseBooleanSetting(session.workspaceAssignment.cleanupApplied) ?? undefined,
-        cleanupDefaultBranch: asString(session.workspaceAssignment.cleanupDefaultBranch) || undefined,
-        workspacePathSessionIdRelation: asString(session.workspaceAssignment.workspacePathSessionIdRelation) as SessionWorktreePathSessionIdRelation,
-        workspacePathSessionId: asString(session.workspaceAssignment.workspacePathSessionId) || undefined,
-      }
+      ? (() => {
+        const assignmentSource = normalizeWorkspaceAssignmentSource(session.workspaceAssignment.assignmentSource);
+        if (!assignmentSource) {
+          return undefined;
+        }
+        return {
+          assignmentSource,
+          reusedExistingWorktree: parseBooleanSetting(session.workspaceAssignment.reusedExistingWorktree) ?? undefined,
+          cleanupApplied: parseBooleanSetting(session.workspaceAssignment.cleanupApplied) ?? undefined,
+          cleanupDefaultBranch: asString(session.workspaceAssignment.cleanupDefaultBranch) || undefined,
+          workspacePathSessionIdRelation: normalizeWorkspacePathSessionIdRelation(
+            session.workspaceAssignment.workspacePathSessionIdRelation,
+          ),
+          workspacePathSessionId: asString(session.workspaceAssignment.workspacePathSessionId) || undefined,
+        };
+      })()
       : undefined,
     creationReason: normalizeSessionCreationReason(session.creationReason),
     sourceSessionId: asString(session.sourceSessionId) || undefined,
