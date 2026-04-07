@@ -109,12 +109,18 @@ export interface SessionConfig {
   provider: string;
   model: string;
   autoApprove: boolean;
+  /** Enable quick-start planning mode that delegates within first few tool calls. */
+  quickStartMode?: boolean;
+  /** Max successful tool calls allowed before first successful sub-agent delegation in quick-start mode. */
+  quickStartMaxPreDelegationToolCalls?: number;
   executionContext?: 'workspace' | 'git-worktree';
   selectedWorktreePath?: string;
   useWorktree?: boolean;
   adaptiveConcurrency: boolean;
   batchConcurrency: number;
   batchMinConcurrency: number;
+  enableTrivialTaskGate?: boolean;
+  trivialTaskMaxPromptLength?: number;
   worktreePath?: string;
   worktreeBranch?: string;
   creationReason: SessionCreationReason;
@@ -152,6 +158,8 @@ export type SessionEventType =
   | 'session:context-compaction'
   // Runner lifecycle
   | 'session:runner-heartbeat'
+  | 'session:checkpoint'
+  | 'session:recovery-detected'
   // Stream deltas (high-frequency, used for real-time SSE replay)
   | 'session:stream-delta'
   // Observer real-time events (per-session observer agent)
@@ -242,6 +250,38 @@ export interface SessionRunnerHeartbeatPayload {
   pid: number;
 }
 
+export interface SessionCheckpointPayload {
+  status: 'committed' | 'skipped' | 'failed';
+  reason: 'edit-threshold' | 'todo-completed' | 'terminal';
+  message: string;
+  trigger?: {
+    threshold?: number;
+    editCountSinceLast?: number;
+    todoId?: string;
+    todoTitle?: string;
+  };
+  commit?: {
+    hash?: string;
+    summary?: string;
+  };
+  error?: string;
+}
+
+export interface SessionRecoveryDetectedPayload {
+  reason: 'restore-dead-runner' | 'runner-exit-fallback';
+  runnerPid?: number;
+  exitCode?: number | null;
+  git: {
+    cwd: string;
+    branch?: string;
+    head?: string;
+    detached?: boolean;
+    dirty: boolean;
+    changedFiles?: string[];
+    diffSummary?: string;
+  };
+}
+
 export interface SessionStreamDeltaPayload {
   taskId: string;
   phase: 'planning' | 'implementation';
@@ -292,6 +332,8 @@ export type SessionEvent =
   | { seq: number; time: string; type: 'session:context-fact'; payload: SessionContextFactPayload }
   | { seq: number; time: string; type: 'session:context-compaction'; payload: SessionContextCompactionPayload }
   | { seq: number; time: string; type: 'session:runner-heartbeat'; payload: SessionRunnerHeartbeatPayload }
+  | { seq: number; time: string; type: 'session:checkpoint'; payload: SessionCheckpointPayload }
+  | { seq: number; time: string; type: 'session:recovery-detected'; payload: SessionRecoveryDetectedPayload }
   | { seq: number; time: string; type: 'session:stream-delta'; payload: SessionStreamDeltaPayload }
   | { seq: number; time: string; type: 'session:observer-status-change'; payload: SessionObserverStatusChangePayload }
   | { seq: number; time: string; type: 'session:observer-finding'; payload: SessionObserverFindingPayload };
@@ -332,6 +374,8 @@ export interface MaterializedSession {
   contextFacts: SharedContextFact[];
   contextCompaction: ContextCompactionState;
   lastHeartbeat?: string;
+  lastCheckpoint?: SessionCheckpointPayload & { time: string };
+  lastRecovery?: SessionRecoveryDetectedPayload & { time: string };
   lastSeq: number;
   createdAt: string;
   updatedAt: string;
