@@ -59,6 +59,12 @@ export class ObserverDaemon {
   private controller = new AbortController();
   private rateLimitBlockedUntilMs = 0;
   private consecutiveRateLimitFailures = 0;
+  /**
+   * Fix session IDs spawned during THIS process run only.
+   * Used for the concurrency limit. Separate from observerSessionIds which
+   * tracks ALL-time observer sessions (used to skip re-analysis).
+   */
+  private activeFixSessionIds: Set<string> = new Set();
 
   constructor(options: ObserverDaemonOptions) {
     this.orchestraceDir = options.orchestraceDir;
@@ -170,6 +176,53 @@ export class ObserverDaemon {
     return this.runAnalysisCycle();
   }
 
+  /**
+   * Spawn ALL pending findings immediately, ignoring the concurrent sessions cap.
+   * For use via the API when manually draining the queue.
+   * Returns the number of sessions successfully spawned.
+   */
+  async spawnAll(): Promise<number> {
+    const spawned = await spawnFixSessions(this.registry, this.config, this.startSession, 0, true);
+    if (spawned > 0) {
+      for (const finding of this.registry.getAll()) {
+        if (finding.fixSessionId && finding.fixStatus === 'spawned') {
+          this.state.observerSessionIds.add(finding.fixSessionId);
+          this.activeFixSessionIds.add(finding.fixSessionId);
+        }
+      }
+      await this.registry.save();
+      console.log(`[orchestrace][observer] Spawned all: ${spawned} fix sessions queued`);
+    }
+    return spawned;
+  }
+
+  /**
+   * Notify the daemon that a fix session has reached a terminal state.
+   * Closes the loop: marks the associated finding as completed or failed
+   * based on whether the session succeeded and opened a PR.
+   */
+  onFixSessionCompleted(sessionId: string, status: 'completed' | 'failed' | 'cancelled', outputText?: string): void {
+    this.activeFixSessionIds.delete(sessionId);
+
+    const finding = this.registry.getAll().find((f) => f.fixSessionId === sessionId);
+    if (!finding) return;
+
+    if (status === 'completed' && outputText && hasPrUrl(outputText)) {
+      this.registry.markFixResult(finding.fingerprint, 'completed');
+      void this.registry.save();
+      console.log(
+        `[orchestrace][observer] Finding "${finding.title}" resolved — PR detected in fix session ${sessionId}`,
+      );
+    } else if (status === 'failed' || status === 'cancelled') {
+      this.registry.markFixResult(finding.fingerprint, 'failed');
+      void this.registry.save();
+      console.log(
+        `[orchestrace][observer] Finding "${finding.title}" fix session ${sessionId} ${status}`,
+      );
+    }
+    // If completed without a PR, leave as 'spawned' — could still be in progress or partial fix
+  }
+
   // ---------------------------------------------------------------------------
   // Internal
   // ---------------------------------------------------------------------------
@@ -216,7 +269,9 @@ export class ObserverDaemon {
     }
 
     if (toAnalyze.length === 0) {
-      return { analyzed: 0, findings: 0, spawned: 0 };
+      // No new sessions to analyze, but still try to spawn pending findings.
+      const spawned = await this.spawnPendingFindings();
+      return { analyzed: 0, findings: 0, spawned };
     }
 
     // Summarize sessions
@@ -233,7 +288,8 @@ export class ObserverDaemon {
     }
 
     if (summaries.length === 0) {
-      return { analyzed: 0, findings: 0, spawned: 0 };
+      const spawned = await this.spawnPendingFindings();
+      return { analyzed: 0, findings: 0, spawned };
     }
 
     const batches = createAnalysisBatches(
@@ -288,18 +344,7 @@ export class ObserverDaemon {
     }
 
     // Spawn fix sessions for pending findings, respecting concurrency limit.
-    // Count in-flight sessions: spawned findings whose session is still tracked as active.
-    const activeFixSessionCount = this.registry.getAll().filter(
-      (f) => f.fixStatus === 'spawned' && f.fixSessionId && this.state.observerSessionIds.has(f.fixSessionId),
-    ).length;
-    const spawned = await spawnFixSessions(this.registry, this.config, this.startSession, activeFixSessionCount);
-
-    // Track spawned session IDs
-    for (const finding of this.registry.getAll()) {
-      if (finding.fixSessionId) {
-        this.state.observerSessionIds.add(finding.fixSessionId);
-      }
-    }
+    const spawned = await this.spawnPendingFindings();
 
     await this.registry.save();
     this.state.lastAnalysisAt = new Date().toISOString();
@@ -310,6 +355,22 @@ export class ObserverDaemon {
     );
 
     return { analyzed: analyzedCount, findings: newFindings, spawned };
+  }
+
+  /** Spawn fix sessions for all pending findings. Extracted so it can be called from early-return paths. */
+  private async spawnPendingFindings(): Promise<number> {
+    const activeFixSessionCount = this.activeFixSessionIds.size;
+    const spawned = await spawnFixSessions(this.registry, this.config, this.startSession, activeFixSessionCount);
+    if (spawned > 0) {
+      for (const finding of this.registry.getAll()) {
+        if (finding.fixSessionId && finding.fixStatus === 'spawned') {
+          this.state.observerSessionIds.add(finding.fixSessionId);
+          this.activeFixSessionIds.add(finding.fixSessionId);
+        }
+      }
+      await this.registry.save();
+    }
+    return spawned;
   }
 
   private applyRateLimitCooldown(): number {
@@ -507,4 +568,12 @@ function clampInt(value: unknown, min: number, max: number, fallback: number): n
   if (rounded < min) return min;
   if (rounded > max) return max;
   return rounded;
+}
+
+/**
+ * Return true if the given text contains a GitHub pull-request URL.
+ * Used to detect that a fix session actually opened a PR.
+ */
+function hasPrUrl(text: string): boolean {
+  return /https?:\/\/github\.com\/[^/\s]+\/[^/\s]+\/pull\/\d+/i.test(text);
 }

@@ -14,6 +14,7 @@ import { getModels } from '@mariozechner/pi-ai';
 import { PiAiAdapter, ProviderAuthManager, type LlmPromptInput, type LlmToolCallEvent } from '@orchestrace/provider';
 import {
   createAgentToolset,
+  createFileReadCache,
   listAgentTools,
   type AgentToolPhase,
   type SubAgentRequest,
@@ -58,7 +59,9 @@ import type {
   SessionChatContentPart,
   SessionChatMessage,
   SessionChatThread,
+  SessionCheckpointInfo,
   SessionLlmStatus,
+  SessionRecoveryInfo,
   UiDagEvent,
   UiPreferences,
   UiServerOptions,
@@ -71,7 +74,7 @@ import type {
 import { WorkspaceManager } from './workspace-manager.js';
 import { FileEventStore } from '@orchestrace/store';
 import { materializeSession as materializeFromEvents } from '@orchestrace/store';
-import type { SessionEventInput } from '@orchestrace/store';
+import type { SessionCheckpointPayload, SessionEventInput, SessionRecoveryDetectedPayload } from '@orchestrace/store';
 import { ObserverDaemon, SessionObserver, BackendLogger, LogWatcher } from './observer/index.js';
 
 const GITHUB_PROVIDER_ID = 'github';
@@ -99,16 +102,21 @@ const SESSION_EVENT_HISTORY_LIMIT = 2_000;
 const TOOL_EVENT_PREVIEW_MAX_CHARS = parsePositiveSetting(process.env.ORCHESTRACE_TOOL_EVENT_PREVIEW_MAX_CHARS) ?? 200_000;
 const PHASE_PROGRESS_PLAN_WEIGHT_DEFAULT = 30;
 const PHASE_PROGRESS_IMPLEMENTATION_WEIGHT_DEFAULT = 70;
-const DEFAULT_PLANNING_BUDGET_PERCENT = 25;
-const DEFAULT_MAX_TOOL_CALLS_WITHOUT_WRITE = 12;
-const FILE_WRITE_TOOL_NAMES = new Set(['write_file', 'write_files', 'edit_file', 'edit_files']);
+const STARTUP_RECOVERY_MODE_ENV = 'ORCHESTRACE_RECOVERY_MODE';
+const SESSION_CHECKPOINT_FILE = 'checkpoint.json';
+const CHECKPOINT_STASH_PREFIX = 'orchestrace-checkpoint';
 const execFileAsync = promisify(execFile);
 
-interface SessionPlanningGuardState {
-  planningToolCalls: number;
-  consecutiveNonWriteToolCalls: number;
-  forcedImplementation: boolean;
-}
+type SessionCheckpointMetadata = {
+  sessionId: string;
+  workspacePath: string;
+  state: 'idle' | 'active' | 'completed' | 'failed' | 'cancelled' | 'interrupted';
+  createdAt: string;
+  updatedAt: string;
+  stashRef?: string;
+  stashMessage?: string;
+  checkpointName?: string;
+};
 
 type NativeGitWorktree = {
   path: string;
@@ -170,6 +178,7 @@ function createInheritedSubAgentToolset(
     resolveGithubToken: () => Promise<string | undefined>;
     sharedContextStore?: import('@orchestrace/context').SharedContextStore;
     agentId?: string;
+    fileReadCache?: ReturnType<typeof createFileReadCache>;
   },
 ) {
   return createAgentToolset({
@@ -186,6 +195,7 @@ function createInheritedSubAgentToolset(
     batchMinConcurrency: options?.batchMinConcurrency,
     resolveGithubToken: options.resolveGithubToken,
     sharedContextStore: options.sharedContextStore,
+    fileReadCache: options.fileReadCache,
     agentId: options.agentId,
   });
 }
@@ -225,6 +235,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
   const sessionChats = new Map<string, SessionChatThread>();
   const sessionTodos = new Map<string, AgentTodoItem[]>();
   const sessionSharedContextStores = new Map<string, InMemorySharedContextStore>();
+  const sessionFileReadCaches = new Map<string, ReturnType<typeof createFileReadCache>>();
   const sessionContextEngines = new Map<string, ContextEngine>();
   const sessionContextStates = new Map<string, SessionContextState>();
   const pendingSubagentNodeIdsBySession = new Map<string, Map<string, string[]>>();
@@ -279,12 +290,16 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           provider: c.provider,
           model: c.model,
           autoApprove: c.autoApprove,
+          quickStartMode: c.quickStartMode,
+          quickStartMaxPreDelegationToolCalls: c.quickStartMaxPreDelegationToolCalls,
           executionContext: c.executionContext ?? 'workspace',
           selectedWorktreePath: c.selectedWorktreePath,
           useWorktree: c.useWorktree ?? c.executionContext === 'git-worktree',
           adaptiveConcurrency: c.adaptiveConcurrency,
           batchConcurrency: c.batchConcurrency,
           batchMinConcurrency: c.batchMinConcurrency,
+          enableTrivialTaskGate: c.enableTrivialTaskGate ?? resolveTrivialTaskGateDefault(),
+          trivialTaskMaxPromptLength: c.trivialTaskMaxPromptLength ?? resolveTrivialTaskMaxPromptLengthDefault(),
           worktreePath: c.worktreePath,
           worktreeBranch: c.worktreeBranch,
           creationReason: c.creationReason,
@@ -299,6 +314,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           agentGraph: materialized.agentGraph,
           error: materialized.error,
           output: materialized.output,
+          lastCheckpoint: materialized.lastCheckpoint as SessionCheckpointInfo | undefined,
+          lastRecovery: materialized.lastRecovery as SessionRecoveryInfo | undefined,
           controller: new AbortController(),
         };
 
@@ -388,6 +405,20 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                   session.agentGraph = (event.payload as { graph: SessionAgentGraphNode[] }).graph;
                   break;
                 }
+                case 'session:checkpoint': {
+                  session.lastCheckpoint = {
+                    ...(event.payload as SessionCheckpointPayload),
+                    time: event.time,
+                  };
+                  break;
+                }
+                case 'session:recovery-detected': {
+                  session.lastRecovery = {
+                    ...(event.payload as SessionRecoveryDetectedPayload),
+                    time: event.time,
+                  };
+                  break;
+                }
                 case 'session:chat-message': {
                   const msg = (event.payload as { message: SessionChatMessage }).message;
                   const thread = sessionChats.get(sessionId);
@@ -408,13 +439,32 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
               uiStatePersistence.schedule();
             });
           } else {
-            // Runner is dead — mark session as failed
+            // Runner is dead — mark session as failed with recovery guidance
             const failedAt = now();
+            const recoveryGit = await inspectGitRecoveryState(session.worktreePath ?? session.workspacePath);
+            session.lastRecovery = {
+              reason: 'restore-dead-runner',
+              runnerPid: meta?.pid,
+              git: recoveryGit,
+              time: failedAt,
+            };
+            const recoveryHint = recoveryGit.dirty
+              ? 'Uncommitted changes were detected; review git diff/status to recover work from the crash.'
+              : 'No uncommitted changes were detected; resume from the latest checkpoint commit.';
             session.status = 'failed';
-            session.error = 'Session interrupted because the runner process exited.';
+            session.error = `Session interrupted because the runner process exited. ${recoveryHint}`;
             session.updatedAt = failedAt;
             session.llmStatus = createLlmStatus('failed', failedAt, {
               detail: session.error,
+            });
+            emitSessionEvent(sessionId, {
+              time: failedAt,
+              type: 'session:recovery-detected',
+              payload: {
+                reason: 'restore-dead-runner',
+                runnerPid: meta?.pid,
+                git: recoveryGit,
+              },
             });
             emitSessionEvent(sessionId, { time: failedAt, type: 'session:error-change', payload: { error: session.error } });
             emitSessionEvent(sessionId, { time: failedAt, type: 'session:llm-status-change', payload: { llmStatus: session.llmStatus } });
@@ -482,6 +532,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
               provider: session.provider,
               model: session.model,
               autoApprove: session.autoApprove,
+              quickStartMode: session.quickStartMode,
+              quickStartMaxPreDelegationToolCalls: session.quickStartMaxPreDelegationToolCalls,
               executionContext: session.executionContext,
               selectedWorktreePath: session.selectedWorktreePath,
               useWorktree: session.useWorktree,
@@ -612,6 +664,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
   }
   uiPreferences = normalizeUiPreferences(restoredUiPreferences, resolveUiPreferencesDefaults());
 
+  await detectStartupPartialChangesAndRecover();
   registerRestoredWorkspacePathLocks();
 
   for (const [sessionId, restoredSession] of workSessions.entries()) {
@@ -725,12 +778,135 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
 
   function registerRestoredWorkspacePathLocks(): void {
     for (const [sessionId, session] of workSessions.entries()) {
+      // Only lock paths for sessions that are still running — completed/failed/cancelled
+      // sessions no longer need to hold their workspace path lock.
+      if (session.status === 'completed' || session.status === 'failed' || session.status === 'cancelled') {
+        continue;
+      }
       const acquired = acquireWorkspacePathLock(session.workspacePath, sessionId);
       if (!acquired.ok) {
         console.warn(
           `[ui-server] Duplicate restored workspace path lock detected for session ${sessionId}; path already owned by ${acquired.ownerSessionId}.`,
         );
       }
+    }
+  }
+
+  async function readSessionCheckpointMetadata(sessionId: string): Promise<SessionCheckpointMetadata | undefined> {
+    try {
+      const checkpointPath = join(workspaceManager.getRootDir(), '.orchestrace', 'sessions', sessionId, SESSION_CHECKPOINT_FILE);
+      const raw = await readFile(checkpointPath, 'utf8');
+      const parsed = JSON.parse(raw) as Partial<SessionCheckpointMetadata>;
+      if (!parsed || typeof parsed !== 'object') return undefined;
+      if (typeof parsed.sessionId !== 'string' || typeof parsed.workspacePath !== 'string' || typeof parsed.state !== 'string') {
+        return undefined;
+      }
+      return parsed as SessionCheckpointMetadata;
+    } catch {
+      return undefined;
+    }
+  }
+
+  async function getWorkspaceDirtySummary(workspacePath: string): Promise<{
+    hasUncommittedChanges: boolean;
+    hasStagedChanges: boolean;
+    hasUntrackedChanges: boolean;
+    dirtySummary: string[];
+  }> {
+    const [unstaged, staged, untracked] = await Promise.all([
+      gitExec(workspacePath, ['diff', '--name-status']).catch(() => ''),
+      gitExec(workspacePath, ['diff', '--cached', '--name-status']).catch(() => ''),
+      gitExec(workspacePath, ['ls-files', '--others', '--exclude-standard']).catch(() => ''),
+    ]);
+    const unstagedLines = unstaged.split('\n').map((line) => line.trim()).filter(Boolean);
+    const stagedLines = staged.split('\n').map((line) => line.trim()).filter(Boolean);
+    const untrackedLines = untracked.split('\n').map((line) => line.trim()).filter(Boolean);
+    return {
+      hasUncommittedChanges: unstagedLines.length > 0,
+      hasStagedChanges: stagedLines.length > 0,
+      hasUntrackedChanges: untrackedLines.length > 0,
+      dirtySummary: [...unstagedLines, ...stagedLines, ...untrackedLines.map((line) => `?? ${line}`)].slice(0, 200),
+    };
+  }
+
+  async function maybeRollbackFromCheckpoint(workspacePath: string, checkpoint?: SessionCheckpointMetadata): Promise<boolean> {
+    const recoveryMode = (process.env[STARTUP_RECOVERY_MODE_ENV] ?? 'flag').trim().toLowerCase();
+    if (recoveryMode !== 'rollback') {
+      return false;
+    }
+    if (!checkpoint?.stashRef) {
+      return false;
+    }
+    if (!checkpoint.stashMessage?.includes(CHECKPOINT_STASH_PREFIX)) {
+      return false;
+    }
+
+    try {
+      await gitExec(workspacePath, ['stash', 'apply', '--index', checkpoint.stashRef]);
+      return true;
+    } catch (error) {
+      console.warn(`[ui-server] Failed startup rollback from checkpoint ${checkpoint.stashRef}: ${toErrorMessage(error)}`);
+      return false;
+    }
+  }
+
+  async function detectStartupPartialChangesAndRecover(): Promise<void> {
+    for (const [sessionId, session] of workSessions.entries()) {
+      const interrupted =
+        session.status === 'failed'
+        && typeof session.error === 'string'
+        && session.error.toLowerCase().includes('runner process exited');
+      if (!interrupted) {
+        continue;
+      }
+
+      const checkpoint = await readSessionCheckpointMetadata(sessionId);
+      const checkpointSuggestsRecovery = checkpoint && (checkpoint.state === 'active' || checkpoint.state === 'interrupted');
+
+      const rolledBack = checkpointSuggestsRecovery
+        ? await maybeRollbackFromCheckpoint(session.workspacePath, checkpoint)
+        : false;
+      const dirty = await getWorkspaceDirtySummary(session.workspacePath).catch((error) => {
+        console.warn(`[ui-server] Startup recovery probe failed for session ${sessionId}: ${toErrorMessage(error)}`);
+        return {
+          hasUncommittedChanges: false,
+          hasStagedChanges: false,
+          hasUntrackedChanges: false,
+          dirtySummary: [] as string[],
+        };
+      });
+
+      const hasDirty = dirty.hasUncommittedChanges || dirty.hasStagedChanges || dirty.hasUntrackedChanges;
+      if (!hasDirty && !rolledBack) {
+        continue;
+      }
+
+      const details = [
+        rolledBack ? 'Applied rollback from checkpoint stash.' : 'Detected partial local changes from prior interrupted session.',
+        ...dirty.dirtySummary.slice(0, 10),
+      ].join('\n');
+
+      const failureType = rolledBack ? 'startup-recovery-rollback' : 'startup-recovery-dirty';
+      const recoveredAt = now();
+      const error = rolledBack
+        ? `Recovered interrupted session from checkpoint (${checkpoint?.stashRef ?? 'unknown stash'}).`
+        : `Startup recovery detected uncommitted changes from interrupted session.\n${details}`;
+
+      session.error = error;
+      session.updatedAt = recoveredAt;
+      session.llmStatus = createLlmStatus('failed', recoveredAt, {
+        detail: error,
+        failureType,
+      });
+      session.output = {
+        ...session.output,
+        failureType,
+      };
+
+      emitSessionEvent(sessionId, { time: recoveredAt, type: 'session:error-change', payload: { error } });
+      emitSessionEvent(sessionId, { time: recoveredAt, type: 'session:llm-status-change', payload: { llmStatus: session.llmStatus } });
+      emitSessionEvent(sessionId, { time: recoveredAt, type: 'session:output-set', payload: { output: session.output } });
+      console.log(`[ui-server] Startup recovery ${rolledBack ? 'rollback' : 'dirty-flag'} for session ${sessionId}.`);
     }
   }
 
@@ -814,12 +990,16 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     provider: string;
     model: string;
     autoApprove: boolean;
+    quickStartMode?: boolean;
+    quickStartMaxPreDelegationToolCalls?: number;
     executionContext?: ExecutionContext;
     selectedWorktreePath?: string;
     useWorktree?: boolean;
     adaptiveConcurrency?: boolean;
     batchConcurrency?: number;
     batchMinConcurrency?: number;
+    enableTrivialTaskGate?: boolean;
+    trivialTaskMaxPromptLength?: number;
     creationReason?: SessionCreationReason;
     sourceSessionId?: string;
     source?: 'user' | 'observer';
@@ -886,6 +1066,17 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       batchConcurrency,
       normalizePositiveSetting(request.batchMinConcurrency, uiPreferences.batchMinConcurrency),
     );
+    const quickStartMode = request.quickStartMode
+      ?? (parseBooleanSetting(process.env.ORCHESTRACE_QUICK_START_MODE) ?? false);
+    const quickStartMaxPreDelegationToolCalls = normalizePositiveSetting(
+      request.quickStartMaxPreDelegationToolCalls,
+      parsePositiveSetting(process.env.ORCHESTRACE_QUICK_START_MAX_PRE_DELEGATION_TOOL_CALLS) ?? 3,
+    );
+    const enableTrivialTaskGate = request.enableTrivialTaskGate ?? uiPreferences.enableTrivialTaskGate;
+    const trivialTaskMaxPromptLength = normalizePositiveSetting(
+      request.trivialTaskMaxPromptLength,
+      uiPreferences.trivialTaskMaxPromptLength,
+    );
 
     let workspacePath = workspace.path;
     let executionContext: ExecutionContext = 'workspace';
@@ -923,7 +1114,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     // so a new session is never blocked by an existing one sharing the same path.
     let autoCreatedWorktreeCleanup: (() => Promise<void>) | undefined;
     let lockResult = acquireWorkspacePathLock(workspacePath, id);
-    if (!lockResult.ok && executionContext === 'git-worktree') {
+    if (!lockResult.ok && (executionContext === 'git-worktree' || isObserverSource)) {
       try {
         const sessionBranch = `orchestrace/session-${id}`;
         const sessionWorktreePath = join(workspace.path, '.worktrees', `session-${id}`);
@@ -956,6 +1147,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     }
 
     const duplicateSession = [...workSessions.values()].find((candidate) => {
+      // Only block on running sessions — completed/failed/cancelled sessions may share the same path.
+      if (candidate.status !== 'running') return false;
       const candidatePath = normalizeWorkspacePathForLock(candidate.workspacePath);
       const requestedPath = normalizeWorkspacePathForLock(workspacePath);
       return Boolean(candidatePath && requestedPath && candidatePath === requestedPath);
@@ -984,12 +1177,16 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       provider: request.provider,
       model: request.model,
       autoApprove: request.autoApprove,
+      quickStartMode,
+      quickStartMaxPreDelegationToolCalls,
       executionContext,
       selectedWorktreePath,
       useWorktree: executionContext === 'git-worktree',
       adaptiveConcurrency,
       batchConcurrency,
       batchMinConcurrency,
+      enableTrivialTaskGate,
+      trivialTaskMaxPromptLength,
       worktreePath: selectedWorktreePath,
       worktreeBranch: selectedWorktreeBranch,
       creationReason: request.creationReason ?? 'start',
@@ -1037,6 +1234,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           provider: request.provider,
           model: request.model,
           autoApprove: request.autoApprove,
+          quickStartMode,
+          quickStartMaxPreDelegationToolCalls,
           executionContext,
           selectedWorktreePath,
           useWorktree: executionContext === 'git-worktree',
@@ -1125,6 +1324,10 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
               obs.stop();
               sessionObservers.delete(id);
             }
+            // Release the workspace path lock so new sessions can use the same path.
+            releaseWorkspacePathLock(session.workspacePath, id);
+            // Notify the observer daemon: close the loop on findings (auto-resolve if PR opened)
+            observerDaemon.onFixSessionCompleted(id, newStatus, session.output?.text);
             broadcastWorkStream(workStreamClients, id, newStatus === 'completed' ? 'end' : 'error', {
               id,
               status: session.status,
@@ -1217,6 +1420,22 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           break;
         }
 
+        case 'session:checkpoint': {
+          session.lastCheckpoint = {
+            ...(event.payload as SessionCheckpointPayload),
+            time: event.time,
+          };
+          break;
+        }
+
+        case 'session:recovery-detected': {
+          session.lastRecovery = {
+            ...(event.payload as SessionRecoveryDetectedPayload),
+            time: event.time,
+          };
+          break;
+        }
+
         case 'session:chat-message': {
           const msg = (event.payload as { message: SessionChatMessage }).message;
           const thread = sessionChats.get(id);
@@ -1286,15 +1505,34 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       eventStore.triggerPoll(id);
 
       // Give event store watcher time to deliver final events
-      setTimeout(() => {
+      setTimeout(async () => {
         if (session.status === 'running') {
-          // Runner exited without writing terminal event — mark as failed
+          // Runner exited without writing terminal event — mark as failed with recovery guidance
           const t = now();
+          const recoveryGit = await inspectGitRecoveryState(session.worktreePath ?? session.workspacePath);
+          session.lastRecovery = {
+            reason: 'runner-exit-fallback',
+            exitCode: code,
+            git: recoveryGit,
+            time: t,
+          };
+          const recoveryHint = recoveryGit.dirty
+            ? 'Uncommitted changes were detected; review git diff/status to recover work from the crash.'
+            : 'No uncommitted changes were detected; resume from the latest checkpoint commit.';
           session.status = 'failed';
-          session.error = `Runner process exited unexpectedly (code ${code}).`;
+          session.error = `Runner process exited unexpectedly (code ${code}). ${recoveryHint}`;
           session.llmStatus = createLlmStatus('failed', t, { detail: session.error });
           session.updatedAt = t;
 
+          emitSessionEvent(id, {
+            time: t,
+            type: 'session:recovery-detected',
+            payload: {
+              reason: 'runner-exit-fallback',
+              exitCode: code,
+              git: recoveryGit,
+            },
+          });
           emitSessionEvent(id, { time: t, type: 'session:error-change', payload: { error: session.error } });
           emitSessionEvent(id, { time: t, type: 'session:llm-status-change', payload: { llmStatus: session.llmStatus } });
           emitSessionEvent(id, { time: t, type: 'session:status-change', payload: { status: 'failed' } });
@@ -1860,6 +2098,12 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         }
 
         const autoApprove = Boolean(body.autoApprove);
+        const quickStartMode = parseBooleanSetting(body.quickStartMode)
+          ?? parseBooleanSetting(body.quickStart)
+          ?? parseBooleanSetting(body.enableQuickStart);
+        const quickStartMaxPreDelegationToolCalls = parsePositiveSetting(body.quickStartMaxPreDelegationToolCalls)
+          ?? parsePositiveSetting(body.quickStartToolCallLimit)
+          ?? parsePositiveSetting(body.maxPreDelegationToolCalls);
         const executionContext = normalizeExecutionContext(body.executionContext)
           ?? normalizeExecutionContext(body.mode)
           ?? normalizeExecutionContext(body.executionMode);
@@ -1875,6 +2119,10 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           ?? parsePositiveSetting(body.toolBatchConcurrency);
         const batchMinConcurrency = parsePositiveSetting(body.batchMinConcurrency)
           ?? parsePositiveSetting(body.toolBatchMinConcurrency);
+        const enableTrivialTaskGate = parseBooleanSetting(body.enableTrivialTaskGate)
+          ?? parseBooleanSetting(body.trivialTaskGateEnabled);
+        const trivialTaskMaxPromptLength = parsePositiveSetting(body.trivialTaskMaxPromptLength)
+          ?? parsePositiveSetting(body.trivialPromptMaxLength);
         const result = await startWorkSession({
           workspaceId,
           prompt,
@@ -1882,12 +2130,16 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           provider,
           model: modelResolution.model,
           autoApprove,
+          quickStartMode,
+          quickStartMaxPreDelegationToolCalls,
           executionContext,
           selectedWorktreePath,
           useWorktree,
           adaptiveConcurrency,
           batchConcurrency,
           batchMinConcurrency,
+          enableTrivialTaskGate,
+          trivialTaskMaxPromptLength,
           creationReason: 'start',
         });
 
@@ -1943,12 +2195,16 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           provider: sourceSession.provider,
           model: sourceSession.model,
           autoApprove: sourceSession.autoApprove,
+          quickStartMode: sourceSession.quickStartMode,
+          quickStartMaxPreDelegationToolCalls: sourceSession.quickStartMaxPreDelegationToolCalls,
           executionContext: sourceSession.executionContext,
           selectedWorktreePath: sourceSession.selectedWorktreePath,
           useWorktree: sourceSession.useWorktree,
           adaptiveConcurrency: sourceSession.adaptiveConcurrency,
           batchConcurrency: sourceSession.batchConcurrency,
           batchMinConcurrency: sourceSession.batchMinConcurrency,
+          enableTrivialTaskGate: sourceSession.enableTrivialTaskGate,
+          trivialTaskMaxPromptLength: sourceSession.trivialTaskMaxPromptLength,
           creationReason: 'retry',
           sourceSessionId: id,
         });
@@ -2488,6 +2744,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
             const sharedContextStore = sessionSharedContextStores.get(session.id)
               ?? new InMemorySharedContextStore();
             sessionSharedContextStores.set(session.id, sharedContextStore);
+            const fileReadCache = sessionFileReadCaches.get(session.id) ?? createFileReadCache();
+            sessionFileReadCaches.set(session.id, fileReadCache);
             const contextEngine = sessionContextEngines.get(session.id)
               ?? createSessionContextEngine(session.provider, session.model);
             sessionContextEngines.set(session.id, contextEngine);
@@ -2517,6 +2775,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                 batchMinConcurrency: session.batchMinConcurrency,
                 resolveGithubToken: () => githubAuthManager.resolveApiKey(GITHUB_PROVIDER_ID),
                 sharedContextStore: sessionSharedContextStores.get(session.id),
+                fileReadCache,
                 agentId: `chat::${session.id}`,
                 runSubAgent: async (runSubAgentRequest, _signal) => {
                   const subProvider = runSubAgentRequest.provider ?? session.provider;
@@ -2552,6 +2811,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                     batchMinConcurrency: session.batchMinConcurrency,
                     resolveGithubToken: () => githubAuthManager.resolveApiKey(GITHUB_PROVIDER_ID),
                     sharedContextStore: sessionSharedContextStores.get(session.id),
+                    fileReadCache,
                     agentId: `subagent::${subAgentTaskId}`,
                   });
                   try {
@@ -2888,6 +3148,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           const sharedContextStore = sessionSharedContextStores.get(session.id)
             ?? new InMemorySharedContextStore();
           sessionSharedContextStores.set(session.id, sharedContextStore);
+          const fileReadCache = sessionFileReadCaches.get(session.id) ?? createFileReadCache();
+          sessionFileReadCaches.set(session.id, fileReadCache);
           const contextEngine = sessionContextEngines.get(session.id)
             ?? createSessionContextEngine(session.provider, session.model);
           sessionContextEngines.set(session.id, contextEngine);
@@ -2917,6 +3179,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
               batchMinConcurrency: session.batchMinConcurrency,
               resolveGithubToken: () => githubAuthManager.resolveApiKey(GITHUB_PROVIDER_ID),
               sharedContextStore: sessionSharedContextStores.get(session.id),
+              fileReadCache,
               agentId: `chat::${session.id}`,
               runSubAgent: async (runSubAgentRequest, _signal) => {
                 const subProvider = runSubAgentRequest.provider ?? session.provider;
@@ -2952,6 +3215,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                   batchMinConcurrency: session.batchMinConcurrency,
                   resolveGithubToken: () => githubAuthManager.resolveApiKey(GITHUB_PROVIDER_ID),
                   sharedContextStore: sessionSharedContextStores.get(session.id),
+                  fileReadCache,
                   agentId: `subagent::${subAgentTaskId}`,
                 });
                 try {
@@ -3164,6 +3428,12 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       if (req.method === 'POST' && pathname === '/api/observer/trigger') {
         const result = await observerDaemon.triggerAnalysis();
         sendJson(res, 200, result);
+        return;
+      }
+
+      if (req.method === 'POST' && pathname === '/api/observer/spawn-all') {
+        const spawned = await observerDaemon.spawnAll();
+        sendJson(res, 200, { spawned });
         return;
       }
 
@@ -3670,12 +3940,16 @@ function toPersistedSession(session: WorkSession): PersistedWorkSession {
     provider: session.provider,
     model: session.model,
     autoApprove: session.autoApprove,
+    quickStartMode: session.quickStartMode,
+    quickStartMaxPreDelegationToolCalls: session.quickStartMaxPreDelegationToolCalls,
     executionContext: session.executionContext,
     selectedWorktreePath: session.selectedWorktreePath,
     useWorktree: session.useWorktree,
     adaptiveConcurrency: session.adaptiveConcurrency,
     batchConcurrency: session.batchConcurrency,
     batchMinConcurrency: session.batchMinConcurrency,
+    enableTrivialTaskGate: session.enableTrivialTaskGate,
+    trivialTaskMaxPromptLength: session.trivialTaskMaxPromptLength,
     worktreePath: session.worktreePath,
     worktreeBranch: session.worktreeBranch,
     creationReason: session.creationReason,
@@ -3715,6 +3989,12 @@ function hydratePersistedSession(session: PersistedWorkSession): WorkSession {
   return {
     ...session,
     promptParts: promptParts.length > 0 ? promptParts : undefined,
+    quickStartMode: parseBooleanSetting(session.quickStartMode)
+      ?? (parseBooleanSetting(process.env.ORCHESTRACE_QUICK_START_MODE) ?? false),
+    quickStartMaxPreDelegationToolCalls: normalizePositiveSetting(
+      session.quickStartMaxPreDelegationToolCalls,
+      parsePositiveSetting(process.env.ORCHESTRACE_QUICK_START_MAX_PRE_DELEGATION_TOOL_CALLS) ?? 3,
+    ),
     executionContext: normalizeExecutionContext(session.executionContext)
       ?? (Boolean(session.useWorktree) ? 'git-worktree' : 'workspace'),
     selectedWorktreePath: asString(session.selectedWorktreePath)
@@ -3727,6 +4007,11 @@ function hydratePersistedSession(session: PersistedWorkSession): WorkSession {
     batchMinConcurrency: Math.min(
       normalizePositiveSetting(session.batchConcurrency, resolveBatchConcurrencyDefault()),
       normalizePositiveSetting(session.batchMinConcurrency, resolveBatchMinConcurrencyDefault()),
+    ),
+    enableTrivialTaskGate: parseBooleanSetting(session.enableTrivialTaskGate) ?? resolveTrivialTaskGateDefault(),
+    trivialTaskMaxPromptLength: normalizePositiveSetting(
+      session.trivialTaskMaxPromptLength,
+      resolveTrivialTaskMaxPromptLengthDefault(),
     ),
     worktreePath: asString(session.worktreePath) || undefined,
     worktreeBranch: asString(session.worktreeBranch) || undefined,
@@ -4397,6 +4682,8 @@ function resolveUiPreferencesDefaults(): UiPreferences {
     adaptiveConcurrency: resolveAdaptiveConcurrencyDefault(),
     batchConcurrency,
     batchMinConcurrency,
+    enableTrivialTaskGate: resolveTrivialTaskGateDefault(),
+    trivialTaskMaxPromptLength: resolveTrivialTaskMaxPromptLengthDefault(),
   };
 }
 
@@ -4428,6 +4715,11 @@ function normalizeUiPreferences(value: unknown, fallback: UiPreferences): UiPref
     adaptiveConcurrency: parseBooleanSetting(value.adaptiveConcurrency) ?? fallback.adaptiveConcurrency,
     batchConcurrency,
     batchMinConcurrency,
+    enableTrivialTaskGate: parseBooleanSetting(value.enableTrivialTaskGate) ?? fallback.enableTrivialTaskGate,
+    trivialTaskMaxPromptLength: normalizePositiveSetting(
+      value.trivialTaskMaxPromptLength,
+      fallback.trivialTaskMaxPromptLength,
+    ),
   };
 }
 
@@ -4480,6 +4772,18 @@ function resolveBatchMinConcurrencyDefault(): number {
   return parsePositiveInt(process.env.ORCHESTRACE_UI_BATCH_MIN_CONCURRENCY)
     ?? parsePositiveInt(process.env.ORCHESTRACE_BATCH_MIN_CONCURRENCY)
     ?? DEFAULT_UI_BATCH_MIN_CONCURRENCY;
+}
+
+function resolveTrivialTaskGateDefault(): boolean {
+  const raw = process.env.ORCHESTRACE_UI_TRIVIAL_TASK_GATE_ENABLED
+    ?? process.env.ORCHESTRACE_TRIVIAL_TASK_GATE_ENABLED;
+  return parseBooleanSetting(raw) ?? false;
+}
+
+function resolveTrivialTaskMaxPromptLengthDefault(): number {
+  return parsePositiveInt(process.env.ORCHESTRACE_UI_TRIVIAL_TASK_MAX_PROMPT_LENGTH)
+    ?? parsePositiveInt(process.env.ORCHESTRACE_TRIVIAL_TASK_MAX_PROMPT_LENGTH)
+    ?? 120;
 }
 
 function normalizeLlmSessionState(raw: unknown): LlmSessionState {
@@ -5965,12 +6269,16 @@ function serializeWorkSession(session: WorkSession, todos: AgentTodoItem[] = [])
     provider: session.provider,
     model: session.model,
     autoApprove: session.autoApprove,
+    quickStartMode: session.quickStartMode,
+    quickStartMaxPreDelegationToolCalls: session.quickStartMaxPreDelegationToolCalls,
     executionContext: session.executionContext,
     selectedWorktreePath: session.selectedWorktreePath,
     useWorktree: session.useWorktree,
     adaptiveConcurrency: session.adaptiveConcurrency,
     batchConcurrency: session.batchConcurrency,
     batchMinConcurrency: session.batchMinConcurrency,
+    enableTrivialTaskGate: session.enableTrivialTaskGate,
+    trivialTaskMaxPromptLength: session.trivialTaskMaxPromptLength,
     worktreePath: session.worktreePath,
     worktreeBranch: session.worktreeBranch,
     creationReason: session.creationReason,
@@ -5987,6 +6295,8 @@ function serializeWorkSession(session: WorkSession, todos: AgentTodoItem[] = [])
     progress,
     error: session.error,
     output: session.output,
+    lastCheckpoint: session.lastCheckpoint,
+    lastRecovery: session.lastRecovery,
   };
 }
 
@@ -6113,6 +6423,59 @@ async function gitExec(repoRoot: string, args: string[]): Promise<string> {
     maxBuffer: 1024 * 1024,
   });
   return stdout;
+}
+
+async function inspectGitRecoveryState(workspacePath: string): Promise<SessionRecoveryInfo['git']> {
+  const fallback: SessionRecoveryInfo['git'] = {
+    cwd: workspacePath,
+    dirty: false,
+  };
+
+  try {
+    const statusRaw = await gitExec(workspacePath, ['status', '--porcelain', '--branch']);
+    const lines = statusRaw.split('\n').map((line) => line.trimEnd()).filter(Boolean);
+    const branchLine = lines.find((line) => line.startsWith('## '));
+    const changeLines = lines.filter((line) => !line.startsWith('## '));
+    const changedFiles = changeLines
+      .map((line) => line.slice(3).trim())
+      .filter(Boolean)
+      .slice(0, 200);
+
+    const branchInfo = parseGitBranchLine(branchLine);
+    let diffSummary: string | undefined;
+    if (changeLines.length > 0) {
+      try {
+        diffSummary = (await gitExec(workspacePath, ['diff', '--stat'])).trim() || undefined;
+      } catch {
+        diffSummary = undefined;
+      }
+    }
+
+    return {
+      cwd: workspacePath,
+      branch: branchInfo.branch,
+      head: branchInfo.head,
+      detached: branchInfo.detached,
+      dirty: changeLines.length > 0,
+      changedFiles: changedFiles.length > 0 ? changedFiles : undefined,
+      diffSummary,
+    };
+  } catch {
+    return fallback;
+  }
+}
+
+function parseGitBranchLine(line: string | undefined): { branch?: string; head?: string; detached?: boolean } {
+  if (!line) return {};
+  const payload = line.replace(/^##\s*/, '').trim();
+  if (!payload) return {};
+  if (payload.startsWith('HEAD ')) {
+    return { detached: true, head: payload.slice('HEAD '.length).trim() || undefined };
+  }
+
+  const dotIdx = payload.indexOf('...');
+  const branch = (dotIdx >= 0 ? payload.slice(0, dotIdx) : payload).trim();
+  return { branch: branch || undefined, detached: false };
 }
 
 async function listNativeGitWorktrees(repoRoot: string): Promise<NativeGitWorktree[]> {
@@ -6689,7 +7052,14 @@ function buildContextExecutionStateSummary(session: WorkSession, todos: AgentTod
   return lines.join('\n');
 }
 
-export function buildSessionSystemPrompt(session: WorkSession, phase: SessionPromptPhase): string {
+function buildSessionSystemPrompt(session: WorkSession, phase: SessionPromptPhase): string {
+  const quickStartMode = session.quickStartMode
+    ?? (parseBooleanSetting(process.env.ORCHESTRACE_QUICK_START_MODE) ?? false);
+  const quickStartMaxPreDelegationToolCalls = normalizePositiveSetting(
+    session.quickStartMaxPreDelegationToolCalls,
+    parsePositiveSetting(process.env.ORCHESTRACE_QUICK_START_MAX_PRE_DELEGATION_TOOL_CALLS) ?? 3,
+  );
+
   const phaseRules =
     phase === 'chat'
       ? [
@@ -6725,16 +7095,22 @@ export function buildSessionSystemPrompt(session: WorkSession, phase: SessionPro
             'Planning must produce and maintain todo_set and agent_graph_set state.',
             'todo_set items must include numeric weight values and the total todo weight must sum to 100.',
             'agent_graph_set nodes must include numeric weight values and the total node weight must sum to 100.',
-            'For non-simple planning tasks, use subagent_spawn or subagent_spawn_batch for focused parallel research and delegate only relevant context.',
-            'For simple single-file tasks, skip sub-agent delegation and produce a direct implementation plan.',
-            'For independent nodes, use subagent_spawn_batch so work runs in parallel when delegation is needed.',
-            'Planning is budgeted: keep planning activity under 25% of session tool-call budget before transitioning to implementation.',
-            'If session guard thresholds are exceeded (e.g., too many non-write tool calls), immediately transition to implementation mode.',
+            'Planning must use subagent_spawn or subagent_spawn_batch for focused parallel research and delegate only relevant context.',
+            'Quick-start mode for well-scoped tasks: keep parent pre-delegation orientation to at most 3-4 calls and delegate within the first 2-3 calls whenever possible.',
+            'Keep parent orientation lightweight and push detailed file reading/search into sub-agent scopes.',
+            'For independent nodes, use subagent_spawn_batch so work runs in parallel.',
             'For multi-file inspection, use read_files with concurrency to reduce latency; avoid repeated single-file reads when possible.',
             'Pass nodeId for each sub-agent request so graph status stays current.',
             'Keep todo and dependency graph state synchronized.',
             'Do not ask the user to continue after partial progress; continue autonomously until completion or a concrete blocker is reached.',
             'For transient tool or sub-agent failures (timeouts, aborts, rate limits), retry automatically before surfacing a blocker.',
+            ...(quickStartMode
+              ? [
+                `Quick-start mode is enabled: delegate focused discovery to sub-agents within the first 2-3 tool calls and no later than ${quickStartMaxPreDelegationToolCalls} successful pre-delegation tool call(s).`,
+                'Limit parent orientation to 3-4 initial tool calls (e.g., root listing, manifest read, git status) before delegating.',
+                'Push detailed file reads/searches into sub-agent scopes unless a direct blocker requires immediate local inspection.',
+              ]
+              : []),
           ]
         : [
             'Execute approved work with minimal, scoped edits and verify outcomes.',
