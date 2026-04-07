@@ -12,7 +12,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { execFile } from 'node:child_process';
+import { execFile, type ExecFileException } from 'node:child_process';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -24,7 +24,7 @@ import {
   extractSingleCommandFromPrompt,
   resolveTrivialTaskGateConfig,
 } from '@orchestrace/core';
-import type { DagEvent, TaskGraph } from '@orchestrace/core';
+import type { DagEvent, TaskGraph, TaskOutput, TaskRouteCategory } from '@orchestrace/core';
 import { PiAiAdapter, ProviderAuthManager, type LlmToolCall } from '@orchestrace/provider';
 import {
   DEFAULT_AGENT_TOOL_POLICY_VERSION,
@@ -51,6 +51,7 @@ import {
   shouldResetThinkingCircuitBreakerOnEvent,
   updateThinkingCircuitBreaker,
 } from './thinking-circuit-breaker.js';
+import { extractShellCommand, resolveTaskRoute } from './task-routing.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -163,9 +164,10 @@ async function main(): Promise<void> {
   // Local state for graph progress tracking
   const agentGraph: SessionAgentGraphNode[] = [];
   const pendingNodeIds = new Map<string, string[]>();
+  const route = resolveTaskRoute(config.prompt, process.env.ORCHESTRACE_TASK_ROUTE).result;
 
   // Build single-task graph
-  const graph = buildSingleTaskGraph(sessionId, config.prompt);
+  const graph = buildSingleTaskGraph(sessionId, config.prompt, route.category);
   const quickStartMode = config.quickStartMode
     ?? resolveBooleanEnv(process.env.ORCHESTRACE_QUICK_START_MODE, false);
   const quickStartMaxPreDelegationToolCalls = config.quickStartMaxPreDelegationToolCalls
@@ -186,6 +188,20 @@ async function main(): Promise<void> {
       console.error(`[runner] Failed to emit event:`, err);
     }
   }
+
+  void emit({
+    time: iso(),
+    type: 'session:dag-event',
+    payload: {
+      event: {
+        time: iso(),
+        runId: sessionId,
+        type: 'task:routing',
+        taskId: 'task',
+        message: `Route selected: ${route.category} (${route.strategy}, source=${route.source}, confidence=${route.confidence.toFixed(2)})`,
+      },
+    },
+  });
 
   async function runGit(args: string[]): Promise<string> {
     const { stdout } = await execFileAsync('git', args, {
@@ -495,7 +511,9 @@ async function main(): Promise<void> {
       process.exit(0);
     }
 
-    const outputs = await orchestrate(graph, {
+    const outputs = route.category === 'shell_command'
+      ? await runShellCommandRoute(config.prompt, config.workspacePath)
+      : await orchestrate(graph, {
       llm,
       cwd: config.workspacePath,
       planOutputDir: join(config.workspacePath, '.orchestrace', 'plans'),
@@ -1145,11 +1163,13 @@ function toUiEvent(runId: string, event: DagEvent, t: string): { time: string; r
   }
 }
 
-function buildSingleTaskGraph(id: string, prompt: string): TaskGraph {
+function buildSingleTaskGraph(id: string, prompt: string, routeCategory: TaskRouteCategory = 'code_change'): TaskGraph {
   const raw = process.env.ORCHESTRACE_VERIFY_COMMANDS;
   const commands = raw
     ? raw.split(';').map((s) => s.trim()).filter(Boolean)
     : ['pnpm typecheck', 'pnpm test'];
+  const nodeType = routeCategory === 'refactor' ? 'refactor' : 'code';
+  const validationCommands = routeCategory === 'investigation' ? [] : commands;
 
   return {
     id: `ui-${id}`,
@@ -1157,12 +1177,57 @@ function buildSingleTaskGraph(id: string, prompt: string): TaskGraph {
     nodes: [{
       id: 'task',
       name: 'Execute UI prompt',
-      type: 'code',
+      type: nodeType,
       prompt,
       dependencies: [],
-      validation: { commands, maxRetries: 2, retryDelayMs: 0 },
+      validation: { commands: validationCommands, maxRetries: 2, retryDelayMs: 0 },
+      meta: { routeCategory },
     }],
   };
+}
+
+async function runShellCommandRoute(prompt: string, cwd: string): Promise<Map<string, TaskOutput>> {
+  const command = extractShellCommand(prompt);
+  const startedAt = Date.now();
+
+  if (!command) {
+    return new Map([
+      ['task', {
+        taskId: 'task',
+        status: 'failed',
+        durationMs: Date.now() - startedAt,
+        retries: 0,
+        error: 'Route shell_command selected, but no executable command was found in the prompt.',
+      }],
+    ]);
+  }
+
+  try {
+    const { stdout, stderr } = await execFileAsync('sh', ['-lc', command], { cwd });
+    const text = `${stdout ?? ''}${stderr ?? ''}`.trim();
+    return new Map([
+      ['task', {
+        taskId: 'task',
+        status: 'completed',
+        response: text || `Command executed: ${command}`,
+        durationMs: Date.now() - startedAt,
+        retries: 0,
+      }],
+    ]);
+  } catch (error) {
+    const err = error as ExecFileException;
+    const details = `${err.stdout ?? ''}${err.stderr ?? ''}`.trim();
+    return new Map([
+      ['task', {
+        taskId: 'task',
+        status: 'failed',
+        response: details || undefined,
+        durationMs: Date.now() - startedAt,
+        retries: 0,
+        error: err.message,
+      }],
+    ]);
+  }
 }
 
 function buildSystemPrompt(config: SessionConfig, phase: 'planning' | 'implementation'): string {

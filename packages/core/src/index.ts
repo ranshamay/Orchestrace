@@ -17,6 +17,8 @@ export { PromptSectionName, renderPromptSections } from './prompt/sections.js';
 export type { OrchestratorConfig, PlanApprovalRequest } from './orchestrator/orchestrator.js';
 export type { PromptSection, PromptSectionNameType } from './prompt/sections.js';
 export { validate } from './validation/validator.js';
+export { classifyTaskPrompt, strategyForTaskRoute } from './task-router.js';
+export type { TaskRouteCategory, TaskRouteResult, TaskRouteStrategy } from './task-router.js';
 
 export type {
   TaskStatus,
