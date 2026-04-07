@@ -1,6 +1,5 @@
 import { classifyTaskPrompt, type TaskRouteCategory, type TaskRouteResult } from '@orchestrace/core';
 import type { TaskType } from '@orchestrace/core';
-import type { SessionConfig } from '@orchestrace/store';
 
 const SHELL_COMMAND_START = /^(pnpm|npm|yarn|node|npx|git|cat|echo|grep|find|sed|awk|curl|bash|zsh|python|make|docker|kubectl|ls|pwd)(?:\s|$)/i;
 
@@ -47,7 +46,7 @@ export function resolveTaskRoute(prompt: string, overrideRaw?: string): Resolved
   };
 }
 
-export function coerceRouteForSessionSource(route: TaskRouteResult, source: SessionConfig['source']): TaskRouteResult {
+export function coerceRouteForSessionSource(route: TaskRouteResult, source?: 'user' | 'observer'): TaskRouteResult {
   if (source === 'observer' && route.category === 'shell_command') {
     return {
       category: 'code_change',
