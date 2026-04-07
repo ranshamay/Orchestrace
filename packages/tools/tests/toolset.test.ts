@@ -311,6 +311,34 @@ describe('batch filesystem tools', () => {
     expect(parsed.concurrency).toBe(2);
     expect(parsed.minConcurrency).toBe(1);
   });
+
+  it('invalidates cached read slices after write_file mutation', async () => {
+    const cwd = await makeWorkspace();
+    const toolset = createAgentToolset({ cwd, phase: 'implementation', taskType: 'code' });
+
+    const firstRead = await toolset.executeTool({
+      id: '1',
+      name: 'read_file',
+      arguments: { path: 'src/file.ts' },
+    });
+    expect(firstRead.isError).toBeFalsy();
+    expect(firstRead.content).toContain('value = 1');
+
+    const writeResult = await toolset.executeTool({
+      id: '2',
+      name: 'write_file',
+      arguments: { path: 'src/file.ts', content: 'export const value = 99;\n' },
+    });
+    expect(writeResult.isError).toBeFalsy();
+
+    const secondRead = await toolset.executeTool({
+      id: '3',
+      name: 'read_file',
+      arguments: { path: 'src/file.ts' },
+    });
+    expect(secondRead.isError).toBeFalsy();
+    expect(secondRead.content).toContain('value = 99');
+  });
 });
 
 describe('search_files tool', () => {
@@ -729,6 +757,43 @@ describe('mode tools smoke test', () => {
 });
 
 describe('subagent prompt enrichment', () => {
+  it('prefers provided context packet snippets over disk reads', async () => {
+    const cwd = await makeWorkspace();
+    const delegatedPrompts: string[] = [];
+
+    const toolset = createAgentToolset({
+      cwd,
+      phase: 'planning',
+      taskType: 'code',
+      graphId: 'g1',
+      taskId: 't1',
+      runSubAgent: async (request) => {
+        delegatedPrompts.push(request.prompt);
+        return { text: 'ok' };
+      },
+    });
+
+    const result = await toolset.executeTool({
+      id: '1',
+      name: 'subagent_spawn',
+      arguments: {
+        contextPacket: {
+          objective: 'Summarize src/file.ts',
+          fileSnippets: [
+            { path: 'src/file.ts', content: 'export const value = 777;\n' },
+          ],
+        },
+      },
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(delegatedPrompts).toHaveLength(1);
+    expect(delegatedPrompts[0]).toContain('[Auto-included file snippets]');
+    expect(delegatedPrompts[0]).toContain('File: src/file.ts');
+    expect(delegatedPrompts[0]).toContain('export const value = 777;');
+    expect(delegatedPrompts[0]).not.toContain('export const value = 1;');
+  });
+
   it('auto-includes referenced file snippets for batch delegation', async () => {
     const cwd = await makeWorkspace();
     const delegatedPrompts: string[] = [];

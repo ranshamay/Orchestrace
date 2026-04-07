@@ -14,6 +14,7 @@ import { getModels } from '@mariozechner/pi-ai';
 import { PiAiAdapter, ProviderAuthManager, type LlmPromptInput, type LlmToolCallEvent } from '@orchestrace/provider';
 import {
   createAgentToolset,
+  createFileReadCache,
   listAgentTools,
   type AgentToolPhase,
   type SubAgentRequest,
@@ -175,6 +176,7 @@ function createInheritedSubAgentToolset(
     resolveGithubToken: () => Promise<string | undefined>;
     sharedContextStore?: import('@orchestrace/context').SharedContextStore;
     agentId?: string;
+    fileReadCache?: ReturnType<typeof createFileReadCache>;
   },
 ) {
   return createAgentToolset({
@@ -191,6 +193,7 @@ function createInheritedSubAgentToolset(
     batchMinConcurrency: options?.batchMinConcurrency,
     resolveGithubToken: options.resolveGithubToken,
     sharedContextStore: options.sharedContextStore,
+    fileReadCache: options.fileReadCache,
     agentId: options.agentId,
   });
 }
@@ -230,6 +233,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
   const sessionChats = new Map<string, SessionChatThread>();
   const sessionTodos = new Map<string, AgentTodoItem[]>();
   const sessionSharedContextStores = new Map<string, InMemorySharedContextStore>();
+  const sessionFileReadCaches = new Map<string, ReturnType<typeof createFileReadCache>>();
   const sessionContextEngines = new Map<string, ContextEngine>();
   const sessionContextStates = new Map<string, SessionContextState>();
   const pendingSubagentNodeIdsBySession = new Map<string, Map<string, string[]>>();
@@ -2656,6 +2660,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
             const sharedContextStore = sessionSharedContextStores.get(session.id)
               ?? new InMemorySharedContextStore();
             sessionSharedContextStores.set(session.id, sharedContextStore);
+            const fileReadCache = sessionFileReadCaches.get(session.id) ?? createFileReadCache();
+            sessionFileReadCaches.set(session.id, fileReadCache);
             const contextEngine = sessionContextEngines.get(session.id)
               ?? createSessionContextEngine(session.provider, session.model);
             sessionContextEngines.set(session.id, contextEngine);
@@ -2685,6 +2691,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                 batchMinConcurrency: session.batchMinConcurrency,
                 resolveGithubToken: () => githubAuthManager.resolveApiKey(GITHUB_PROVIDER_ID),
                 sharedContextStore: sessionSharedContextStores.get(session.id),
+                fileReadCache,
                 agentId: `chat::${session.id}`,
                 runSubAgent: async (runSubAgentRequest, _signal) => {
                   const subProvider = runSubAgentRequest.provider ?? session.provider;
@@ -2720,6 +2727,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                     batchMinConcurrency: session.batchMinConcurrency,
                     resolveGithubToken: () => githubAuthManager.resolveApiKey(GITHUB_PROVIDER_ID),
                     sharedContextStore: sessionSharedContextStores.get(session.id),
+                    fileReadCache,
                     agentId: `subagent::${subAgentTaskId}`,
                   });
                   try {
@@ -3048,6 +3056,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           const sharedContextStore = sessionSharedContextStores.get(session.id)
             ?? new InMemorySharedContextStore();
           sessionSharedContextStores.set(session.id, sharedContextStore);
+          const fileReadCache = sessionFileReadCaches.get(session.id) ?? createFileReadCache();
+          sessionFileReadCaches.set(session.id, fileReadCache);
           const contextEngine = sessionContextEngines.get(session.id)
             ?? createSessionContextEngine(session.provider, session.model);
           sessionContextEngines.set(session.id, contextEngine);
@@ -3077,6 +3087,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
               batchMinConcurrency: session.batchMinConcurrency,
               resolveGithubToken: () => githubAuthManager.resolveApiKey(GITHUB_PROVIDER_ID),
               sharedContextStore: sessionSharedContextStores.get(session.id),
+              fileReadCache,
               agentId: `chat::${session.id}`,
               runSubAgent: async (runSubAgentRequest, _signal) => {
                 const subProvider = runSubAgentRequest.provider ?? session.provider;
@@ -3112,6 +3123,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                   batchMinConcurrency: session.batchMinConcurrency,
                   resolveGithubToken: () => githubAuthManager.resolveApiKey(GITHUB_PROVIDER_ID),
                   sharedContextStore: sessionSharedContextStores.get(session.id),
+                  fileReadCache,
                   agentId: `subagent::${subAgentTaskId}`,
                 });
                 try {

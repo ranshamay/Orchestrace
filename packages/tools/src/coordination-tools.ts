@@ -8,6 +8,7 @@ import type {
   RegisteredAgentTool,
   SubAgentContextPacket,
   SubAgentEvidenceItem,
+  SubAgentFileSnippet,
   SubAgentRequest,
   SubAgentResult,
   TodoItem,
@@ -65,6 +66,12 @@ const subAgentContextPacketSchema = Type.Object({
   relevantContext: Type.Optional(Type.Array(Type.String())),
   requiredOutputSchema: Type.Optional(Type.String()),
   evidenceRequirements: Type.Optional(Type.Array(Type.String())),
+  fileSnippets: Type.Optional(Type.Array(
+    Type.Object({
+      path: Type.String({ minLength: 1 }),
+      content: Type.String(),
+    }),
+  )),
 });
 
 interface CoordinationToolsOptions extends AgentToolsetOptions {
@@ -377,7 +384,9 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
 
         let request: SubAgentRequest;
         try {
-          request = await buildSubAgentRequestFromToolArgs(options.cwd, toolArgs);
+          request = await buildSubAgentRequestFromToolArgs(options.cwd, toolArgs, {
+            fileReadCache: options.fileReadCache,
+          });
         } catch (error) {
           return {
             content: error instanceof Error ? error.message : String(error),
@@ -536,7 +545,9 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
           requests = await mapWithConcurrency(
             requestInputs,
             concurrency,
-            async (entry) => buildSubAgentRequestFromToolArgs(options.cwd, entry),
+            async (entry) => buildSubAgentRequestFromToolArgs(options.cwd, entry, {
+              fileReadCache: options.fileReadCache,
+            }),
           );
         } catch (error) {
           return {
@@ -826,6 +837,9 @@ function usageOrZero(usage: { input: number; output: number; cost: number } | un
 async function buildSubAgentRequestFromToolArgs(
   cwd: string,
   toolArgs: Record<string, unknown>,
+  options?: {
+    fileReadCache?: AgentToolsetOptions['fileReadCache'];
+  },
 ): Promise<SubAgentRequest> {
   const packet = normalizeSubAgentContextPacket(toolArgs.contextPacket);
   const legacyPrompt = optionalString(toolArgs.prompt) ?? '';
@@ -837,6 +851,10 @@ async function buildSubAgentRequestFromToolArgs(
   const prompt = await enrichDelegationPromptWithFileSnippets(
     cwd,
     buildSubAgentPrompt(legacyPrompt, packet),
+    {
+      providedSnippets: packet?.fileSnippets,
+      fileReadCache: options?.fileReadCache,
+    },
   );
 
   return {
@@ -884,6 +902,7 @@ function normalizeSubAgentContextPacket(value: unknown): SubAgentContextPacket |
     relevantContext: optionalStringArray(value.relevantContext),
     requiredOutputSchema: optionalString(value.requiredOutputSchema),
     evidenceRequirements: optionalStringArray(value.evidenceRequirements),
+    fileSnippets: normalizeFileSnippets(value.fileSnippets),
   };
 }
 
@@ -1419,18 +1438,49 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
 
-async function enrichDelegationPromptWithFileSnippets(cwd: string, prompt: string): Promise<string> {
+async function enrichDelegationPromptWithFileSnippets(
+  cwd: string,
+  prompt: string,
+  options?: {
+    providedSnippets?: SubAgentFileSnippet[];
+    fileReadCache?: AgentToolsetOptions['fileReadCache'];
+  },
+): Promise<string> {
   const trimmed = prompt.trim();
   if (!trimmed || trimmed.includes(SUBAGENT_CONTEXT_MARKER)) {
     return prompt;
   }
 
-  const filePaths = extractCandidateFilePaths(trimmed);
-  if (filePaths.length === 0) {
-    return prompt;
+  const providedSnippets = normalizeFileSnippets(options?.providedSnippets) ?? [];
+  const snippetByPath = new Map<string, SubAgentFileSnippet>();
+  for (const snippet of providedSnippets) {
+    const normalizedPath = normalizePromptPath(snippet.path);
+    if (!normalizedPath || snippetByPath.has(normalizedPath)) {
+      continue;
+    }
+    snippetByPath.set(normalizedPath, {
+      path: normalizedPath,
+      content: trimText(snippet.content.trim(), SUBAGENT_CONTEXT_MAX_CHARS_PER_FILE),
+    });
   }
 
-  const snippets = await collectFileSnippets(cwd, filePaths);
+  const extractedPaths = extractCandidateFilePaths(trimmed);
+  const missingPaths = extractedPaths.filter((filePath) => !snippetByPath.has(filePath));
+  if (missingPaths.length > 0 && snippetByPath.size < SUBAGENT_CONTEXT_MAX_FILES) {
+    const fallbackSnippets = await collectFileSnippets(cwd, missingPaths, {
+      fileReadCache: options?.fileReadCache,
+    });
+    for (const snippet of fallbackSnippets) {
+      if (snippetByPath.size >= SUBAGENT_CONTEXT_MAX_FILES) {
+        break;
+      }
+      if (!snippetByPath.has(snippet.path)) {
+        snippetByPath.set(snippet.path, snippet);
+      }
+    }
+  }
+
+  const snippets = [...snippetByPath.values()].slice(0, SUBAGENT_CONTEXT_MAX_FILES);
   if (snippets.length === 0) {
     return prompt;
   }
@@ -1461,7 +1511,7 @@ function extractCandidateFilePaths(prompt: string): string[] {
       continue;
     }
 
-    const normalized = candidate.replace(/^\.\//, '');
+    const normalized = normalizePromptPath(candidate);
     if (normalized) {
       unique.add(normalized);
     }
@@ -1470,7 +1520,37 @@ function extractCandidateFilePaths(prompt: string): string[] {
   return [...unique];
 }
 
-async function collectFileSnippets(cwd: string, filePaths: string[]): Promise<Array<{ path: string; content: string }>> {
+function normalizeFileSnippets(value: unknown): SubAgentFileSnippet[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+
+  const snippets: SubAgentFileSnippet[] = [];
+  for (const entry of value) {
+    if (!isRecord(entry)) {
+      continue;
+    }
+
+    const path = normalizePromptPath(entry.path);
+    const content = optionalString(entry.content);
+    if (!path || content === undefined) {
+      continue;
+    }
+
+    snippets.push({ path, content });
+  }
+
+  return snippets.length > 0 ? snippets : undefined;
+}
+
+async function collectFileSnippets(
+  cwd: string,
+  filePaths: string[],
+  options?: {
+    fileReadCache?: AgentToolsetOptions['fileReadCache'];
+  },
+): Promise<SubAgentFileSnippet[]> {
+  const revision = await resolveRevision(cwd);
   const candidates = filePaths.map((filePath, index) => ({ filePath, index }));
   const results = await mapWithConcurrency(candidates, SUBAGENT_SNIPPET_READ_CONCURRENCY, async (candidate) => {
     const absolutePath = resolve(cwd, candidate.filePath);
@@ -1478,16 +1558,35 @@ async function collectFileSnippets(cwd: string, filePaths: string[]): Promise<Ar
       return undefined;
     }
 
+    const relativePath = toPosixPath(relative(cwd, absolutePath));
     try {
-      const content = await readFile(absolutePath, 'utf-8');
+      const cached = options?.fileReadCache?.get({
+        path: absolutePath,
+        revision,
+        startLine: 1,
+        endLine: undefined,
+        maxChars: SUBAGENT_CONTEXT_MAX_CHARS_PER_FILE,
+      });
+      const content = cached ?? await readFile(absolutePath, 'utf-8');
       if (content.includes('\u0000')) {
         return undefined;
       }
 
+      const trimmedContent = trimText(content.trim(), SUBAGENT_CONTEXT_MAX_CHARS_PER_FILE);
+      if (!cached) {
+        options?.fileReadCache?.set({
+          path: absolutePath,
+          revision,
+          startLine: 1,
+          endLine: undefined,
+          maxChars: SUBAGENT_CONTEXT_MAX_CHARS_PER_FILE,
+        }, trimmedContent);
+      }
+
       return {
         index: candidate.index,
-        path: toPosixPath(relative(cwd, absolutePath)),
-        content: trimText(content.trim(), SUBAGENT_CONTEXT_MAX_CHARS_PER_FILE),
+        path: relativePath,
+        content: trimmedContent,
       };
     } catch {
       return undefined;
@@ -1499,6 +1598,41 @@ async function collectFileSnippets(cwd: string, filePaths: string[]): Promise<Ar
     .sort((a, b) => a.index - b.index)
     .slice(0, SUBAGENT_CONTEXT_MAX_FILES)
     .map((entry) => ({ path: entry.path, content: entry.content }));
+}
+
+function normalizePromptPath(path: unknown): string | undefined {
+  if (typeof path !== 'string') {
+    return undefined;
+  }
+
+  const trimmed = path.trim().replace(/^\.\//, '');
+  return trimmed.length > 0 ? toPosixPath(trimmed) : undefined;
+}
+
+const revisionByCwd = new Map<string, string>();
+
+async function resolveRevision(cwd: string): Promise<string> {
+  const existing = revisionByCwd.get(cwd);
+  if (existing) {
+    return existing;
+  }
+
+  try {
+    const { runCommand } = await import('./command-tools/command-runner.js');
+    const result = await runCommand('git', ['rev-parse', 'HEAD'], {
+      cwd,
+      timeoutMs: 5_000,
+    });
+    const revision = result.exitCode === 0
+      ? result.stdout.trim()
+      : '';
+    const normalized = revision || 'no-git-revision';
+    revisionByCwd.set(cwd, normalized);
+    return normalized;
+  } catch {
+    revisionByCwd.set(cwd, 'no-git-revision');
+    return 'no-git-revision';
+  }
 }
 
 function isWithinDirectory(path: string, cwd: string): boolean {
