@@ -4216,6 +4216,16 @@ function hydratePersistedSession(session: PersistedWorkSession): WorkSession {
     ),
     worktreePath: asString(session.worktreePath) || undefined,
     worktreeBranch: asString(session.worktreeBranch) || undefined,
+    workspaceAssignment: isRecord(session.workspaceAssignment)
+      ? {
+        assignmentSource: asString(session.workspaceAssignment.assignmentSource) as SessionWorkspaceAssignmentProvenance['assignmentSource'],
+        reusedExistingWorktree: parseBooleanSetting(session.workspaceAssignment.reusedExistingWorktree) ?? undefined,
+        cleanupApplied: parseBooleanSetting(session.workspaceAssignment.cleanupApplied) ?? undefined,
+        cleanupDefaultBranch: asString(session.workspaceAssignment.cleanupDefaultBranch) || undefined,
+        workspacePathSessionIdRelation: asString(session.workspaceAssignment.workspacePathSessionIdRelation) as SessionWorktreePathSessionIdRelation,
+        workspacePathSessionId: asString(session.workspaceAssignment.workspacePathSessionId) || undefined,
+      }
+      : undefined,
     creationReason: normalizeSessionCreationReason(session.creationReason),
     sourceSessionId: asString(session.sourceSessionId) || undefined,
     agentGraph: normalizeSessionAgentGraphNodes(session.agentGraph),
@@ -4844,6 +4854,29 @@ function normalizeSessionCreationReason(raw: unknown): SessionCreationReason {
   }
 
   return 'start';
+}
+
+function normalizeWorkspaceAssignmentSource(
+  raw: unknown,
+): SessionWorkspaceAssignmentProvenance['assignmentSource'] | undefined {
+  const value = asString(raw).trim().toLowerCase();
+  if (
+    value === 'workspace-root'
+    || value === 'selected-worktree'
+    || value === 'fallback-worktree'
+    || value === 'auto-created-worktree'
+  ) {
+    return value;
+  }
+  return undefined;
+}
+
+function normalizeWorkspacePathSessionIdRelation(raw: unknown): SessionWorktreePathSessionIdRelation | undefined {
+  const value = asString(raw).trim().toLowerCase();
+  if (value === 'match' || value === 'mismatch' || value === 'none') {
+    return value;
+  }
+  return undefined;
 }
 
 function resolveExecutionContextDefault(): ExecutionContext {
@@ -6381,6 +6414,7 @@ function serializeWorkSession(session: WorkSession, todos: AgentTodoItem[] = [])
     trivialTaskMaxPromptLength: session.trivialTaskMaxPromptLength,
     worktreePath: session.worktreePath,
     worktreeBranch: session.worktreeBranch,
+    workspaceAssignment: session.workspaceAssignment,
     creationReason: session.creationReason,
     sourceSessionId: session.sourceSessionId,
     source: session.source,
