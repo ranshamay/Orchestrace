@@ -402,6 +402,27 @@ export interface ObserverStatusResponse {
   };
 }
 
+export interface ObserverFailedSessionMonitor {
+  sessionId: string;
+  workspaceId: string;
+  workspaceName: string;
+  prompt: string;
+  status: string;
+  createdAt: string;
+  updatedAt: string;
+  observer: {
+    analyzed: boolean;
+    findings: number;
+    latestFindingAt: string | null;
+    fixStatusCounts: {
+      pending: number;
+      spawned: number;
+      completed: number;
+      failed: number;
+    };
+  };
+}
+
 export async function fetchObserverStatus(): Promise<ObserverStatusResponse> {
   const res = await fetch(`${API_BASE}/observer/status`);
   return readJson(res);
@@ -409,6 +430,11 @@ export async function fetchObserverStatus(): Promise<ObserverStatusResponse> {
 
 export async function fetchObserverFindings(): Promise<{ findings: ObserverFinding[] }> {
   const res = await fetch(`${API_BASE}/observer/findings`);
+  return readJson(res);
+}
+
+export async function fetchObserverFailedSessions(): Promise<{ sessions: ObserverFailedSessionMonitor[] }> {
+  const res = await fetch(`${API_BASE}/observer/failed-sessions`);
   return readJson(res);
 }
 

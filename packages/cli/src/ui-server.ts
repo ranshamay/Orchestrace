@@ -3374,6 +3374,48 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         return;
       }
 
+      if (req.method === 'GET' && pathname === '/api/observer/failed-sessions') {
+        const findings = observerDaemon.getFindings();
+        const analyzedSessionIds = new Set(observerDaemon.getAnalyzedSessionIds());
+        const monitoredSessions = [...workSessions.values()]
+          .filter((session) => session.status === 'failed' && session.source !== 'observer')
+          .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt))
+          .map((session) => {
+            const relatedFindings = findings.filter((finding) => (
+              finding.observedInSessions.includes(session.id)
+              || finding.additionalSessions.includes(session.id)
+            ));
+            const fixStatusCounts = {
+              pending: relatedFindings.filter((finding) => finding.fixStatus === 'pending').length,
+              spawned: relatedFindings.filter((finding) => finding.fixStatus === 'spawned').length,
+              completed: relatedFindings.filter((finding) => finding.fixStatus === 'completed').length,
+              failed: relatedFindings.filter((finding) => finding.fixStatus === 'failed').length,
+            };
+            const latestFindingAt = relatedFindings
+              .map((finding) => finding.detectedAt)
+              .sort((left, right) => Date.parse(right) - Date.parse(left))[0] ?? null;
+
+            return {
+              sessionId: session.id,
+              workspaceId: session.workspaceId,
+              workspaceName: session.workspaceName,
+              prompt: session.prompt,
+              status: session.status,
+              createdAt: session.createdAt,
+              updatedAt: session.updatedAt,
+              observer: {
+                analyzed: analyzedSessionIds.has(session.id) || relatedFindings.length > 0,
+                findings: relatedFindings.length,
+                latestFindingAt,
+                fixStatusCounts,
+              },
+            };
+          });
+
+        sendJson(res, 200, { sessions: monitoredSessions });
+        return;
+      }
+
       if (req.method === 'POST' && pathname === '/api/observer/enable') {
         await observerDaemon.setEnabled(true);
         if (logWatcher.getState().status === 'idle' || logWatcher.getState().status === 'stopped') {
