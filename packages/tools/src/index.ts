@@ -13,9 +13,11 @@ export type {
   AgentToolsetOptions,
   SubAgentContextPacket,
   SubAgentEvidenceItem,
+  SubAgentFileSnippet,
   SubAgentRequest,
   SubAgentResult,
 } from './types.js';
+export { createFileReadCache } from './file-read-cache.js';
 export { DEFAULT_AGENT_TOOL_POLICY_VERSION } from './policy.js';
 
 export interface AgentToolDescriptor {
