@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { resolveTaskRoute, stripRetryContinuationContext } from '../src/task-routing.js';
+import { resolveTaskRoute, resolveTaskRouteForSource, stripRetryContinuationContext } from '../src/task-routing.js';
 
 describe('runner task routing parity', () => {
   it('defaults ambiguous prompts to safe full pipeline category', () => {
@@ -48,5 +48,21 @@ describe('runner task routing parity', () => {
     const route = resolveTaskRoute(stripRetryContinuationContext(rawPrompt));
     expect(route.result.category).toBe('shell_command');
     expect(route.result.strategy).toBe('direct_shell');
+  });
+
+  it('forces observer sessions to code_change route even when shell override is set', () => {
+    const observerPrompt = [
+      '[Observer Fix] Broken routing',
+      '',
+      'Category: architecture | Severity: critical',
+      '',
+      '## Task',
+      'Route through coding agent pipeline.',
+    ].join('\n');
+
+    const route = resolveTaskRouteForSource(observerPrompt, 'observer', 'shell_command');
+    expect(route.result.category).toBe('code_change');
+    expect(route.result.strategy).toBe('full_planning_pipeline');
+    expect(route.result.source).toBe('override');
   });
 });

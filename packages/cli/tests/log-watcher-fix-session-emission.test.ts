@@ -52,6 +52,8 @@ describe('log watcher fix-session emission', () => {
       expect(startSession).toHaveBeenCalledTimes(1);
       expect(startSession.mock.calls[0]?.[0].source).toBe('observer');
       expect(startSession.mock.calls[0]?.[0].prompt).toContain('[Observer Fix] Crash loop in API handler');
+      expect(startSession.mock.calls[0]?.[0].prompt).toContain('## Issue');
+      expect(startSession.mock.calls[0]?.[0].prompt).toContain('\n## Task\n');
       expect(daemon.getFindings()[0]?.category).toBe('code-quality');
 
       const duplicate = await daemon.ingestLogWatcherFindings([
