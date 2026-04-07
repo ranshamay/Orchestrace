@@ -59,6 +59,13 @@ describe('task-router', () => {
     expect(result.category).not.toBe('shell_command');
   });
 
+  it('does not classify natural language prompts that only mention git/worktree as shell commands', () => {
+    const prompt = 'we want to make sure we will use git worktrees natively each new session when implementation starts';
+    const result = classifyTaskPrompt(prompt);
+    expect(result.category).not.toBe('shell_command');
+    expect(result.strategy).toBe('full_planning_pipeline');
+  });
+
   it('still classifies short single-line shell commands correctly', () => {
     expect(classifyTaskPrompt('git status').category).toBe('shell_command');
     expect(classifyTaskPrompt('run pnpm test').category).toBe('shell_command');

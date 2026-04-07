@@ -21,9 +21,9 @@ const SHELL_PREFIXES = [
 ] as const;
 
 const SHELL_COMMAND_PATTERNS = [
-  /(?:^|\s)(pnpm|npm|yarn|node|npx|git|cat|echo|grep|find|sed|awk|curl|bash|zsh|python|make|docker|kubectl)(?:\s|$)/,
-  /^ls(?:\s|$)/,
-  /^pwd(?:\s|$)/,
+  /^(?:\$\s*)?(pnpm|npm|yarn|node|npx|git|cat|echo|grep|find|sed|awk|curl|bash|zsh|python|make|docker|kubectl)(?:\s|$)/,
+  /^(?:\$\s*)?ls(?:\s|$)/,
+  /^(?:\$\s*)?pwd(?:\s|$)/,
 ] as const;
 
 const INVESTIGATION_HINTS = [

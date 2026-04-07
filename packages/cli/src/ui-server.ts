@@ -1692,9 +1692,6 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     startSession: startWorkSession,
     resolveApiKey: (provider) => authManager.resolveApiKey(provider),
   });
-  void observerDaemon.start().catch((err) => {
-    console.error('[orchestrace][observer] Failed to start daemon:', err);
-  });
 
   // -- Log watcher (analyzes backend logs for issues) -------------------------
   const logWatcher = new LogWatcher({
@@ -1713,10 +1710,15 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       }
     },
   });
-  if (observerDaemon.getConfig().enabled) {
-    logWatcher.start(backendLogger);
-    console.log('[orchestrace][log-watcher] Started');
-  }
+
+  void observerDaemon.start().then(() => {
+    if (observerDaemon.getConfig().enabled) {
+      logWatcher.start(backendLogger);
+      console.log('[orchestrace][log-watcher] Started');
+    }
+  }).catch((err) => {
+    console.error('[orchestrace][observer] Failed to start daemon:', err);
+  });
 
   let hmrWatcher: FSWatcher | undefined;
   if (hmrEnabled) {
