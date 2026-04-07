@@ -946,7 +946,16 @@ function buildPlanningPrompt(
       name: PromptSectionName.DependencyContext,
       lines: [depContext],
     },
-  ]);
+  ];
+
+  if (retryDirective.length > 0) {
+    sections.push({
+      name: PromptSectionName.RetryContext,
+      lines: retryDirective,
+    });
+  }
+
+  return renderPromptSections(sections);
 }
 
 function buildImplementationPrompt(params: {
@@ -981,6 +990,8 @@ function buildImplementationPrompt(params: {
           '',
           'Validation failures to fix:',
           truncateForRetry(previousValidationError) || '(missing validation details)',
+          '',
+          PLANNING_FIRST_TOOL_RETRY_DIRECTIVE,
         ].join('\n')
       : '';
 
