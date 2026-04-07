@@ -167,6 +167,10 @@ async function main(): Promise<void> {
 
   // Build single-task graph
   const graph = buildSingleTaskGraph(sessionId, config.prompt);
+  const quickStartMode = config.quickStartMode
+    ?? resolveBooleanEnv(process.env.ORCHESTRACE_QUICK_START_MODE, false);
+  const quickStartMaxPreDelegationToolCalls = config.quickStartMaxPreDelegationToolCalls
+    ?? resolvePositiveIntEnv(process.env.ORCHESTRACE_QUICK_START_MAX_PRE_DELEGATION_TOOL_CALLS, 3);
   const checkpointFilePath = join(workspaceRoot, '.orchestrace', 'sessions', sessionId, CHECKPOINT_METADATA_FILE);
   const checkpointName = `${CHECKPOINT_STASH_PREFIX}:${sessionId}:${Date.now()}`;
   const checkpointState = {
@@ -503,6 +507,8 @@ async function main(): Promise<void> {
       defaultModel: { provider: config.provider, model: config.model },
       planningSystemPrompt: buildSystemPrompt(config, 'planning'),
       implementationSystemPrompt: buildSystemPrompt(config, 'implementation'),
+      quickStartMode,
+      quickStartMaxPreDelegationToolCalls,
       maxParallel: 1,
       requirePlanApproval: !config.autoApprove,
       onPlanApproval: async () => config.autoApprove,
@@ -1159,6 +1165,11 @@ function buildSingleTaskGraph(id: string, prompt: string): TaskGraph {
 }
 
 function buildSystemPrompt(config: SessionConfig, phase: 'planning' | 'implementation'): string {
+  const quickStartMode = config.quickStartMode
+    ?? resolveBooleanEnv(process.env.ORCHESTRACE_QUICK_START_MODE, false);
+  const quickStartMaxPreDelegationToolCalls = config.quickStartMaxPreDelegationToolCalls
+    ?? resolvePositiveIntEnv(process.env.ORCHESTRACE_QUICK_START_MAX_PRE_DELEGATION_TOOL_CALLS, 3);
+
   const phaseRules = phase === 'planning'
     ? [
       'Produce a concrete implementation plan with explicit staged execution and validation steps.',
@@ -1176,6 +1187,13 @@ function buildSystemPrompt(config: SessionConfig, phase: 'planning' | 'implement
       'Keep todo and dependency graph state synchronized.',
       'Do not ask the user to continue after partial progress; continue autonomously until completion or a concrete blocker is reached.',
       'For transient tool or sub-agent failures (timeouts, aborts, rate limits), retry automatically before surfacing a blocker.',
+      ...(quickStartMode
+        ? [
+          `Quick-start mode is enabled: delegate focused discovery to sub-agents within the first 2-3 tool calls and no later than ${quickStartMaxPreDelegationToolCalls} successful pre-delegation tool call(s).`,
+          'Limit parent orientation to 3-4 initial tool calls (e.g., root listing, manifest read, git status) before delegating.',
+          'Push detailed file reads/searches into sub-agent scopes unless a direct blocker requires immediate local inspection.',
+        ]
+        : []),
     ]
     : [
       'Execute approved work with minimal, scoped edits and verify outcomes.',
