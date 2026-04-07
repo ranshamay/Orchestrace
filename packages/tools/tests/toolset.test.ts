@@ -1015,6 +1015,118 @@ describe('subagent prompt enrichment', () => {
     expect(parsed.runs.some((entry) => entry.nodeId === 'n1' && entry.status === 'completed' && entry.usage?.input === 12)).toBe(true);
   });
 
+  it('subagent_spawn_batch retries only failed nodeIds and merges retried success', async () => {
+    const cwd = await makeWorkspace();
+    const callCount = new Map<string, number>();
+
+    const runSubAgent = vi.fn(async (request: { nodeId?: string }) => {
+      const nodeId = request.nodeId ?? 'none';
+      const count = (callCount.get(nodeId) ?? 0) + 1;
+      callCount.set(nodeId, count);
+
+      if (nodeId === 'n2' && count === 1) {
+        throw new Error('n2 fails on first attempt');
+      }
+
+      return {
+        text: `ok:${nodeId}:attempt-${count}`,
+        usage: { input: 10, output: 4, cost: 0.01 },
+      };
+    });
+
+    const toolset = createAgentToolset({
+      cwd,
+      phase: 'planning',
+      taskType: 'code',
+      graphId: 'g1',
+      taskId: 't-retry-partial',
+      runSubAgent,
+    });
+
+    const result = await toolset.executeTool({
+      id: '1',
+      name: 'subagent_spawn_batch',
+      arguments: {
+        agents: [
+          { nodeId: 'n1', prompt: 'Inspect src/file.ts for n1' },
+          { nodeId: 'n2', prompt: 'Inspect src/file.ts for n2' },
+        ],
+        maxRetries: 2,
+      },
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(runSubAgent).toHaveBeenCalledTimes(3);
+    expect(callCount.get('n1')).toBe(1);
+    expect(callCount.get('n2')).toBe(2);
+
+    const parsed = JSON.parse(result.content) as {
+      failed: number;
+      completed: number;
+      maxRetries: number;
+      failedNodeIds: string[];
+      dispatchedNodeIds: string[];
+      runs: Array<{ nodeId?: string; status: 'completed' | 'failed' }>;
+    };
+
+    expect(parsed.maxRetries).toBe(2);
+    expect(parsed.failed).toBe(0);
+    expect(parsed.completed).toBe(2);
+    expect(parsed.failedNodeIds).toEqual([]);
+    expect(parsed.dispatchedNodeIds.filter((id) => id === 'n1')).toHaveLength(1);
+    expect(parsed.dispatchedNodeIds.filter((id) => id === 'n2')).toHaveLength(2);
+    expect(parsed.runs).toHaveLength(2);
+    expect(parsed.runs[0]).toMatchObject({ nodeId: 'n1', status: 'completed' });
+    expect(parsed.runs[1]).toMatchObject({ nodeId: 'n2', status: 'completed' });
+  });
+
+  it('subagent_spawn_batch honors maxRetries cap for persistent failures', async () => {
+    const cwd = await makeWorkspace();
+    const runSubAgent = vi.fn(async (request: { nodeId?: string }) => {
+      if (request.nodeId === 'n-fail') {
+        throw new Error('always fails');
+      }
+
+      return { text: 'ok', usage: { input: 1, output: 1, cost: 0.001 } };
+    });
+
+    const toolset = createAgentToolset({
+      cwd,
+      phase: 'planning',
+      taskType: 'code',
+      graphId: 'g1',
+      taskId: 't-retry-cap',
+      runSubAgent,
+    });
+
+    const result = await toolset.executeTool({
+      id: '1',
+      name: 'subagent_spawn_batch',
+      arguments: {
+        agents: [{ nodeId: 'n-fail', prompt: 'Inspect src/file.ts and fail.' }],
+        maxRetries: 2,
+      },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(runSubAgent).toHaveBeenCalledTimes(3);
+
+    const parsed = JSON.parse(result.content) as {
+      maxRetries: number;
+      completed: number;
+      failed: number;
+      failedNodeIds: string[];
+      runs: Array<{ nodeId?: string; status: 'completed' | 'failed' }>;
+    };
+
+    expect(parsed.maxRetries).toBe(2);
+    expect(parsed.completed).toBe(0);
+    expect(parsed.failed).toBe(1);
+    expect(parsed.failedNodeIds).toEqual(['n-fail']);
+    expect(parsed.runs).toHaveLength(1);
+    expect(parsed.runs[0]).toMatchObject({ nodeId: 'n-fail', status: 'failed' });
+  });
+
   it('subagent_spawn_batch reuses cached completed results when all nodeIds are cache hits', async () => {
     const cwd = await makeWorkspace();
     const runSubAgent = vi.fn(async () => ({ text: 'unexpected dispatch' }));

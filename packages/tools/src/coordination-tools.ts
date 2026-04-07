@@ -1690,19 +1690,6 @@ function toPosixPath(path: string): string {
   return path.split(sep).join('/');
 }
 
-function asNumber(value: unknown): number | undefined {
-  if (typeof value === 'number' && Number.isFinite(value)) {
-    return value;
-  }
-
-  if (typeof value !== 'string') {
-    return undefined;
-  }
-
-  const normalized = Number.parseFloat(value.trim());
-  return Number.isFinite(normalized) ? normalized : undefined;
-}
-
 function asPositiveInteger(value: unknown): number | undefined {
   if (typeof value !== 'number' || !Number.isFinite(value)) {
     return undefined;
