@@ -63,12 +63,6 @@ export interface OrchestratorConfig extends RunnerConfig {
   promptVersion?: string;
   /** Replay policy version tag persisted into task outputs. */
   policyVersion?: string;
-<<<<<<< HEAD
-  /** Enable quick-start planning mode that enforces early delegation. Defaults to false. */
-  quickStartMode?: boolean;
-  /** Max successful tool calls allowed before first successful sub-agent delegation. Defaults to 3 when quick-start is enabled. */
-  quickStartMaxPreDelegationToolCalls?: number;
-=======
   /** Enables conservative pre-planning trivial-task classification gate. */
   enableTrivialTaskGate?: boolean;
   /** Max normalized prompt length for trivial-task classification. */
@@ -77,7 +71,6 @@ export interface OrchestratorConfig extends RunnerConfig {
   quickStartMode?: boolean;
   /** Max successful tool calls allowed before first successful sub-agent delegation. Defaults to 3 when quick-start is enabled. */
   quickStartMaxPreDelegationToolCalls?: number;
->>>>>>> origin/main
 }
 
 type OrchestratorPhase = 'planning' | 'implementation';
@@ -113,15 +106,10 @@ export async function orchestrate(
     onEvent,
     promptVersion,
     policyVersion,
-<<<<<<< HEAD
-    quickStartMode,
-    quickStartMaxPreDelegationToolCalls,
-=======
     enableTrivialTaskGate,
     trivialTaskMaxPromptLength,
     quickStartMode,
     quickStartMaxPreDelegationToolCalls,
->>>>>>> origin/main
   } = config;
 
   const emit = onEvent ?? (() => {});
@@ -366,21 +354,6 @@ export async function orchestrate(
               await delay(delayMs);
               continue;
             }
-
-<<<<<<< HEAD
-      if (createToolset) {
-        const planningContractError = buildPlanningContractError(planningToolCalls, {
-          quickStartMode,
-          quickStartMaxPreDelegationToolCalls,
-        });
-        if (planningContractError) {
-          completedPlanningAttempt.failureType = 'validation';
-          completedPlanningAttempt.error = planningContractError;
-
-          if (planningAttempt < MAX_PLANNING_ATTEMPTS) {
-            const delayMs = PLANNING_RETRY_BASE_DELAY_MS * (2 ** (planningAttempt - 1));
-=======
->>>>>>> origin/main
             emit({
               type: 'task:verification-failed',
               taskId: node.id,

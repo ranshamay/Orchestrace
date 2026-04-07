@@ -26,12 +26,8 @@ function createAdapter(params: {
   planningThrows?: boolean;
   failImplementationOnceWithType?: 'timeout' | 'rate_limit' | 'tool_runtime' | 'empty_response';
   omitPlanningCoordination?: boolean;
-<<<<<<< HEAD
   planningDelegationDelaySuccessfulCalls?: number;
   onPrompt?: (phase: 'planning' | 'implementation', prompt: LlmPromptInput, systemPrompt: string) => void;
-=======
-  onPrompt?: (phase: 'planning' | 'implementation', prompt: LlmPromptInput, systemPrompt: string) => void;
->>>>>>> origin/main
 }): LlmAdapter {
   let implementationCalls = 0;
 
@@ -341,14 +337,6 @@ describe('orchestrate replay capture', () => {
     }
   }, 15_000);
 
-<<<<<<< HEAD
-  it('passes quick-start planning contract when delegation occurs within configured call limit', async () => {
-    const cwd = await mkdtemp(join(tmpdir(), 'orchestrace-replay-quick-start-pass-'));
-
-    try {
-      const outputs = await orchestrate(makeSingleNodeGraph(), {
-        llm: createAdapter({ planningDelegationDelaySuccessfulCalls: 1 }),
-=======
   it('bypasses planning for trivial prompts when gate is enabled', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'orchestrace-replay-trivial-bypass-'));
     const events: DagEvent[] = [];
@@ -358,33 +346,10 @@ describe('orchestrate replay capture', () => {
       graph.nodes[0] = { ...graph.nodes[0], prompt: 'echo hello world' };
       const outputs = await orchestrate(graph, {
         llm: createAdapter({}),
->>>>>>> origin/main
         cwd,
         requirePlanApproval: false,
         planningSystemPrompt: 'planning',
         implementationSystemPrompt: 'implementation',
-<<<<<<< HEAD
-        createToolset: () => ({ tools: [], executeTool: async () => ({ content: 'noop' }) }),
-        quickStartMode: true,
-        quickStartMaxPreDelegationToolCalls: 3,
-      });
-
-      const output = outputs.get('task-1');
-      expect(output).toBeDefined();
-      expect(output?.status).toBe('completed');
-      expect(output?.failureType).toBeUndefined();
-    } finally {
-      await rm(cwd, { recursive: true, force: true });
-    }
-  }, 20_000);
-
-  it('fails quick-start planning contract when delegation occurs too late', async () => {
-    const cwd = await mkdtemp(join(tmpdir(), 'orchestrace-replay-quick-start-fail-'));
-
-    try {
-      const outputs = await orchestrate(makeSingleNodeGraph(), {
-        llm: createAdapter({ planningDelegationDelaySuccessfulCalls: 4 }),
-=======
         enableTrivialTaskGate: true,
         trivialTaskMaxPromptLength: 120,
         onEvent: (event) => events.push(event),
@@ -407,30 +372,10 @@ describe('orchestrate replay capture', () => {
     try {
       const outputs = await orchestrate(makeSingleNodeGraph(), {
         llm: createAdapter({}),
->>>>>>> origin/main
         cwd,
         requirePlanApproval: false,
         planningSystemPrompt: 'planning',
         implementationSystemPrompt: 'implementation',
-<<<<<<< HEAD
-        createToolset: () => ({ tools: [], executeTool: async () => ({ content: 'noop' }) }),
-        quickStartMode: true,
-        quickStartMaxPreDelegationToolCalls: 3,
-      });
-
-      const output = outputs.get('task-1');
-      expect(output).toBeDefined();
-      expect(output?.status).toBe('failed');
-      expect(output?.failureType).toBe('validation');
-      expect(output?.error).toContain('Planning contract not satisfied');
-      expect(output?.error).toContain('quick-start mode requires delegation within the first 3 successful tool call(s)');
-      expect(output?.replay?.attempts.length).toBe(3);
-      expect(output?.replay?.attempts.at(-1)?.failureType).toBe('validation');
-    } finally {
-      await rm(cwd, { recursive: true, force: true });
-    }
-  }, 20_000);
-=======
         enableTrivialTaskGate: true,
         trivialTaskMaxPromptLength: 120,
         onEvent: (event) => events.push(event),
@@ -472,7 +417,6 @@ describe('orchestrate replay capture', () => {
       await rm(cwd, { recursive: true, force: true });
     }
   });
->>>>>>> origin/main
 
   it('includes granular planning contract guidance in planning prompt', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'orchestrace-replay-plan-prompt-'));

@@ -1018,18 +1018,16 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       batchConcurrency,
       normalizePositiveSetting(request.batchMinConcurrency, uiPreferences.batchMinConcurrency),
     );
-<<<<<<< HEAD
     const quickStartMode = request.quickStartMode
       ?? (parseBooleanSetting(process.env.ORCHESTRACE_QUICK_START_MODE) ?? false);
     const quickStartMaxPreDelegationToolCalls = normalizePositiveSetting(
       request.quickStartMaxPreDelegationToolCalls,
       parsePositiveSetting(process.env.ORCHESTRACE_QUICK_START_MAX_PRE_DELEGATION_TOOL_CALLS) ?? 3,
-=======
+    );
     const enableTrivialTaskGate = request.enableTrivialTaskGate ?? uiPreferences.enableTrivialTaskGate;
     const trivialTaskMaxPromptLength = normalizePositiveSetting(
       request.trivialTaskMaxPromptLength,
       uiPreferences.trivialTaskMaxPromptLength,
->>>>>>> origin/main
     );
 
     let workspacePath = workspace.path;
@@ -1052,12 +1050,6 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           error: toErrorMessage(error),
           statusCode: 400,
         };
-      const quickStartMode = request.quickStartMode
-        ?? (parseBooleanSetting(process.env.ORCHESTRACE_QUICK_START_MODE) ?? false);
-      const quickStartMaxPreDelegationToolCalls = normalizePositiveSetting(
-        request.quickStartMaxPreDelegationToolCalls,
-        parsePositiveSetting(process.env.ORCHESTRACE_QUICK_START_MAX_PRE_DELEGATION_TOOL_CALLS) ?? 3,
-      );
       }
 
       try {
