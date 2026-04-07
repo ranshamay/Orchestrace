@@ -261,8 +261,8 @@ describe('orchestrate replay capture', () => {
       }
     }, 20_000);
 
-    it('fails quick-start planning contract when delegation occurs too late', async () => {
-      const cwd = await mkdtemp(join(tmpdir(), 'orchestrace-replay-quick-start-fail-'));
+    it('succeeds even when delegation occurs late (quick-start enforcement removed)', async () => {
+      const cwd = await mkdtemp(join(tmpdir(), 'orchestrace-replay-quick-start-no-enforce-'));
 
       try {
         const outputs = await orchestrate(makeSingleNodeGraph(), {
@@ -278,12 +278,8 @@ describe('orchestrate replay capture', () => {
 
         const output = outputs.get('task-1');
         expect(output).toBeDefined();
-        expect(output?.status).toBe('failed');
-        expect(output?.failureType).toBe('validation');
-        expect(output?.error).toContain('Planning contract not satisfied');
-        expect(output?.error).toContain('quick-start mode requires delegation within the first 3 successful tool call(s)');
-        expect(output?.replay?.attempts.length).toBe(3);
-        expect(output?.replay?.attempts.at(-1)?.failureType).toBe('validation');
+        expect(output?.status).toBe('completed');
+        expect(output?.failureType).toBeUndefined();
       } finally {
         await rm(cwd, { recursive: true, force: true });
       }
@@ -448,7 +444,7 @@ describe('orchestrate replay capture', () => {
     }
   }, 15_000);
 
-  it('still requires sub-agent delegation for broader non-simple planning tasks', async () => {
+  it('still requires todo_set and agent_graph_set for broader tasks (sub-agent delegation is optional)', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'orchestrace-replay-plan-complex-'));
 
     try {
@@ -471,9 +467,8 @@ describe('orchestrate replay capture', () => {
       expect(output?.error).toContain('Planning contract not satisfied');
       expect(output?.error).toContain('todo_set');
       expect(output?.error).toContain('agent_graph_set');
-      expect(output?.error).toContain('subagent_spawn');
-      expect(output?.error).toContain('quick-start behavior');
-      expect(output?.error).toContain('delegate within the first 2-3 calls');
+      // Sub-agent delegation is no longer required — the LLM decides
+      expect(output?.error).not.toContain('subagent_spawn');
       // Planning now retries up to 3 times before giving up
       expect(output?.replay?.attempts.length).toBe(3);
       expect(output?.replay?.attempts.at(-1)?.failureType).toBe('validation');
@@ -1041,16 +1036,14 @@ describe('orchestrate replay capture', () => {
       expect(output?.status).toBe('completed');
       expect(capturedPlanningPrompts.length).toBeGreaterThan(0);
       const planningPrompt = capturedPlanningPrompts[0] ?? '';
-      expect(planningPrompt).toContain('Decompose planning work into atomic tasks: each todo should represent one action and one completion outcome.');
-      expect(planningPrompt).toContain('Never bundle multiple actions in one task; split broad work into smaller tasks before finalizing the plan.');
-      expect(planningPrompt).toContain('If a task would take more than ~15 minutes or touches multiple independent areas, split it further.');
-      expect(planningPrompt).toContain('Quick-start planning mode for well-scoped tasks: keep parent pre-delegation orientation to at most 3-4 calls and delegate within the first 2-3 calls whenever possible');
-      expect(planningPrompt).toContain('Keep parent orientation lightweight (e.g., root list + manifest + git status) and push detailed file reading/search into sub-agent scopes');
-      expect(planningPrompt).toContain('3) per-stage atomic tasks with explicit dependencies and concurrency boundaries');
-      expect(planningPrompt).toContain('6) rollback/risk notes (required only when the plan includes file modifications or state-changing operations; otherwise state "N/A - read-only task")');
-      // Phase-system heuristic guidance is validated via orchestrator source edits; planning prompt assertions stay scoped to planning prompt contract lines.
-      expect(planningPrompt).toContain('8) atomic todo specification per task: {id, action, target, deps, verification, done_criteria}');
-      expect(planningPrompt).toContain('9) Next Follow-up Suggestions section with 1-3 numbered, concrete next actions');
+      // Verify new unified planning prompt structure
+      expect(planningPrompt).toContain('## Required coordination tools');
+      expect(planningPrompt).toContain('todo_set (required)');
+      expect(planningPrompt).toContain('agent_graph_set (required)');
+      expect(planningPrompt).toContain('## Sub-agent delegation (your choice)');
+      expect(planningPrompt).toContain('YOU decide whether to use sub-agents and how many');
+      expect(planningPrompt).toContain('## Effort guidance');
+      expect(planningPrompt).toContain('Scale your planning depth to match the task complexity');
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }

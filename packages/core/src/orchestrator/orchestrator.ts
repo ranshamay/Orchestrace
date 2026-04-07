@@ -927,96 +927,58 @@ function buildPlanningPrompt(
       ]
     : [];
 
-  const isMedium = effort === 'medium';
-
-  const goalLines = isMedium
-    ? [
-        'Create a focused implementation plan for the following task.',
-        'Keep planning lightweight and proportional to task scope.',
-        'Within the first 1-2 thinking cycles, make a concrete tool call to gather grounding context before extended narration.',
-        'Before each tool call and after each tool result, narrate your reasoning briefly: what you learned, what you plan to do next, and why.',
-      ]
-    : [
-        'Create a deep implementation plan for the following task.',
-        'Optimize for maximum safe concurrency and explicit multi-stage execution.',
-        'Within the first 1-2 thinking cycles, make a concrete tool call to gather grounding context before extended narration.',
-        'Before each tool call and after each tool result, narrate your reasoning briefly: what you learned, what you plan to do next, and why.',
-      ];
-
-  const autonomyLines = isMedium
-    ? [
-        'If a tool call fails, use the error details to correct arguments and retry instead of aborting.',
-        'Each planned task must include a concrete target, explicit done criteria, and at least one verification command.',
-        'You MUST use coordination tools during planning:',
-        '- todo_set (required) to create a concrete todo list',
-        '- todo_set items must include numeric weight per item, and the total weight must sum to exactly 100',
-        '- todo_set item ids must be unique, and dependsOn can only reference ids from the same todo_set payload',
-        '- todo_set item status values must be exactly one of: todo, in_progress, done',
-        '- agent_graph_set (required) to define the execution structure (may contain a single node for focused tasks)',
-        '- agent_graph_set nodes must include numeric weight per node, and the total node weight must sum to exactly 100',
-        'Sub-agent delegation is OPTIONAL for this task. Only use subagent_spawn/subagent_spawn_batch if the task genuinely benefits from parallel research.',
-        'Prefer doing focused investigation yourself rather than spawning sub-agents for small tasks.',
-      ]
-    : [
-        'If a tool call fails, use the error details to correct arguments and retry instead of aborting.',
-        'Decompose planning work into atomic tasks: each todo should represent one action and one completion outcome.',
-        'Never bundle multiple actions in one task; split broad work into smaller tasks before finalizing the plan.',
-        'Each planned task must include a concrete target, explicit done criteria, and at least one verification command.',
-        'If a task would take more than ~15 minutes or touches multiple independent areas, split it further.',
-        'You MUST use coordination tools during planning:',
-        '- todo_set (required) to create a concrete todo list',
-        '- todo_set items must include numeric weight per item, and the total weight must sum to exactly 100',
-        '- todo_set item ids must be unique, and dependsOn can only reference ids from the same todo_set payload',
-        '- todo_set item status values must be exactly one of: todo, in_progress, done',
-        '- todo_update to track progress changes',
-        '- todo statuses must be exactly: todo, in_progress, done',
-        '- agent_graph_set (required) to define sub-agent dependency graph',
-        '- agent_graph_set nodes must include numeric weight per node, and the total node weight must sum to exactly 100',
-        '- agent_graph_set node ids must be unique, and dependency ids can only reference nodes from the same payload',
-        '- in agent_graph_set, provide descriptive node ids/names (avoid generic n1/n2 labels)',
-        '- agent_graph_set nodes must map to atomic execution units with explicit dependency ids',
-        '- For focused tasks affecting fewer than 3 files with a specific known-module behavior change, planning may use zero sub-agent delegation.',
-        '- subagent_spawn/subagent_spawn_batch (required) to delegate focused planning research with only relevant context per sub-agent',
-        '- Quick-start planning mode for well-scoped tasks: keep parent pre-delegation orientation to at most 3-4 calls and delegate within the first 2-3 calls whenever possible',
-        '- Keep parent orientation lightweight (e.g., root list + manifest + git status) and push detailed file reading/search into sub-agent scopes',
-        '- ALWAYS use subagent_spawn_batch (not individual subagent_spawn calls) when multiple independent sub-agents can run concurrently',
-        '- subagent_spawn/subagent_spawn_batch calls must include nodeId values that map back to agent_graph_set node ids when delegation is used',
-        '- pass nodeId on each sub-agent request so graph progress can be tracked per node',
-      ];
-
-  const outputContractLines = isMedium
-    ? [
-        'Your plan must include:',
-        '1) what needs to change and why',
-        '2) files likely to change',
-        '3) verification strategy with explicit commands',
-        '4) Next Follow-up Suggestions section with 1-3 numbered, concrete next actions',
-      ]
-    : [
-        'Your plan must include:',
-        '1) assumptions and constraints',
-        '2) multi-stage execution waves (stage 1..N)',
-        '3) per-stage atomic tasks with explicit dependencies and concurrency boundaries',
-        '4) files likely to change',
-        '5) verification strategy with explicit commands',
-        '6) rollback/risk notes (required only when the plan includes file modifications or state-changing operations; otherwise state "N/A - read-only task")',
-        '7) a sub-agent delegation map aligned to agent_graph_set nodes and minimal per-agent context',
-        '8) atomic todo specification per task: {id, action, target, deps, verification, done_criteria}',
-        '9) Next Follow-up Suggestions section with 1-3 numbered, concrete next actions',
-      ];
-
   const sections: PromptSection[] = [
     {
       name: PromptSectionName.Goal,
-      lines: goalLines,
+      lines: [
+        'Create an implementation plan for the following task.',
+        'Scale your planning depth to match the task complexity — simple tasks need minimal plans, complex tasks need detailed multi-stage plans.',
+        'Within the first 1-2 thinking cycles, make a concrete tool call to gather grounding context before extended narration.',
+        'Before each tool call and after each tool result, narrate your reasoning briefly: what you learned, what you plan to do next, and why.',
+      ],
     },
     {
       name: PromptSectionName.Autonomy,
-      lines: autonomyLines,
+      lines: [
+        'If a tool call fails, use the error details to correct arguments and retry instead of aborting.',
+        'Each planned task must include a concrete target, explicit done criteria, and at least one verification command.',
+        '',
+        '## Required coordination tools',
+        '- todo_set (required) to create a concrete todo list',
+        '- todo_set items must include numeric weight per item, and the total weight must sum to exactly 100',
+        '- todo_set item ids must be unique, and dependsOn can only reference ids from the same todo_set payload',
+        '- todo_set item status values must be exactly one of: todo, in_progress, done',
+        '- agent_graph_set (required) to define the execution structure',
+        '- agent_graph_set nodes must include numeric weight per node, and the total node weight must sum to exactly 100',
+        '- agent_graph_set node ids must be unique; use descriptive ids (avoid generic n1/n2 labels)',
+        '',
+        '## Sub-agent delegation (your choice)',
+        '- subagent_spawn / subagent_spawn_batch are available for delegating work to focused sub-agents',
+        '- YOU decide whether to use sub-agents and how many, based on the task at hand',
+        '- For simple, well-scoped changes: skip sub-agents, do the work yourself — fewer moving parts means faster results',
+        '- For broad, multi-area work: spawn sub-agents freely to parallelize investigation and implementation',
+        '- For medium-scope work: use your judgment — 1 sub-agent for a focused slice is fine, 0 is also fine',
+        '- When you do use sub-agents, use subagent_spawn_batch for independent parallel work (not sequential subagent_spawn calls)',
+        '- When you do use sub-agents, pass nodeId values mapping to agent_graph_set node ids so progress tracking works',
+        '- Delegate only task-relevant context to each sub-agent; keep their scope focused',
+        '',
+        '## Effort guidance',
+        `- This task has been classified as **${effort}** effort`,
+        '- Match your planning depth, coordination overhead, and sub-agent usage to this level',
+        '- A "low" task might need a 1-item todo and a single-node graph with no sub-agents',
+        '- A "high" task might need detailed multi-stage waves, many todos, and several parallel sub-agents',
+      ],
     },
     {
       name: PromptSectionName.OutputContract,
-      lines: outputContractLines,
+      lines: [
+        'Your plan must include (scale detail to effort level):',
+        '1) what needs to change and why',
+        '2) files likely to change',
+        '3) verification strategy with explicit commands',
+        '4) execution structure (stages/waves if the task warrants them)',
+        '5) Next Follow-up Suggestions section with 1-3 numbered, concrete next actions',
+      ],
     },
     {
       name: PromptSectionName.TaskContext,
@@ -1086,65 +1048,48 @@ function buildImplementationPrompt(params: {
       : '';
 
   const isLowEffort = effort === 'trivial' || effort === 'low';
-  const isMediumEffort = effort === 'medium';
-
-  const goalLines = isLowEffort
-    ? [
-        'Implement the requested change directly.',
-        'This is a focused, low-complexity task — work efficiently without unnecessary ceremony.',
-        'Before each tool call and after each tool result, narrate your reasoning briefly.',
-      ]
-    : [
-        'Execute the approved plan and implement the requested changes.',
-        'You must satisfy validation criteria before considering the task complete.',
-        'Before each tool call and after each tool result, narrate your reasoning: what you learned, what you plan to do next, and why.',
-      ];
-
-  const autonomyLines = isLowEffort
-    ? [
-        'Implement the change directly. Do not spawn sub-agents for this focused task.',
-        'If a tool call fails, read the error details, adjust arguments, and retry.',
-        'Read relevant files before editing. Keep edits minimal and focused.',
-        'Run verification commands when the task has validation criteria.',
-        'After validation succeeds and if code was changed, commit changes and push.',
-      ]
-    : isMediumEffort
-      ? [
-          'If a tool call fails, read the error details, adjust arguments, and retry the tool call.',
-          'Follow the todo list if one was created during planning.',
-          'Sub-agent delegation is OPTIONAL. Only use subagent_spawn if the remaining work genuinely benefits from parallelism.',
-          'Prefer doing focused work yourself rather than spawning sub-agents for straightforward changes.',
-          'If sub-agents are used, pass nodeId so the execution graph stays current.',
-          'Before finishing, ensure all todos are done.',
-          'After validation succeeds, create/switch a feature branch, commit all changes, push the branch, and open/update a PR using github_api (never gh CLI).',
-          'If git/PR automation fails, read the exact error, retry with corrected command/flags, and continue.',
-        ]
-      : [
-          'Operate in multi-stage waves and maximize safe concurrency.',
-          'If a tool call fails, read the error details, adjust arguments, and retry the tool call.',
-          'Before coding, read todo_get and follow the todo list strictly.',
-          'Update todo states using todo_update as you progress.',
-          'Read agent_graph_get and spawn dependent sub-agents with subagent_spawn throughout execution.',
-          'ALWAYS use subagent_spawn_batch (not sequential subagent_spawn calls) when multiple independent nodes are ready to run in parallel.',
-          'Delegate only task-relevant context to each sub-agent; avoid sending full unrelated history.',
-          'Pass nodeId for each spawned sub-agent so the execution graph can reflect live progress.',
-          'Keep sub-agent outputs concise and integrate them into the main implementation.',
-          'Before finishing, ensure all todos are done and all agent graph nodes are completed (no failed nodes).',
-          'After validation succeeds, create/switch a feature branch, commit all changes, push the branch, and open/update a PR using github_api (never gh CLI).',
-          'After each push or PR update, probe remote CI/check status via github_api and continue until checks are green or a true blocker is reached.',
-          'Do not stop at green checks alone: verify PR mergeability, required checks, and review state via github_api, then keep iterating until the PR is merge-ready or a true blocker is reached.',
-          'If remote checks fail, inspect failing workflows/check-runs, fix root causes, rerun local validation, push again, and re-check CI.',
-          'If git/PR automation fails, read the exact error, retry with corrected command/flags, and continue from the same point.',
-        ];
 
   const sections: PromptSection[] = [
     {
       name: PromptSectionName.Goal,
-      lines: goalLines,
+      lines: [
+        'Execute the approved plan and implement the requested changes.',
+        'You must satisfy validation criteria before considering the task complete.',
+        'Scale your execution depth to match the task — simple tasks should be completed quickly, complex tasks may need sub-agents.',
+        'Before each tool call and after each tool result, narrate your reasoning briefly.',
+      ],
     },
     {
       name: PromptSectionName.Autonomy,
-      lines: autonomyLines,
+      lines: [
+        'If a tool call fails, read the error details, adjust arguments, and retry the tool call.',
+        'Read relevant files before editing. Keep edits minimal and focused.',
+        ...(isLowEffort
+          ? []
+          : [
+              'Follow the todo list from planning (read todo_get) and update via todo_update as you progress.',
+              'Check agent_graph_get for the execution structure.',
+            ]),
+        '',
+        '## Sub-agent delegation (your choice)',
+        '- subagent_spawn / subagent_spawn_batch are available for delegating work in parallel',
+        '- YOU decide whether to use sub-agents based on the work remaining',
+        '- For simple, contained changes: do the work yourself — no sub-agents needed',
+        '- For broad, multi-file changes: spawn sub-agents to parallelize implementation',
+        '- When you do use sub-agents, use subagent_spawn_batch for independent parallel work',
+        '- When you do use sub-agents, pass nodeId so the execution graph stays current',
+        '- Delegate only task-relevant context; keep each sub-agent focused',
+        '',
+        `## Effort: ${effort}`,
+        '- Match your coordination overhead to this level',
+        ...(isLowEffort
+          ? ['- This is a simple task — implement directly, skip sub-agents, minimal ceremony']
+          : [
+              '- Ensure all todos are done before finishing',
+              'After validation succeeds, create/switch a feature branch, commit all changes, push the branch, and open/update a PR using github_api (never gh CLI).',
+              'If git/PR automation fails, read the exact error, retry with corrected command/flags, and continue.',
+            ]),
+      ],
     },
     {
       name: PromptSectionName.TaskContext,
@@ -1489,25 +1434,19 @@ function buildPlanningContractError(
     taskEffort?: TaskEffort;
   },
 ): string | undefined {
-  const allowsZeroPlanningSubagents = options?.task
-    ? isFocusedTaskForZeroPlanningSubagents(options.task)
-    : false;
-  // Medium effort tasks don't require sub-agent delegation
-  const effortAllowsNoSubagents = options?.taskEffort === 'medium';
-  const hasSubAgentDelegation = hasSuccessfulToolCall(toolCalls, 'subagent_spawn')
-    || hasSuccessfulToolCall(toolCalls, 'subagent_spawn_batch');
-  const requiresSubAgentDelegation = !allowsZeroPlanningSubagents && !effortAllowsNoSubagents;
+  const effort = options?.taskEffort ?? 'high';
+
+  // Low/trivial effort skips planning entirely, so never reaches this.
+  // Medium/high: require todo_set + agent_graph_set as structural scaffolding.
   const requiredTools = ['todo_set', 'agent_graph_set'];
   const missing = requiredTools.filter((toolName) => !hasSuccessfulToolCall(toolCalls, toolName));
-  if (requiresSubAgentDelegation && !hasSubAgentDelegation) {
-    missing.push('subagent_spawn or subagent_spawn_batch');
-  }
 
   const contractIssues: string[] = [];
   if (missing.length > 0) {
     contractIssues.push(`Missing successful coordination tool call(s): ${missing.join(', ')}.`);
   }
 
+  // Validate format of todo_set if it was called
   const todoSetResult = latestSuccessfulToolCall(toolCalls, 'todo_set');
   if (todoSetResult) {
     const todoValidation = validateWeightedListPayload(
@@ -1525,14 +1464,13 @@ function buildPlanningContractError(
     }
   }
 
-  let graphNodeIds = new Set<string>();
+  // Validate format of agent_graph_set if it was called
   const graphSetResult = latestSuccessfulToolCall(toolCalls, 'agent_graph_set');
   if (graphSetResult) {
     const graphValidation = validateWeightedListPayload(
       resolveToolCallInputForValidation(toolCalls, 'agent_graph_set', graphSetResult),
       'nodes',
     );
-    graphNodeIds = graphValidation.ids;
     if (graphValidation.sum === undefined) {
       contractIssues.push('agent_graph_set must include numeric weight for each node.');
     } else if (!isWeightTotalValid(graphValidation.sum)) {
@@ -1544,7 +1482,16 @@ function buildPlanningContractError(
     }
   }
 
-  if (requiresSubAgentDelegation && graphNodeIds.size > 0 && hasSubAgentDelegation) {
+  // Validate that sub-agent nodeIds map to graph nodes when both are used
+  const hasSubAgentDelegation = hasSuccessfulToolCall(toolCalls, 'subagent_spawn')
+    || hasSuccessfulToolCall(toolCalls, 'subagent_spawn_batch');
+  const graphNodeIds = graphSetResult
+    ? validateWeightedListPayload(
+        resolveToolCallInputForValidation(toolCalls, 'agent_graph_set', graphSetResult),
+        'nodes',
+      ).ids
+    : new Set<string>();
+  if (graphNodeIds.size > 0 && hasSubAgentDelegation) {
     const delegatedNodeIds = collectSubAgentNodeIds(toolCalls);
     const mappedNodes = [...graphNodeIds].filter((nodeId) => delegatedNodeIds.has(nodeId));
     if (mappedNodes.length === 0) {
@@ -1552,33 +1499,14 @@ function buildPlanningContractError(
     }
   }
 
-  if (options?.quickStartMode) {
-    const maxPreDelegationToolCalls = normalizeQuickStartMaxPreDelegationToolCalls(options.quickStartMaxPreDelegationToolCalls);
-    const quickStartAssessment = assessQuickStartDelegation(toolCalls, maxPreDelegationToolCalls);
-    if (!quickStartAssessment.hasDelegation) {
-      contractIssues.push(
-        `quick-start mode requires a successful sub-agent delegation (subagent_spawn or subagent_spawn_batch) within the first ${maxPreDelegationToolCalls} successful tool call(s).`,
-      );
-    } else if (!quickStartAssessment.withinLimit) {
-      contractIssues.push(
-        `quick-start mode requires delegation within the first ${maxPreDelegationToolCalls} successful tool call(s), but first delegation occurred after ${quickStartAssessment.preDelegationSuccessfulToolCalls} successful call(s).`,
-      );
-    }
-  }
-
   if (contractIssues.length === 0) {
     return undefined;
   }
 
-  const delegationGuidance = allowsZeroPlanningSubagents
-    ? 'Focused-task policy allows zero planning sub-agents for this task, but planning must still publish todo_set + agent_graph_set before implementation can begin.'
-    : 'Planning must publish todo_set + agent_graph_set and delegate focused work via subagent_spawn before implementation can begin.';
-
   return [
     'Planning contract not satisfied.',
     ...contractIssues,
-    delegationGuidance,
-    'For well-scoped tasks, use quick-start behavior: keep parent orientation to 3-4 calls max, delegate within the first 2-3 calls when feasible, and push detailed discovery into sub-agents.',
+    `Task effort: ${effort}. Planning must publish todo_set + agent_graph_set before implementation can begin. Sub-agent delegation is your choice — use it when it helps, skip it when the task is simple.`,
   ].join(' ');
 }
 

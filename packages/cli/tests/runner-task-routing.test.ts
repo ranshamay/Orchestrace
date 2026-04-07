@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { resolveTaskRoute } from '../src/task-routing.js';
+import { resolveTaskRoute, stripRetryContinuationContext } from '../src/task-routing.js';
 
 describe('runner task routing parity', () => {
   it('defaults ambiguous prompts to safe full pipeline category', () => {
@@ -13,5 +13,40 @@ describe('runner task routing parity', () => {
     expect(route.result.category).toBe('investigation');
     expect(route.result.source).toBe('override');
     expect(route.validationEnabled).toBe(false);
+  });
+
+  it('strips retry continuation context before routing while preserving follow-up request', () => {
+    const rawPrompt = [
+      'Run echo hello world',
+      '',
+      'Retry continuation context from previous attempt:',
+      '- Previous status: failed',
+      '- Previous error: timeout',
+      '- Todo snapshot: ...',
+      '',
+      'Follow-up request:',
+      'try again',
+    ].join('\n');
+
+    const stripped = stripRetryContinuationContext(rawPrompt);
+    expect(stripped).toContain('Run echo hello world');
+    expect(stripped).toContain('Follow-up request:');
+    expect(stripped).toContain('try again');
+    expect(stripped).not.toContain('Retry continuation context from previous attempt:');
+    expect(stripped).not.toContain('Previous status: failed');
+  });
+
+  it('keeps shell-command route for retry prompts once continuation context is stripped', () => {
+    const rawPrompt = [
+      'Run echo hello world',
+      '',
+      'Retry continuation context from previous attempt:',
+      '- Previous status: completed',
+      '- Agent graph snapshot: ...',
+    ].join('\n');
+
+    const route = resolveTaskRoute(stripRetryContinuationContext(rawPrompt));
+    expect(route.result.category).toBe('shell_command');
+    expect(route.result.strategy).toBe('direct_shell');
   });
 });

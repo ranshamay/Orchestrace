@@ -3,6 +3,9 @@ import type { TaskType } from '@orchestrace/core';
 
 const SHELL_COMMAND_START = /^(pnpm|npm|yarn|node|npx|git|cat|echo|grep|find|sed|awk|curl|bash|zsh|python|make|docker|kubectl|ls|pwd)(?:\s|$)/i;
 
+const RETRY_CONTINUATION_MARKER = 'Retry continuation context from previous attempt:';
+const FOLLOW_UP_MARKER = 'Follow-up request:';
+
 export interface ResolvedRoute {
   result: TaskRouteResult;
   nodeType: TaskType;
@@ -38,6 +41,36 @@ export function resolveTaskRoute(prompt: string, overrideRaw?: string): Resolved
     nodeType,
     validationEnabled: result.category !== 'investigation',
   };
+}
+
+/**
+ * Removes retry-context scaffolding from retry execution prompts so routing/effort
+ * classifiers evaluate user intent instead of serialized continuation metadata.
+ */
+export function stripRetryContinuationContext(prompt: string): string {
+  let result = prompt.trim();
+  if (!result) {
+    return result;
+  }
+
+  while (true) {
+    const markerIndex = result.indexOf(RETRY_CONTINUATION_MARKER);
+    if (markerIndex < 0) {
+      break;
+    }
+
+    const followUpIndex = result.indexOf(FOLLOW_UP_MARKER, markerIndex + RETRY_CONTINUATION_MARKER.length);
+    if (followUpIndex < 0) {
+      result = result.slice(0, markerIndex).trimEnd();
+      break;
+    }
+
+    const prefix = result.slice(0, markerIndex).trimEnd();
+    const suffix = result.slice(followUpIndex).trimStart();
+    result = [prefix, suffix].filter((section) => section.length > 0).join('\n\n');
+  }
+
+  return result.trim();
 }
 
 export function extractShellCommand(prompt: string): string | undefined {
