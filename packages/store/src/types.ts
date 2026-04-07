@@ -115,6 +115,8 @@ export interface SessionConfig {
   adaptiveConcurrency: boolean;
   batchConcurrency: number;
   batchMinConcurrency: number;
+  enableTrivialTaskGate?: boolean;
+  trivialTaskMaxPromptLength?: number;
   worktreePath?: string;
   worktreeBranch?: string;
   creationReason: SessionCreationReason;

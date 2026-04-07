@@ -13,9 +13,16 @@
 
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
-import { orchestrate, PromptSectionName, renderPromptSections } from '@orchestrace/core';
+import {
+  orchestrate,
+  PromptSectionName,
+  renderPromptSections,
+  classifyTrivialTaskPrompt,
+  extractSingleCommandFromPrompt,
+  resolveTrivialTaskGateConfig,
+} from '@orchestrace/core';
 import type { DagEvent, TaskGraph } from '@orchestrace/core';
-import { PiAiAdapter, ProviderAuthManager } from '@orchestrace/provider';
+import { PiAiAdapter, ProviderAuthManager, type LlmToolCall } from '@orchestrace/provider';
 import {
   DEFAULT_AGENT_TOOL_POLICY_VERSION,
   createAgentToolset,
@@ -130,12 +137,120 @@ async function main(): Promise<void> {
   }
 
   try {
+    const trivialTaskGate = resolveTrivialTaskGateConfig({
+      enabled: config.enableTrivialTaskGate,
+      maxPromptLength: config.trivialTaskMaxPromptLength,
+    });
+    const trivialClassification = classifyTrivialTaskPrompt(config.prompt, trivialTaskGate);
+    console.info(
+      `[runner:${sessionId}] trivial-task-gate enabled=${trivialTaskGate.enabled} isTrivial=${trivialClassification.isTrivial} reasons=${trivialClassification.reasons.join(',')}`,
+    );
+
+    const trivialCommand = trivialClassification.isTrivial
+      ? extractSingleCommandFromPrompt(config.prompt)
+      : undefined;
+
+    if (trivialClassification.isTrivial && trivialCommand) {
+      const t = iso();
+      const llmStatus = makeLlmStatus('using-tools', 'Executing lightweight trivial command.', undefined, 'task', 'implementation');
+      lastLlmStatusEmission = {
+        key: llmStatusIdentityKey(llmStatus),
+        emittedAt: parseTimestamp(llmStatus.updatedAt),
+      };
+      await emit({ time: t, type: 'session:llm-status-change', payload: { llmStatus } });
+
+      const lightweightToolset = createAgentToolset({
+        cwd: config.workspacePath,
+        phase: 'implementation',
+        taskType: 'custom',
+        graphId: graph.id,
+        taskId: 'task',
+        provider: config.provider,
+        model: config.model,
+        adaptiveConcurrency: config.adaptiveConcurrency,
+        batchConcurrency: config.batchConcurrency,
+        batchMinConcurrency: config.batchMinConcurrency,
+        resolveGithubToken: () => githubAuthManager.resolveApiKey('github'),
+      });
+
+      const toolCallId = `lightweight-${randomUUID()}`;
+      const toolCall: LlmToolCall = {
+        id: toolCallId,
+        name: 'run_command',
+        arguments: { command: trivialCommand },
+      };
+
+      const started: Extract<DagEvent, { type: 'task:tool-call' }> = {
+        type: 'task:tool-call',
+        taskId: 'task',
+        phase: 'implementation',
+        attempt: 1,
+        toolCallId,
+        toolName: 'run_command',
+        status: 'started',
+        input: JSON.stringify({ command: trivialCommand }),
+      };
+      const startedUiEvent = toUiEvent(sessionId, started, t);
+      if (startedUiEvent) {
+        await emit({ time: t, type: 'session:dag-event', payload: { event: startedUiEvent } });
+      }
+
+      const toolResult = await lightweightToolset.executeTool(toolCall, controller.signal);
+      const resultEvent: Extract<DagEvent, { type: 'task:tool-call' }> = {
+        ...started,
+        status: 'result',
+        output: toolResult.content,
+        isError: toolResult.isError,
+      };
+      const resultUiEvent = toUiEvent(sessionId, resultEvent, iso());
+      if (resultUiEvent) {
+        await emit({ time: iso(), type: 'session:dag-event', payload: { event: resultUiEvent } });
+      }
+
+      const outputText = toolResult.content;
+      await emit({
+        time: iso(),
+        type: 'session:output-set',
+        payload: { output: { text: outputText } },
+      });
+
+      if (toolResult.isError) {
+        await emit({ time: iso(), type: 'session:error-change', payload: { error: outputText } });
+        const failedStatus = makeLlmStatus('failed', outputText, 'tool_runtime', 'task', 'implementation');
+        lastLlmStatusEmission = {
+          key: llmStatusIdentityKey(failedStatus),
+          emittedAt: parseTimestamp(failedStatus.updatedAt),
+        };
+        await emit({ time: iso(), type: 'session:llm-status-change', payload: { llmStatus: failedStatus } });
+        await emit({ time: iso(), type: 'session:status-change', payload: { status: 'failed' } });
+        clearInterval(heartbeatInterval);
+        process.exit(1);
+      }
+
+      const completedStatus = makeLlmStatus('completed', 'Lightweight trivial command completed.', undefined, 'task', 'implementation');
+      lastLlmStatusEmission = {
+        key: llmStatusIdentityKey(completedStatus),
+        emittedAt: parseTimestamp(completedStatus.updatedAt),
+      };
+      await emit({ time: iso(), type: 'session:llm-status-change', payload: { llmStatus: completedStatus } });
+      await emit({ time: iso(), type: 'session:status-change', payload: { status: 'completed' } });
+      await emit({
+        time: iso(),
+        type: 'session:chat-message',
+        payload: { message: { role: 'assistant', content: outputText, time: iso() } },
+      });
+      clearInterval(heartbeatInterval);
+      process.exit(0);
+    }
+
     const outputs = await orchestrate(graph, {
       llm,
       cwd: config.workspacePath,
       planOutputDir: join(config.workspacePath, '.orchestrace', 'plans'),
       promptVersion: process.env.ORCHESTRACE_PROMPT_VERSION,
       policyVersion: process.env.ORCHESTRACE_POLICY_VERSION ?? DEFAULT_AGENT_TOOL_POLICY_VERSION,
+      enableTrivialTaskGate: trivialTaskGate.enabled,
+      trivialTaskMaxPromptLength: trivialTaskGate.maxPromptLength,
       defaultModel: { provider: config.provider, model: config.model },
       planningSystemPrompt: buildSystemPrompt(config, 'planning'),
       implementationSystemPrompt: buildSystemPrompt(config, 'implementation'),
