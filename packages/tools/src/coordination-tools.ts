@@ -500,6 +500,7 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
           concurrency: Type.Optional(Type.Number({ minimum: 1, maximum: SUBAGENT_BATCH_MAX_CONCURRENCY })),
           adaptiveConcurrency: Type.Optional(Type.Boolean({ description: 'Automatically tune concurrency based on sub-agent failures while processing the batch.' })),
           minConcurrency: Type.Optional(Type.Number({ minimum: 1, maximum: SUBAGENT_BATCH_MAX_CONCURRENCY })),
+          maxRetries: Type.Optional(Type.Number({ minimum: 0 })),
         }),
       },
       execute: async (toolArgs, signal) => {
@@ -531,6 +532,7 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
             ?? SUBAGENT_BATCH_MIN_CONCURRENCY,
           SUBAGENT_BATCH_MAX_CONCURRENCY,
         );
+        const maxRetries = Math.max(0, Math.floor(asNumber(toolArgs.maxRetries) ?? 2));
 
         const requestInputs = rawAgents.filter((entry): entry is Record<string, unknown> => isRecord(entry));
         if (requestInputs.length === 0) {
@@ -601,74 +603,115 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
         });
 
         const startIndex = state.subAgents.length;
-        const records: SubAgentRunRecord[] = misses.map(({ request }, index) => ({
+        const allRecords = misses.map(({ request }, index) => ({
           id: `sub-${startIndex + index + 1}`,
           nodeId: request.nodeId,
           prompt: request.prompt,
-          status: 'running',
+          status: 'running' as const,
           provider: request.provider,
           model: request.model,
           reasoning: request.reasoning,
           startedAt: now(),
         }));
 
-        if (records.length > 0) {
-          state.subAgents.push(...records);
+        if (allRecords.length > 0) {
+          state.subAgents.push(...allRecords);
           state.updatedAt = now();
           await writeCoordinationState(statePath, state);
         }
 
-        const mapper = async (record: SubAgentRunRecord, index: number): Promise<SubAgentBatchRunResult> => {
-          const request = misses[index].request;
-          try {
-            const result = await options.runSubAgent?.(request, signal);
-            const mergePayload = buildSubAgentMergePayload(result ?? { text: '' }, record.id, request);
-            return {
-              id: record.id,
-              nodeId: record.nodeId,
-              status: 'completed' as const,
-              promptChars: request.prompt.length,
-              promptPreview: compactPromptPreview(request.prompt),
-              outputPreview: mergePayload.summary,
-              mergePayload,
-              usage: usageOrZero(result?.usage),
-              usageReported: Boolean(result?.usage),
-              cacheHit: false as const,
-            };
-          } catch (error) {
-            return {
-              id: record.id,
-              nodeId: record.nodeId,
-              status: 'failed' as const,
-              promptChars: request.prompt.length,
-              promptPreview: compactPromptPreview(request.prompt),
-              error: error instanceof Error ? error.message : String(error),
-              cacheHit: false as const,
-            };
-          }
-        };
+        const recordByRequestIndex = new Map<number, SubAgentRunRecord>();
+        misses.forEach((miss, index) => {
+          recordByRequestIndex.set(miss.requestIndex, allRecords[index]);
+        });
 
-        const batchRun = records.length === 0
-          ? { results: [], finalConcurrency: 0, windows: 0 }
-          : adaptiveConcurrency
-            ? await mapWithAdaptiveConcurrency(records, {
+        const settledByRequestIndex = new Map<number, SubAgentBatchRunResult>();
+        let pending = misses.map((miss, index) => ({
+          request: miss.request,
+          requestIndex: miss.requestIndex,
+          record: allRecords[index],
+        }));
+        const dispatchedNodeIds: string[] = [];
+        let finalConcurrency = allRecords.length > 0 ? concurrency : 0;
+        let windows = 0;
+
+        for (let attempt = 0; pending.length > 0 && attempt <= maxRetries; attempt += 1) {
+          const mapper = async (
+            pendingEntry: { request: SubAgentRequest; requestIndex: number; record: SubAgentRunRecord },
+          ): Promise<SubAgentBatchRunResult> => {
+            const request = pendingEntry.request;
+            const record = pendingEntry.record;
+            try {
+              const result = await options.runSubAgent?.(request, signal);
+              const mergePayload = buildSubAgentMergePayload(result ?? { text: '' }, record.id, request);
+              return {
+                id: record.id,
+                nodeId: record.nodeId,
+                status: 'completed' as const,
+                promptChars: request.prompt.length,
+                promptPreview: compactPromptPreview(request.prompt),
+                outputPreview: mergePayload.summary,
+                mergePayload,
+                usage: usageOrZero(result?.usage),
+                usageReported: Boolean(result?.usage),
+                cacheHit: false as const,
+              };
+            } catch (error) {
+              return {
+                id: record.id,
+                nodeId: record.nodeId,
+                status: 'failed' as const,
+                promptChars: request.prompt.length,
+                promptPreview: compactPromptPreview(request.prompt),
+                error: error instanceof Error ? error.message : String(error),
+                cacheHit: false as const,
+              };
+            }
+          };
+
+          const batchRun = adaptiveConcurrency
+            ? await mapWithAdaptiveConcurrency(pending, {
                 initialConcurrency: concurrency,
                 minConcurrency,
                 maxConcurrency: SUBAGENT_BATCH_MAX_CONCURRENCY,
               }, mapper, (result) => result.status === 'failed')
             : {
-                results: await mapWithConcurrency(records, concurrency, mapper),
+                results: await mapWithConcurrency(pending, concurrency, mapper),
                 finalConcurrency: concurrency,
                 windows: 1,
               };
 
-        const settledByRequestIndex = new Map<number, SubAgentBatchRunResult>();
-        batchRun.results.forEach((result, missIndex) => {
-          const requestIndex = misses[missIndex].requestIndex;
-          settledByRequestIndex.set(requestIndex, result);
-        });
+          finalConcurrency = batchRun.finalConcurrency;
+          windows += batchRun.windows;
 
-        const settled = requests.map((_, requestIndex) => {
+          const nextPending: typeof pending = [];
+          batchRun.results.forEach((result, pendingIndex) => {
+            const pendingEntry = pending[pendingIndex];
+            dispatchedNodeIds.push(
+              pendingEntry.request.nodeId
+                ?? pendingEntry.record.id,
+            );
+
+            if (result.status === 'completed') {
+              settledByRequestIndex.set(pendingEntry.requestIndex, result);
+              return;
+            }
+
+            if (attempt < maxRetries) {
+              nextPending.push(pendingEntry);
+            } else {
+              settledByRequestIndex.set(pendingEntry.requestIndex, result);
+            }
+          });
+
+          pending = nextPending;
+
+          if (pending.length > 0 && attempt < maxRetries) {
+            await sleepWithSignal(200 * (2 ** attempt), signal);
+          }
+        }
+
+        const settled = requests.map((request, requestIndex) => {
           const cached = cacheHits.get(requestIndex);
           if (cached) {
             return cached.run;
@@ -679,12 +722,13 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
             return executed;
           }
 
+          const record = recordByRequestIndex.get(requestIndex);
           return {
-            id: `unknown-${requestIndex + 1}`,
-            nodeId: requests[requestIndex].nodeId,
+            id: record?.id ?? `unknown-${requestIndex + 1}`,
+            nodeId: request.nodeId,
             status: 'failed' as const,
-            promptChars: requests[requestIndex].prompt.length,
-            promptPreview: compactPromptPreview(requests[requestIndex].prompt),
+            promptChars: request.prompt.length,
+            promptPreview: compactPromptPreview(request.prompt),
             error: 'Missing sub-agent execution result.',
             cacheHit: false as const,
           };
@@ -706,7 +750,7 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
         const maxPromptChars = promptSizes.length > 0 ? Math.max(...promptSizes) : 0;
         const oversized = settled.filter((entry) => (entry.promptChars ?? 0) > SUBAGENT_PROMPT_SOFT_LIMIT_CHARS);
 
-        if (records.length > 0) {
+        if (allRecords.length > 0) {
           const latest = await readCoordinationState(statePath);
           for (const result of settled) {
             const current = latest.subAgents.find((entry) => entry.id === result.id);
@@ -745,8 +789,9 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
           concurrency,
           adaptiveConcurrency,
           minConcurrency,
-          finalConcurrency: batchRun.finalConcurrency,
-          windows: batchRun.windows,
+          maxRetries,
+          finalConcurrency,
+          windows,
           completed: settled.length - failedCount,
           failed: failedCount,
           failedNodeIds,
@@ -754,7 +799,7 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
           cacheHitCount: cacheHits.size,
           cacheMissCount: misses.length,
           cachedNodeIds: Array.from(cacheHits.values()).map((entry) => entry.record.nodeId ?? entry.record.id),
-          dispatchedNodeIds: misses.map(({ request }, index) => request.nodeId ?? records[index]?.id ?? `sub-${startIndex + index + 1}`),
+          dispatchedNodeIds,
           decomposition: {
             totalPromptChars,
             averagePromptChars: settled.length > 0 ? Math.round(totalPromptChars / settled.length) : 0,
@@ -1645,6 +1690,19 @@ function toPosixPath(path: string): string {
   return path.split(sep).join('/');
 }
 
+function asNumber(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value;
+  }
+
+  if (typeof value !== 'string') {
+    return undefined;
+  }
+
+  const normalized = Number.parseFloat(value.trim());
+  return Number.isFinite(normalized) ? normalized : undefined;
+}
+
 function asPositiveInteger(value: unknown): number | undefined {
   if (typeof value !== 'number' || !Number.isFinite(value)) {
     return undefined;
@@ -1706,6 +1764,37 @@ async function mapWithConcurrency<T, U>(
 
   await Promise.all(workers);
   return results;
+}
+
+async function sleepWithSignal(ms: number, signal?: AbortSignal): Promise<void> {
+  if (ms <= 0) {
+    return;
+  }
+
+  await new Promise<void>((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      cleanup();
+      resolve();
+    }, ms);
+
+    const onAbort = () => {
+      cleanup();
+      reject(new Error('Operation aborted'));
+    };
+
+    const cleanup = () => {
+      clearTimeout(timeout);
+      signal?.removeEventListener('abort', onAbort);
+    };
+
+    if (signal?.aborted) {
+      cleanup();
+      reject(new Error('Operation aborted'));
+      return;
+    }
+
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
 }
 
 async function mapWithAdaptiveConcurrency<T, U>(
