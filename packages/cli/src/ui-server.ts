@@ -283,6 +283,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           provider: c.provider,
           model: c.model,
           autoApprove: c.autoApprove,
+          quickStartMode: c.quickStartMode,
+          quickStartMaxPreDelegationToolCalls: c.quickStartMaxPreDelegationToolCalls,
           executionContext: c.executionContext ?? 'workspace',
           selectedWorktreePath: c.selectedWorktreePath,
           useWorktree: c.useWorktree ?? c.executionContext === 'git-worktree',
@@ -488,6 +490,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
               provider: session.provider,
               model: session.model,
               autoApprove: session.autoApprove,
+              quickStartMode: session.quickStartMode,
+              quickStartMaxPreDelegationToolCalls: session.quickStartMaxPreDelegationToolCalls,
               executionContext: session.executionContext,
               selectedWorktreePath: session.selectedWorktreePath,
               useWorktree: session.useWorktree,
@@ -938,6 +942,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     provider: string;
     model: string;
     autoApprove: boolean;
+    quickStartMode?: boolean;
+    quickStartMaxPreDelegationToolCalls?: number;
     executionContext?: ExecutionContext;
     selectedWorktreePath?: string;
     useWorktree?: boolean;
@@ -1011,6 +1017,12 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     const batchMinConcurrency = Math.min(
       batchConcurrency,
       normalizePositiveSetting(request.batchMinConcurrency, uiPreferences.batchMinConcurrency),
+    );
+    const quickStartMode = request.quickStartMode
+      ?? (parseBooleanSetting(process.env.ORCHESTRACE_QUICK_START_MODE) ?? false);
+    const quickStartMaxPreDelegationToolCalls = normalizePositiveSetting(
+      request.quickStartMaxPreDelegationToolCalls,
+      parsePositiveSetting(process.env.ORCHESTRACE_QUICK_START_MAX_PRE_DELEGATION_TOOL_CALLS) ?? 3,
     );
     const enableTrivialTaskGate = request.enableTrivialTaskGate ?? uiPreferences.enableTrivialTaskGate;
     const trivialTaskMaxPromptLength = normalizePositiveSetting(
@@ -1117,6 +1129,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       provider: request.provider,
       model: request.model,
       autoApprove: request.autoApprove,
+      quickStartMode,
+      quickStartMaxPreDelegationToolCalls,
       executionContext,
       selectedWorktreePath,
       useWorktree: executionContext === 'git-worktree',
@@ -1167,6 +1181,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           provider: request.provider,
           model: request.model,
           autoApprove: request.autoApprove,
+          quickStartMode,
+          quickStartMaxPreDelegationToolCalls,
           executionContext,
           selectedWorktreePath,
           useWorktree: executionContext === 'git-worktree',
@@ -1994,6 +2010,12 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         }
 
         const autoApprove = Boolean(body.autoApprove);
+        const quickStartMode = parseBooleanSetting(body.quickStartMode)
+          ?? parseBooleanSetting(body.quickStart)
+          ?? parseBooleanSetting(body.enableQuickStart);
+        const quickStartMaxPreDelegationToolCalls = parsePositiveSetting(body.quickStartMaxPreDelegationToolCalls)
+          ?? parsePositiveSetting(body.quickStartToolCallLimit)
+          ?? parsePositiveSetting(body.maxPreDelegationToolCalls);
         const executionContext = normalizeExecutionContext(body.executionContext)
           ?? normalizeExecutionContext(body.mode)
           ?? normalizeExecutionContext(body.executionMode);
@@ -2020,6 +2042,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           provider,
           model: modelResolution.model,
           autoApprove,
+          quickStartMode,
+          quickStartMaxPreDelegationToolCalls,
           executionContext,
           selectedWorktreePath,
           useWorktree,
@@ -2083,6 +2107,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           provider: sourceSession.provider,
           model: sourceSession.model,
           autoApprove: sourceSession.autoApprove,
+          quickStartMode: sourceSession.quickStartMode,
+          quickStartMaxPreDelegationToolCalls: sourceSession.quickStartMaxPreDelegationToolCalls,
           executionContext: sourceSession.executionContext,
           selectedWorktreePath: sourceSession.selectedWorktreePath,
           useWorktree: sourceSession.useWorktree,
@@ -3802,6 +3828,8 @@ function toPersistedSession(session: WorkSession): PersistedWorkSession {
     provider: session.provider,
     model: session.model,
     autoApprove: session.autoApprove,
+    quickStartMode: session.quickStartMode,
+    quickStartMaxPreDelegationToolCalls: session.quickStartMaxPreDelegationToolCalls,
     executionContext: session.executionContext,
     selectedWorktreePath: session.selectedWorktreePath,
     useWorktree: session.useWorktree,
@@ -3849,6 +3877,12 @@ function hydratePersistedSession(session: PersistedWorkSession): WorkSession {
   return {
     ...session,
     promptParts: promptParts.length > 0 ? promptParts : undefined,
+    quickStartMode: parseBooleanSetting(session.quickStartMode)
+      ?? (parseBooleanSetting(process.env.ORCHESTRACE_QUICK_START_MODE) ?? false),
+    quickStartMaxPreDelegationToolCalls: normalizePositiveSetting(
+      session.quickStartMaxPreDelegationToolCalls,
+      parsePositiveSetting(process.env.ORCHESTRACE_QUICK_START_MAX_PRE_DELEGATION_TOOL_CALLS) ?? 3,
+    ),
     executionContext: normalizeExecutionContext(session.executionContext)
       ?? (Boolean(session.useWorktree) ? 'git-worktree' : 'workspace'),
     selectedWorktreePath: asString(session.selectedWorktreePath)
@@ -6022,6 +6056,8 @@ function serializeWorkSession(session: WorkSession, todos: AgentTodoItem[] = [])
     provider: session.provider,
     model: session.model,
     autoApprove: session.autoApprove,
+    quickStartMode: session.quickStartMode,
+    quickStartMaxPreDelegationToolCalls: session.quickStartMaxPreDelegationToolCalls,
     executionContext: session.executionContext,
     selectedWorktreePath: session.selectedWorktreePath,
     useWorktree: session.useWorktree,
@@ -6749,6 +6785,13 @@ function buildContextExecutionStateSummary(session: WorkSession, todos: AgentTod
 }
 
 function buildSessionSystemPrompt(session: WorkSession, phase: SessionPromptPhase): string {
+  const quickStartMode = session.quickStartMode
+    ?? (parseBooleanSetting(process.env.ORCHESTRACE_QUICK_START_MODE) ?? false);
+  const quickStartMaxPreDelegationToolCalls = normalizePositiveSetting(
+    session.quickStartMaxPreDelegationToolCalls,
+    parsePositiveSetting(process.env.ORCHESTRACE_QUICK_START_MAX_PRE_DELEGATION_TOOL_CALLS) ?? 3,
+  );
+
   const phaseRules =
     phase === 'chat'
       ? [
@@ -6788,6 +6831,13 @@ function buildSessionSystemPrompt(session: WorkSession, phase: SessionPromptPhas
             'Keep todo and dependency graph state synchronized.',
             'Do not ask the user to continue after partial progress; continue autonomously until completion or a concrete blocker is reached.',
             'For transient tool or sub-agent failures (timeouts, aborts, rate limits), retry automatically before surfacing a blocker.',
+            ...(quickStartMode
+              ? [
+                `Quick-start mode is enabled: delegate focused discovery to sub-agents within the first 2-3 tool calls and no later than ${quickStartMaxPreDelegationToolCalls} successful pre-delegation tool call(s).`,
+                'Limit parent orientation to 3-4 initial tool calls (e.g., root listing, manifest read, git status) before delegating.',
+                'Push detailed file reads/searches into sub-agent scopes unless a direct blocker requires immediate local inspection.',
+              ]
+              : []),
           ]
         : [
             'Execute approved work with minimal, scoped edits and verify outcomes.',
