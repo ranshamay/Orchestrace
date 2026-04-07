@@ -28,6 +28,12 @@ import {
 } from '@orchestrace/context';
 import { now } from './ui-server/clock.js';
 import {
+  llmStatusIdentityKey,
+  parseTimestamp,
+  shouldEmitLlmStatus,
+  type LlmStatusEmissionState,
+} from './ui-server/llm-status-emission.js';
+import {
   buildChatContinuationInput,
   cloneChatContentParts,
   compactInlineImageMarkdown,
@@ -61,12 +67,14 @@ import type {
   LlmSessionState,
   ExecutionContext,
   SessionCreationReason,
+  SessionCheckpoint,
 } from './ui-server/types.js';
 import { WorkspaceManager } from './workspace-manager.js';
 import { FileEventStore } from '@orchestrace/store';
 import { materializeSession as materializeFromEvents } from '@orchestrace/store';
 import type { SessionEventInput } from '@orchestrace/store';
 import { ObserverDaemon } from './observer/index.js';
+import { createWorktree, WorktreeLockError, type WorktreeStartupWarning } from '@orchestrace/sandbox';
 
 const GITHUB_PROVIDER_ID = 'github';
 const GITHUB_API_BASE_URL = 'https://api.github.com';
@@ -89,6 +97,10 @@ const PERSIST_RAW_DEBUG_ENV = 'ORCHESTRACE_PERSIST_RAW_DEBUG';
 const PERSIST_TEXT_MAX_CHARS = 3_000;
 const PERSIST_EVENT_MESSAGE_MAX_CHARS = 1_200;
 const PERSIST_CHAT_MESSAGE_MAX_CHARS = 2_400;
+const ORCHESTRACE_UI_RESUME_ENV = 'ORCHESTRACE_UI_RESUME';
+const ORCHESTRACE_RESUME_ENV = 'ORCHESTRACE_RESUME';
+const ORCHESTRACE_UI_SKIP_PLANNING_ENV = 'ORCHESTRACE_UI_SKIP_PLANNING';
+const ORCHESTRACE_SKIP_PLANNING_ENV = 'ORCHESTRACE_SKIP_PLANNING';
 const PHASE_PROGRESS_PLAN_WEIGHT_DEFAULT = 30;
 const PHASE_PROGRESS_IMPLEMENTATION_WEIGHT_DEFAULT = 70;
 const execFileAsync = promisify(execFile);
@@ -176,6 +188,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
   const githubDeviceAuthSessions = new Map<string, GithubDeviceAuthSession>();
   const sessionChats = new Map<string, SessionChatThread>();
   const sessionTodos = new Map<string, AgentTodoItem[]>();
+  const lastLlmStatusEmissionBySession = new Map<string, LlmStatusEmissionState>();
   const sessionSharedContextStores = new Map<string, InMemorySharedContextStore>();
   const sessionContextEngines = new Map<string, ContextEngine>();
   const sessionContextStates = new Map<string, SessionContextState>();
@@ -194,6 +207,20 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
 
   /** Append a session event to the durable event store. Fire-and-forget; errors are logged. */
   function emitSessionEvent(sessionId: string, event: SessionEventInput): void {
+    if (event.type === 'session:llm-status-change') {
+      const next = (event.payload as { llmStatus?: SessionLlmStatus }).llmStatus;
+      if (next) {
+        const previous = lastLlmStatusEmissionBySession.get(sessionId);
+        if (!shouldEmitLlmStatus(next, previous, event.time)) {
+          return;
+        }
+        lastLlmStatusEmissionBySession.set(sessionId, {
+          key: llmStatusIdentityKey(next),
+          emittedAt: parseTimestamp(event.time),
+        });
+      }
+    }
+
     void eventStore.append(sessionId, event).catch((err) => {
       console.error(`[orchestrace][event-store] Failed to append event for ${sessionId}:`, err);
     });
@@ -239,6 +266,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           creationReason: c.creationReason,
           sourceSessionId: c.sourceSessionId,
           source: c.source,
+          checkpoint: normalizeSessionCheckpoint(c.checkpoint),
           createdAt: materialized.createdAt,
           updatedAt: materialized.updatedAt,
           status: materialized.status,
@@ -441,6 +469,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
               worktreeBranch: session.worktreeBranch,
               creationReason: session.creationReason,
               sourceSessionId: session.sourceSessionId,
+              checkpoint: session.checkpoint,
             },
           },
         });
@@ -708,6 +737,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
 
     closeWorkStream(workStreamClients, id);
     workSessions.delete(id);
+    lastLlmStatusEmissionBySession.delete(id);
     sessionChats.delete(id);
     sessionTodos.delete(id);
     sessionSharedContextStores.delete(id);
@@ -749,7 +779,9 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     creationReason?: SessionCreationReason;
     sourceSessionId?: string;
     source?: 'user' | 'observer';
-  }): Promise<{ id: string } | { error: string; statusCode: number }> {
+    resumeMode?: 'auto' | 'force' | 'off';
+    resumeSourceSessionId?: string;
+  }): Promise<{ id: string; resumedFromId?: string; resumeReason?: string; warnings?: WorktreeStartupWarning[] } | { error: string; statusCode: number }> {
     const promptParts = cloneChatContentParts(request.promptParts ?? []);
     const prompt = asString(request.prompt);
 
@@ -808,27 +840,44 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     let executionContext: ExecutionContext = 'workspace';
     let selectedWorktreePath: string | undefined;
     let selectedWorktreeBranch: string | undefined;
+    let startupWarnings: WorktreeStartupWarning[] | undefined;
+    let createdWorktreeCleanup: (() => Promise<void>) | undefined;
     if (requestedExecutionContext === 'git-worktree') {
       try {
-        const resolved = await resolveSessionWorkspacePath({
-          workspaceRoot: workspace.path,
-          executionContext: requestedExecutionContext,
-          selectedWorktreePath: requestedWorktreePath,
-        });
-        workspacePath = resolved.workspacePath;
-        executionContext = resolved.executionContext;
-        selectedWorktreePath = resolved.selectedWorktreePath;
-        selectedWorktreeBranch = resolved.worktreeBranch;
+        const worktreeHandle = await createWorktree(workspace.path, `session-${id}`);
+        createdWorktreeCleanup = worktreeHandle.cleanup;
+        workspacePath = worktreeHandle.path;
+        executionContext = 'git-worktree';
+        selectedWorktreePath = worktreeHandle.path;
+        selectedWorktreeBranch = worktreeHandle.branch;
+        startupWarnings = worktreeHandle.warnings.length > 0 ? [...worktreeHandle.warnings] : undefined;
       } catch (error) {
+        if (error instanceof WorktreeLockError) {
+          return {
+            error: toErrorMessage(error),
+            statusCode: 409,
+          };
+        }
+
         return {
-          error: toErrorMessage(error),
-          statusCode: 400,
+          error: `Failed to create worktree: ${toErrorMessage(error)}`,
+          statusCode: 500,
         };
       }
 
       try {
         await ensureWorktreeDependenciesInstalled(workspacePath);
       } catch (error) {
+        if (createdWorktreeCleanup) {
+          try {
+            await createdWorktreeCleanup();
+          } catch (cleanupError) {
+            console.warn(
+              `[ui-server] Failed to cleanup newly created worktree after dependency install failure for session ${id}: ${toErrorMessage(cleanupError)}`,
+            );
+          }
+        }
+
         return {
           error: toErrorMessage(error),
           statusCode: 500,
@@ -836,15 +885,81 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       }
     }
 
+    const resumeEnabled = resolveResumeEnabled();
+    const resumeMode = request.resumeMode ?? 'auto';
+    let resumeDecision: ResumeDecision = { mode: 'fresh', reason: 'resume-not-requested' };
+
+    if (resumeMode !== 'off') {
+      const forcedSourceId = asString(request.resumeSourceSessionId);
+      if (forcedSourceId) {
+        const forcedCandidate = workSessions.get(forcedSourceId);
+        if (
+          forcedCandidate
+          && isSessionResumeCandidate(forcedCandidate, workspace.id, request.provider, request.model)
+          && hasCheckpointSignals(forcedCandidate, sessionTodos.get(forcedSourceId) ?? [])
+        ) {
+          resumeDecision = {
+            mode: 'resume',
+            reason: 'forced-source-session',
+            candidate: forcedCandidate,
+          };
+        } else if (resumeMode === 'force') {
+          return {
+            error: `Cannot resume from source session ${forcedSourceId}.`,
+            statusCode: 409,
+          };
+        }
+      } else {
+        resumeDecision = resolveResumeDecision({
+          enabled: resumeEnabled,
+          sessions: workSessions,
+          sessionTodos,
+          workspaceId: workspace.id,
+          provider: request.provider,
+          model: request.model,
+          requestedWorktreePath,
+        });
+      }
+    }
+
+    if (resumeMode === 'force' && resumeDecision.mode !== 'resume') {
+      return {
+        error: `Resume requested but no eligible checkpoint was found (${resumeDecision.reason}).`,
+        statusCode: 409,
+      };
+    }
+
+    if (resumeDecision.mode === 'resume' && requestedExecutionContext !== 'git-worktree') {
+      workspacePath = resumeDecision.candidate.workspacePath;
+      executionContext = resumeDecision.candidate.executionContext;
+      selectedWorktreePath = resumeDecision.candidate.selectedWorktreePath;
+      selectedWorktreeBranch = resumeDecision.candidate.worktreeBranch;
+    }
+
     const lockResult = acquireWorkspacePathLock(workspacePath, id);
     if (!lockResult.ok) {
+      if (createdWorktreeCleanup) {
+        try {
+          await createdWorktreeCleanup();
+        } catch (cleanupError) {
+          console.warn(
+            `[ui-server] Failed to cleanup newly created worktree for rejected session ${id}: ${toErrorMessage(cleanupError)}`,
+          );
+        }
+      }
+
       return {
         error: `Workspace path is currently in use by another session (${lockResult.ownerSessionId}). Select a different worktree path or wait for the session to be deleted.`,
         statusCode: 409,
       };
     }
 
+    const resumedFromId = resumeDecision.mode === 'resume' ? resumeDecision.candidate.id : undefined;
+
     const duplicateSession = [...workSessions.values()].find((candidate) => {
+      if (resumedFromId && candidate.id === resumedFromId) {
+        return false;
+      }
       const candidatePath = normalizeWorkspacePathForLock(candidate.workspacePath);
       const requestedPath = normalizeWorkspacePathForLock(workspacePath);
       return Boolean(candidatePath && requestedPath && candidatePath === requestedPath);
@@ -852,6 +967,16 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
 
     if (duplicateSession) {
       releaseWorkspacePathLock(workspacePath, id);
+      if (createdWorktreeCleanup) {
+        try {
+          await createdWorktreeCleanup();
+        } catch (cleanupError) {
+          console.warn(
+            `[ui-server] Failed to cleanup newly created worktree for duplicate-path rejected session ${id}: ${toErrorMessage(cleanupError)}`,
+          );
+        }
+      }
+
       return {
         error: `Workspace path is already assigned to active session ${duplicateSession.id}. Select a different worktree path.`,
         statusCode: 409,
@@ -878,9 +1003,27 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       batchMinConcurrency,
       worktreePath: selectedWorktreePath,
       worktreeBranch: selectedWorktreeBranch,
-      creationReason: request.creationReason ?? 'start',
-      sourceSessionId: asString(request.sourceSessionId) || undefined,
+      creationReason: request.creationReason ?? (resumeDecision.mode === 'resume' ? 'resume' : 'start'),
+      sourceSessionId: asString(request.sourceSessionId) || resumedFromId || undefined,
       source: request.source,
+      checkpoint: {
+        ...(resumeDecision.mode === 'resume'
+          ? {
+            ...createSessionCheckpointSnapshot(resumeDecision.candidate, sessionTodos.get(resumeDecision.candidate.id) ?? []),
+            resumeEligible: true,
+            resumeReason: resumeDecision.reason,
+            resumeSourceSessionId: resumeDecision.candidate.id,
+            resumedAt: createdAt,
+            skipPlanningOnResume: resolveSkipPlanningOnResumeEnabled(),
+          }
+          : {
+            resumeEligible: true,
+            resumeReason: 'fresh-session',
+            branch: selectedWorktreeBranch,
+            worktreePath: selectedWorktreePath,
+            skipPlanningOnResume: false,
+          }),
+      },
       createdAt,
       updatedAt: createdAt,
       status: 'running',
@@ -923,8 +1066,9 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           adaptiveConcurrency,
           batchConcurrency,
           batchMinConcurrency,
-          creationReason: request.creationReason ?? 'start',
-          sourceSessionId: asString(request.sourceSessionId) || undefined,
+          creationReason: request.creationReason ?? (resumeDecision.mode === 'resume' ? 'resume' : 'start'),
+          sourceSessionId: asString(request.sourceSessionId) || resumedFromId || undefined,
+          checkpoint: session.checkpoint,
           source: request.source,
         },
       },
@@ -1120,7 +1264,12 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       }, 3_000);
     });
 
-    return { id };
+    return {
+      id,
+      resumedFromId,
+      resumeReason: resumeDecision.mode === 'resume' ? resumeDecision.reason : undefined,
+      ...(startupWarnings && startupWarnings.length > 0 ? { warnings: startupWarnings } : {}),
+    };
   }
 
   // -- Observer daemon (autonomous background agent) --------------------------
@@ -1622,20 +1771,29 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         const prompt = asString(body.prompt);
         const promptParts = parseChatContentParts(body.promptParts);
         const provider = asString(body.provider) || process.env.ORCHESTRACE_DEFAULT_PROVIDER || 'anthropic';
-        let model = asString(body.model);
-        if (!model) {
-          try {
-            model = getModels(provider as never)[0]?.id ?? '';
-          } catch (error) {
-            sendJson(res, 400, { error: toErrorMessage(error) });
-            return;
-          }
+        const model = asString(body.model);
+        const models = getModels(provider as never);
 
-          if (!model) {
-            sendJson(res, 400, { error: `No models available for provider ${provider}.` });
-            return;
-          }
+        if (!models.length) {
+          sendJson(res, 400, { error: 'No models available for provider' });
+          return;
         }
+
+        if (model && !models.some((entry) => entry.id === model)) {
+          sendJson(res, 400, {
+            error: `Model ${model} is not available for provider ${provider}.`,
+            code: 'MODEL_NOT_FOUND',
+            details: {
+              provider,
+              requestedModel: model,
+              availableModels: models.map((entry) => entry.id),
+            },
+          });
+          return;
+        }
+
+        const resolvedModel = model || models[0].id;
+
         const autoApprove = Boolean(body.autoApprove);
         const executionContext = normalizeExecutionContext(body.executionContext)
           ?? normalizeExecutionContext(body.mode)
@@ -1652,12 +1810,17 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           ?? parsePositiveSetting(body.toolBatchConcurrency);
         const batchMinConcurrency = parsePositiveSetting(body.batchMinConcurrency)
           ?? parsePositiveSetting(body.toolBatchMinConcurrency);
+        const resumeModeRaw = asString(body.resumeMode).toLowerCase();
+        const resumeMode = resumeModeRaw === 'off' || resumeModeRaw === 'force' || resumeModeRaw === 'auto'
+          ? resumeModeRaw
+          : 'auto';
+        const resumeSourceSessionId = asString(body.resumeSourceSessionId) || undefined;
         const result = await startWorkSession({
           workspaceId,
           prompt,
           promptParts,
           provider,
-          model,
+          model: resolvedModel,
           autoApprove,
           executionContext,
           selectedWorktreePath,
@@ -1666,6 +1829,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           batchConcurrency,
           batchMinConcurrency,
           creationReason: 'start',
+          resumeMode,
+          resumeSourceSessionId,
         });
 
         if ('error' in result) {
@@ -1673,7 +1838,12 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           return;
         }
 
-        sendJson(res, 200, { id: result.id });
+        sendJson(res, 200, {
+          id: result.id,
+          resumedFromId: result.resumedFromId,
+          resumeReason: result.resumeReason,
+          ...(result.warnings && result.warnings.length > 0 ? { warnings: result.warnings } : {}),
+        });
         return;
       }
 
@@ -1725,6 +1895,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           batchMinConcurrency: sourceSession.batchMinConcurrency,
           creationReason: 'retry',
           sourceSessionId: id,
+          resumeMode: 'auto',
+          resumeSourceSessionId: id,
         });
 
         if ('error' in result) {
@@ -1732,7 +1904,13 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           return;
         }
 
-        sendJson(res, 200, { id: result.id, sourceId: id });
+        sendJson(res, 200, {
+          id: result.id,
+          sourceId: id,
+          resumedFromId: result.resumedFromId,
+          resumeReason: result.resumeReason,
+          ...(result.warnings && result.warnings.length > 0 ? { warnings: result.warnings } : {}),
+        });
         return;
       }
 
@@ -2307,6 +2485,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                   emitSubAgentWorkerEvent({
                     session,
                     uiStatePersistence,
+                    lastLlmStatusEmissionBySession,
                     persistEvent: emitSessionEvent,
                     taskId: 'chat',
                     phase: subAgentPhase,
@@ -2353,6 +2532,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                     emitSubAgentWorkerEvent({
                       session,
                       uiStatePersistence,
+                      lastLlmStatusEmissionBySession,
                       persistEvent: emitSessionEvent,
                       taskId: 'chat',
                       phase: subAgentPhase,
@@ -2371,6 +2551,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                     emitSubAgentWorkerEvent({
                       session,
                       uiStatePersistence,
+                      lastLlmStatusEmissionBySession,
                       persistEvent: emitSessionEvent,
                       taskId: 'chat',
                       phase: subAgentPhase,
@@ -2692,6 +2873,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                 emitSubAgentWorkerEvent({
                   session,
                   uiStatePersistence,
+                  lastLlmStatusEmissionBySession,
                   persistEvent: emitSessionEvent,
                   taskId: 'chat',
                   phase: subAgentPhase,
@@ -2738,6 +2920,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                   emitSubAgentWorkerEvent({
                     session,
                     uiStatePersistence,
+                    lastLlmStatusEmissionBySession,
                     persistEvent: emitSessionEvent,
                     taskId: 'chat',
                     phase: subAgentPhase,
@@ -2756,6 +2939,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                   emitSubAgentWorkerEvent({
                     session,
                     uiStatePersistence,
+                    lastLlmStatusEmissionBySession,
                     persistEvent: emitSessionEvent,
                     taskId: 'chat',
                     phase: subAgentPhase,
@@ -3360,6 +3544,7 @@ function toPersistedSession(session: WorkSession): PersistedWorkSession {
     worktreeBranch: session.worktreeBranch,
     creationReason: session.creationReason,
     sourceSessionId: session.sourceSessionId,
+    checkpoint: session.checkpoint,
     createdAt: session.createdAt,
     updatedAt: session.updatedAt,
     status: session.status,
@@ -3412,6 +3597,7 @@ function hydratePersistedSession(session: PersistedWorkSession): WorkSession {
     worktreeBranch: asString(session.worktreeBranch) || undefined,
     creationReason: normalizeSessionCreationReason(session.creationReason),
     sourceSessionId: asString(session.sourceSessionId) || undefined,
+    checkpoint: normalizeSessionCheckpoint(session.checkpoint),
     agentGraph: normalizeSessionAgentGraphNodes(session.agentGraph),
     status: resumedStatus,
     llmStatus: resumedLlmStatus,
@@ -3831,6 +4017,113 @@ function parseGithubScopes(scopes: string | undefined): string[] {
     .filter((part) => part.length > 0);
 }
 
+type WorkStartModelResolutionErrorCode =
+  | 'MODEL_LIST_FETCH_FAILED'
+  | 'MODEL_NOT_FOUND'
+  | 'MODEL_UNAVAILABLE';
+
+type WorkStartModelResolutionResult =
+  | {
+    type: 'success';
+    model: string;
+  }
+  | {
+    type: 'error';
+    statusCode: number;
+    code: WorkStartModelResolutionErrorCode;
+    error: string;
+    details: Record<string, unknown>;
+  };
+
+function resolveWorkStartModel(request: {
+  provider: string;
+  requestedModel: string;
+}): WorkStartModelResolutionResult {
+  const provider = request.provider;
+  const requestedModel = request.requestedModel;
+  const envFallbackModel = asString(process.env.ORCHESTRACE_DEFAULT_MODEL);
+
+  let models: Array<{ id: string }> = [];
+  let fetchErrorMessage: string | undefined;
+
+  try {
+    models = getModels(provider as never).map((model) => ({ id: model.id }));
+  } catch (error) {
+    fetchErrorMessage = toErrorMessage(error);
+    if (envFallbackModel) {
+      console.warn(
+        `[orchestrace][ui-server] Falling back to ORCHESTRACE_DEFAULT_MODEL for provider "${provider}" because model discovery failed: ${fetchErrorMessage}`,
+      );
+      return {
+        type: 'success',
+        model: envFallbackModel,
+      };
+    }
+
+    return {
+      type: 'error',
+      statusCode: 502,
+      code: 'MODEL_LIST_FETCH_FAILED',
+      error: `Failed to fetch models for provider "${provider}". Check provider credentials/connectivity and try again.`,
+      details: {
+        provider,
+        cause: fetchErrorMessage,
+      },
+    };
+  }
+
+  if (requestedModel) {
+    const requestedExists = models.some((entry) => entry.id === requestedModel);
+    if (!requestedExists) {
+      return {
+        type: 'error',
+        statusCode: 400,
+        code: 'MODEL_NOT_FOUND',
+        error: `Model "${requestedModel}" is not available for provider "${provider}".`,
+        details: {
+          provider,
+          requestedModel,
+          availableModels: models.map((entry) => entry.id),
+        },
+      };
+    }
+
+    return {
+      type: 'success',
+      model: requestedModel,
+    };
+  }
+
+  const firstProviderModel = models[0]?.id;
+  if (firstProviderModel) {
+    return {
+      type: 'success',
+      model: firstProviderModel,
+    };
+  }
+
+  if (envFallbackModel) {
+    console.warn(
+      `[orchestrace][ui-server] Falling back to ORCHESTRACE_DEFAULT_MODEL for provider "${provider}" because no models were discovered.`,
+    );
+    return {
+      type: 'success',
+      model: envFallbackModel,
+    };
+  }
+
+  return {
+    type: 'error',
+    statusCode: 400,
+    code: 'MODEL_UNAVAILABLE',
+    error: `No models are available for provider "${provider}" and no ORCHESTRACE_DEFAULT_MODEL fallback is configured.`,
+    details: {
+      provider,
+      availableModels: [],
+    },
+  };
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
@@ -3936,10 +4229,177 @@ function normalizeExecutionContext(raw: unknown): ExecutionContext | undefined {
   return undefined;
 }
 
+type ResumeDecision =
+  | { mode: 'fresh'; reason: string }
+  | { mode: 'resume'; reason: string; candidate: WorkSession };
+
+function resolveResumeEnabled(): boolean {
+  const explicit = parseBooleanSetting(process.env[ORCHESTRACE_UI_RESUME_ENV]);
+  if (explicit !== undefined) {
+    return explicit;
+  }
+  return parseBooleanSetting(process.env[ORCHESTRACE_RESUME_ENV]) ?? true;
+}
+
+function resolveSkipPlanningOnResumeEnabled(): boolean {
+  const explicit = parseBooleanSetting(process.env[ORCHESTRACE_UI_SKIP_PLANNING_ENV]);
+  if (explicit !== undefined) {
+    return explicit;
+  }
+  return parseBooleanSetting(process.env[ORCHESTRACE_SKIP_PLANNING_ENV]) ?? true;
+}
+
+function normalizeSessionCheckpoint(raw: unknown): SessionCheckpoint | undefined {
+  if (!isRecord(raw)) {
+    return undefined;
+  }
+
+  const editedFiles = Array.isArray(raw.editedFiles)
+    ? raw.editedFiles.map((item) => asString(item)).filter(Boolean)
+    : undefined;
+  const completedTodoIds = Array.isArray(raw.completedTodoIds)
+    ? raw.completedTodoIds.map((item) => asString(item)).filter(Boolean)
+    : undefined;
+  const completedGraphNodeIds = Array.isArray(raw.completedGraphNodeIds)
+    ? raw.completedGraphNodeIds.map((item) => asString(item)).filter(Boolean)
+    : undefined;
+  const lastPhaseRaw = asString(raw.lastPhase);
+  const lastPhase = lastPhaseRaw === 'planning' || lastPhaseRaw === 'implementation' ? lastPhaseRaw : undefined;
+
+  return {
+    resumeEligible: parseBooleanSetting(raw.resumeEligible),
+    resumeReason: asString(raw.resumeReason) || undefined,
+    resumeSourceSessionId: asString(raw.resumeSourceSessionId) || undefined,
+    branch: asString(raw.branch) || undefined,
+    worktreePath: asString(raw.worktreePath) || undefined,
+    lastPhase,
+    editedFiles: editedFiles && editedFiles.length > 0 ? editedFiles : undefined,
+    completedTodoIds: completedTodoIds && completedTodoIds.length > 0 ? completedTodoIds : undefined,
+    completedGraphNodeIds: completedGraphNodeIds && completedGraphNodeIds.length > 0 ? completedGraphNodeIds : undefined,
+    skipPlanningOnResume: parseBooleanSetting(raw.skipPlanningOnResume),
+    resumedAt: asString(raw.resumedAt) || undefined,
+  };
+}
+
+function createSessionCheckpointSnapshot(session: WorkSession, todos: AgentTodoItem[] = []): SessionCheckpoint {
+  const completedTodoIds = todos
+    .filter((item) => item.done || item.status === 'done')
+    .map((item) => item.id);
+  const completedGraphNodeIds = session.agentGraph
+    .filter((node) => node.status === 'completed')
+    .map((node) => node.id);
+
+  return {
+    resumeEligible: session.status !== 'completed' && session.status !== 'cancelled',
+    resumeReason: session.status === 'failed' ? 'failed-session-checkpoint' : 'in-progress-or-partial',
+    resumeSourceSessionId: session.sourceSessionId,
+    branch: session.worktreeBranch,
+    worktreePath: session.worktreePath,
+    lastPhase: resolveSessionToolMode(session) === 'implementation' ? 'implementation' : 'planning',
+    completedTodoIds: completedTodoIds.length > 0 ? completedTodoIds : undefined,
+    completedGraphNodeIds: completedGraphNodeIds.length > 0 ? completedGraphNodeIds : undefined,
+    skipPlanningOnResume: resolveSkipPlanningOnResumeEnabled(),
+  };
+}
+
+function isSessionResumeCandidate(session: WorkSession, workspaceId: string, provider: string, model: string): boolean {
+  if (session.workspaceId !== workspaceId) {
+    return false;
+  }
+
+  if (session.provider !== provider || session.model !== model) {
+    return false;
+  }
+
+  if (session.status === 'completed' || session.status === 'cancelled' || session.status === 'running') {
+    return false;
+  }
+
+  if (session.creationReason === 'resume') {
+    return false;
+  }
+
+  return true;
+}
+
+function hasCheckpointSignals(session: WorkSession, todos: AgentTodoItem[] = []): boolean {
+  const checkpoint = session.checkpoint;
+  if (checkpoint && checkpoint.resumeEligible) {
+    return true;
+  }
+
+  if (todos.some((item) => item.done || item.status === 'done')) {
+    return true;
+  }
+
+  if (session.agentGraph.some((node) => node.status === 'completed' || node.status === 'running' || node.status === 'failed')) {
+    return true;
+  }
+
+  if (session.events.length > 0 || Object.keys(session.taskStatus).length > 0 || Boolean(session.output?.text)) {
+    return true;
+  }
+
+  return false;
+}
+
+function selectResumeCandidate(params: {
+  sessions: Map<string, WorkSession>;
+  sessionTodos: Map<string, AgentTodoItem[]>;
+  workspaceId: string;
+  provider: string;
+  model: string;
+  requestedWorktreePath?: string;
+}): WorkSession | undefined {
+  const candidates = [...params.sessions.values()]
+    .filter((session) => isSessionResumeCandidate(session, params.workspaceId, params.provider, params.model))
+    .filter((session) => hasCheckpointSignals(session, params.sessionTodos.get(session.id) ?? []));
+
+  if (candidates.length === 0) {
+    return undefined;
+  }
+
+  const requestedPath = asString(params.requestedWorktreePath);
+  const prioritized = requestedPath
+    ? candidates.filter((session) => asString(session.worktreePath) === requestedPath)
+    : candidates;
+
+  const sorted = [...(prioritized.length > 0 ? prioritized : candidates)].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  return sorted[0];
+}
+
+function resolveResumeDecision(params: {
+  enabled: boolean;
+  sessions: Map<string, WorkSession>;
+  sessionTodos: Map<string, AgentTodoItem[]>;
+  workspaceId: string;
+  provider: string;
+  model: string;
+  requestedWorktreePath?: string;
+}): ResumeDecision {
+  if (!params.enabled) {
+    return { mode: 'fresh', reason: 'resume-disabled' };
+  }
+
+  const candidate = selectResumeCandidate(params);
+  if (!candidate) {
+    return { mode: 'fresh', reason: 'no-candidate' };
+  }
+
+  return {
+    mode: 'resume',
+    reason: 'candidate-found',
+    candidate,
+  };
+}
+
 function normalizeSessionCreationReason(raw: unknown): SessionCreationReason {
   const value = asString(raw).trim().toLowerCase();
   if (value === 'retry') {
     return 'retry';
+  }
+  if (value === 'resume') {
+    return 'resume';
   }
 
   return 'start';
@@ -5449,6 +5909,7 @@ function serializeWorkSession(session: WorkSession, todos: AgentTodoItem[] = [])
     creationReason: session.creationReason,
     sourceSessionId: session.sourceSessionId,
     source: session.source,
+    checkpoint: session.checkpoint,
     createdAt: session.createdAt,
     updatedAt: session.updatedAt,
     status: session.status,
@@ -5732,17 +6193,7 @@ async function ensureSessionWorkspaceReady(
     return;
   }
 
-  const previousWorkspacePath = session.workspacePath;
   const workspace = await workspaceManager.selectWorkspace(session.workspaceId);
-
-  releaseWorkspacePathLock(previousWorkspacePath, session.id);
-  const acquired = acquireWorkspacePathLock(workspace.path, session.id);
-  if (!acquired.ok) {
-    throw new Error(
-      `Workspace path ${workspace.path} is currently in use by session ${acquired.ownerSessionId}; cannot recover session workspace path.`,
-    );
-  }
-
   session.workspacePath = workspace.path;
   session.workspaceName = workspace.name;
   session.executionContext = 'workspace';

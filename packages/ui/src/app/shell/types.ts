@@ -8,6 +8,9 @@ export type AppShellProps = {
   mainContentProps: AppMainContentProps;
   llmModalProps: LlmControlsModalProps;
   errorMessage: string;
+  warningMessage?: string;
+  onConfirmWarning?: () => void;
+  onDismissWarning?: () => void;
   settingsSaveToastState: SettingsSaveToastState;
   settingsSaveToastMessage: string;
 };

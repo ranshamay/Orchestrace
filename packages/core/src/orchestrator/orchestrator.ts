@@ -1,6 +1,8 @@
+import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { appendFile, mkdir, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
+import { promisify } from 'node:util';
 import type {
   TaskGraph,
   TaskNode,
@@ -16,7 +18,13 @@ import type { TaskExecutionContext } from '../dag/scheduler.js';
 import { runDag } from '../dag/scheduler.js';
 import { validate } from '../validation/validator.js';
 import { PromptSectionName, renderPromptSections, type PromptSection } from '../prompt/sections.js';
-import type { LlmAdapter, LlmToolCallEvent, LlmToolset } from '@orchestrace/provider';
+import type {
+  LlmAdapter,
+  LlmToolCall,
+  LlmToolCallEvent,
+  LlmToolResult,
+  LlmToolset,
+} from '@orchestrace/provider';
 
 export interface PlanApprovalRequest {
   task: TaskNode;
@@ -43,6 +51,8 @@ export interface OrchestratorConfig extends RunnerConfig {
   onPlanApproval?: (request: PlanApprovalRequest) => Promise<boolean>;
   /** Optional provider auth resolver (env, OAuth store, secret manager, etc.). */
   resolveApiKey?: (provider: string) => Promise<string | undefined>;
+  /** Optional resolver for workspace git SHA used in cache keying. */
+  resolveWorkspaceGitSha?: (cwd: string) => Promise<string | undefined>;
   /** Optional factory for phase-specific agent tools. */
   createToolset?: (params: {
     phase: 'planning' | 'implementation';
@@ -62,11 +72,28 @@ export interface OrchestratorConfig extends RunnerConfig {
   promptVersion?: string;
   /** Replay policy version tag persisted into task outputs. */
   policyVersion?: string;
+  /** Max wall-clock budget for planning phase across retries. Default 120000ms. */
+  planningPhaseBudgetMs?: number;
+  /** Optional hard timeout for each individual planning attempt. Defaults to remaining phase budget. */
+  planningAttemptTimeoutMs?: number;
+  /** Ratio threshold for planning token budget warnings. Default 0.3 (30%). */
+  planningTokenBudgetWarningRatio?: number;
+  /** Optional total token budget used for warning thresholds. */
+  totalTokenBudget?: number;
+  /** Proceed with best-effort fallback plan when planning timeout budget is exceeded. Default true. */
+  forceProceedOnPlanningTimeout?: boolean;
+  /** Require approval before implementation when timeout fallback plan is used. Default false. */
+  requireApprovalOnPlanningTimeoutFallback?: boolean;
+  /** Maximum consecutive non-progress events before opening planning circuit breaker. */
+  maxNoProgressEvents?: number;
 }
 
 type OrchestratorPhase = 'planning' | 'implementation';
+type PlanningMode = 'fast' | 'full';
 
 const DEFAULT_ORCHESTRATOR_PROMPT_VERSION = 'orchestrator-prompts-v2';
+const DEFAULT_PLANNING_PHASE_BUDGET_MS = 120_000;
+const DEFAULT_MAX_NO_PROGRESS_EVENTS = 4_000;
 const MAX_PLANNING_ATTEMPTS = 3;
 const PLANNING_RETRY_BASE_DELAY_MS = 2_000;
 const RETRY_CONTEXT_MAX_CHARS = 2_000;
@@ -92,6 +119,12 @@ export async function orchestrate(
     requirePlanApproval,
     onPlanApproval,
     resolveApiKey,
+    resolveWorkspaceGitSha,
+    planningPhaseBudgetMs,
+    planningAttemptTimeoutMs,
+    forceProceedOnPlanningTimeout,
+    requireApprovalOnPlanningTimeoutFallback,
+    maxNoProgressEvents,
     createToolset,
     maxImplementationAttempts,
     onEvent,
@@ -158,6 +191,36 @@ export async function orchestrate(
     );
     const planningTokenDumpPath = join(taskTokenDumpDir, 'planning.jsonl');
     const implementationTokenDumpPath = join(taskTokenDumpDir, 'implementation.jsonl');
+    const workspaceGitSha = await resolveWorkspaceGitShaSafe(cwd, resolveWorkspaceGitSha);
+    const subAgentResultCache = new Map<string, LlmToolResult>();
+
+    const planningToolset = wrapToolsetWithSubAgentCache({
+      toolset: createToolset?.({
+        phase: 'planning',
+        task: node,
+        graphId: graph.id,
+        cwd,
+        provider: model.provider,
+        model: model.model,
+        reasoning: model.reasoning,
+      }),
+      workspaceGitSha,
+      cache: subAgentResultCache,
+    });
+
+    const implementationToolset = wrapToolsetWithSubAgentCache({
+      toolset: createToolset?.({
+        phase: 'implementation',
+        task: node,
+        graphId: graph.id,
+        cwd,
+        provider: model.provider,
+        model: model.model,
+        reasoning: model.reasoning,
+      }),
+      workspaceGitSha,
+      cache: subAgentResultCache,
+    });
 
     const planningAgent = await llm.spawnAgent({
       provider: model.provider,
@@ -176,33 +239,48 @@ export async function orchestrate(
           reasoning: model.reasoning,
         }),
       signal: context.signal,
-      toolset: createToolset?.({
-        phase: 'planning',
-        task: node,
-        graphId: graph.id,
-        cwd,
-        provider: model.provider,
-        model: model.model,
-        reasoning: model.reasoning,
-      }),
+      toolset: planningToolset,
       apiKey,
       refreshApiKey,
     });
 
     emit({ type: 'task:planning', taskId: node.id });
 
-    const planningPrompt = buildPlanningPrompt(node, context.depOutputs);
+    const planningMode = determinePlanningMode(node);
+    const planningPrompt = buildPlanningPrompt(node, context.depOutputs, planningMode);
+    const planningPhaseStartMs = Date.now();
+    const planningBudgetMs = Math.max(1, planningPhaseBudgetMs ?? DEFAULT_PLANNING_PHASE_BUDGET_MS);
+    const planningAttemptBudgetMs = Math.max(1, planningAttemptTimeoutMs ?? planningBudgetMs);
+    const shouldForceProceedOnTimeout = forceProceedOnPlanningTimeout ?? true;
+    const noProgressLimit = Math.max(1, maxNoProgressEvents ?? DEFAULT_MAX_NO_PROGRESS_EVENTS);
+
     let planningResult;
     let planningToolCalls: ReplayToolCallRecord[] = [];
+    let planningBudgetExceeded = false;
+    let planningCircuitBreakerReason: string | undefined;
+    const planningProgress = createNoProgressTracker(noProgressLimit);
 
     for (let planningAttempt = 1; planningAttempt <= MAX_PLANNING_ATTEMPTS; planningAttempt++) {
+      const planningElapsedMs = Date.now() - planningPhaseStartMs;
+      const remainingPlanningBudgetMs = planningBudgetMs - planningElapsedMs;
+      if (remainingPlanningBudgetMs <= 0) {
+        planningBudgetExceeded = true;
+        break;
+      }
+
       planningToolCalls = [];
       const planningAttemptStart = new Date().toISOString();
       planningResult = undefined;
+      planningProgress.reset();
+      const activeAttemptBudgetMs = Math.max(1, Math.min(planningAttemptBudgetMs, remainingPlanningBudgetMs));
 
       try {
-        planningResult = await planningAgent.complete(planningPrompt, context.signal, {
+        planningResult = await withTimeout(planningAgent.complete(planningPrompt, context.signal, {
           onTextDelta: (delta) => {
+            if (planningProgress.onNonProgressEvent() && !planningCircuitBreakerReason) {
+              planningCircuitBreakerReason = `Planning circuit breaker opened after ${planningProgress.getCount()} consecutive non-progress events (threshold ${noProgressLimit}).`;
+            }
+
             emit({
               type: 'task:stream-delta',
               taskId: node.id,
@@ -213,6 +291,10 @@ export async function orchestrate(
           },
           onToolCall: (event) => {
             planningToolCalls.push(toReplayToolCallRecord(event));
+            if (planningProgress.onToolCall(event) && !planningCircuitBreakerReason) {
+              planningCircuitBreakerReason = `Planning circuit breaker opened after ${planningProgress.getCount()} consecutive non-progress events (threshold ${noProgressLimit}).`;
+            }
+
             emit({
               type: 'task:tool-call',
               taskId: node.id,
@@ -226,10 +308,15 @@ export async function orchestrate(
               isError: event.isError,
             });
           },
-        });
+        }), activeAttemptBudgetMs, `Planning attempt ${planningAttempt} exceeded ${activeAttemptBudgetMs}ms timeout budget.`);
       } catch (error) {
-        const failureType = resolveReplayFailureType(error);
         const planningError = error instanceof Error ? error.message : String(error);
+        if (planningError.includes('timeout budget')) {
+          planningBudgetExceeded = true;
+          break;
+        }
+
+        const failureType = resolveReplayFailureType(error);
         const failedPlanningAttempt: ReplayAttemptRecord = {
           phase: 'planning',
           attempt: planningAttempt,
@@ -276,6 +363,53 @@ export async function orchestrate(
         };
       }
 
+      if (planningCircuitBreakerReason) {
+        const failureType: ReplayFailureType = 'budget_exhausted';
+        const failedPlanningAttempt: ReplayAttemptRecord = {
+          phase: 'planning',
+          attempt: planningAttempt,
+          startedAt: planningAttemptStart,
+          completedAt: new Date().toISOString(),
+          provider: model.provider,
+          model: model.model,
+          reasoning: model.reasoning,
+          error: planningCircuitBreakerReason,
+          failureType,
+          toolCalls: planningToolCalls,
+        };
+        replay.attempts.push(failedPlanningAttempt);
+        emit({
+          type: 'task:replay-attempt',
+          taskId: node.id,
+          phase: 'planning',
+          attempt: planningAttempt,
+          record: failedPlanningAttempt,
+        });
+        emit({
+          type: 'task:warning',
+          taskId: node.id,
+          phase: 'planning',
+          code: 'NO_PROGRESS_CIRCUIT_BREAKER',
+          message: planningCircuitBreakerReason,
+          details: {
+            noProgressEvents: planningProgress.getCount(),
+            maxNoProgressEvents: noProgressLimit,
+          },
+        });
+
+        return {
+          taskId: node.id,
+          status: 'failed',
+          tokenDumpDir: taskTokenDumpDir,
+          error: planningCircuitBreakerReason,
+          failureType,
+          durationMs: Date.now() - start,
+          retries: planningAttempt - 1,
+          usage,
+          replay,
+        };
+      }
+
       const completedPlanningAttempt: ReplayAttemptRecord = {
         phase: 'planning',
         attempt: planningAttempt,
@@ -311,7 +445,7 @@ export async function orchestrate(
       });
 
       if (createToolset) {
-        const planningContractError = buildPlanningContractError(planningToolCalls);
+        const planningContractError = buildPlanningContractError(planningToolCalls, planningMode);
         if (planningContractError) {
           completedPlanningAttempt.failureType = 'validation';
           completedPlanningAttempt.error = planningContractError;
@@ -352,13 +486,20 @@ export async function orchestrate(
       break;
     }
 
-    if (!planningResult) {
+    const approvedPlanText = planningResult?.text
+      ?? (planningBudgetExceeded && shouldForceProceedOnTimeout
+        ? buildPlanningTimeoutFallbackPlan(node)
+        : undefined);
+
+    if (!approvedPlanText) {
       return {
         taskId: node.id,
         status: 'failed',
         tokenDumpDir: taskTokenDumpDir,
-        error: 'Planning failed after all retry attempts.',
-        failureType: 'unknown',
+        error: planningBudgetExceeded
+          ? `Planning phase exceeded ${planningBudgetMs}ms budget and force-proceed is disabled.`
+          : 'Planning failed after all retry attempts.',
+        failureType: planningBudgetExceeded ? 'budget_exhausted' : 'unknown',
         durationMs: Date.now() - start,
         retries: MAX_PLANNING_ATTEMPTS,
         usage,
@@ -366,11 +507,27 @@ export async function orchestrate(
       };
     }
 
+    // approvedPlanText is guaranteed above via fallback/guard.
+
+    if (planningBudgetExceeded) {
+      emit({
+        type: 'task:warning',
+        taskId: node.id,
+        phase: 'planning',
+        code: 'PLANNING_TIMEOUT_FORCED_TRANSITION',
+        message: `Planning budget exceeded after ${Date.now() - planningPhaseStartMs}ms; forcing transition to implementation.`,
+        details: {
+          planningPhaseBudgetMs: planningBudgetMs,
+          forceProceedOnPlanningTimeout: shouldForceProceedOnTimeout,
+        },
+      });
+    }
+
     const persistedPlanPath = await persistPlan({
       baseDir: planOutputDir ?? join(cwd, '.orchestrace', 'plans'),
       graphId: graph.id,
       node,
-      plan: planningResult.text,
+      plan: approvedPlanText,
     });
     emit({ type: 'task:plan-persisted', taskId: node.id, path: persistedPlanPath });
 
@@ -381,7 +538,7 @@ export async function orchestrate(
         return {
           taskId: node.id,
           status: 'failed',
-          plan: planningResult.text,
+          plan: approvedPlanText,
           planPath: persistedPlanPath,
           tokenDumpDir: taskTokenDumpDir,
           error: 'Plan approval is required but no approval handler was provided.',
@@ -394,7 +551,7 @@ export async function orchestrate(
 
       const approved = await onPlanApproval({
         task: node,
-        plan: planningResult.text,
+        plan: approvedPlanText,
         planPath: persistedPlanPath,
       });
 
@@ -402,7 +559,7 @@ export async function orchestrate(
         return {
           taskId: node.id,
           status: 'failed',
-          plan: planningResult.text,
+          plan: approvedPlanText,
           planPath: persistedPlanPath,
           tokenDumpDir: taskTokenDumpDir,
           error: 'Plan was rejected by user approval gate.',
@@ -433,15 +590,7 @@ export async function orchestrate(
           reasoning: model.reasoning,
         }),
       signal: context.signal,
-      toolset: createToolset?.({
-        phase: 'implementation',
-        task: node,
-        graphId: graph.id,
-        cwd,
-        provider: model.provider,
-        model: model.model,
-        reasoning: model.reasoning,
-      }),
+      toolset: implementationToolset,
       apiKey,
       refreshApiKey,
     });
@@ -456,6 +605,7 @@ export async function orchestrate(
     let lastFailureType: ReplayFailureType | undefined;
     let lastValidationError = '';
     let lastValidationResults = undefined as TaskOutput['validationResults'];
+    const implementationProgress = createNoProgressTracker(noProgressLimit);
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       emit({
@@ -468,7 +618,7 @@ export async function orchestrate(
       const implementationPrompt = buildImplementationPrompt({
         node,
         depOutputs: context.depOutputs,
-        approvedPlan: planningResult.text,
+        approvedPlan: approvedPlanText,
         attempt,
         previousResponse: lastResponse,
         previousFailureType: lastFailureType,
@@ -477,10 +627,16 @@ export async function orchestrate(
 
       const implementationToolCalls: ReplayToolCallRecord[] = [];
       const implementationAttemptStart = new Date().toISOString();
+      let implementationCircuitBreakerReason: string | undefined;
+      implementationProgress.reset();
       let implResult;
       try {
         implResult = await implAgent.complete(implementationPrompt, context.signal, {
           onTextDelta: (delta) => {
+            if (implementationProgress.onNonProgressEvent() && !implementationCircuitBreakerReason) {
+              implementationCircuitBreakerReason = `Implementation circuit breaker opened after ${implementationProgress.getCount()} consecutive non-progress events (threshold ${noProgressLimit}).`;
+            }
+
             emit({
               type: 'task:stream-delta',
               taskId: node.id,
@@ -491,6 +647,10 @@ export async function orchestrate(
           },
           onToolCall: (event) => {
             implementationToolCalls.push(toReplayToolCallRecord(event));
+            if (implementationProgress.onToolCall(event) && !implementationCircuitBreakerReason) {
+              implementationCircuitBreakerReason = `Implementation circuit breaker opened after ${implementationProgress.getCount()} consecutive non-progress events (threshold ${noProgressLimit}).`;
+            }
+
             emit({
               type: 'task:tool-call',
               taskId: node.id,
@@ -505,6 +665,56 @@ export async function orchestrate(
             });
           },
         });
+
+        if (implementationCircuitBreakerReason) {
+          const failureType: ReplayFailureType = 'budget_exhausted';
+          const failedImplementationAttempt: ReplayAttemptRecord = {
+            phase: 'implementation',
+            attempt,
+            startedAt: implementationAttemptStart,
+            completedAt: new Date().toISOString(),
+            provider: model.provider,
+            model: model.model,
+            reasoning: model.reasoning,
+            error: implementationCircuitBreakerReason,
+            failureType,
+            toolCalls: implementationToolCalls,
+          };
+          replay.attempts.push(failedImplementationAttempt);
+          emit({
+            type: 'task:replay-attempt',
+            taskId: node.id,
+            phase: 'implementation',
+            attempt,
+            record: failedImplementationAttempt,
+          });
+          emit({
+            type: 'task:warning',
+            taskId: node.id,
+            phase: 'implementation',
+            code: 'NO_PROGRESS_CIRCUIT_BREAKER',
+            message: implementationCircuitBreakerReason,
+            details: {
+              noProgressEvents: implementationProgress.getCount(),
+              maxNoProgressEvents: noProgressLimit,
+            },
+          });
+
+          return {
+            taskId: node.id,
+            status: 'failed',
+            plan: approvedPlanText,
+            planPath: persistedPlanPath,
+            tokenDumpDir: taskTokenDumpDir,
+            response: lastResponse,
+            error: implementationCircuitBreakerReason,
+            failureType,
+            durationMs: Date.now() - start,
+            retries: attempt - 1,
+            usage,
+            replay,
+          };
+        }
       } catch (error) {
         const failureType = resolveReplayFailureType(error);
         const implementationError = error instanceof Error ? error.message : String(error);
@@ -548,7 +758,7 @@ export async function orchestrate(
         return {
           taskId: node.id,
           status: 'failed',
-          plan: planningResult.text,
+          plan: approvedPlanText,
           planPath: persistedPlanPath,
           tokenDumpDir: taskTokenDumpDir,
           response: lastResponse,
@@ -599,7 +809,7 @@ export async function orchestrate(
       const output: TaskOutput = {
         taskId: node.id,
         status: 'completed',
-        plan: planningResult.text,
+        plan: approvedPlanText,
         planPath: persistedPlanPath,
         tokenDumpDir: taskTokenDumpDir,
         response: implResult.text,
@@ -651,7 +861,7 @@ export async function orchestrate(
     return {
       taskId: node.id,
       status: 'failed',
-      plan: planningResult.text,
+      plan: approvedPlanText,
       planPath: persistedPlanPath,
       tokenDumpDir: taskTokenDumpDir,
       response: lastResponse,
@@ -702,14 +912,25 @@ async function appendTokenDump(
   await appendFile(path, `${JSON.stringify(payload)}\n`, 'utf-8');
 }
 
-function buildPlanningPrompt(node: TaskNode, depOutputs: Map<string, TaskOutput>): string {
+function buildPlanningPrompt(
+  node: TaskNode,
+  depOutputs: Map<string, TaskOutput>,
+  planningMode: PlanningMode,
+): string {
   const depContext = buildDependencyContext(depOutputs);
   return renderPromptSections([
     {
       name: PromptSectionName.Goal,
       lines: [
-        'Create a deep implementation plan for the following task.',
-        'Optimize for maximum safe concurrency and explicit multi-stage execution.',
+        planningMode === 'fast'
+          ? 'Create a focused implementation plan for the following cleanup/removal task.'
+          : 'Create a deep implementation plan for the following task.',
+        planningMode === 'fast'
+          ? 'Prioritize a streamlined, deterministic flow that reaches code edits quickly.'
+          : 'Optimize for maximum safe concurrency and explicit multi-stage execution.',
+        planningMode === 'fast'
+          ? 'Use fast-path flow: (1) single grep/search pass, (2) derive edit plan from results, (3) execute scoped edits.'
+          : 'Use full planning flow with research, synthesis, and coordinated delegation.',
         'Before each tool call and after each tool result, narrate your reasoning: what you learned, what you plan to do next, and why.',
       ],
     },
@@ -733,10 +954,16 @@ function buildPlanningPrompt(node: TaskNode, depOutputs: Map<string, TaskOutput>
         '- agent_graph_set node ids must be unique, and dependency ids can only reference nodes from the same payload',
         '- in agent_graph_set, provide descriptive node ids/names (avoid generic n1/n2 labels)',
         '- agent_graph_set nodes must map to atomic execution units with explicit dependency ids',
-        '- subagent_spawn/subagent_spawn_batch (required) to delegate focused planning research with only relevant context per sub-agent',
-        '- ALWAYS use subagent_spawn_batch (not individual subagent_spawn calls) when multiple independent sub-agents can run concurrently',
-        '- subagent_spawn/subagent_spawn_batch calls must include nodeId values that map back to agent_graph_set node ids',
-        '- pass nodeId on each sub-agent request so graph progress can be tracked per node',
+        planningMode === 'fast'
+          ? '- subagent_spawn/subagent_spawn_batch are optional in fast-path mode when simple grep→plan→edit is sufficient'
+          : '- subagent_spawn/subagent_spawn_batch (required) to delegate focused planning research with only relevant context per sub-agent',
+        ...(planningMode === 'fast'
+          ? []
+          : [
+              '- ALWAYS use subagent_spawn_batch (not individual subagent_spawn calls) when multiple independent sub-agents can run concurrently',
+              '- subagent_spawn/subagent_spawn_batch calls must include nodeId values that map back to agent_graph_set node ids',
+              '- pass nodeId on each sub-agent request so graph progress can be tracked per node',
+            ]),
       ],
     },
     {
@@ -749,7 +976,9 @@ function buildPlanningPrompt(node: TaskNode, depOutputs: Map<string, TaskOutput>
         '4) files likely to change',
         '5) verification strategy with explicit commands',
         '6) rollback/risk notes',
-        '7) a sub-agent delegation map aligned to agent_graph_set nodes and minimal per-agent context',
+        planningMode === 'fast'
+          ? '7) if sub-agents are used, include a delegation map aligned to agent_graph_set nodes and minimal per-agent context'
+          : '7) a sub-agent delegation map aligned to agent_graph_set nodes and minimal per-agent context',
         '8) atomic todo specification per task: {id, action, target, deps, verification, done_criteria}',
         '9) Next Follow-up Suggestions section with 1-3 numbered, concrete next actions',
       ],
@@ -760,6 +989,7 @@ function buildPlanningPrompt(node: TaskNode, depOutputs: Map<string, TaskOutput>
         `Task ID: ${node.id}`,
         `Task Name: ${node.name}`,
         `Task Type: ${node.type}`,
+        `Planning Mode: ${planningMode}`,
         '',
         'Task Prompt:',
         node.prompt,
@@ -958,6 +1188,75 @@ function buildPhaseSystemPrompt(params: {
   ]);
 }
 
+function determinePlanningMode(node: TaskNode): PlanningMode {
+  const prompt = node.prompt.toLowerCase();
+
+  const cleanupSignals = [
+    'remove',
+    'delete',
+    'cleanup',
+    'clean up',
+    'prune',
+    'drop',
+    'strip',
+    'eliminate',
+    'remove references',
+    'delete references',
+    'dead code',
+    'unused code',
+    'unused import',
+    'leftover',
+  ];
+
+  const simplicitySignals = [
+    'all references',
+    'search-and-delete',
+    'grep',
+    'no functional change',
+    'no behavior change',
+    'small',
+    'minor',
+    'targeted',
+    'mechanical',
+  ];
+
+  const complexityBlockers = [
+    'redesign',
+    'architecture',
+    'migrate',
+    'migration',
+    'rollout',
+    'multi-step',
+    'new feature',
+    'introduce',
+    'rewrite',
+    'cross-cutting',
+    'across',
+    'public api',
+    'breaking change',
+    'database',
+    'schema',
+    'protocol',
+    'performance',
+    'security',
+    'state machine',
+  ];
+
+  const hasComplexity = complexityBlockers.some((signal) => prompt.includes(signal));
+  if (hasComplexity) {
+    return 'full';
+  }
+
+  const cleanupCount = cleanupSignals.reduce((acc, signal) => acc + (prompt.includes(signal) ? 1 : 0), 0);
+  const simplicityCount = simplicitySignals.reduce((acc, signal) => acc + (prompt.includes(signal) ? 1 : 0), 0);
+
+  if (cleanupCount >= 2 || (cleanupCount >= 1 && simplicityCount >= 1)) {
+    return 'fast';
+  }
+
+  return 'full';
+}
+
 function buildDependencyContext(depOutputs: Map<string, TaskOutput>): string {
   if (depOutputs.size === 0) {
     return 'No dependency outputs.';
@@ -1020,6 +1319,81 @@ function mergeUsage(
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  timeoutMessage: string,
+): Promise<T> {
+  let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeoutHandle = setTimeout(() => reject(new Error(timeoutMessage)), timeoutMs);
+  });
+
+  try {
+    return await Promise.race([promise, timeoutPromise]);
+  } finally {
+    if (timeoutHandle) {
+      clearTimeout(timeoutHandle);
+    }
+  }
+}
+
+function buildPlanningTimeoutFallbackPlan(node: TaskNode): string {
+  return [
+    `Planning budget exhausted for task ${node.id} (${node.name}).`,
+    'Forced transition to implementation with fallback plan to prevent additional planning overhead.',
+    '',
+    'Fallback steps:',
+    '1) Read only task-relevant files.',
+    '2) Apply minimal scoped edits required by the task prompt.',
+    '3) Update related types/events if needed.',
+    '4) Run validation commands and iterate until passing or blocked.',
+  ].join('\n');
+}
+
+function isMeaningfulProgressToolEvent(event: LlmToolCallEvent): boolean {
+  if (event.type !== 'result' || event.isError) {
+    return false;
+  }
+
+  return event.toolName === 'write_file'
+    || event.toolName === 'write_files'
+    || event.toolName === 'edit_file'
+    || event.toolName === 'edit_files'
+    || event.toolName === 'run_command'
+    || event.toolName === 'run_command_batch';
+}
+
+function createNoProgressTracker(maxNoProgressEvents: number): {
+  getCount: () => number;
+  reset: () => void;
+  onNonProgressEvent: () => boolean;
+  onToolCall: (event: LlmToolCallEvent) => boolean;
+} {
+  let consecutiveNoProgressEvents = 0;
+
+  const incrementAndCheck = (): boolean => {
+    consecutiveNoProgressEvents += 1;
+    return consecutiveNoProgressEvents >= maxNoProgressEvents;
+  };
+
+  return {
+    getCount: () => consecutiveNoProgressEvents,
+    reset: () => {
+      consecutiveNoProgressEvents = 0;
+    },
+    onNonProgressEvent: () => incrementAndCheck(),
+    onToolCall: (event: LlmToolCallEvent) => {
+      if (isMeaningfulProgressToolEvent(event)) {
+        consecutiveNoProgressEvents = 0;
+        return false;
+      }
+
+      return incrementAndCheck();
+    },
+  };
 }
 
 function truncateForRetry(text: string): string {
@@ -1093,6 +1467,7 @@ function isReplayFailureType(value: unknown): value is ReplayFailureType {
     || value === 'tool_runtime'
     || value === 'validation'
     || value === 'empty_response'
+    || value === 'budget_exhausted'
     || value === 'unknown';
 }
 
@@ -1137,12 +1512,15 @@ function buildCompletionFailureRetryHint(params: {
   }
 }
 
-function buildPlanningContractError(toolCalls: ReplayToolCallRecord[]): string | undefined {
+function buildPlanningContractError(
+  toolCalls: ReplayToolCallRecord[],
+  planningMode: PlanningMode,
+): string | undefined {
   const hasSubAgentDelegation = hasSuccessfulToolCall(toolCalls, 'subagent_spawn')
     || hasSuccessfulToolCall(toolCalls, 'subagent_spawn_batch');
   const requiredTools = ['todo_set', 'agent_graph_set'];
   const missing = requiredTools.filter((toolName) => !hasSuccessfulToolCall(toolCalls, toolName));
-  if (!hasSubAgentDelegation) {
+  if (planningMode === 'full' && !hasSubAgentDelegation) {
     missing.push('subagent_spawn or subagent_spawn_batch');
   }
 
@@ -1196,7 +1574,9 @@ function buildPlanningContractError(toolCalls: ReplayToolCallRecord[]): string |
   return [
     'Planning contract not satisfied.',
     ...contractIssues,
-    'Planning must publish todo_set + agent_graph_set and delegate focused work via subagent_spawn before implementation can begin.',
+    planningMode === 'fast'
+      ? 'Planning must publish todo_set + agent_graph_set before implementation can begin.'
+      : 'Planning must publish todo_set + agent_graph_set and delegate focused work via subagent_spawn before implementation can begin.',
   ].join(' ');
 }
 
@@ -1401,6 +1781,255 @@ function parseToolCallInput(input: string | undefined): Record<string, unknown> 
   }
 
   return undefined;
+}
+
+const FALLBACK_WORKSPACE_GIT_SHA = 'unknown-workspace-sha';
+const CACHEABLE_SUBAGENT_TOOLS = new Set(['subagent_spawn', 'subagent_spawn_batch']);
+const execFileAsync = promisify(execFile);
+
+async function resolveWorkspaceGitShaSafe(
+  cwd: string,
+  resolver?: (cwd: string) => Promise<string | undefined>,
+): Promise<string> {
+  if (resolver) {
+    try {
+      const resolved = (await resolver(cwd))?.trim();
+      if (resolved) {
+        return resolved;
+      }
+    } catch {
+      // fall through
+    }
+  }
+
+  try {
+    const { stdout } = await execFileAsync('git', ['rev-parse', 'HEAD'], { cwd });
+    const resolved = stdout.trim();
+    if (resolved) {
+      return resolved;
+    }
+  } catch {
+    // fall through
+  }
+
+  return FALLBACK_WORKSPACE_GIT_SHA;
+}
+
+function stableStringify(value: unknown): string {
+  return JSON.stringify(stableSortValue(value));
+}
+
+function stableSortValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map((entry) => stableSortValue(entry));
+  }
+
+  if (value && typeof value === 'object') {
+    const input = value as Record<string, unknown>;
+    const out: Record<string, unknown> = {};
+    for (const key of Object.keys(input).sort((a, b) => a.localeCompare(b))) {
+      out[key] = stableSortValue(input[key]);
+    }
+    return out;
+  }
+
+  return value;
+}
+
+function hashPromptPayload(payload: unknown): string {
+  return createHash('sha256').update(stableStringify(payload)).digest('hex');
+}
+
+function buildSubAgentCacheKey(params: {
+  toolName: string;
+  args: Record<string, unknown>;
+  workspaceGitSha: string;
+}): string | undefined {
+  if (!CACHEABLE_SUBAGENT_TOOLS.has(params.toolName)) {
+    return undefined;
+  }
+
+  const nodeId = typeof params.args.nodeId === 'string' ? params.args.nodeId.trim() : '';
+  if (!nodeId) {
+    return undefined;
+  }
+
+  const promptHash = hashPromptPayload({
+    prompt: params.args.prompt,
+    contextPacket: params.args.contextPacket,
+    systemPrompt: params.args.systemPrompt,
+    provider: params.args.provider,
+    model: params.args.model,
+    reasoning: params.args.reasoning,
+  });
+
+  return `${nodeId}:${params.workspaceGitSha}:${promptHash}`;
+}
+
+function wrapToolsetWithSubAgentCache(params: {
+  toolset?: LlmToolset;
+  workspaceGitSha: string;
+  cache: Map<string, LlmToolResult>;
+}): LlmToolset | undefined {
+  const { toolset, workspaceGitSha, cache } = params;
+  if (!toolset) {
+    return undefined;
+  }
+
+  return {
+    tools: toolset.tools,
+    executeTool: async (call: LlmToolCall, signal?: AbortSignal): Promise<LlmToolResult> => {
+      if (!CACHEABLE_SUBAGENT_TOOLS.has(call.name)) {
+        return toolset.executeTool(call, signal);
+      }
+
+      if (call.name === 'subagent_spawn') {
+        const key = buildSubAgentCacheKey({
+          toolName: call.name,
+          args: call.arguments,
+          workspaceGitSha,
+        });
+
+        if (key) {
+          const cached = cache.get(key);
+          if (cached) {
+            return cached;
+          }
+        }
+
+        const result = await toolset.executeTool(call, signal);
+        if (!result.isError && key) {
+          cache.set(key, result);
+        }
+        return result;
+      }
+
+      const rawAgents = call.arguments.agents;
+      const agents = Array.isArray(rawAgents) ? rawAgents : [];
+      const cachedRuns: Record<string, unknown>[] = [];
+      const misses: Record<string, unknown>[] = [];
+
+      for (const raw of agents) {
+        if (!raw || typeof raw !== 'object') {
+          continue;
+        }
+        const agent = raw as Record<string, unknown>;
+        const key = buildSubAgentCacheKey({
+          toolName: call.name,
+          args: agent,
+          workspaceGitSha,
+        });
+        if (!key) {
+          misses.push(agent);
+          continue;
+        }
+
+        const cached = cache.get(key);
+        const parsed = cached ? parseToolCallInput(cached.content) : undefined;
+        const runs = parsed && Array.isArray(parsed.runs) ? parsed.runs : [];
+        const firstRun = runs[0];
+        if (cached && !cached.isError && firstRun && typeof firstRun === 'object') {
+          cachedRuns.push(firstRun as Record<string, unknown>);
+          continue;
+        }
+
+        misses.push(agent);
+      }
+
+      if (misses.length === 0) {
+        return {
+          content: JSON.stringify({
+            total: cachedRuns.length,
+            completed: cachedRuns.length,
+            failed: 0,
+            failedNodeIds: [],
+            runs: cachedRuns,
+          }),
+        };
+      }
+
+      const missResult = await toolset.executeTool(
+        {
+          ...call,
+          arguments: {
+            ...call.arguments,
+            agents: misses,
+          },
+        },
+        signal,
+      );
+
+      if (missResult.isError) {
+        return missResult;
+      }
+
+      const parsedMiss = parseToolCallInput(missResult.content);
+      const missRuns = parsedMiss && Array.isArray(parsedMiss.runs) ? parsedMiss.runs : [];
+
+      for (const rawRun of missRuns) {
+        if (!rawRun || typeof rawRun !== 'object') {
+          continue;
+        }
+        const run = rawRun as Record<string, unknown>;
+        if (run.status !== 'completed') {
+          continue;
+        }
+        const runNodeId = typeof run.nodeId === 'string' ? run.nodeId.trim() : '';
+        if (!runNodeId) {
+          continue;
+        }
+
+        const sourceAgent = misses.find((agent) => {
+          const nodeId = typeof agent.nodeId === 'string' ? agent.nodeId.trim() : '';
+          return nodeId === runNodeId;
+        });
+        if (!sourceAgent) {
+          continue;
+        }
+
+        const key = buildSubAgentCacheKey({
+          toolName: call.name,
+          args: sourceAgent,
+          workspaceGitSha,
+        });
+        if (!key) {
+          continue;
+        }
+
+        cache.set(key, {
+          content: JSON.stringify({
+            total: 1,
+            completed: 1,
+            failed: 0,
+            failedNodeIds: [],
+            runs: [run],
+          }),
+        });
+      }
+
+      if (cachedRuns.length === 0) {
+        return missResult;
+      }
+
+      const liveRuns = missRuns.filter((run): run is Record<string, unknown> => Boolean(run && typeof run === 'object'));
+      const mergedRuns = [...cachedRuns, ...liveRuns];
+      const failedNodeIds = mergedRuns
+        .filter((run) => run.status !== 'completed')
+        .map((run) => run.nodeId)
+        .filter((nodeId): nodeId is string => typeof nodeId === 'string');
+
+      return {
+        ...missResult,
+        content: JSON.stringify({
+          total: mergedRuns.length,
+          completed: mergedRuns.length - failedNodeIds.length,
+          failed: failedNodeIds.length,
+          failedNodeIds,
+          runs: mergedRuns,
+        }),
+      };
+    },
+  };
 }
 
 function isWeightTotalValid(value: number): boolean {

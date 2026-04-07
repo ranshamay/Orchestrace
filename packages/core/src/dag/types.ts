@@ -22,6 +22,7 @@ export type ReplayFailureType =
   | 'tool_runtime'
   | 'validation'
   | 'empty_response'
+  | 'budget_exhausted'
   | 'unknown';
 
 /** Per-task model override. */
@@ -195,6 +196,14 @@ export type DagEvent =
   | { type: 'task:approved'; taskId: string }
   | { type: 'task:implementation-attempt'; taskId: string; attempt: number; maxAttempts: number }
   | { type: 'task:verification-failed'; taskId: string; attempt: number; error: string }
+  | {
+      type: 'task:warning';
+      taskId: string;
+      phase: 'planning' | 'implementation';
+      code: string;
+      message: string;
+      details?: Record<string, unknown>;
+    }
   | { type: 'task:ready'; taskId: string }
   | { type: 'task:started'; taskId: string }
   | { type: 'task:validating'; taskId: string }

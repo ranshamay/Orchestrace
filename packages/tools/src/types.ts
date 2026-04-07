@@ -2,6 +2,12 @@ import type { Tool } from '@mariozechner/pi-ai';
 import type { LlmToolResult } from '@orchestrace/provider';
 import type { SharedContextStore } from '@orchestrace/context';
 
+export interface SessionFileSnippetCache {
+  get(key: string): string | undefined;
+  set(key: string, value: string): void;
+  clear(): void;
+}
+
 export type AgentToolPhase = 'planning' | 'implementation' | 'chat';
 
 export interface AgentToolPermissions {
@@ -31,6 +37,7 @@ export interface AgentToolsetOptions {
   modeController?: AgentModeController;
   resolveGithubToken?: () => Promise<string | undefined>;
   sharedContextStore?: SharedContextStore;
+  sharedFileSnippetCache?: SessionFileSnippetCache;
   agentId?: string;
 }
 

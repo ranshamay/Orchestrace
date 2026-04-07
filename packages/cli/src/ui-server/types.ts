@@ -8,7 +8,7 @@ export interface UiServerOptions {
 
 export type WorkState = 'running' | 'completed' | 'failed' | 'cancelled';
 export type ExecutionContext = 'workspace' | 'git-worktree';
-export type SessionCreationReason = 'start' | 'retry';
+export type SessionCreationReason = 'start' | 'retry' | 'resume';
 
 export type LlmSessionState =
   | 'queued'
@@ -118,6 +118,20 @@ export interface ChatTokenStream {
   updatedAt: string;
 }
 
+export interface SessionCheckpoint {
+  resumeEligible?: boolean;
+  resumeReason?: string;
+  resumeSourceSessionId?: string;
+  branch?: string;
+  worktreePath?: string;
+  lastPhase?: 'planning' | 'implementation';
+  editedFiles?: string[];
+  completedTodoIds?: string[];
+  completedGraphNodeIds?: string[];
+  skipPlanningOnResume?: boolean;
+  resumedAt?: string;
+}
+
 export interface WorkSession {
   id: string;
   workspaceId: string;
@@ -139,6 +153,7 @@ export interface WorkSession {
   creationReason: SessionCreationReason;
   sourceSessionId?: string;
   source?: 'user' | 'observer';
+  checkpoint?: SessionCheckpoint;
   createdAt: string;
   updatedAt: string;
   status: WorkState;
@@ -171,6 +186,7 @@ export interface PersistedWorkSession {
   worktreeBranch?: string;
   creationReason?: SessionCreationReason;
   sourceSessionId?: string;
+  checkpoint?: SessionCheckpoint;
   createdAt: string;
   updatedAt: string;
   status: WorkState;

@@ -6,6 +6,7 @@ import type {
   AgentGraphNode,
   AgentToolsetOptions,
   RegisteredAgentTool,
+  SessionFileSnippetCache,
   SubAgentContextPacket,
   SubAgentEvidenceItem,
   SubAgentRequest,
@@ -13,6 +14,7 @@ import type {
   TodoItem,
 } from './types.js';
 import { sanitizeForPathSegment } from './path-utils.js';
+import { cacheReadFileSlice } from './fs-tools.js';
 
 const todoStatusSchema = Type.Union([
   Type.Literal('todo'),
@@ -349,7 +351,7 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
 
         let request: SubAgentRequest;
         try {
-          request = await buildSubAgentRequestFromToolArgs(options.cwd, toolArgs);
+          request = await buildSubAgentRequestFromToolArgs(options.cwd, toolArgs, options.sharedFileSnippetCache);
         } catch (error) {
           return {
             content: error instanceof Error ? error.message : String(error),
@@ -499,7 +501,7 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
           requests = await mapWithConcurrency(
             requestInputs,
             concurrency,
-            async (entry) => buildSubAgentRequestFromToolArgs(options.cwd, entry),
+            async (entry) => buildSubAgentRequestFromToolArgs(options.cwd, entry, options.sharedFileSnippetCache),
           );
         } catch (error) {
           return {
@@ -699,6 +701,7 @@ function usageOrZero(usage: { input: number; output: number; cost: number } | un
 async function buildSubAgentRequestFromToolArgs(
   cwd: string,
   toolArgs: Record<string, unknown>,
+  sharedFileSnippetCache?: SessionFileSnippetCache,
 ): Promise<SubAgentRequest> {
   const packet = normalizeSubAgentContextPacket(toolArgs.contextPacket);
   const legacyPrompt = optionalString(toolArgs.prompt) ?? '';
@@ -710,6 +713,7 @@ async function buildSubAgentRequestFromToolArgs(
   const prompt = await enrichDelegationPromptWithFileSnippets(
     cwd,
     buildSubAgentPrompt(legacyPrompt, packet),
+    sharedFileSnippetCache,
   );
 
   return {
@@ -1205,7 +1209,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
 
-async function enrichDelegationPromptWithFileSnippets(cwd: string, prompt: string): Promise<string> {
+async function enrichDelegationPromptWithFileSnippets(
+  cwd: string,
+  prompt: string,
+  sharedFileSnippetCache?: SessionFileSnippetCache,
+): Promise<string> {
   const trimmed = prompt.trim();
   if (!trimmed || trimmed.includes(SUBAGENT_CONTEXT_MARKER)) {
     return prompt;
@@ -1216,7 +1224,7 @@ async function enrichDelegationPromptWithFileSnippets(cwd: string, prompt: strin
     return prompt;
   }
 
-  const snippets = await collectFileSnippets(cwd, filePaths);
+  const snippets = await collectFileSnippets(cwd, filePaths, sharedFileSnippetCache);
   if (snippets.length === 0) {
     return prompt;
   }
@@ -1256,12 +1264,31 @@ function extractCandidateFilePaths(prompt: string): string[] {
   return [...unique];
 }
 
-async function collectFileSnippets(cwd: string, filePaths: string[]): Promise<Array<{ path: string; content: string }>> {
+async function collectFileSnippets(
+  cwd: string,
+  filePaths: string[],
+  sharedFileSnippetCache?: SessionFileSnippetCache,
+): Promise<Array<{ path: string; content: string }>> {
   const candidates = filePaths.map((filePath, index) => ({ filePath, index }));
   const results = await mapWithConcurrency(candidates, SUBAGENT_SNIPPET_READ_CONCURRENCY, async (candidate) => {
     const absolutePath = resolve(cwd, candidate.filePath);
     if (!isWithinDirectory(absolutePath, cwd)) {
       return undefined;
+    }
+
+    const relativePath = toPosixPath(relative(cwd, absolutePath));
+    const cached = cacheReadFileSlice(sharedFileSnippetCache, {
+      path: relativePath,
+      startLine: 1,
+      endLine: undefined,
+      maxChars: SUBAGENT_CONTEXT_MAX_CHARS_PER_FILE,
+    });
+    if (cached) {
+      return {
+        index: candidate.index,
+        path: relativePath,
+        content: trimText(cached.trim(), SUBAGENT_CONTEXT_MAX_CHARS_PER_FILE),
+      };
     }
 
     try {
@@ -1272,7 +1299,7 @@ async function collectFileSnippets(cwd: string, filePaths: string[]): Promise<Ar
 
       return {
         index: candidate.index,
-        path: toPosixPath(relative(cwd, absolutePath)),
+        path: relativePath,
         content: trimText(content.trim(), SUBAGENT_CONTEXT_MAX_CHARS_PER_FILE),
       };
     } catch {

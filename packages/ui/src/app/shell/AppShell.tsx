@@ -11,6 +11,9 @@ export function AppShell({
   mainContentProps,
   llmModalProps,
   errorMessage,
+  warningMessage,
+  onConfirmWarning,
+  onDismissWarning,
   settingsSaveToastState,
   settingsSaveToastMessage,
 }: AppShellProps) {
@@ -40,6 +43,12 @@ export function AppShell({
       </div>
       <SettingsSaveToast state={settingsSaveToastState} message={settingsSaveToastMessage} />
       <ErrorToast message={errorMessage} />
+      <ErrorToast
+        message={warningMessage ?? ''}
+        tone="warning"
+        onConfirm={onConfirmWarning}
+        onDismiss={onDismissWarning}
+      />
       <LlmControlsModal {...llmModalProps} />
     </div>
   );

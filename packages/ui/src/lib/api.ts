@@ -80,6 +80,20 @@ export interface WorkSessionProgress {
 
 export type SessionCreationReason = 'start' | 'retry';
 
+export interface SessionCheckpoint {
+  resumeEligible?: boolean;
+  resumeReason?: string;
+  resumeSourceSessionId?: string;
+  branch?: string;
+  worktreePath?: string;
+  lastPhase?: 'planning' | 'implementation';
+  editedFiles?: string[];
+  completedTodoIds?: string[];
+  completedGraphNodeIds?: string[];
+  skipPlanningOnResume?: boolean;
+  resumedAt?: string;
+}
+
 export interface WorkSession {
   id: string;
   workspaceId: string;
@@ -97,6 +111,7 @@ export interface WorkSession {
   creationReason?: SessionCreationReason;
   sourceSessionId?: string;
   source?: 'user' | 'observer';
+  checkpoint?: SessionCheckpoint;
   createdAt: string;
   updatedAt: string;
   status: string;

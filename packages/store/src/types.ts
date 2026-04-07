@@ -9,7 +9,7 @@
 // Intentionally duplicated here so the store package has zero workspace deps.
 
 export type WorkState = 'running' | 'completed' | 'failed' | 'cancelled';
-export type SessionCreationReason = 'start' | 'retry';
+export type SessionCreationReason = 'start' | 'retry' | 'resume';
 
 export type LlmSessionState =
   | 'queued'
@@ -99,6 +99,20 @@ export interface ContextCompactionState {
 
 // ---- Session configuration (written once at creation) -----------------------
 
+export interface SessionCheckpoint {
+  resumeEligible?: boolean;
+  resumeReason?: string;
+  resumeSourceSessionId?: string;
+  branch?: string;
+  worktreePath?: string;
+  lastPhase?: 'planning' | 'implementation';
+  editedFiles?: string[];
+  completedTodoIds?: string[];
+  completedGraphNodeIds?: string[];
+  skipPlanningOnResume?: boolean;
+  resumedAt?: string;
+}
+
 export interface SessionConfig {
   id: string;
   workspaceId: string;
@@ -119,6 +133,7 @@ export interface SessionConfig {
   worktreeBranch?: string;
   creationReason: SessionCreationReason;
   sourceSessionId?: string;
+  checkpoint?: SessionCheckpoint;
   /** Session origin: 'user' (default) or 'observer' (auto-created by observer agent). */
   source?: 'user' | 'observer';
 }

@@ -25,6 +25,12 @@ import {
 import { InMemorySharedContextStore } from '@orchestrace/context';
 import { FileEventStore, materializeSession } from '@orchestrace/store';
 import type { SessionEventInput, SessionConfig, SessionLlmStatus, LlmSessionState, SessionAgentGraphNode } from '@orchestrace/store';
+import {
+  llmStatusIdentityKey,
+  parseTimestamp,
+  shouldEmitLlmStatus,
+  type LlmStatusEmissionState,
+} from './ui-server/llm-status-emission.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -89,12 +95,18 @@ async function main(): Promise<void> {
   process.on('SIGTERM', () => {
     cancelled = true;
     controller.abort();
-    void emit({ time: iso(), type: 'session:llm-status-change', payload: { llmStatus: makeLlmStatus('cancelled', 'Cancelled by user.') } });
+    const llmStatus = makeLlmStatus('cancelled', 'Cancelled by user.');
+    lastLlmStatusEmission = {
+      key: llmStatusIdentityKey(llmStatus),
+      emittedAt: parseTimestamp(llmStatus.updatedAt),
+    };
+    void emit({ time: iso(), type: 'session:llm-status-change', payload: { llmStatus } });
     void emit({ time: iso(), type: 'session:status-change', payload: { status: 'cancelled' } });
   });
 
   // Shared context store for this session
   const sharedContextStore = new InMemorySharedContextStore();
+  let lastLlmStatusEmission: LlmStatusEmissionState | undefined;
 
   // Local state for graph progress tracking
   const agentGraph: SessionAgentGraphNode[] = [];
@@ -233,7 +245,11 @@ async function main(): Promise<void> {
 
         // LLM status
         const llmStatus = deriveLlmStatus(event, t);
-        if (llmStatus) {
+        if (llmStatus && shouldEmitLlmStatus(llmStatus, lastLlmStatusEmission, t)) {
+          lastLlmStatusEmission = {
+            key: llmStatusIdentityKey(llmStatus),
+            emittedAt: parseTimestamp(t),
+          };
           void emit({ time: t, type: 'session:llm-status-change', payload: { llmStatus } });
         }
 
@@ -290,14 +306,22 @@ async function main(): Promise<void> {
     if (failed) {
       const error = failedOutput?.error ?? 'Execution failed';
       await emit({ time: t, type: 'session:error-change', payload: { error } });
-      await emit({ time: t, type: 'session:llm-status-change', payload: {
-        llmStatus: makeLlmStatus('failed', failedOutput?.failureType
-          ? `${failedOutput.failureType}: ${failedOutput.error || 'Execution failed.'}`
-          : (failedOutput?.error || 'Execution failed.'), failedOutput?.failureType),
-      } });
+      const llmStatus = makeLlmStatus('failed', failedOutput?.failureType
+        ? `${failedOutput.failureType}: ${failedOutput.error || 'Execution failed.'}`
+        : (failedOutput?.error || 'Execution failed.'), failedOutput?.failureType);
+      lastLlmStatusEmission = {
+        key: llmStatusIdentityKey(llmStatus),
+        emittedAt: parseTimestamp(llmStatus.updatedAt),
+      };
+      await emit({ time: t, type: 'session:llm-status-change', payload: { llmStatus } });
       await emit({ time: t, type: 'session:status-change', payload: { status: 'failed' } });
     } else {
-      await emit({ time: t, type: 'session:llm-status-change', payload: { llmStatus: makeLlmStatus('completed', 'Run completed successfully.') } });
+      const llmStatus = makeLlmStatus('completed', 'Run completed successfully.');
+      lastLlmStatusEmission = {
+        key: llmStatusIdentityKey(llmStatus),
+        emittedAt: parseTimestamp(llmStatus.updatedAt),
+      };
+      await emit({ time: t, type: 'session:llm-status-change', payload: { llmStatus } });
       await emit({ time: t, type: 'session:status-change', payload: { status: 'completed' } });
     }
 
@@ -317,7 +341,12 @@ async function main(): Promise<void> {
     const t = iso();
     const errorText = errorMsg(error);
     await emit({ time: t, type: 'session:error-change', payload: { error: errorText } });
-    await emit({ time: t, type: 'session:llm-status-change', payload: { llmStatus: makeLlmStatus('failed', errorText) } });
+    const llmStatus = makeLlmStatus('failed', errorText);
+    lastLlmStatusEmission = {
+      key: llmStatusIdentityKey(llmStatus),
+      emittedAt: parseTimestamp(llmStatus.updatedAt),
+    };
+    await emit({ time: t, type: 'session:llm-status-change', payload: { llmStatus } });
     await emit({ time: t, type: 'session:status-change', payload: { status: 'failed' } });
 
     clearInterval(heartbeatInterval);
@@ -375,7 +404,14 @@ async function main(): Promise<void> {
       : status === 'failed'
         ? (opts.nodeId ? `Sub-agent ${opts.nodeId} failed.` : 'Sub-agent failed.')
         : (opts.nodeId ? `Sub-agent ${opts.nodeId} completed.` : 'Sub-agent completed.');
-    void emit({ time: iso(), type: 'session:llm-status-change', payload: { llmStatus: makeLlmStatus('using-tools', detail, undefined, taskId, phase) } });
+    const llmStatus = makeLlmStatus('using-tools', detail, undefined, taskId, phase);
+    if (shouldEmitLlmStatus(llmStatus, lastLlmStatusEmission, llmStatus.updatedAt)) {
+      lastLlmStatusEmission = {
+        key: llmStatusIdentityKey(llmStatus),
+        emittedAt: parseTimestamp(llmStatus.updatedAt),
+      };
+      void emit({ time: iso(), type: 'session:llm-status-change', payload: { llmStatus } });
+    }
   }
 
   // ---- Checklist from tool events ----
@@ -647,24 +683,38 @@ function buildSingleTaskGraph(id: string, prompt: string): TaskGraph {
 }
 
 function buildSystemPrompt(config: SessionConfig, phase: 'planning' | 'implementation'): string {
+  const resumeSkipPlanning = Boolean(config.checkpoint?.skipPlanningOnResume)
+    && config.creationReason === 'resume'
+    && phase === 'planning';
+
   const phaseRules = phase === 'planning'
-    ? [
-      'Produce a concrete implementation plan with explicit staged execution and validation steps.',
-      'Do not perform direct code edits in planning mode.',
-      'Planning output must be highly granular and atomic: each task should represent one action and one completion outcome.',
-      'Split broad, multi-area, or multi-step tasks into smaller independent tasks before finalizing.',
-      'Each planned task must include explicit dependencies, concrete done criteria, and at least one verification command.',
-      'Planning must produce and maintain todo_set and agent_graph_set state.',
-      'todo_set items must include numeric weight values and the total todo weight must sum to 100.',
-      'agent_graph_set nodes must include numeric weight values and the total node weight must sum to 100.',
-      'Planning must use subagent_spawn or subagent_spawn_batch for focused parallel research and delegate only relevant context.',
-      'For independent nodes, use subagent_spawn_batch so work runs in parallel.',
-      'For multi-file inspection, use read_files with concurrency to reduce latency; avoid repeated single-file reads when possible.',
-      'Pass nodeId for each sub-agent request so graph status stays current.',
-      'Keep todo and dependency graph state synchronized.',
-      'Do not ask the user to continue after partial progress; continue autonomously until completion or a concrete blocker is reached.',
-      'For transient tool or sub-agent failures (timeouts, aborts, rate limits), retry automatically before surfacing a blocker.',
-    ]
+    ? (resumeSkipPlanning
+      ? [
+        'This is a resumed session with checkpoint context. Do not redo baseline planning/audit from scratch.',
+        'Immediately continue implementation from checkpoint state and existing partial work.',
+        'Reuse existing todos/agent graph continuity where possible; only update what is required for completion.',
+        'If checkpoint context is incomplete, gather only the minimal missing context required to continue implementation.',
+        'Avoid expensive broad planning sub-agent waves unless absolutely required by missing state.',
+        'Keep todo and dependency graph state synchronized and progress-focused.',
+        'Do not ask the user to continue after partial progress; continue autonomously until completion or a concrete blocker is reached.',
+      ]
+      : [
+        'Produce a concrete implementation plan with explicit staged execution and validation steps.',
+        'Do not perform direct code edits in planning mode.',
+        'Planning output must be highly granular and atomic: each task should represent one action and one completion outcome.',
+        'Split broad, multi-area, or multi-step tasks into smaller independent tasks before finalizing.',
+        'Each planned task must include explicit dependencies, concrete done criteria, and at least one verification command.',
+        'Planning must produce and maintain todo_set and agent_graph_set state.',
+        'todo_set items must include numeric weight values and the total todo weight must sum to 100.',
+        'agent_graph_set nodes must include numeric weight values and the total node weight must sum to 100.',
+        'Planning must use subagent_spawn or subagent_spawn_batch for focused parallel research and delegate only relevant context.',
+        'For independent nodes, use subagent_spawn_batch so work runs in parallel.',
+        'For multi-file inspection, use read_files with concurrency to reduce latency; avoid repeated single-file reads when possible.',
+        'Pass nodeId for each sub-agent request so graph status stays current.',
+        'Keep todo and dependency graph state synchronized.',
+        'Do not ask the user to continue after partial progress; continue autonomously until completion or a concrete blocker is reached.',
+        'For transient tool or sub-agent failures (timeouts, aborts, rate limits), retry automatically before surfacing a blocker.',
+      ])
     : [
       'Execute approved work with minimal, scoped edits and verify outcomes.',
       'Read before editing, and use tool output to adapt after failures.',

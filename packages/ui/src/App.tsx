@@ -184,7 +184,12 @@ export default function App() {
   const preferredModelForProvider = workProvider === defaultLlmControls.provider
     ? defaultLlmControls.model
     : '';
-  const { currentModels } = useProviderModels(
+  const {
+    currentModels,
+    missingModelWarning,
+    confirmMissingModelSwitch,
+    dismissMissingModelWarning,
+  } = useProviderModels(
     workProvider,
     workModel,
     setWorkModel,
@@ -356,6 +361,9 @@ export default function App() {
       mainContentProps={mainContentProps}
       llmModalProps={llmModalProps}
       errorMessage={errorMessage}
+      warningMessage={missingModelWarning?.message}
+      onConfirmWarning={confirmMissingModelSwitch}
+      onDismissWarning={dismissMissingModelWarning}
       settingsSaveToastState={settingsSaveToastState}
       settingsSaveToastMessage={settingsSaveToastMessage}
     />

@@ -1,7 +1,7 @@
 import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { Type } from '@mariozechner/pi-ai';
-import type { AgentToolsetOptions, RegisteredAgentTool } from './types.js';
+import type { AgentToolsetOptions, RegisteredAgentTool, SessionFileSnippetCache } from './types.js';
 import { resolveWorkspacePath, toWorkspaceRelative } from './path-utils.js';
 
 interface FilesystemToolOptions extends AgentToolsetOptions {
@@ -16,6 +16,85 @@ const DEFAULT_BATCH_EDIT_CONCURRENCY = 12;
 const MAX_BATCH_CONCURRENCY = 128;
 const MAX_BATCH_ITEMS = 1000;
 const DEFAULT_BATCH_MIN_CONCURRENCY = 1;
+const DEFAULT_SNIPPET_CACHE_MAX_ENTRIES = 256;
+
+export function normalizeFileSnippetPath(path: string): string {
+  return path.trim().replace(/\\/g, '/').replace(/^\.\//, '');
+}
+
+export function createFileSnippetCacheKey(slice: {
+  path: string;
+  startLine: number;
+  endLine?: number;
+  maxChars: number;
+}): string {
+  const normalizedPath = normalizeFileSnippetPath(slice.path);
+  const startLine = Math.max(1, Math.floor(slice.startLine));
+  const endLine = slice.endLine === undefined ? '' : String(Math.max(startLine, Math.floor(slice.endLine)));
+  const maxChars = Math.max(200, Math.floor(slice.maxChars));
+  return `${normalizedPath}::${startLine}:${endLine}:${maxChars}`;
+}
+
+export function createSessionFileSnippetCache(maxEntries = DEFAULT_SNIPPET_CACHE_MAX_ENTRIES): SessionFileSnippetCache {
+  const entries = new Map<string, string>();
+  const order: string[] = [];
+  const limit = Math.max(1, Math.floor(maxEntries));
+
+  return {
+    get(key) {
+      const value = entries.get(key);
+      if (value === undefined) {
+        return undefined;
+      }
+      const index = order.indexOf(key);
+      if (index >= 0) {
+        order.splice(index, 1);
+      }
+      order.push(key);
+      return value;
+    },
+    set(key, value) {
+      entries.set(key, value);
+      const index = order.indexOf(key);
+      if (index >= 0) {
+        order.splice(index, 1);
+      }
+      order.push(key);
+      while (order.length > limit) {
+        const evicted = order.shift();
+        if (!evicted) {
+          break;
+        }
+        entries.delete(evicted);
+      }
+    },
+    clear() {
+      entries.clear();
+      order.length = 0;
+    },
+  };
+}
+
+export function cacheReadFileSlice(
+  cache: SessionFileSnippetCache | undefined,
+  slice: { path: string; startLine: number; endLine?: number; maxChars: number },
+): string | undefined {
+  if (!cache) {
+    return undefined;
+  }
+  return cache.get(createFileSnippetCacheKey(slice));
+}
+
+export function cacheWriteFileSlice(
+  cache: SessionFileSnippetCache | undefined,
+  slice: { path: string; startLine: number; endLine?: number; maxChars: number },
+  content: string,
+): void {
+  if (!cache) {
+    return;
+  }
+  cache.set(createFileSnippetCacheKey(slice), content);
+}
 
 export function createFilesystemTools(options: FilesystemToolOptions): RegisteredAgentTool[] {
   const tools: RegisteredAgentTool[] = [
@@ -64,6 +143,12 @@ export function createFilesystemTools(options: FilesystemToolOptions): Registere
         const endLine = asPositiveInteger(toolArgs.endLine);
         const maxChars = asPositiveInteger(toolArgs.maxChars) ?? DEFAULT_READ_MAX_CHARS;
         const trimmed = await readWorkspaceFileSlice(target, { startLine, endLine, maxChars });
+        cacheWriteFileSlice(options.sharedFileSnippetCache, {
+          path,
+          startLine,
+          endLine,
+          maxChars,
+        }, trimmed);
 
         return {
           content: trimmed,
@@ -112,6 +197,12 @@ export function createFilesystemTools(options: FilesystemToolOptions): Registere
               endLine: request.endLine,
               maxChars: request.maxChars,
             });
+            cacheWriteFileSlice(options.sharedFileSnippetCache, {
+              path: request.path,
+              startLine: request.startLine,
+              endLine: request.endLine,
+              maxChars: request.maxChars,
+            }, content);
             return {
               path: request.path,
               ok: true,
