@@ -12,6 +12,12 @@ export interface ResolvedRoute {
   validationEnabled: boolean;
 }
 
+export interface ShellExecutionValidation {
+  ok: boolean;
+  command?: string;
+  reason?: string;
+}
+
 export function parseTaskRouteOverride(raw: string | undefined): TaskRouteCategory | undefined {
   if (!raw) return undefined;
   const normalized = raw.trim().toLowerCase();
@@ -41,6 +47,50 @@ export function resolveTaskRoute(prompt: string, overrideRaw?: string): Resolved
     nodeType,
     validationEnabled: result.category !== 'investigation',
   };
+}
+
+/**
+ * Observer-generated fix prompts are task instructions, never shell commands.
+ * Force observer sessions into the planning/code pipeline even if a global shell
+ * route override is enabled.
+ */
+export function resolveTaskRouteForSource(
+  prompt: string,
+  source: 'user' | 'observer' | undefined,
+  overrideRaw?: string,
+): ResolvedRoute {
+  if (source === 'observer') {
+    return resolveTaskRoute(prompt, 'code_change');
+  }
+  return resolveTaskRoute(prompt, overrideRaw);
+}
+
+/**
+ * Final safety check before executing sh -lc.
+ * Rejects multiline markdown/prose payloads and returns a validated command.
+ */
+export function validateShellExecutionPrompt(prompt: string): ShellExecutionValidation {
+  const normalized = prompt.trim();
+  if (!normalized) {
+    return {
+      ok: false,
+      reason: 'Route shell_command selected, but prompt was empty.',
+    };
+  }
+  if (normalized.includes('\n')) {
+    return {
+      ok: false,
+      reason: 'Rejected shell execution: prompt contains multiple lines and appears to be instructions/markdown, not a single command.',
+    };
+  }
+  const command = extractShellCommand(normalized);
+  if (!command) {
+    return {
+      ok: false,
+      reason: 'Route shell_command selected, but no executable command was found in the prompt.',
+    };
+  }
+  return { ok: true, command };
 }
 
 /**

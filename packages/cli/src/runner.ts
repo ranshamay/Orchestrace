@@ -51,7 +51,11 @@ import {
   shouldResetThinkingCircuitBreakerOnEvent,
   updateThinkingCircuitBreaker,
 } from './thinking-circuit-breaker.js';
-import { extractShellCommand, resolveTaskRoute, stripRetryContinuationContext } from './task-routing.js';
+import {
+  resolveTaskRouteForSource,
+  stripRetryContinuationContext,
+  validateShellExecutionPrompt,
+} from './task-routing.js';
 
 // ---------------------------------------------------------------------------
 // Constants
