@@ -808,7 +808,7 @@ function buildPlanningPrompt(node: TaskNode, depOutputs: Map<string, TaskOutput>
         '- Quick-start planning mode for well-scoped tasks: keep parent pre-delegation orientation to at most 3-4 calls and delegate within the first 2-3 calls whenever possible',
         '- Keep parent orientation lightweight (e.g., root list + manifest + git status) and push detailed file reading/search into sub-agent scopes',
         '- ALWAYS use subagent_spawn_batch (not individual subagent_spawn calls) when multiple independent sub-agents can run concurrently',
-        '- subagent_spawn/subagent_spawn_batch calls must include nodeId values that map back to agent_graph_set node ids',
+        '- subagent_spawn/subagent_spawn_batch calls must include nodeId values that map back to agent_graph_set node ids when delegation is used',
         '- pass nodeId on each sub-agent request so graph progress can be tracked per node',
       ],
     },
@@ -971,7 +971,7 @@ function buildPhaseSystemPrompt(params: {
           'todo_set status values must be exactly todo, in_progress, or done.',
           'agent_graph_set must define weighted implementation breakdown where node weights sum to 100.',
           'agent_graph_set ids must be unique and dependency ids must resolve within the same payload.',
-          'subagent delegation must include nodeId values that map to agent_graph_set node ids.',
+          'subagent delegation must include nodeId values that map to agent_graph_set node ids when delegation is used.',
           'Planning must include successful todo_set and agent_graph_set tool calls.',
           'Focused tasks touching fewer than 3 known-module files may skip planning sub-agent delegation when todo_set and agent_graph_set are satisfied.',
           'Planning must include successful subagent_spawn or subagent_spawn_batch calls with focused context per sub-agent.',
@@ -1241,6 +1241,7 @@ function buildPlanningContractError(
     : false;
   const hasSubAgentDelegation = hasSuccessfulToolCall(toolCalls, 'subagent_spawn')
     || hasSuccessfulToolCall(toolCalls, 'subagent_spawn_batch');
+  const requiresSubAgentDelegation = !allowsZeroPlanningSubagents;
   const requiredTools = ['todo_set', 'agent_graph_set'];
   const missing = requiredTools.filter((toolName) => !hasSuccessfulToolCall(toolCalls, toolName));
   if (!allowsZeroPlanningSubagents && !hasSubAgentDelegation) {
@@ -1288,7 +1289,7 @@ function buildPlanningContractError(
     }
   }
 
-  if (graphNodeIds.size > 0 && hasSubAgentDelegation) {
+  if (requiresSubAgentDelegation && graphNodeIds.size > 0 && hasSubAgentDelegation) {
     const delegatedNodeIds = collectSubAgentNodeIds(toolCalls);
     const mappedNodes = [...graphNodeIds].filter((nodeId) => delegatedNodeIds.has(nodeId));
     if (mappedNodes.length === 0) {
