@@ -1743,6 +1743,11 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         }
       }
     },
+    onFindings: (findings) => {
+      void observerDaemon.ingestLogWatcherFindings(findings).catch((error) => {
+        console.error('[orchestrace][observer] Failed to ingest log watcher findings:', error);
+      });
+    },
   });
 
   void observerDaemon.start().then(() => {

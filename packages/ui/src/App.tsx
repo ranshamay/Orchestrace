@@ -167,19 +167,14 @@ export default function App() {
       planningModel: resetModel ? '' : current.planningModel,
     }));
 
-    if (!selectedSessionId) {
-      updateActiveLlmControls({ planningProvider: normalizedProvider, planningModel: nextModel });
-    }
-  }, [defaultLlmControls.planningModel, defaultLlmControls.planningProvider, selectedSessionId, setDefaultLlmControls, updateActiveLlmControls]);
+    updateActiveLlmControls({ planningProvider: normalizedProvider, planningModel: nextModel });
+  }, [defaultLlmControls.planningModel, defaultLlmControls.planningProvider, setDefaultLlmControls, updateActiveLlmControls]);
 
   const setDefaultPlanningModel = useCallback((nextModel: string) => {
     const normalizedModel = typeof nextModel === 'string' ? nextModel.trim() : '';
     setDefaultLlmControls((current) => ({ ...current, planningModel: normalizedModel }));
-
-    if (!selectedSessionId) {
-      updateActiveLlmControls({ planningModel: normalizedModel });
-    }
-  }, [selectedSessionId, setDefaultLlmControls, updateActiveLlmControls]);
+    updateActiveLlmControls({ planningModel: normalizedModel });
+  }, [setDefaultLlmControls, updateActiveLlmControls]);
 
   const setDefaultImplementationProvider = useCallback((nextProvider: string) => {
     const normalizedProvider = typeof nextProvider === 'string' ? nextProvider.trim() : '';
@@ -192,19 +187,14 @@ export default function App() {
       implementationModel: resetModel ? '' : current.implementationModel,
     }));
 
-    if (!selectedSessionId) {
-      updateActiveLlmControls({ implementationProvider: normalizedProvider, implementationModel: nextModel });
-    }
-  }, [defaultLlmControls.implementationModel, defaultLlmControls.implementationProvider, selectedSessionId, setDefaultLlmControls, updateActiveLlmControls]);
+    updateActiveLlmControls({ implementationProvider: normalizedProvider, implementationModel: nextModel });
+  }, [defaultLlmControls.implementationModel, defaultLlmControls.implementationProvider, setDefaultLlmControls, updateActiveLlmControls]);
 
   const setDefaultImplementationModel = useCallback((nextModel: string) => {
     const normalizedModel = typeof nextModel === 'string' ? nextModel.trim() : '';
     setDefaultLlmControls((current) => ({ ...current, implementationModel: normalizedModel }));
-
-    if (!selectedSessionId) {
-      updateActiveLlmControls({ implementationModel: normalizedModel });
-    }
-  }, [selectedSessionId, setDefaultLlmControls, updateActiveLlmControls]);
+    updateActiveLlmControls({ implementationModel: normalizedModel });
+  }, [setDefaultLlmControls, updateActiveLlmControls]);
 
   const handleStartNewSessionDraft = useCallback(() => {
     setActiveTab('graph');

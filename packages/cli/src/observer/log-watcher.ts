@@ -59,6 +59,8 @@ export interface LogWatcherOptions {
   resolveApiKey: (provider: string) => Promise<string | undefined>;
   /** Called when status or findings change. */
   onStateChange?: (state: LogWatcherState) => void;
+  /** Called only with findings newly detected in the latest analysis batch. */
+  onFindings?: (findings: LogFinding[]) => void | Promise<void>;
   /** Maximum lines to accumulate before triggering analysis (default 200). */
   batchSize?: number;
   /** Time window (ms) — trigger analysis after this interval even if batch isn't full (default 120s). */
@@ -122,6 +124,7 @@ export class LogWatcher {
   private config: ObserverConfig;
   private readonly resolveApiKey: (provider: string) => Promise<string | undefined>;
   private readonly onStateChange?: (state: LogWatcherState) => void;
+  private readonly onFindings?: (findings: LogFinding[]) => void | Promise<void>;
   private readonly batchSize: number;
   private readonly timeWindowMs: number;
 
@@ -144,6 +147,7 @@ export class LogWatcher {
     this.config = { ...options.config };
     this.resolveApiKey = options.resolveApiKey;
     this.onStateChange = options.onStateChange;
+    this.onFindings = options.onFindings;
     this.batchSize = options.batchSize ?? 200;
     this.timeWindowMs = options.timeWindowMs ?? 120_000;
   }
@@ -239,11 +243,21 @@ export class LogWatcher {
       });
 
       const findings = parseLogFindings(result.text);
+      const newlyDetected: LogFinding[] = [];
 
       for (const finding of findings) {
         // Deduplicate by title
         if (this.state.findings.some((f) => f.title === finding.title)) continue;
         this.state.findings.push(finding);
+        newlyDetected.push(finding);
+      }
+
+      if (newlyDetected.length > 0 && this.onFindings) {
+        void Promise.resolve(this.onFindings(newlyDetected)).catch((err) => {
+          process.stderr.write(
+            `[orchestrace][log-watcher] Finding callback error: ${(err as Error).message}\n`,
+          );
+        });
       }
 
       this.state.analyzedBatches++;

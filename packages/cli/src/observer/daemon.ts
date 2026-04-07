@@ -13,6 +13,7 @@ import {
   ALL_FINDING_CATEGORIES,
   DEFAULT_OBSERVER_CONFIG,
   type FindingCategory,
+  type FindingSeverity,
   type ObserverConfig,
   type ObserverDaemonState,
 } from './types.js';
@@ -20,12 +21,24 @@ import { FindingRegistry } from './registry.js';
 import { summarizeSession, formatSummaryForLlm, type SessionSummary } from './summarizer.js';
 import { analyzeSessionSummaries } from './analyzer.js';
 import { spawnFixSessions, type StartSessionFn } from './spawner.js';
+import type { LogFindingCategory } from './log-watcher.js';
 
 type AnalysisSummaryEntry = {
   sessionId: string;
   summary: SessionSummary;
   estimatedPromptChars: number;
 };
+
+type LogWatcherFindingInput = {
+  category: LogFindingCategory;
+  severity: FindingSeverity;
+  title: string;
+  description: string;
+  suggestedFix: string;
+  relevantFiles?: string[];
+};
+
+const LOG_WATCHER_SOURCE_SESSION_ID = 'log-watcher';
 
 export interface ObserverDaemonOptions {
   /** Root .orchestrace directory path. */
@@ -179,6 +192,48 @@ export class ObserverDaemon {
   /** Manually trigger an analysis cycle (for API/testing). */
   async triggerAnalysis(): Promise<{ analyzed: number; findings: number; spawned: number }> {
     return this.runAnalysisCycle();
+  }
+
+  /**
+   * Register newly detected log-watcher findings and spawn fix sessions immediately.
+   * This bypasses the daemon cooldown loop so backend log issues can trigger remediation quickly.
+   */
+  async ingestLogWatcherFindings(findings: LogWatcherFindingInput[]): Promise<{ registered: number; spawned: number }> {
+    if (findings.length === 0) {
+      return { registered: 0, spawned: 0 };
+    }
+
+    let registered = 0;
+    for (const finding of findings) {
+      const mappedCategory = mapLogWatcherCategory(finding.category);
+      if (!this.config.assessmentCategories.includes(mappedCategory)) {
+        continue;
+      }
+
+      const { isNew } = this.registry.register({
+        category: mappedCategory,
+        severity: finding.severity,
+        title: finding.title,
+        description: finding.description,
+        suggestedFix: finding.suggestedFix,
+        relevantFiles: finding.relevantFiles,
+      }, [LOG_WATCHER_SOURCE_SESSION_ID]);
+
+      if (isNew) {
+        registered += 1;
+      }
+    }
+
+    const spawned = await this.spawnPendingFindings();
+    await this.registry.save();
+
+    if (registered > 0 || spawned > 0) {
+      console.log(
+        `[orchestrace][observer] Log watcher ingest: registered=${registered} spawned=${spawned}`,
+      );
+    }
+
+    return { registered, spawned };
   }
 
   /**
@@ -602,4 +657,19 @@ function sanitizeNonEmptyString(value: unknown, fallback: string): string {
  */
 function hasPrUrl(text: string): boolean {
   return /https?:\/\/github\.com\/[^/\s]+\/[^/\s]+\/pull\/\d+/i.test(text);
+}
+
+function mapLogWatcherCategory(category: LogFindingCategory): FindingCategory {
+  switch (category) {
+    case 'performance':
+      return 'performance';
+    case 'error-pattern':
+    case 'configuration':
+      return 'code-quality';
+    case 'reliability':
+    case 'security':
+      return 'architecture';
+    default:
+      return 'code-quality';
+  }
 }
