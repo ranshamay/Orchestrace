@@ -50,4 +50,16 @@ describe('task routing config', () => {
     expect(route.result.strategy).toBe('full_planning_pipeline');
     expect(extractShellCommand(prompt)).toBeUndefined();
   });
+
+  it('validates a direct shell command prompt', () => {
+    const validation = validateShellCommandPrompt('run pnpm -w test');
+    expect(validation.ok).toBe(true);
+    expect(validation.command).toBe('pnpm -w test');
+  });
+
+  it('blocks observer-style markdown from shell validation', () => {
+    const validation = validateShellCommandPrompt('[Observer Fix] Broken dispatch\n\nCategory: architecture | Severity: critical\n\n## Issue\nThe task markdown was sent to sh -lc directly.');
+    expect(validation.ok).toBe(false);
+    expect(validation.command).toBeUndefined();
+  });
 });
