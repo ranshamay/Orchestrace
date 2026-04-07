@@ -99,7 +99,21 @@ const SESSION_EVENT_HISTORY_LIMIT = 2_000;
 const TOOL_EVENT_PREVIEW_MAX_CHARS = parsePositiveSetting(process.env.ORCHESTRACE_TOOL_EVENT_PREVIEW_MAX_CHARS) ?? 200_000;
 const PHASE_PROGRESS_PLAN_WEIGHT_DEFAULT = 30;
 const PHASE_PROGRESS_IMPLEMENTATION_WEIGHT_DEFAULT = 70;
+const STARTUP_RECOVERY_MODE_ENV = 'ORCHESTRACE_RECOVERY_MODE';
+const SESSION_CHECKPOINT_FILE = 'checkpoint.json';
+const CHECKPOINT_STASH_PREFIX = 'orchestrace-checkpoint';
 const execFileAsync = promisify(execFile);
+
+type SessionCheckpointMetadata = {
+  sessionId: string;
+  workspacePath: string;
+  state: 'idle' | 'active' | 'completed' | 'failed' | 'cancelled' | 'interrupted';
+  createdAt: string;
+  updatedAt: string;
+  stashRef?: string;
+  stashMessage?: string;
+  checkpointName?: string;
+};
 
 type NativeGitWorktree = {
   path: string;
@@ -602,6 +616,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
   }
   uiPreferences = normalizeUiPreferences(restoredUiPreferences, resolveUiPreferencesDefaults());
 
+  await detectStartupPartialChangesAndRecover();
   registerRestoredWorkspacePathLocks();
 
   for (const [sessionId, restoredSession] of workSessions.entries()) {
@@ -716,6 +731,124 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           `[ui-server] Duplicate restored workspace path lock detected for session ${sessionId}; path already owned by ${acquired.ownerSessionId}.`,
         );
       }
+    }
+  }
+
+  async function readSessionCheckpointMetadata(sessionId: string): Promise<SessionCheckpointMetadata | undefined> {
+    try {
+      const checkpointPath = join(workspaceManager.getRootDir(), '.orchestrace', 'sessions', sessionId, SESSION_CHECKPOINT_FILE);
+      const raw = await readFile(checkpointPath, 'utf8');
+      const parsed = JSON.parse(raw) as Partial<SessionCheckpointMetadata>;
+      if (!parsed || typeof parsed !== 'object') return undefined;
+      if (typeof parsed.sessionId !== 'string' || typeof parsed.workspacePath !== 'string' || typeof parsed.state !== 'string') {
+        return undefined;
+      }
+      return parsed as SessionCheckpointMetadata;
+    } catch {
+      return undefined;
+    }
+  }
+
+  async function getWorkspaceDirtySummary(workspacePath: string): Promise<{
+    hasUncommittedChanges: boolean;
+    hasStagedChanges: boolean;
+    hasUntrackedChanges: boolean;
+    dirtySummary: string[];
+  }> {
+    const [unstaged, staged, untracked] = await Promise.all([
+      gitExec(workspacePath, ['diff', '--name-status']).catch(() => ''),
+      gitExec(workspacePath, ['diff', '--cached', '--name-status']).catch(() => ''),
+      gitExec(workspacePath, ['ls-files', '--others', '--exclude-standard']).catch(() => ''),
+    ]);
+    const unstagedLines = unstaged.split('\n').map((line) => line.trim()).filter(Boolean);
+    const stagedLines = staged.split('\n').map((line) => line.trim()).filter(Boolean);
+    const untrackedLines = untracked.split('\n').map((line) => line.trim()).filter(Boolean);
+    return {
+      hasUncommittedChanges: unstagedLines.length > 0,
+      hasStagedChanges: stagedLines.length > 0,
+      hasUntrackedChanges: untrackedLines.length > 0,
+      dirtySummary: [...unstagedLines, ...stagedLines, ...untrackedLines.map((line) => `?? ${line}`)].slice(0, 200),
+    };
+  }
+
+  async function maybeRollbackFromCheckpoint(workspacePath: string, checkpoint?: SessionCheckpointMetadata): Promise<boolean> {
+    const recoveryMode = (process.env[STARTUP_RECOVERY_MODE_ENV] ?? 'flag').trim().toLowerCase();
+    if (recoveryMode !== 'rollback') {
+      return false;
+    }
+    if (!checkpoint?.stashRef) {
+      return false;
+    }
+    if (!checkpoint.stashMessage?.includes(CHECKPOINT_STASH_PREFIX)) {
+      return false;
+    }
+
+    try {
+      await gitExec(workspacePath, ['stash', 'apply', '--index', checkpoint.stashRef]);
+      return true;
+    } catch (error) {
+      console.warn(`[ui-server] Failed startup rollback from checkpoint ${checkpoint.stashRef}: ${toErrorMessage(error)}`);
+      return false;
+    }
+  }
+
+  async function detectStartupPartialChangesAndRecover(): Promise<void> {
+    for (const [sessionId, session] of workSessions.entries()) {
+      const interrupted =
+        session.status === 'failed'
+        && typeof session.error === 'string'
+        && session.error.toLowerCase().includes('runner process exited');
+      if (!interrupted) {
+        continue;
+      }
+
+      const checkpoint = await readSessionCheckpointMetadata(sessionId);
+      const checkpointSuggestsRecovery = checkpoint && (checkpoint.state === 'active' || checkpoint.state === 'interrupted');
+
+      const rolledBack = checkpointSuggestsRecovery
+        ? await maybeRollbackFromCheckpoint(session.workspacePath, checkpoint)
+        : false;
+      const dirty = await getWorkspaceDirtySummary(session.workspacePath).catch((error) => {
+        console.warn(`[ui-server] Startup recovery probe failed for session ${sessionId}: ${toErrorMessage(error)}`);
+        return {
+          hasUncommittedChanges: false,
+          hasStagedChanges: false,
+          hasUntrackedChanges: false,
+          dirtySummary: [] as string[],
+        };
+      });
+
+      const hasDirty = dirty.hasUncommittedChanges || dirty.hasStagedChanges || dirty.hasUntrackedChanges;
+      if (!hasDirty && !rolledBack) {
+        continue;
+      }
+
+      const details = [
+        rolledBack ? 'Applied rollback from checkpoint stash.' : 'Detected partial local changes from prior interrupted session.',
+        ...dirty.dirtySummary.slice(0, 10),
+      ].join('\n');
+
+      const failureType = rolledBack ? 'startup-recovery-rollback' : 'startup-recovery-dirty';
+      const recoveredAt = now();
+      const error = rolledBack
+        ? `Recovered interrupted session from checkpoint (${checkpoint?.stashRef ?? 'unknown stash'}).`
+        : `Startup recovery detected uncommitted changes from interrupted session.\n${details}`;
+
+      session.error = error;
+      session.updatedAt = recoveredAt;
+      session.llmStatus = createLlmStatus('failed', recoveredAt, {
+        detail: error,
+        failureType,
+      });
+      session.output = {
+        ...session.output,
+        failureType,
+      };
+
+      emitSessionEvent(sessionId, { time: recoveredAt, type: 'session:error-change', payload: { error } });
+      emitSessionEvent(sessionId, { time: recoveredAt, type: 'session:llm-status-change', payload: { llmStatus: session.llmStatus } });
+      emitSessionEvent(sessionId, { time: recoveredAt, type: 'session:output-set', payload: { output: session.output } });
+      console.log(`[ui-server] Startup recovery ${rolledBack ? 'rollback' : 'dirty-flag'} for session ${sessionId}.`);
     }
   }
 
