@@ -26,8 +26,9 @@ const MAX_EVENTS = 2_000; // Same trim limit as ui-server
 export function materializeSession(events: SessionEvent[]): MaterializedSession | null {
   if (events.length === 0) return null;
 
-  // Find the creation event
-  const createdEvent = events.find((e) => e.type === 'session:created');
+  // Find the latest creation event. In-place retries append a new session:created
+  // with updated config while preserving the same session id and event history.
+  const createdEvent = [...events].reverse().find((e) => e.type === 'session:created');
   if (!createdEvent || createdEvent.type !== 'session:created') return null;
 
   const config: SessionConfig = createdEvent.payload.config;

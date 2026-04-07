@@ -3,7 +3,7 @@
  *
  * Usage: node --import tsx runner.ts <sessionId> <workspaceRoot>
  *
- * Reads session config from the event store (first session:created event).
+ * Reads session config from the event store (latest session:created event).
  * Writes all orchestration events to the event store.
  * Handles SIGTERM for graceful cancellation.
  * Writes heartbeat events every 5 seconds.
@@ -117,13 +117,13 @@ async function main(): Promise<void> {
 
   // Read session config from event store
   const events = await eventStore.read(sessionId);
-  const firstEvent = events.find((e) => e.type === 'session:created');
-  if (!firstEvent || firstEvent.type !== 'session:created') {
+  const createdEvent = [...events].reverse().find((e) => e.type === 'session:created');
+  if (!createdEvent || createdEvent.type !== 'session:created') {
     console.error(`No session:created event found for session ${sessionId}`);
     process.exit(1);
   }
 
-  const config: SessionConfig = firstEvent.payload.config;
+  const config: SessionConfig = createdEvent.payload.config;
   const controller = new AbortController();
 
   // Write runner metadata (PID)

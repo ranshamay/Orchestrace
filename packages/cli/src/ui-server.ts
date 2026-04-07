@@ -29,12 +29,6 @@ import {
 } from '@orchestrace/context';
 import { now } from './ui-server/clock.js';
 import {
-  llmStatusIdentityKey,
-  parseTimestamp,
-  shouldEmitLlmStatus,
-  type LlmStatusEmissionState,
-} from './ui-server/llm-status-emission.js';
-import {
   buildChatContinuationInput,
   cloneChatContentParts,
   compactInlineImageMarkdown,
@@ -74,7 +68,7 @@ import type {
 import { WorkspaceManager } from './workspace-manager.js';
 import { FileEventStore } from '@orchestrace/store';
 import { materializeSession as materializeFromEvents } from '@orchestrace/store';
-import type { SessionCheckpointPayload, SessionEventInput, SessionRecoveryDetectedPayload } from '@orchestrace/store';
+import type { SessionCheckpointPayload, SessionConfig, SessionEventInput, SessionRecoveryDetectedPayload } from '@orchestrace/store';
 import { ObserverDaemon, SessionObserver, BackendLogger, LogWatcher } from './observer/index.js';
 
 const GITHUB_PROVIDER_ID = 'github';
@@ -986,6 +980,447 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     return true;
   }
 
+  function toSessionConfig(session: WorkSession): SessionConfig {
+    return {
+      id: session.id,
+      workspaceId: session.workspaceId,
+      workspaceName: session.workspaceName,
+      workspacePath: session.workspacePath,
+      prompt: session.prompt,
+      promptParts: session.promptParts ? cloneChatContentParts(session.promptParts) : undefined,
+      provider: session.provider,
+      model: session.model,
+      autoApprove: session.autoApprove,
+      quickStartMode: session.quickStartMode,
+      quickStartMaxPreDelegationToolCalls: session.quickStartMaxPreDelegationToolCalls,
+      executionContext: session.executionContext,
+      selectedWorktreePath: session.selectedWorktreePath,
+      useWorktree: session.useWorktree,
+      adaptiveConcurrency: session.adaptiveConcurrency,
+      batchConcurrency: session.batchConcurrency,
+      batchMinConcurrency: session.batchMinConcurrency,
+      enableTrivialTaskGate: session.enableTrivialTaskGate,
+      trivialTaskMaxPromptLength: session.trivialTaskMaxPromptLength,
+      worktreePath: session.worktreePath,
+      worktreeBranch: session.worktreeBranch,
+      creationReason: session.creationReason,
+      sourceSessionId: session.sourceSessionId,
+      source: session.source,
+    };
+  }
+
+  async function appendSessionCreatedEvent(session: WorkSession, time: string): Promise<void> {
+    await eventStore.append(session.id, {
+      time,
+      type: 'session:created',
+      payload: { config: toSessionConfig(session) },
+    });
+  }
+
+  async function launchSessionRunner(session: WorkSession): Promise<void> {
+    const id = session.id;
+    const events = await eventStore.read(id);
+    const watchFromSeq = events.length > 0 ? events[events.length - 1].seq : 0;
+
+    // Watch event store for updates from the runner.
+    const unwatch = eventStore.watch(id, watchFromSeq, (event) => {
+      session.updatedAt = event.time;
+
+      switch (event.type) {
+        case 'session:llm-status-change':
+          session.llmStatus = event.payload.llmStatus as SessionLlmStatus;
+          break;
+
+        case 'session:status-change': {
+          const newStatus = event.payload.status as WorkState;
+          session.status = newStatus;
+          if (newStatus === 'completed' || newStatus === 'failed' || newStatus === 'cancelled') {
+            // Terminal state — broadcast end event, stop watching, and stop observer.
+            const obs = sessionObservers.get(id);
+            if (obs) {
+              obs.stop();
+              sessionObservers.delete(id);
+            }
+            // Release the workspace path lock so new sessions can use the same path.
+            releaseWorkspacePathLock(session.workspacePath, id);
+            // Notify the observer daemon: close the loop on findings (auto-resolve if PR opened)
+            observerDaemon.onFixSessionCompleted(id, newStatus, session.output?.text);
+            broadcastWorkStream(workStreamClients, id, newStatus === 'completed' ? 'end' : 'error', {
+              id,
+              status: session.status,
+              llmStatus: session.llmStatus,
+              error: session.error,
+              time: event.time,
+            });
+            unwatch();
+          }
+          break;
+        }
+
+        case 'session:error-change':
+          session.error = event.payload.error as string | undefined;
+          break;
+
+        case 'session:output-set':
+          session.output = event.payload.output as WorkSession['output'];
+          break;
+
+        case 'session:dag-event': {
+          const uiEvent = event.payload.event as UiDagEvent;
+          session.events.push(uiEvent);
+          if (session.events.length > SESSION_EVENT_HISTORY_LIMIT) session.events.shift();
+          break;
+        }
+
+        case 'session:stream-delta': {
+          const p = event.payload as { taskId: string; phase: string; delta: string };
+          broadcastWorkStream(workStreamClients, id, 'token', {
+            id,
+            taskId: p.taskId,
+            phase: p.phase,
+            delta: p.delta,
+            llmStatus: session.llmStatus,
+            time: event.time,
+          });
+          break;
+        }
+
+        case 'session:task-status-change': {
+          const p = event.payload as { taskId: string; taskStatus: string };
+          session.taskStatus[p.taskId] = p.taskStatus;
+          break;
+        }
+
+        case 'session:todos-set': {
+          const items = (event.payload as { items: AgentTodoItem[] }).items;
+          sessionTodos.set(id, items);
+          broadcastTodoUpdate(workStreamClients, id, items);
+          break;
+        }
+
+        case 'session:todo-item-added': {
+          const item = (event.payload as { item: AgentTodoItem }).item;
+          const existing = sessionTodos.get(id) ?? [];
+          existing.push(item);
+          sessionTodos.set(id, existing);
+          broadcastTodoUpdate(workStreamClients, id, existing);
+          break;
+        }
+
+        case 'session:todo-item-toggled': {
+          const p = event.payload as { itemId: string; done: boolean; status?: string };
+          const items = sessionTodos.get(id) ?? [];
+          const idx = items.findIndex((i) => i.id === p.itemId);
+          if (idx >= 0) {
+            items[idx] = {
+              ...items[idx],
+              done: p.done,
+              status: (p.status as AgentTodoItem['status']) ?? items[idx].status,
+              updatedAt: event.time,
+            };
+            broadcastTodoUpdate(workStreamClients, id, items);
+          }
+          break;
+        }
+
+        case 'session:agent-graph-set': {
+          const graph = (event.payload as { graph: SessionAgentGraphNode[] }).graph;
+          session.agentGraph = graph;
+          break;
+        }
+
+        case 'session:agent-graph-node-status': {
+          const p = event.payload as { nodeId: string; status: string };
+          session.agentGraph = session.agentGraph.map((node) =>
+            node.id === p.nodeId ? { ...node, status: p.status as SessionAgentGraphNode['status'] } : node,
+          );
+          break;
+        }
+
+        case 'session:checkpoint': {
+          session.lastCheckpoint = {
+            ...(event.payload as SessionCheckpointPayload),
+            time: event.time,
+          };
+          break;
+        }
+
+        case 'session:recovery-detected': {
+          session.lastRecovery = {
+            ...(event.payload as SessionRecoveryDetectedPayload),
+            time: event.time,
+          };
+          break;
+        }
+
+        case 'session:chat-message': {
+          const msg = (event.payload as { message: SessionChatMessage }).message;
+          const thread = sessionChats.get(id);
+          if (thread) {
+            thread.messages.push(msg);
+            trimThreadMessages(thread);
+            thread.updatedAt = event.time;
+          }
+          break;
+        }
+
+        // Observer real-time events — broadcast to UI via SSE.
+        case 'session:observer-status-change': {
+          broadcastWorkStream(workStreamClients, id, 'observer-status', {
+            id,
+            observer: event.payload,
+            time: event.time,
+          });
+          break;
+        }
+
+        case 'session:observer-finding': {
+          broadcastWorkStream(workStreamClients, id, 'observer-finding', {
+            id,
+            finding: (event.payload as { finding: unknown }).finding,
+            time: event.time,
+          });
+          break;
+        }
+
+        default:
+          break;
+      }
+
+      // Broadcast session state for all events except high-frequency stream deltas and observer events.
+      if (event.type !== 'session:stream-delta' && event.type !== 'session:observer-status-change' && event.type !== 'session:observer-finding') {
+        broadcastSessionUpdate(workStreamClients, id, serializeWorkSession(session, sessionTodos.get(id) ?? []));
+      }
+
+      uiStatePersistence.schedule();
+    });
+
+    // Spawn runner as a detached child process.
+    const runnerPath = join(dirname(fileURLToPath(import.meta.url)), 'runner.ts');
+    const runnerProcess = spawn(
+      process.execPath,
+      [...(process.execArgv.length > 0 ? process.execArgv : ['--import', 'tsx']), runnerPath, id, workspaceManager.getRootDir()],
+      {
+        detached: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        cwd: session.workspacePath,
+        env: { ...process.env, ORCHESTRACE_SESSION_ID: id },
+      },
+    );
+
+    // Capture runner stdout/stderr to persistent log stream.
+    if (runnerProcess.stdout) {
+      let stdoutBuf = '';
+      runnerProcess.stdout.on('data', (chunk: Buffer) => {
+        stdoutBuf += chunk.toString();
+        const lines = stdoutBuf.split('\n');
+        stdoutBuf = lines.pop() ?? '';
+        for (const line of lines) {
+          if (line.trim()) backendLogger.appendRunnerLine(id, 'stdout', line);
+        }
+      });
+    }
+    if (runnerProcess.stderr) {
+      let stderrBuf = '';
+      runnerProcess.stderr.on('data', (chunk: Buffer) => {
+        stderrBuf += chunk.toString();
+        const lines = stderrBuf.split('\n');
+        stderrBuf = lines.pop() ?? '';
+        for (const line of lines) {
+          if (line.trim()) backendLogger.appendRunnerLine(id, 'stderr', line);
+        }
+      });
+    }
+    runnerProcess.unref();
+
+    // Record runner PID in metadata.
+    void eventStore.setMetadata(id, {
+      id,
+      pid: runnerProcess.pid ?? 0,
+      createdAt: now(),
+      workspacePath: session.workspacePath,
+    });
+
+    // Attach per-session real-time observer (if observer is enabled and session is not from observer itself).
+    if (observerDaemon.getConfig().enabled && session.source !== 'observer') {
+      const sessionObs = new SessionObserver({
+        sessionId: id,
+        eventStore,
+        llm,
+        config: observerDaemon.getConfig(),
+        resolveApiKey: (provider) => authManager.resolveApiKey(provider),
+        emit: (evt) => {
+          emitSessionEvent(id, {
+            time: new Date().toISOString(),
+            type: evt.type as 'session:observer-status-change' | 'session:observer-finding',
+            payload: evt.payload as Record<string, unknown>,
+          });
+        },
+      });
+      sessionObservers.set(id, sessionObs);
+      sessionObs.start();
+    }
+
+    // Monitor runner process exit (backup for missed events).
+    runnerProcess.on('exit', (code) => {
+      // Immediately poll the event store so final runner events are delivered
+      // before the 3-second fallback check runs (important when FS watcher missed events).
+      eventStore.triggerPoll(id);
+
+      // Give event store watcher time to deliver final events.
+      setTimeout(async () => {
+        if (session.status === 'running') {
+          // Runner exited without writing terminal event — mark as failed with recovery guidance.
+          const t = now();
+          const recoveryGit = await inspectGitRecoveryState(session.worktreePath ?? session.workspacePath);
+          session.lastRecovery = {
+            reason: 'runner-exit-fallback',
+            exitCode: code,
+            git: recoveryGit,
+            time: t,
+          };
+          const recoveryHint = recoveryGit.dirty
+            ? 'Uncommitted changes were detected; review git diff/status to recover work from the crash.'
+            : 'No uncommitted changes were detected; resume from the latest checkpoint commit.';
+          session.status = 'failed';
+          session.error = `Runner process exited unexpectedly (code ${code}). ${recoveryHint}`;
+          session.llmStatus = createLlmStatus('failed', t, { detail: session.error });
+          session.updatedAt = t;
+
+          emitSessionEvent(id, {
+            time: t,
+            type: 'session:recovery-detected',
+            payload: {
+              reason: 'runner-exit-fallback',
+              exitCode: code,
+              git: recoveryGit,
+            },
+          });
+          emitSessionEvent(id, { time: t, type: 'session:error-change', payload: { error: session.error } });
+          emitSessionEvent(id, { time: t, type: 'session:llm-status-change', payload: { llmStatus: session.llmStatus } });
+          emitSessionEvent(id, { time: t, type: 'session:status-change', payload: { status: 'failed' } });
+
+          broadcastWorkStream(workStreamClients, id, 'error', {
+            id,
+            error: session.error,
+            llmStatus: session.llmStatus,
+            time: t,
+          });
+
+          uiStatePersistence.schedule();
+          unwatch();
+
+          // Stop per-session observer on unexpected exit.
+          const obs = sessionObservers.get(id);
+          if (obs) {
+            obs.stop();
+            sessionObservers.delete(id);
+          }
+        }
+      }, 3_000);
+    });
+  }
+
+  async function retryWorkSessionInPlace(params: {
+    id: string;
+    prompt: string;
+    promptParts?: SessionChatContentPart[];
+  }): Promise<{ id: string } | { error: string; statusCode: number }> {
+    const session = workSessions.get(params.id);
+    if (!session) {
+      return { error: 'Unknown work session', statusCode: 404 };
+    }
+
+    if (session.status === 'running') {
+      return { error: 'Cannot retry a running session.', statusCode: 409 };
+    }
+
+    const lockResult = acquireWorkspacePathLock(session.workspacePath, session.id);
+    if (!lockResult.ok) {
+      return {
+        error: `Workspace path is currently in use by another session (${lockResult.ownerSessionId}). Select a different worktree path or wait for the session to be deleted.`,
+        statusCode: 409,
+      };
+    }
+
+    const promptParts = cloneChatContentParts(params.promptParts ?? []);
+    const prompt = asString(params.prompt);
+    if (!prompt && promptParts.length === 0) {
+      releaseWorkspacePathLock(session.workspacePath, session.id);
+      return { error: 'Missing prompt', statusCode: 400 };
+    }
+
+    const normalizedPrompt = promptParts.length > 0
+      ? compactInlineImageMarkdown(prompt || summarizeChatContentParts(promptParts))
+      : (prompt || summarizeChatContentParts(promptParts));
+
+    const retryStartedAt = now();
+    session.prompt = normalizedPrompt;
+    session.promptParts = promptParts.length > 0 ? cloneChatContentParts(promptParts) : undefined;
+    session.creationReason = 'retry';
+    session.updatedAt = retryStartedAt;
+    session.status = 'running';
+    session.llmStatus = createLlmStatus('queued', retryStartedAt, {
+      detail: 'Queued for orchestration.',
+    });
+    session.taskStatus = {};
+    session.agentGraph = [];
+    session.error = undefined;
+    session.output = undefined;
+    session.lastRecovery = undefined;
+    session.controller = new AbortController();
+
+    const existingObserver = sessionObservers.get(session.id);
+    if (existingObserver) {
+      existingObserver.stop();
+      sessionObservers.delete(session.id);
+    }
+
+    const chatThread = sessionChats.get(session.id);
+    if (chatThread) {
+      chatThread.taskPrompt = normalizedPrompt;
+      chatThread.updatedAt = retryStartedAt;
+    }
+
+    try {
+      await appendSessionCreatedEvent(session, retryStartedAt);
+    } catch (error) {
+      releaseWorkspacePathLock(session.workspacePath, session.id);
+      session.status = 'failed';
+      session.error = `Failed to persist retry session config: ${toErrorMessage(error)}`;
+      session.llmStatus = createLlmStatus('failed', now(), { detail: session.error });
+      uiStatePersistence.schedule();
+      return { error: session.error, statusCode: 500 };
+    }
+
+    emitSessionEvent(session.id, {
+      time: retryStartedAt,
+      type: 'session:llm-status-change',
+      payload: { llmStatus: session.llmStatus },
+    });
+    emitSessionEvent(session.id, {
+      time: retryStartedAt,
+      type: 'session:status-change',
+      payload: { status: 'running' },
+    });
+    emitSessionEvent(session.id, {
+      time: retryStartedAt,
+      type: 'session:error-change',
+      payload: { error: undefined },
+    });
+    emitSessionEvent(session.id, {
+      time: retryStartedAt,
+      type: 'session:output-set',
+      payload: { output: {} },
+    });
+
+    broadcastSessionUpdate(workStreamClients, session.id, serializeWorkSession(session, sessionTodos.get(session.id) ?? []));
+    uiStatePersistence.schedule();
+
+    await launchSessionRunner(session);
+    return { id: session.id };
+  }
+
   async function startWorkSession(request: {
     workspaceId?: string;
     prompt: string;
@@ -1168,7 +1603,6 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
 
     const controller = new AbortController();
     const createdAt = now();
-    let lastLlmStatusEmission: LlmStatusEmissionState | undefined;
 
     const session: WorkSession = {
       id,
@@ -1217,343 +1651,35 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     uiStatePersistence.schedule();
     broadcastTodoUpdate(workStreamClients, id, sessionTodos.get(id) ?? []);
 
-    // Dual-write: emit session:created event to durable event store
-    emitSessionEvent(id, {
-      time: createdAt,
-      type: 'session:created',
-      payload: {
-        config: {
-          id,
-          workspaceId: workspace.id,
-          workspaceName: workspace.name,
-          workspacePath,
-          prompt: normalizedPrompt,
-          promptParts: promptParts.length > 0 ? cloneChatContentParts(promptParts) : undefined,
+    try {
+      await appendSessionCreatedEvent(session, createdAt);
+      await eventStore.append(id, {
+        time: createdAt,
+        type: 'session:chat-thread-created',
+        payload: {
           provider: request.provider,
           model: request.model,
-          autoApprove: request.autoApprove,
-          quickStartMode,
-          quickStartMaxPreDelegationToolCalls,
-          executionContext,
-          selectedWorktreePath,
-          useWorktree: executionContext === 'git-worktree',
-          adaptiveConcurrency,
-          batchConcurrency,
-          batchMinConcurrency,
-          creationReason: request.creationReason ?? 'start',
-          sourceSessionId: asString(request.sourceSessionId) || undefined,
-          source: request.source,
-        },
-      },
-    });
-    emitSessionEvent(id, {
-      time: createdAt,
-      type: 'session:chat-thread-created',
-      payload: {
-        provider: request.provider,
-        model: request.model,
-        workspacePath,
-        taskPrompt: normalizedPrompt,
-      },
-    });
-
-    // Spawn runner as a detached child process
-    const runnerPath = join(dirname(fileURLToPath(import.meta.url)), 'runner.ts');
-    const runnerProcess = spawn(
-      process.execPath,
-      [...(process.execArgv.length > 0 ? process.execArgv : ['--import', 'tsx']), runnerPath, id, workspaceManager.getRootDir()],
-      {
-        detached: true,
-        stdio: ['ignore', 'pipe', 'pipe'],
-        cwd: workspacePath,
-        env: { ...process.env, ORCHESTRACE_SESSION_ID: id },
-      },
-    );
-
-    // Capture runner stdout/stderr to persistent log stream
-    if (runnerProcess.stdout) {
-      let stdoutBuf = '';
-      runnerProcess.stdout.on('data', (chunk: Buffer) => {
-        stdoutBuf += chunk.toString();
-        const lines = stdoutBuf.split('\n');
-        stdoutBuf = lines.pop() ?? '';
-        for (const line of lines) {
-          if (line.trim()) backendLogger.appendRunnerLine(id, 'stdout', line);
-        }
-      });
-    }
-    if (runnerProcess.stderr) {
-      let stderrBuf = '';
-      runnerProcess.stderr.on('data', (chunk: Buffer) => {
-        stderrBuf += chunk.toString();
-        const lines = stderrBuf.split('\n');
-        stderrBuf = lines.pop() ?? '';
-        for (const line of lines) {
-          if (line.trim()) backendLogger.appendRunnerLine(id, 'stderr', line);
-        }
-      });
-    }
-    runnerProcess.unref();
-
-    // Record runner PID in metadata
-    void eventStore.setMetadata(id, {
-      id,
-      pid: runnerProcess.pid ?? 0,
-      createdAt,
-      workspacePath,
-    });
-
-    // Watch event store for updates from the runner
-    const unwatch = eventStore.watch(id, 0, (event) => {
-      session.updatedAt = event.time;
-
-      switch (event.type) {
-        case 'session:llm-status-change':
-          session.llmStatus = event.payload.llmStatus as SessionLlmStatus;
-          break;
-
-        case 'session:status-change': {
-          const newStatus = event.payload.status as WorkState;
-          session.status = newStatus;
-          if (newStatus === 'completed' || newStatus === 'failed' || newStatus === 'cancelled') {
-            // Terminal state — broadcast end event, stop watching, and stop observer
-            const obs = sessionObservers.get(id);
-            if (obs) {
-              obs.stop();
-              sessionObservers.delete(id);
-            }
-            // Release the workspace path lock so new sessions can use the same path.
-            releaseWorkspacePathLock(session.workspacePath, id);
-            // Notify the observer daemon: close the loop on findings (auto-resolve if PR opened)
-            observerDaemon.onFixSessionCompleted(id, newStatus, session.output?.text);
-            broadcastWorkStream(workStreamClients, id, newStatus === 'completed' ? 'end' : 'error', {
-              id,
-              status: session.status,
-              llmStatus: session.llmStatus,
-              error: session.error,
-              time: event.time,
-            });
-            unwatch();
-          }
-          break;
-        }
-
-        case 'session:error-change':
-          session.error = event.payload.error as string | undefined;
-          break;
-
-        case 'session:output-set':
-          session.output = event.payload.output as WorkSession['output'];
-          break;
-
-        case 'session:dag-event': {
-          const uiEvent = event.payload.event as UiDagEvent;
-          session.events.push(uiEvent);
-          if (session.events.length > SESSION_EVENT_HISTORY_LIMIT) session.events.shift();
-          break;
-        }
-
-        case 'session:stream-delta': {
-          const p = event.payload as { taskId: string; phase: string; delta: string };
-          broadcastWorkStream(workStreamClients, id, 'token', {
-            id,
-            taskId: p.taskId,
-            phase: p.phase,
-            delta: p.delta,
-            llmStatus: session.llmStatus,
-            time: event.time,
-          });
-          break;
-        }
-
-        case 'session:task-status-change': {
-          const p = event.payload as { taskId: string; taskStatus: string };
-          session.taskStatus[p.taskId] = p.taskStatus;
-          break;
-        }
-
-        case 'session:todos-set': {
-          const items = (event.payload as { items: AgentTodoItem[] }).items;
-          sessionTodos.set(id, items);
-          broadcastTodoUpdate(workStreamClients, id, items);
-          break;
-        }
-
-        case 'session:todo-item-added': {
-          const item = (event.payload as { item: AgentTodoItem }).item;
-          const existing = sessionTodos.get(id) ?? [];
-          existing.push(item);
-          sessionTodos.set(id, existing);
-          broadcastTodoUpdate(workStreamClients, id, existing);
-          break;
-        }
-
-        case 'session:todo-item-toggled': {
-          const p = event.payload as { itemId: string; done: boolean; status?: string };
-          const items = sessionTodos.get(id) ?? [];
-          const idx = items.findIndex((i) => i.id === p.itemId);
-          if (idx >= 0) {
-            items[idx] = {
-              ...items[idx],
-              done: p.done,
-              status: (p.status as AgentTodoItem['status']) ?? items[idx].status,
-              updatedAt: event.time,
-            };
-            broadcastTodoUpdate(workStreamClients, id, items);
-          }
-          break;
-        }
-
-        case 'session:agent-graph-set': {
-          const graph = (event.payload as { graph: SessionAgentGraphNode[] }).graph;
-          session.agentGraph = graph;
-          break;
-        }
-
-        case 'session:agent-graph-node-status': {
-          const p = event.payload as { nodeId: string; status: string };
-          session.agentGraph = session.agentGraph.map((node) =>
-            node.id === p.nodeId ? { ...node, status: p.status as SessionAgentGraphNode['status'] } : node,
-          );
-          break;
-        }
-
-        case 'session:checkpoint': {
-          session.lastCheckpoint = {
-            ...(event.payload as SessionCheckpointPayload),
-            time: event.time,
-          };
-          break;
-        }
-
-        case 'session:recovery-detected': {
-          session.lastRecovery = {
-            ...(event.payload as SessionRecoveryDetectedPayload),
-            time: event.time,
-          };
-          break;
-        }
-
-        case 'session:chat-message': {
-          const msg = (event.payload as { message: SessionChatMessage }).message;
-          const thread = sessionChats.get(id);
-          if (thread) {
-            thread.messages.push(msg);
-            trimThreadMessages(thread);
-            thread.updatedAt = event.time;
-          }
-          break;
-        }
-
-        // Observer real-time events — broadcast to UI via SSE
-        case 'session:observer-status-change': {
-          broadcastWorkStream(workStreamClients, id, 'observer-status', {
-            id,
-            observer: event.payload,
-            time: event.time,
-          });
-          break;
-        }
-
-        case 'session:observer-finding': {
-          broadcastWorkStream(workStreamClients, id, 'observer-finding', {
-            id,
-            finding: (event.payload as { finding: unknown }).finding,
-            time: event.time,
-          });
-          break;
-        }
-
-        default:
-          break;
-      }
-
-      // Broadcast session state for all events except high-frequency stream deltas and observer events
-      if (event.type !== 'session:stream-delta' && event.type !== 'session:observer-status-change' && event.type !== 'session:observer-finding') {
-        broadcastSessionUpdate(workStreamClients, id, serializeWorkSession(session, sessionTodos.get(id) ?? []));
-      }
-
-      uiStatePersistence.schedule();
-    });
-
-    // Attach per-session real-time observer (if observer is enabled and session is not from observer itself)
-    if (observerDaemon.getConfig().enabled && request.source !== 'observer') {
-      const sessionObs = new SessionObserver({
-        sessionId: id,
-        eventStore,
-        llm,
-        config: observerDaemon.getConfig(),
-        resolveApiKey: (provider) => authManager.resolveApiKey(provider),
-        emit: (evt) => {
-          emitSessionEvent(id, {
-            time: new Date().toISOString(),
-            type: evt.type as 'session:observer-status-change' | 'session:observer-finding',
-            payload: evt.payload as Record<string, unknown>,
-          });
+          workspacePath,
+          taskPrompt: normalizedPrompt,
         },
       });
-      sessionObservers.set(id, sessionObs);
-      sessionObs.start();
+    } catch (error) {
+      releaseWorkspacePathLock(workspacePath, id);
+      void autoCreatedWorktreeCleanup?.().catch(() => {});
+      workSessions.delete(id);
+      sessionChats.delete(id);
+      sessionTodos.delete(id);
+      sessionSharedContextStores.delete(id);
+      sessionContextEngines.delete(id);
+      sessionContextStates.delete(id);
+      pendingSubagentNodeIdsBySession.delete(id);
+      return {
+        error: `Failed to persist initial session events: ${toErrorMessage(error)}`,
+        statusCode: 500,
+      };
     }
 
-    // Monitor runner process exit (backup for missed events)
-    runnerProcess.on('exit', (code) => {
-      // Immediately poll the event store so final runner events are delivered
-      // before the 3-second fallback check runs (important when FS watcher missed events).
-      eventStore.triggerPoll(id);
-
-      // Give event store watcher time to deliver final events
-      setTimeout(async () => {
-        if (session.status === 'running') {
-          // Runner exited without writing terminal event — mark as failed with recovery guidance
-          const t = now();
-          const recoveryGit = await inspectGitRecoveryState(session.worktreePath ?? session.workspacePath);
-          session.lastRecovery = {
-            reason: 'runner-exit-fallback',
-            exitCode: code,
-            git: recoveryGit,
-            time: t,
-          };
-          const recoveryHint = recoveryGit.dirty
-            ? 'Uncommitted changes were detected; review git diff/status to recover work from the crash.'
-            : 'No uncommitted changes were detected; resume from the latest checkpoint commit.';
-          session.status = 'failed';
-          session.error = `Runner process exited unexpectedly (code ${code}). ${recoveryHint}`;
-          session.llmStatus = createLlmStatus('failed', t, { detail: session.error });
-          session.updatedAt = t;
-
-          emitSessionEvent(id, {
-            time: t,
-            type: 'session:recovery-detected',
-            payload: {
-              reason: 'runner-exit-fallback',
-              exitCode: code,
-              git: recoveryGit,
-            },
-          });
-          emitSessionEvent(id, { time: t, type: 'session:error-change', payload: { error: session.error } });
-          emitSessionEvent(id, { time: t, type: 'session:llm-status-change', payload: { llmStatus: session.llmStatus } });
-          emitSessionEvent(id, { time: t, type: 'session:status-change', payload: { status: 'failed' } });
-
-          broadcastWorkStream(workStreamClients, id, 'error', {
-            id,
-            error: session.error,
-            llmStatus: session.llmStatus,
-            time: t,
-          });
-
-          uiStatePersistence.schedule();
-          unwatch();
-
-          // Stop per-session observer on unexpected exit
-          const obs = sessionObservers.get(id);
-          if (obs) {
-            obs.stop();
-            sessionObservers.delete(id);
-          }
-        }
-      }, 3_000);
-    });
+    await launchSessionRunner(session);
 
     return { id };
   }
@@ -2186,25 +2312,10 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           followUpParts,
         });
 
-        const result = await startWorkSession({
-          workspaceId: sourceSession.workspaceId,
+        const result = await retryWorkSessionInPlace({
+          id,
           prompt: retryPrompt,
           promptParts: retryPromptParts,
-          provider: sourceSession.provider,
-          model: sourceSession.model,
-          autoApprove: sourceSession.autoApprove,
-          quickStartMode: sourceSession.quickStartMode,
-          quickStartMaxPreDelegationToolCalls: sourceSession.quickStartMaxPreDelegationToolCalls,
-          executionContext: sourceSession.executionContext,
-          selectedWorktreePath: sourceSession.selectedWorktreePath,
-          useWorktree: sourceSession.useWorktree,
-          adaptiveConcurrency: sourceSession.adaptiveConcurrency,
-          batchConcurrency: sourceSession.batchConcurrency,
-          batchMinConcurrency: sourceSession.batchMinConcurrency,
-          enableTrivialTaskGate: sourceSession.enableTrivialTaskGate,
-          trivialTaskMaxPromptLength: sourceSession.trivialTaskMaxPromptLength,
-          creationReason: 'retry',
-          sourceSessionId: id,
         });
 
         if ('error' in result) {
@@ -2215,7 +2326,6 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         sendJson(res, 200, {
           id: result.id,
           sourceId: id,
-          warnings: result.warnings,
         });
         return;
       }
