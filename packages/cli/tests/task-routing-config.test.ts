@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { extractShellCommand, parseTaskRouteOverride, resolveTaskRoute } from '../src/task-routing.js';
+import { extractShellCommand, parseTaskRouteOverride, resolveTaskRoute, validateShellCommandPrompt } from '../src/task-routing.js';
 
 describe('task routing config', () => {
   it('parses valid override values', () => {
