@@ -55,7 +55,6 @@ import {
   enforceSafeShellDispatch,
   resolveTaskRouteForSource,
   stripRetryContinuationContext,
-  validateShellExecutionPrompt,
 } from './task-routing.js';
 
 // ---------------------------------------------------------------------------
@@ -679,7 +678,7 @@ async function main(): Promise<void> {
     }
 
     const outputs = route.category === 'shell_command'
-      ? await runShellCommandRoute(promptForRoutingAndEffort, config.workspacePath)
+      ? await runShellCommandRoute(dispatch.shell.command!, config.workspacePath)
       : await orchestrate(graph, {
       llm,
       cwd: config.workspacePath,
@@ -1398,23 +1397,8 @@ function buildSingleTaskGraph(id: string, prompt: string, routeCategory: TaskRou
   };
 }
 
-async function runShellCommandRoute(prompt: string, cwd: string): Promise<Map<string, TaskOutput>> {
-  const validation = validateShellExecutionPrompt(prompt);
+async function runShellCommandRoute(command: string, cwd: string): Promise<Map<string, TaskOutput>> {
   const startedAt = Date.now();
-
-  if (!validation.ok || !validation.command) {
-    return new Map([
-      ['task', {
-        taskId: 'task',
-        status: 'failed',
-        durationMs: Date.now() - startedAt,
-        retries: 0,
-        error: validation.reason ?? 'Rejected shell execution due to invalid prompt.',
-      }],
-    ]);
-  }
-
-  const command = validation.command;
 
   try {
     const { stdout, stderr } = await execFileAsync('sh', ['-lc', command], { cwd });
