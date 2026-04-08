@@ -18,6 +18,11 @@ export interface ShellExecutionValidation {
   reason?: string;
 }
 
+export interface SafeDispatchResolution {
+  route: TaskRouteResult;
+  shell: ShellExecutionValidation;
+}
+
 export function parseTaskRouteOverride(raw: string | undefined): TaskRouteCategory | undefined {
   if (!raw) return undefined;
   const normalized = raw.trim().toLowerCase();
@@ -27,25 +32,61 @@ export function parseTaskRouteOverride(raw: string | undefined): TaskRouteCatego
   return undefined;
 }
 
+function fallbackToCodeChangeRoute(result: TaskRouteResult, reason: string): TaskRouteResult {
+  return {
+    category: 'code_change',
+    strategy: 'full_planning_pipeline',
+    confidence: result.confidence,
+    reason,
+    source: 'fallback',
+  };
+}
+
 export function resolveTaskRoute(prompt: string, overrideRaw?: string): ResolvedRoute {
   const forceCategory = parseTaskRouteOverride(overrideRaw);
   const classified = classifyTaskPrompt(prompt, forceCategory ? { forceCategory } : undefined);
   const result: TaskRouteResult = classified.category === 'shell_command'
     && classified.source === 'heuristic'
     && !extractShellCommand(prompt)
-    ? {
-      category: 'code_change',
-      strategy: 'full_planning_pipeline',
-      confidence: 0.45,
-      reason: 'Shell heuristic matched, but prompt was not an executable command; defaulting to safe full planning pipeline.',
-      source: 'fallback',
-    }
+    ? fallbackToCodeChangeRoute(
+      classified,
+      'Shell heuristic matched, but prompt was not an executable command; defaulting to safe full planning pipeline.',
+    )
     : classified;
   const nodeType: TaskType = result.category === 'refactor' ? 'refactor' : 'code';
   return {
     result,
     nodeType,
     validationEnabled: result.category !== 'investigation',
+  };
+}
+
+/**
+ * Enforces the final dispatch contract shared by runner + CLI entrypoints.
+ * Shell dispatch is only allowed when route selects shell_command AND prompt
+ * passes command extraction validation; otherwise dispatch is demoted to code_change.
+ */
+export function enforceSafeShellDispatch(prompt: string, route: TaskRouteResult): SafeDispatchResolution {
+  if (route.category !== 'shell_command') {
+    return {
+      route,
+      shell: { ok: false, reason: 'Route is not shell_command.' },
+    };
+  }
+
+  const shell = validateShellExecutionPrompt(prompt);
+  if (shell.ok) {
+    return { route, shell };
+  }
+
+  const demotedRoute = fallbackToCodeChangeRoute(
+    route,
+    `Shell dispatch blocked by validation: ${shell.reason ?? 'prompt did not contain an executable command.'}`,
+  );
+
+  return {
+    route: demotedRoute,
+    shell,
   };
 }
 
