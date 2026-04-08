@@ -70,4 +70,25 @@ describe('runner task routing parity', () => {
     expect(route.result.strategy).toBe('full_planning_pipeline');
     expect(route.result.source).toBe('override');
   });
+
+  it('demotes shell override for user prose prompt before execution', () => {
+    const prompt = 'we want to make sure we will use git worktrees natively (probably by using git tool) each new session when impl starts';
+    const resolvedRoute = resolveTaskRouteForSource(prompt, 'user', 'shell_command').result;
+    expect(resolvedRoute.category).toBe('shell_command');
+
+    const dispatch = enforceSafeShellDispatch(prompt, resolvedRoute);
+    expect(dispatch.shell.ok).toBe(false);
+    expect(dispatch.route.category).toBe('code_change');
+    expect(dispatch.route.strategy).toBe('full_planning_pipeline');
+  });
+
+  it('keeps shell route for user command prompt under shell override', () => {
+    const prompt = '$ pnpm test';
+    const resolvedRoute = resolveTaskRouteForSource(prompt, 'user', 'shell_command').result;
+    const dispatch = enforceSafeShellDispatch(prompt, resolvedRoute);
+
+    expect(dispatch.route.category).toBe('shell_command');
+    expect(dispatch.shell.ok).toBe(true);
+    expect(dispatch.shell.command).toBe('pnpm test');
+  });
 });
