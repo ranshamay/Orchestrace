@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  enforceSafeShellDispatch,
   extractShellCommand,
   parseTaskRouteOverride,
   resolveTaskRoute,
@@ -78,5 +79,28 @@ describe('task routing config', () => {
     const validation = validateShellExecutionPrompt('run git status');
     expect(validation.ok).toBe(true);
     expect(validation.command).toBe('git status');
+  });
+
+  it('demotes override-forced shell route to code_change when prompt is prose', () => {
+    const prompt = 'we want to make sure we will use git worktrees natively (probably by using git tool) each new session when impl starts';
+    const resolved = resolveTaskRoute(prompt, 'shell_command').result;
+    expect(resolved.category).toBe('shell_command');
+    expect(resolved.source).toBe('override');
+
+    const dispatch = enforceSafeShellDispatch(prompt, resolved);
+    expect(dispatch.shell.ok).toBe(false);
+    expect(dispatch.route.category).toBe('code_change');
+    expect(dispatch.route.strategy).toBe('full_planning_pipeline');
+    expect(dispatch.route.source).toBe('fallback');
+  });
+
+  it('keeps explicit shell route when override prompt is a real command', () => {
+    const prompt = 'run git status';
+    const resolved = resolveTaskRoute(prompt, 'shell_command').result;
+    const dispatch = enforceSafeShellDispatch(prompt, resolved);
+
+    expect(dispatch.route.category).toBe('shell_command');
+    expect(dispatch.shell.ok).toBe(true);
+    expect(dispatch.shell.command).toBe('git status');
   });
 });

@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { resolveTaskRoute, resolveTaskRouteForSource, stripRetryContinuationContext } from '../src/task-routing.js';
+import {
+  enforceSafeShellDispatch,
+  resolveTaskRoute,
+  resolveTaskRouteForSource,
+  stripRetryContinuationContext,
+} from '../src/task-routing.js';
 
 describe('runner task routing parity', () => {
   it('defaults ambiguous prompts to safe full pipeline category', () => {
