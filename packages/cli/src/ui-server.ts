@@ -77,6 +77,7 @@ import type {
   SessionRecoveryDetectedPayload,
 } from '@orchestrace/store';
 import { ObserverDaemon, SessionObserver, BackendLogger, LogWatcher } from './observer/index.js';
+import type { RealtimeFinding } from './observer/index.js';
 
 const GITHUB_PROVIDER_ID = 'github';
 const GITHUB_API_BASE_URL = 'https://api.github.com';
@@ -1278,6 +1279,18 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
             type: evt.type as 'session:observer-status-change' | 'session:observer-finding',
             payload: evt.payload as Record<string, unknown>,
           });
+
+          if (evt.type === 'session:observer-finding') {
+            const finding = (evt.payload as { finding?: RealtimeFinding }).finding;
+            if (finding) {
+              void observerDaemon.ingestSessionObserverFindings(id, [finding]).catch((error) => {
+                console.error(
+                  `[orchestrace][observer] Failed to ingest session observer finding for ${id}:`,
+                  error,
+                );
+              });
+            }
+          }
         },
       });
       sessionObservers.set(id, sessionObs);

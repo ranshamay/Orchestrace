@@ -38,6 +38,15 @@ type LogWatcherFindingInput = {
   relevantFiles?: string[];
 };
 
+type RealtimeFindingInput = {
+  category: FindingCategory;
+  severity: FindingSeverity;
+  title: string;
+  description: string;
+  suggestedFix: string;
+  relevantFiles?: string[];
+};
+
 const LOG_WATCHER_SOURCE_SESSION_ID = 'log-watcher';
 
 export interface ObserverDaemonOptions {
@@ -237,6 +246,49 @@ export class ObserverDaemon {
   }
 
   /**
+   * Register newly detected per-session observer findings and spawn fix sessions immediately.
+   */
+  async ingestSessionObserverFindings(
+    sourceSessionId: string,
+    findings: RealtimeFindingInput[],
+  ): Promise<{ registered: number; spawned: number }> {
+    if (!sourceSessionId || findings.length === 0) {
+      return { registered: 0, spawned: 0 };
+    }
+
+    let registered = 0;
+    for (const finding of findings) {
+      if (!this.config.assessmentCategories.includes(finding.category)) {
+        continue;
+      }
+
+      const { isNew } = this.registry.register({
+        category: finding.category,
+        severity: finding.severity,
+        title: finding.title,
+        description: finding.description,
+        suggestedFix: finding.suggestedFix,
+        relevantFiles: finding.relevantFiles,
+      }, [sourceSessionId]);
+
+      if (isNew) {
+        registered += 1;
+      }
+    }
+
+    const spawned = await this.spawnPendingFindings();
+    await this.registry.save();
+
+    if (registered > 0 || spawned > 0) {
+      console.log(
+        `[orchestrace][observer] Session observer ingest (${sourceSessionId}): registered=${registered} spawned=${spawned}`,
+      );
+    }
+
+    return { registered, spawned };
+  }
+
+  /**
    * Spawn ALL pending findings immediately, ignoring the concurrent sessions cap.
    * For use via the API when manually draining the queue.
    * Returns the number of sessions successfully spawned.
@@ -244,12 +296,7 @@ export class ObserverDaemon {
   async spawnAll(): Promise<number> {
     const spawned = await spawnFixSessions(this.registry, this.config, this.startSession, 0, true);
     if (spawned > 0) {
-      for (const finding of this.registry.getAll()) {
-        if (finding.fixSessionId && finding.fixStatus === 'spawned') {
-          this.state.observerSessionIds.add(finding.fixSessionId);
-          this.activeFixSessionIds.add(finding.fixSessionId);
-        }
-      }
+      this.trackNewlySpawnedFixSessions();
       await this.registry.save();
       console.log(`[orchestrace][observer] Spawned all: ${spawned} fix sessions queued`);
     }
@@ -422,15 +469,28 @@ export class ObserverDaemon {
     const activeFixSessionCount = this.activeFixSessionIds.size;
     const spawned = await spawnFixSessions(this.registry, this.config, this.startSession, activeFixSessionCount);
     if (spawned > 0) {
-      for (const finding of this.registry.getAll()) {
-        if (finding.fixSessionId && finding.fixStatus === 'spawned') {
-          this.state.observerSessionIds.add(finding.fixSessionId);
-          this.activeFixSessionIds.add(finding.fixSessionId);
-        }
-      }
+      this.trackNewlySpawnedFixSessions();
       await this.registry.save();
     }
     return spawned;
+  }
+
+  /**
+   * Record only fix sessions first seen in this process run as active.
+   * Previously spawned historical sessions are tracked in observerSessionIds at startup
+   * and must not count against current concurrency.
+   */
+  private trackNewlySpawnedFixSessions(): void {
+    for (const finding of this.registry.getAll()) {
+      if (!finding.fixSessionId || finding.fixStatus !== 'spawned') {
+        continue;
+      }
+
+      if (!this.state.observerSessionIds.has(finding.fixSessionId)) {
+        this.state.observerSessionIds.add(finding.fixSessionId);
+        this.activeFixSessionIds.add(finding.fixSessionId);
+      }
+    }
   }
 
   private applyRateLimitCooldown(): number {
