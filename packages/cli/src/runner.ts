@@ -52,6 +52,7 @@ import {
   updateThinkingCircuitBreaker,
 } from './thinking-circuit-breaker.js';
 import {
+  enforceSafeShellDispatch,
   resolveTaskRouteForSource,
   stripRetryContinuationContext,
   validateShellExecutionPrompt,
@@ -173,11 +174,13 @@ async function main(): Promise<void> {
   const agentGraph: SessionAgentGraphNode[] = [];
   const pendingNodeIds = new Map<string, string[]>();
   const promptForRoutingAndEffort = stripRetryContinuationContext(config.prompt);
-  const route = resolveTaskRouteForSource(
+  const resolvedRoute = resolveTaskRouteForSource(
     promptForRoutingAndEffort,
     config.source,
     process.env.ORCHESTRACE_TASK_ROUTE,
   ).result;
+  const dispatch = enforceSafeShellDispatch(promptForRoutingAndEffort, resolvedRoute);
+  const route = dispatch.route;
   const effortClassification = classifyTaskEffort(promptForRoutingAndEffort);
   const taskEffort: TaskEffort = (process.env.ORCHESTRACE_TASK_EFFORT as TaskEffort) || effortClassification.effort;
   let successfulEditFileResultsSinceCheckpoint = 0;
@@ -223,6 +226,22 @@ async function main(): Promise<void> {
       },
     },
   });
+
+  if (resolvedRoute.category === 'shell_command' && route.category !== 'shell_command') {
+    void emit({
+      time: iso(),
+      type: 'session:dag-event',
+      payload: {
+        event: {
+          time: iso(),
+          runId: sessionId,
+          type: 'task:routing',
+          taskId: 'task',
+          message: `Shell route fallback applied: ${dispatch.shell.reason ?? 'prompt failed shell validation'}`,
+        },
+      },
+    });
+  }
 
   void emit({
     time: iso(),
