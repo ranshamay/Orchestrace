@@ -179,7 +179,7 @@ function createInheritedSubAgentToolset(
     resolveGithubToken: () => Promise<string | undefined>;
     sharedContextStore?: import('@orchestrace/context').SharedContextStore;
     agentId?: string;
-    fileReadCache?: ReturnType<typeof createFileReadCache>;
+    fileReadCache?: ReturnType<typeof createFileReadCache> | Map<string, { content: string; mtimeMs: number; size: number; readAt: number }>;
   },
 ) {
   return createAgentToolset({

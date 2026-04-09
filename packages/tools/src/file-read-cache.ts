@@ -1,3 +1,5 @@
+import { readFile, stat } from 'node:fs/promises';
+
 export interface FileReadCacheKey {
   path: string;
   revision: string;
@@ -18,6 +20,15 @@ export interface FileReadCache {
   clear: () => void;
   size: () => number;
 }
+
+export interface SessionFileReadCacheEntry {
+  content: string;
+  mtimeMs: number;
+  size: number;
+  readAt: number;
+}
+
+export type SessionFileReadCache = Map<string, SessionFileReadCacheEntry>;
 
 export interface FileReadCacheOptions {
   maxEntries?: number;
@@ -83,6 +94,26 @@ export function serializeCacheKey(key: FileReadCacheKey): string {
     key.endLine ?? '',
     key.maxChars,
   ].join('\u001f');
+}
+
+export async function readFullFileWithCache(
+  path: string,
+  options: { cache: SessionFileReadCache },
+): Promise<string> {
+  const fileStat = await stat(path);
+  const existing = options.cache.get(path);
+  if (existing && existing.mtimeMs === fileStat.mtimeMs && existing.size === fileStat.size) {
+    return existing.content;
+  }
+
+  const content = await readFile(path, 'utf-8');
+  options.cache.set(path, {
+    content,
+    mtimeMs: fileStat.mtimeMs,
+    size: fileStat.size,
+    readAt: Date.now(),
+  });
+  return content;
 }
 
 function normalizePath(path: string): string {
