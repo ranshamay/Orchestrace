@@ -7,7 +7,6 @@ import type {
   TaskOutput,
   RunnerConfig,
   ModelConfig,
-  ReplayFailureType,
   ReplayAttemptRecord,
   ReplayToolCallRecord,
   TaskReplayRecord,
@@ -23,6 +22,10 @@ import {
   buildRoleSystemPrompt,
 } from './role-config.js';
 import { executeImplementerRole, executeRole, spawnRoleAgent } from './role-executor.js';
+import {
+  resolveReplayFailureType,
+  shouldRetryAfterCompletionFailure,
+} from './completion-retry-policy.js';
 import {
   buildPlanningContractError,
   createPlanningContractFailureSignature,
@@ -836,65 +839,6 @@ function createTextPreview(text: string, maxChars = 600): string {
   }
 
   return compact.length > maxChars ? `${compact.slice(0, maxChars - 3)}...` : compact;
-}
-
-function resolveReplayFailureType(error: unknown): ReplayFailureType {
-  if (error && typeof error === 'object' && 'failureType' in error) {
-    const raw = (error as { failureType?: unknown }).failureType;
-    if (isReplayFailureType(raw)) {
-      return raw;
-    }
-  }
-
-  const message = error instanceof Error ? error.message : String(error);
-  const normalized = message.toLowerCase();
-  if (/(timed?\s*out|timeout|etimedout|abort)/.test(normalized)) {
-    return 'timeout';
-  }
-
-  if (/(rate\s*limit|too many requests|quota|\b429\b)/.test(normalized)) {
-    return 'rate_limit';
-  }
-
-  if (/(unauthorized|forbidden|invalid api key|auth|\b401\b|\b403\b)/.test(normalized)) {
-    return 'auth';
-  }
-
-  if (/(invalid tool call|schema|validatetoolcall|invalid arguments|tool arguments)/.test(normalized)) {
-    return 'tool_schema';
-  }
-
-  if (/(circuit breaker tripped|identical subagent batch failures repeated|manual intervention or explicit backoff is required)/.test(normalized)) {
-    return 'validation';
-  }
-
-  if (/(tool execution failed|unknown tool|blocked command|not allowed while mode|tool failed)/.test(normalized)) {
-    return 'tool_runtime';
-  }
-
-  if (/(empty response|no text output|zero tokens)/.test(normalized)) {
-    return 'empty_response';
-  }
-
-  return 'unknown';
-}
-
-function isReplayFailureType(value: unknown): value is ReplayFailureType {
-  return value === 'timeout'
-    || value === 'auth'
-    || value === 'rate_limit'
-    || value === 'tool_schema'
-    || value === 'tool_runtime'
-    || value === 'validation'
-    || value === 'empty_response'
-    || value === 'unknown';
-}
-
-function shouldRetryAfterCompletionFailure(failureType: ReplayFailureType): boolean {
-  return failureType === 'timeout'
-    || failureType === 'rate_limit'
-    || failureType === 'tool_runtime'
-    || failureType === 'empty_response';
 }
 
 function resolvePromptVersion(params: {
