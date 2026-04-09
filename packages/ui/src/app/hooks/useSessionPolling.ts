@@ -1,5 +1,6 @@
 import { useEffect } from 'react';
 import { fetchSessions, fetchWorkAgent, type AgentTodo, type ChatMessage, type WorkSession } from '../../lib/api';
+import { sortSessionsByActivityAndRecency } from '../utils/sessionSort';
 
 type Params = {
   selectedSessionId: string;
@@ -27,11 +28,12 @@ export function useSessionPolling({ selectedSessionId, setSelectedSessionId, set
           return;
         }
 
-        setSessions(sessionsState.sessions);
+        const sortedSessions = sortSessionsByActivityAndRecency(sessionsState.sessions);
+        setSessions(sortedSessions);
 
-        const selectedExists = sessionsState.sessions.some((session) => session.id === selectedSessionId);
+        const selectedExists = sortedSessions.some((session) => session.id === selectedSessionId);
         if (!selectedExists) {
-          const fallbackSessionId = sessionsState.sessions[0]?.id ?? '';
+          const fallbackSessionId = sortedSessions[0]?.id ?? '';
           if (fallbackSessionId !== selectedSessionId) {
             setSelectedSessionId(fallbackSessionId);
           }

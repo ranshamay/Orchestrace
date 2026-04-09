@@ -1,6 +1,6 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join, relative, resolve, sep } from 'node:path';
-import { Type } from '@mariozechner/pi-ai';
+import { Type, validateToolCall } from '@mariozechner/pi-ai';
 import type {
   AgentToolPhase,
   AgentGraphNode,
@@ -56,6 +56,13 @@ const COORDINATION_PERSIST_PROMPT_MAX_CHARS = 1_600;
 const COORDINATION_PERSIST_OUTPUT_MAX_CHARS = 1_000;
 const PROMPT_FILE_PATH_PATTERN = /(?:^|[\s`"'])((?:\.?\.?\/)?[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)+\.[A-Za-z0-9._-]+)(?=$|[\s`"':),])/g;
 
+const subAgentReasoningSchema = Type.Union([
+  Type.Literal('minimal'),
+  Type.Literal('low'),
+  Type.Literal('medium'),
+  Type.Literal('high'),
+], { description: 'LLM reasoning effort: "minimal" for simple tasks, "low"/"medium" for moderate complexity, "high" for complex multi-step reasoning.' });
+
 const subAgentContextPacketSchema = Type.Object({
   objective: Type.String({ minLength: 1 }),
   boundaries: Type.Optional(Type.Object({
@@ -73,6 +80,30 @@ const subAgentContextPacketSchema = Type.Object({
     }),
   )),
 });
+
+const subAgentSpawnEntrySchema = Type.Object({
+  nodeId: Type.Optional(Type.String()),
+  prompt: Type.Optional(Type.String({ minLength: 1 })),
+  contextPacket: Type.Optional(subAgentContextPacketSchema),
+  systemPrompt: Type.Optional(Type.String()),
+  provider: Type.Optional(Type.String()),
+  model: Type.Optional(Type.String()),
+  reasoning: Type.Optional(subAgentReasoningSchema),
+}, { additionalProperties: false });
+
+const subAgentSpawnArgsSchema = Type.Object({
+  ...subAgentSpawnEntrySchema.properties,
+}, { additionalProperties: false });
+
+const subAgentSpawnBatchArgsSchema = Type.Object({
+  agents: Type.Array(subAgentSpawnEntrySchema, { minItems: 1 }),
+  concurrency: Type.Optional(Type.Number({ minimum: 1, maximum: SUBAGENT_BATCH_MAX_CONCURRENCY })),
+  adaptiveConcurrency: Type.Optional(Type.Boolean({ description: 'Automatically tune concurrency based on sub-agent failures while processing the batch.' })),
+  minConcurrency: Type.Optional(Type.Number({ minimum: 1, maximum: SUBAGENT_BATCH_MAX_CONCURRENCY })),
+  maxRetries: Type.Optional(Type.Number({ minimum: 0 })),
+}, { additionalProperties: false });
+
+type SubAgentToolName = 'subagent_spawn' | 'subagent_spawn_batch';
 
 interface CoordinationToolsOptions extends AgentToolsetOptions {
   includeSubAgentTool: boolean;
@@ -357,27 +388,20 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
       tool: {
         name: 'subagent_spawn',
         description: 'Spawn a focused sub-agent for a dependent sub-task and return a concise result.',
-        parameters: Type.Object({
-          nodeId: Type.Optional(Type.String()),
-          prompt: Type.Optional(Type.String({ minLength: 1 })),
-          contextPacket: Type.Optional(subAgentContextPacketSchema),
-          systemPrompt: Type.Optional(Type.String()),
-          provider: Type.Optional(Type.String()),
-          model: Type.Optional(Type.String()),
-          reasoning: Type.Optional(
-            Type.Union([
-              Type.Literal('minimal'),
-              Type.Literal('low'),
-              Type.Literal('medium'),
-              Type.Literal('high'),
-            ], { description: 'LLM reasoning effort: "minimal" for simple tasks, "low"/"medium" for moderate complexity, "high" for complex multi-step reasoning.' }),
-          ),
-        }),
+        parameters: subAgentSpawnArgsSchema,
       },
       execute: async (toolArgs, signal) => {
         if (!options.runSubAgent) {
           return {
             content: 'Sub-agent runner is not available in this context.',
+            isError: true,
+          };
+        }
+
+        const spawnValidation = validateSubAgentToolArgs('subagent_spawn', subAgentSpawnArgsSchema, toolArgs);
+        if (!spawnValidation.ok) {
+          return {
+            content: spawnValidation.message,
             isError: true,
           };
         }
@@ -477,36 +501,20 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
       tool: {
         name: 'subagent_spawn_batch',
         description: 'Spawn multiple focused sub-agents in parallel for independent sub-tasks.',
-        parameters: Type.Object({
-          agents: Type.Array(
-            Type.Object({
-              nodeId: Type.Optional(Type.String()),
-              prompt: Type.Optional(Type.String({ minLength: 1 })),
-              contextPacket: Type.Optional(subAgentContextPacketSchema),
-              systemPrompt: Type.Optional(Type.String()),
-              provider: Type.Optional(Type.String()),
-              model: Type.Optional(Type.String()),
-              reasoning: Type.Optional(
-                Type.Union([
-                  Type.Literal('minimal'),
-                  Type.Literal('low'),
-                  Type.Literal('medium'),
-                  Type.Literal('high'),
-                ], { description: 'LLM reasoning effort: "minimal" for simple tasks, "low"/"medium" for moderate complexity, "high" for complex multi-step reasoning.' }),
-              ),
-            }),
-            { minItems: 1 },
-          ),
-          concurrency: Type.Optional(Type.Number({ minimum: 1, maximum: SUBAGENT_BATCH_MAX_CONCURRENCY })),
-          adaptiveConcurrency: Type.Optional(Type.Boolean({ description: 'Automatically tune concurrency based on sub-agent failures while processing the batch.' })),
-          minConcurrency: Type.Optional(Type.Number({ minimum: 1, maximum: SUBAGENT_BATCH_MAX_CONCURRENCY })),
-          maxRetries: Type.Optional(Type.Number({ minimum: 0 })),
-        }),
+        parameters: subAgentSpawnBatchArgsSchema,
       },
       execute: async (toolArgs, signal) => {
         if (!options.runSubAgent) {
           return {
             content: 'Sub-agent runner is not available in this context.',
+            isError: true,
+          };
+        }
+
+        const spawnValidation = validateSubAgentToolArgs('subagent_spawn_batch', subAgentSpawnBatchArgsSchema, toolArgs);
+        if (!spawnValidation.ok) {
+          return {
+            content: spawnValidation.message,
             isError: true,
           };
         }
@@ -877,6 +885,26 @@ function usageOrZero(usage: { input: number; output: number; cost: number } | un
     output: usage?.output ?? 0,
     cost: usage?.cost ?? 0,
   };
+}
+
+function validateSubAgentToolArgs(
+  toolName: SubAgentToolName,
+  schema: typeof subAgentSpawnArgsSchema | typeof subAgentSpawnBatchArgsSchema,
+  args: Record<string, unknown>,
+): { ok: true } | { ok: false; message: string } {
+  try {
+    validateToolCall(
+      [{ name: toolName, description: `${toolName} validation`, parameters: schema }],
+      { type: 'toolCall', id: `validate-${toolName}`, name: toolName, arguments: args },
+    );
+    return { ok: true };
+  } catch (error) {
+    const details = (error instanceof Error ? error.message : String(error))
+      .replace(/\b([a-zA-Z0-9_]+(?:\/[a-zA-Z0-9_]+)+)\b/g, (match) => match.replace(/\//g, '.'));
+    const message = `${toolName} argument validation failed before spawn: ${details}`;
+    console.warn(`[coordination-tools] ${message}`);
+    return { ok: false, message };
+  }
 }
 
 async function buildSubAgentRequestFromToolArgs(

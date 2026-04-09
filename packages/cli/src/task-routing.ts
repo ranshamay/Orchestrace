@@ -12,6 +12,17 @@ export interface ResolvedRoute {
   validationEnabled: boolean;
 }
 
+export interface ShellExecutionValidation {
+  ok: boolean;
+  command?: string;
+  reason?: string;
+}
+
+export interface SafeDispatchResolution {
+  route: TaskRouteResult;
+  shell: ShellExecutionValidation;
+}
+
 export function parseTaskRouteOverride(raw: string | undefined): TaskRouteCategory | undefined {
   if (!raw) return undefined;
   const normalized = raw.trim().toLowerCase();
@@ -21,19 +32,26 @@ export function parseTaskRouteOverride(raw: string | undefined): TaskRouteCatego
   return undefined;
 }
 
+function fallbackToCodeChangeRoute(result: TaskRouteResult, reason: string): TaskRouteResult {
+  return {
+    category: 'code_change',
+    strategy: 'full_planning_pipeline',
+    confidence: result.confidence,
+    reason,
+    source: 'fallback',
+  };
+}
+
 export function resolveTaskRoute(prompt: string, overrideRaw?: string): ResolvedRoute {
   const forceCategory = parseTaskRouteOverride(overrideRaw);
   const classified = classifyTaskPrompt(prompt, forceCategory ? { forceCategory } : undefined);
   const result: TaskRouteResult = classified.category === 'shell_command'
     && classified.source === 'heuristic'
     && !extractShellCommand(prompt)
-    ? {
-      category: 'code_change',
-      strategy: 'full_planning_pipeline',
-      confidence: 0.45,
-      reason: 'Shell heuristic matched, but prompt was not an executable command; defaulting to safe full planning pipeline.',
-      source: 'fallback',
-    }
+    ? fallbackToCodeChangeRoute(
+      classified,
+      'Shell heuristic matched, but prompt was not an executable command; defaulting to safe full planning pipeline.',
+    )
     : classified;
   const nodeType: TaskType = result.category === 'refactor' ? 'refactor' : 'code';
   return {
@@ -41,6 +59,79 @@ export function resolveTaskRoute(prompt: string, overrideRaw?: string): Resolved
     nodeType,
     validationEnabled: result.category !== 'investigation',
   };
+}
+
+/**
+ * Enforces the final dispatch contract shared by runner + CLI entrypoints.
+ * Shell dispatch is only allowed when route selects shell_command AND prompt
+ * passes command extraction validation; otherwise dispatch is demoted to code_change.
+ */
+export function enforceSafeShellDispatch(prompt: string, route: TaskRouteResult): SafeDispatchResolution {
+  if (route.category !== 'shell_command') {
+    return {
+      route,
+      shell: { ok: false, reason: 'Route is not shell_command.' },
+    };
+  }
+
+  const shell = validateShellExecutionPrompt(prompt);
+  if (shell.ok) {
+    return { route, shell };
+  }
+
+  const demotedRoute = fallbackToCodeChangeRoute(
+    route,
+    `Shell dispatch blocked by validation: ${shell.reason ?? 'prompt did not contain an executable command.'}`,
+  );
+
+  return {
+    route: demotedRoute,
+    shell,
+  };
+}
+
+/**
+ * Observer-generated fix prompts are task instructions, never shell commands.
+ * Force observer sessions into the planning/code pipeline even if a global shell
+ * route override is enabled.
+ */
+export function resolveTaskRouteForSource(
+  prompt: string,
+  source: 'user' | 'observer' | undefined,
+  overrideRaw?: string,
+): ResolvedRoute {
+  if (source === 'observer') {
+    return resolveTaskRoute(prompt, 'code_change');
+  }
+  return resolveTaskRoute(prompt, overrideRaw);
+}
+
+/**
+ * Final safety check before executing sh -lc.
+ * Rejects multiline markdown/prose payloads and returns a validated command.
+ */
+export function validateShellExecutionPrompt(prompt: string): ShellExecutionValidation {
+  const normalized = prompt.trim();
+  if (!normalized) {
+    return {
+      ok: false,
+      reason: 'Route shell_command selected, but prompt was empty.',
+    };
+  }
+  if (normalized.includes('\n')) {
+    return {
+      ok: false,
+      reason: 'Rejected shell execution: prompt contains multiple lines and appears to be instructions/markdown, not a single command.',
+    };
+  }
+  const command = extractShellCommand(normalized);
+  if (!command) {
+    return {
+      ok: false,
+      reason: 'Route shell_command selected, but no executable command was found in the prompt.',
+    };
+  }
+  return { ok: true, command };
 }
 
 /**

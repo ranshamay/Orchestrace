@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
@@ -22,6 +22,54 @@ function createEventStoreStub(): EventStore {
 }
 
 describe('log watcher fix-session emission', () => {
+  it('registers realtime session observer findings and spawns fix sessions', async () => {
+    const orchestraceDir = await mkdtemp(join(tmpdir(), 'orchestrace-observer-'));
+
+    try {
+      const startSession = vi.fn(async () => ({ id: `fix-${String(startSession.mock.calls.length + 1)}` }));
+      const daemon = new ObserverDaemon({
+        orchestraceDir,
+        eventStore: createEventStoreStub(),
+        llm: { complete: vi.fn() } as unknown as any,
+        startSession,
+        resolveApiKey: async () => undefined,
+      });
+
+      await daemon.updateConfig({ enabled: true, maxConcurrentFixSessions: 0 });
+
+      const first = await daemon.ingestSessionObserverFindings('session-123', [
+        {
+          category: 'architecture',
+          severity: 'high',
+          title: 'Unsafe cross-session mutable state',
+          description: 'Multiple sessions mutate a shared singleton without locks.',
+          suggestedFix: 'Scope mutable state per session and guard shared writes with synchronization.',
+          relevantFiles: ['packages/cli/src/ui-server.ts'],
+        },
+      ]);
+
+      expect(first).toEqual({ registered: 1, spawned: 1 });
+      expect(startSession).toHaveBeenCalledTimes(1);
+      expect(startSession.mock.calls[0]?.[0].source).toBe('observer');
+      expect(startSession.mock.calls[0]?.[0].prompt).toContain('[Observer Fix] Unsafe cross-session mutable state');
+
+      const duplicate = await daemon.ingestSessionObserverFindings('session-123', [
+        {
+          category: 'architecture',
+          severity: 'high',
+          title: 'Unsafe cross-session mutable state',
+          description: 'Multiple sessions mutate a shared singleton without locks.',
+          suggestedFix: 'Scope mutable state per session and guard shared writes with synchronization.',
+        },
+      ]);
+
+      expect(duplicate).toEqual({ registered: 0, spawned: 0 });
+      expect(startSession).toHaveBeenCalledTimes(1);
+    } finally {
+      await rm(orchestraceDir, { recursive: true, force: true });
+    }
+  });
+
   it('registers log findings and spawns fix sessions immediately', async () => {
     const orchestraceDir = await mkdtemp(join(tmpdir(), 'orchestrace-observer-'));
 
@@ -52,6 +100,8 @@ describe('log watcher fix-session emission', () => {
       expect(startSession).toHaveBeenCalledTimes(1);
       expect(startSession.mock.calls[0]?.[0].source).toBe('observer');
       expect(startSession.mock.calls[0]?.[0].prompt).toContain('[Observer Fix] Crash loop in API handler');
+      expect(startSession.mock.calls[0]?.[0].prompt).toContain('## Issue');
+      expect(startSession.mock.calls[0]?.[0].prompt).toContain('\n## Task\n');
       expect(daemon.getFindings()[0]?.category).toBe('code-quality');
 
       const duplicate = await daemon.ingestLogWatcherFindings([
@@ -139,6 +189,72 @@ describe('log watcher fix-session emission', () => {
       expect(emitted).toEqual(['Repeated timeout']);
     } finally {
       watcher.stop();
+    }
+  });
+
+  it('does not count historical spawned findings against current process concurrency', async () => {
+    const orchestraceDir = await mkdtemp(join(tmpdir(), 'orchestrace-observer-'));
+
+    try {
+      const observerDir = join(orchestraceDir, 'observer');
+      await mkdir(observerDir, { recursive: true });
+      await writeFile(
+        join(observerDir, 'findings.json'),
+        JSON.stringify([
+          {
+            fingerprint: 'historical-finding-1',
+            category: 'code-quality',
+            severity: 'medium',
+            title: 'Historical spawned finding',
+            description: 'Old finding kept as spawned from a prior process.',
+            suggestedFix: 'Historical fix',
+            observedInSessions: ['legacy-session'],
+            detectedAt: new Date().toISOString(),
+            fixSessionId: 'legacy-fix-session',
+            fixStatus: 'spawned',
+            additionalSessions: [],
+          },
+        ], null, 2),
+        'utf-8',
+      );
+
+      const startSession = vi.fn(async () => ({ id: `fix-${String(startSession.mock.calls.length + 1)}` }));
+      const daemon = new ObserverDaemon({
+        orchestraceDir,
+        eventStore: createEventStoreStub(),
+        llm: { complete: vi.fn() } as unknown as any,
+        startSession,
+        resolveApiKey: async () => undefined,
+      });
+
+      await daemon.start();
+      await daemon.updateConfig({ maxConcurrentFixSessions: 2 });
+
+      const first = await daemon.ingestLogWatcherFindings([
+        {
+          category: 'error-pattern',
+          severity: 'high',
+          title: 'Fresh issue A',
+          description: 'New issue A from current process.',
+          suggestedFix: 'Fix issue A.',
+        },
+      ]);
+
+      const second = await daemon.ingestLogWatcherFindings([
+        {
+          category: 'error-pattern',
+          severity: 'high',
+          title: 'Fresh issue B',
+          description: 'New issue B from current process.',
+          suggestedFix: 'Fix issue B.',
+        },
+      ]);
+
+      expect(first).toEqual({ registered: 1, spawned: 1 });
+      expect(second).toEqual({ registered: 1, spawned: 1 });
+      expect(startSession).toHaveBeenCalledTimes(2);
+    } finally {
+      await rm(orchestraceDir, { recursive: true, force: true });
     }
   });
 });

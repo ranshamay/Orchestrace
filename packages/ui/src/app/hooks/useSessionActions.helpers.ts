@@ -7,6 +7,7 @@ import {
   type WorkSession,
 } from '../../lib/api';
 import type { SessionLlmControls } from '../types';
+import { sortSessionsByActivityAndRecency } from '../utils/sessionSort';
 import { normalizeSessionStatus } from '../utils/status';
 
 type CommonStateSetters = {
@@ -23,8 +24,9 @@ export function toErrorMessage(error: unknown): string {
 
 export async function refreshSessionsOnly(setters: Pick<CommonStateSetters, 'setSessions'>) {
   const sessionsState = await fetchSessions();
-  setters.setSessions(sessionsState.sessions);
-  return sessionsState.sessions;
+  const sortedSessions = sortSessionsByActivityAndRecency(sessionsState.sessions);
+  setters.setSessions(sortedSessions);
+  return sortedSessions;
 }
 
 export async function retryAndSyncSession(
@@ -35,7 +37,7 @@ export async function retryAndSyncSession(
 
   const result = await retryWork(session.id);
   const sessionsState = await fetchSessions();
-  setters.setSessions(sessionsState.sessions);
+  setters.setSessions(sortSessionsByActivityAndRecency(sessionsState.sessions));
   setters.setSelectedSessionId(result.id);
 
   try {

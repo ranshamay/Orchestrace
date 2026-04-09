@@ -12,6 +12,7 @@ import { useBootstrapData } from './app/hooks/useBootstrapData';
 import { useProviderModels } from './app/hooks/useProviderModels';
 import { useSessionPolling } from './app/hooks/useSessionPolling';
 import { useSessionStream } from './app/hooks/useSessionStream';
+import { useSessionsStatusStream } from './app/hooks/useSessionsStatusStream';
 import { useRunUrlSync } from './app/hooks/useRunUrlSync';
 import { useTimelineFollow } from './app/hooks/useTimelineFollow';
 import { useToolsPanel } from './app/hooks/useToolsPanel';
@@ -93,6 +94,7 @@ export default function App() {
     updateTabInUrl(tab, 'push');
   }, []);
 
+  useSessionsStatusStream({ selectedSessionId, setSelectedSessionId: setSessionSelection, setSessions });
   useSessionPolling({ selectedSessionId, setSelectedSessionId: setSessionSelection, setSessions, setChatMessages, setTodos });
   useSessionStream({ selectedSessionId, setSessions, setChatMessages, setTodos, setNodeTokenStreams, setObserverState });
   useRunUrlSync(selectedSessionId, setSessionSelection);

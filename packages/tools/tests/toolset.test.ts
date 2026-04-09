@@ -45,6 +45,7 @@ describe('createAgentToolset phase policy', () => {
       'todo_get',
       'todo_set',
       'todo_update',
+      'url_fetch',
     ]);
   });
 
@@ -66,6 +67,7 @@ describe('createAgentToolset phase policy', () => {
       'todo_get',
       'todo_set',
       'todo_update',
+      'url_fetch',
     ]);
   });
 
@@ -92,6 +94,7 @@ describe('createAgentToolset phase policy', () => {
       'todo_get',
       'todo_set',
       'todo_update',
+      'url_fetch',
       'write_file',
       'write_files',
     ]);
@@ -627,6 +630,46 @@ describe('run_command safety', () => {
   });
 });
 
+describe('url_fetch tool', () => {
+  it('is available in planning and implementation phases', async () => {
+    const cwd = await makeWorkspace();
+    const planningToolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+    const implementationToolset = createAgentToolset({ cwd, phase: 'implementation', taskType: 'code' });
+
+    expect(toolNames(planningToolset)).toContain('url_fetch');
+    expect(toolNames(implementationToolset)).toContain('url_fetch');
+  });
+
+  it('fetches JSON response and returns parsed data', async () => {
+    const cwd = await makeWorkspace();
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ ok: true, name: 'demo' }), {
+      status: 200,
+      headers: {
+        'content-type': 'application/json',
+      },
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    try {
+      const toolset = createAgentToolset({ cwd, phase: 'implementation', taskType: 'code' });
+      const result = await toolset.executeTool({
+        id: '1',
+        name: 'url_fetch',
+        arguments: { url: 'https://example.com/data' },
+      });
+
+      expect(result.isError).toBeFalsy();
+      expect(result.content).toContain('"name": "demo"');
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const [requestUrl, requestInit] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(requestUrl).toBe('https://example.com/data');
+      expect(requestInit.method).toBe('GET');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
 describe('github_api tool', () => {
   it('is hidden when no GitHub token resolver is configured', async () => {
     const cwd = await makeWorkspace();
@@ -827,6 +870,84 @@ describe('mode tools smoke test', () => {
 });
 
 describe('subagent prompt enrichment', () => {
+  it('subagent_spawn validates args synchronously and skips sub-agent invocation on malformed payload', async () => {
+    const cwd = await makeWorkspace();
+    const runSubAgent = vi.fn(async () => ({ text: 'unexpected dispatch' }));
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    try {
+      const toolset = createAgentToolset({
+        cwd,
+        phase: 'planning',
+        taskType: 'code',
+        graphId: 'g1',
+        taskId: 't-sync-validation-single',
+        runSubAgent,
+      });
+
+      const result = await toolset.executeTool({
+        id: '1',
+        name: 'subagent_spawn',
+        arguments: {
+          contextPacket: {
+            objective: 'Investigate failing task',
+            boundaries: {
+              timeoutMs: 0,
+            },
+          },
+        },
+      });
+
+      expect(result.isError).toBe(true);
+      expect(result.content).toContain('subagent_spawn argument validation failed before spawn');
+      expect(result.content).toContain('contextPacket.boundaries.timeoutMs');
+      expect(runSubAgent).not.toHaveBeenCalled();
+      expect(warnSpy).toHaveBeenCalled();
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('subagent_spawn_batch validates args synchronously and skips all sub-agent invocations on malformed payload', async () => {
+    const cwd = await makeWorkspace();
+    const runSubAgent = vi.fn(async () => ({ text: 'unexpected dispatch' }));
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    try {
+      const toolset = createAgentToolset({
+        cwd,
+        phase: 'planning',
+        taskType: 'code',
+        graphId: 'g1',
+        taskId: 't-sync-validation-batch',
+        runSubAgent,
+      });
+
+      const result = await toolset.executeTool({
+        id: '1',
+        name: 'subagent_spawn_batch',
+        arguments: {
+          agents: [
+            {
+              contextPacket: {
+                objective: 'Review code',
+              },
+              unexpected: true,
+            },
+          ],
+        },
+      });
+
+      expect(result.isError).toBe(true);
+      expect(result.content).toContain('subagent_spawn_batch argument validation failed before spawn');
+      expect(result.content).toContain('agents.0');
+      expect(result.content).toContain('additional properties');
+      expect(runSubAgent).not.toHaveBeenCalled();
+      expect(warnSpy).toHaveBeenCalled();
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
   it('prefers provided context packet snippets over disk reads', async () => {
     const cwd = await makeWorkspace();
     const delegatedPrompts: string[] = [];
