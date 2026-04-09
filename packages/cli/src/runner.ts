@@ -169,7 +169,7 @@ async function main(): Promise<void> {
 
   // Handle SIGTERM for gracellation
   let cancelled = false;
-  process.on('SIGTERM', () => {
+  const handleSigterm = () => {
     cancelled = true;
     controller.abort();
     resetThinkingCircuitBreaker(thinkingCircuitBreaker);
@@ -181,7 +181,8 @@ async function main(): Promise<void> {
     };
     void emit({ time: iso(), type: 'session:llm-status-change', payload: { llmStatus } });
     void emit({ time: iso(), type: 'session:status-change', payload: { status: 'cancelled' } });
-  });
+  };
+  process.on('SIGTERM', handleSigterm);
 
   // Shared context and file-read cache for this session
   const sharedContextStore = new InMemorySharedContextStore();
@@ -1353,17 +1354,34 @@ async function main(): Promise<void> {
       await emit({ time: t, type: 'session:chat-message', payload: { message: { role: 'assistant', content: primaryOutput.response, time: t } } });
     }
 
+    await lifecycle.cleanup();
+    if (terminalFailed) {
+      await lifecycle.complete('FAILED');
+      await emitLifecyclePhaseChange('FAILED');
+    } else {
+      await lifecycle.complete('COMPLETED');
+      await emitLifecyclePhaseChange('COMPLETED');
+    }
+
     clearInterval(heartbeatInterval);
     process.exit(terminalFailed ? 1 : 0);
   } catch (error) {
     if (cancelled) {
       await markCheckpointInterrupted(iso(), 'Interrupted during cancellation path.');
+      await lifecycle.cleanup();
+      await lifecycle.complete('CANCELLED');
+      await emitLifecyclePhaseChange('CANCELLED');
       clearInterval(heartbeatInterval);
       process.exit(130);
     }
 
     const t = iso();
-    const errorText = errorMsg(error);
+    const lifecyclePhase = lifecycle.phase;
+    const lifecycleError = error instanceof SessionLifecycleError
+      ? error
+      : await lifecycle.failAt(lifecyclePhase, errorMsg(error), error);
+    const lifecyclePrefix = `[phase=${lifecycleError.phase}]`;
+    const errorText = `${lifecyclePrefix} ${errorMsg(error)}`;
     resetThinkingCircuitBreaker(thinkingCircuitBreaker);
     await maybeCheckpoint('terminal');
     let deliveryError: string | undefined;
@@ -1375,8 +1393,14 @@ async function main(): Promise<void> {
     const finalError = deliveryError
       ? `${errorText}\nRemote delivery failed: ${deliveryError}`
       : errorText;
-    await emit({ time: t, type: 'session:error-change', payload: { error: finalError } });
-    const llmStatus = makeLlmStatus('failed', finalError, deliveryError ? 'delivery_failure' : undefined);
+
+    const cleanupErrors = lifecycle.diagnostics.cleanupErrors;
+    const cleanupErrorSuffix = cleanupErrors.length > 0
+      ? `\nCleanup errors: ${cleanupErrors.map((entry) => `${entry.phase}:${entry.actionLabel}:${errorMsg(entry.error)}`).join(' | ')}`
+      : '';
+
+    await emit({ time: t, type: 'session:error-change', payload: { error: `${finalError}${cleanupErrorSuffix}` } });
+    const llmStatus = makeLlmStatus('failed', `${finalError}${cleanupErrorSuffix}`, deliveryError ? 'delivery_failure' : lifecycleError.type);
     lastLlmStatusEmission = {
       key: llmStatusIdentityKey(llmStatus),
       emittedAt: parseTimestamp(llmStatus.updatedAt),
@@ -1384,6 +1408,10 @@ async function main(): Promise<void> {
     await emit({ time: t, type: 'session:llm-status-change', payload: { llmStatus } });
     await emit({ time: t, type: 'session:status-change', payload: { status: 'failed' } });
     await finalizeCheckpoint('failed', t);
+
+    await lifecycle.cleanup();
+    await lifecycle.complete('FAILED');
+    await emitLifecyclePhaseChange('FAILED');
 
     clearInterval(heartbeatInterval);
     process.exit(1);
