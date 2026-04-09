@@ -41,9 +41,10 @@ describe('log watcher fix-session emission', () => {
         {
           category: 'architecture',
           severity: 'high',
+          severityRationale: 'Repeated unsafe mutations can cause sustained user-visible failures.',
           title: 'Unsafe cross-session mutable state',
-          description: 'Multiple sessions mutate a shared singleton without locks.',
-          suggestedFix: 'Scope mutable state per session and guard shared writes with synchronization.',
+          issueSummary: 'Multiple sessions mutate a shared singleton without locks.',
+          evidence: ['Multiple sessions mutate shared singleton', 'No synchronization observed in trace'],
           relevantFiles: ['packages/cli/src/ui-server.ts'],
         },
       ]);
@@ -57,9 +58,10 @@ describe('log watcher fix-session emission', () => {
         {
           category: 'architecture',
           severity: 'high',
+          severityRationale: 'Repeated unsafe mutations can cause sustained user-visible failures.',
           title: 'Unsafe cross-session mutable state',
-          description: 'Multiple sessions mutate a shared singleton without locks.',
-          suggestedFix: 'Scope mutable state per session and guard shared writes with synchronization.',
+          issueSummary: 'Multiple sessions mutate a shared singleton without locks.',
+          evidence: ['Multiple sessions mutate shared singleton', 'No synchronization observed in trace'],
         },
       ]);
 
@@ -89,9 +91,10 @@ describe('log watcher fix-session emission', () => {
         {
           category: 'error-pattern',
           severity: 'high',
+          severityRationale: 'Repeated crash loops break request handling for users.',
           title: 'Crash loop in API handler',
-          description: 'Handler retries endlessly when upstream returns malformed payload.',
-          suggestedFix: 'Add schema guard and stop retrying on non-retryable errors.',
+          issueSummary: 'Handler retries endlessly when upstream returns malformed payload.',
+          evidence: ['Malformed payload appears repeatedly', 'Retries continue after non-retryable parse failures'],
           relevantFiles: ['packages/cli/src/ui-server.ts'],
         },
       ]);
@@ -100,17 +103,18 @@ describe('log watcher fix-session emission', () => {
       expect(startSession).toHaveBeenCalledTimes(1);
       expect(startSession.mock.calls[0]?.[0].source).toBe('observer');
       expect(startSession.mock.calls[0]?.[0].prompt).toContain('[Observer Fix] Crash loop in API handler');
-      expect(startSession.mock.calls[0]?.[0].prompt).toContain('## Issue');
-      expect(startSession.mock.calls[0]?.[0].prompt).toContain('\n## Task\n');
+      expect(startSession.mock.calls[0]?.[0].prompt).toContain('## Issue Summary');
+      expect(startSession.mock.calls[0]?.[0].prompt).toContain('\n## Evidence\n');
       expect(daemon.getFindings()[0]?.category).toBe('code-quality');
 
       const duplicate = await daemon.ingestLogWatcherFindings([
         {
           category: 'error-pattern',
           severity: 'high',
+          severityRationale: 'Repeated crash loops break request handling for users.',
           title: 'Crash loop in API handler',
-          description: 'Handler retries endlessly when upstream returns malformed payload.',
-          suggestedFix: 'Add schema guard and stop retrying on non-retryable errors.',
+          issueSummary: 'Handler retries endlessly when upstream returns malformed payload.',
+          evidence: ['Malformed payload appears repeatedly', 'Retries continue after non-retryable parse failures'],
         },
       ]);
 
@@ -122,8 +126,8 @@ describe('log watcher fix-session emission', () => {
           category: 'performance',
           severity: 'medium',
           title: 'Excessive log polling',
-          description: 'Loop polls status endpoint too frequently under load.',
-          suggestedFix: 'Back off polling frequency and debounce updates.',
+          issueSummary: 'Loop polls status endpoint too frequently under load.',
+          evidence: ['Status endpoint polled in tight loop', 'Load spikes correlate with polling bursts'],
         },
       ]);
 
@@ -153,9 +157,10 @@ describe('log watcher fix-session emission', () => {
           {
             category: 'error-pattern',
             severity: 'high',
+            severityRationale: 'Repeated timeout pattern causes sustained request failures.',
             title: 'Repeated timeout',
-            description: 'Service call times out repeatedly.',
-            suggestedFix: 'Increase timeout guard and add jittered retry cap.',
+            issueSummary: 'Service call times out repeatedly.',
+            evidence: ['timeout after 30000ms appears repeatedly', 'Retries cluster without jitter'],
             logSnippet: 'timeout after 30000ms',
           },
         ],
@@ -206,8 +211,8 @@ describe('log watcher fix-session emission', () => {
             category: 'code-quality',
             severity: 'medium',
             title: 'Historical spawned finding',
-            description: 'Old finding kept as spawned from a prior process.',
-            suggestedFix: 'Historical fix',
+            issueSummary: 'Old finding kept as spawned from a prior process.',
+            evidence: ['Historical evidence item 1', 'Historical evidence item 2'],
             observedInSessions: ['legacy-session'],
             detectedAt: new Date().toISOString(),
             fixSessionId: 'legacy-fix-session',
@@ -234,9 +239,10 @@ describe('log watcher fix-session emission', () => {
         {
           category: 'error-pattern',
           severity: 'high',
+          severityRationale: 'Recurring issue affects live request handling.',
           title: 'Fresh issue A',
-          description: 'New issue A from current process.',
-          suggestedFix: 'Fix issue A.',
+          issueSummary: 'New issue A from current process.',
+          evidence: ['Issue A evidence item 1', 'Issue A evidence item 2'],
         },
       ]);
 
@@ -244,9 +250,10 @@ describe('log watcher fix-session emission', () => {
         {
           category: 'error-pattern',
           severity: 'high',
+          severityRationale: 'Recurring issue affects live request handling.',
           title: 'Fresh issue B',
-          description: 'New issue B from current process.',
-          suggestedFix: 'Fix issue B.',
+          issueSummary: 'New issue B from current process.',
+          evidence: ['Issue B evidence item 1', 'Issue B evidence item 2'],
         },
       ]);
 

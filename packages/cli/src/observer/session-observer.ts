@@ -587,7 +587,7 @@ function parseRealtimeFindings(
         phase: triggerPhase,
         detectedAt: new Date().toISOString(),
       }))
-      .filter((finding) =>
+      .filter((finding: RealtimeFinding) =>
         isSingleSentence(finding.issueSummary) &&
         finding.evidence.length >= 2 &&
         finding.evidence.length <= 3 &&

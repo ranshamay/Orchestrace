@@ -22,7 +22,7 @@ export type FindingSeverity = 'low' | 'medium' | 'high' | 'critical';
 
 /** A single observation/issue found by the observer LLM. */
 export interface ObserverFinding {
-  /** Deterministic fingerprint for deduplication (hash of category + normalized description). */
+  /** Deterministic fingerprint for deduplication (hash of category + normalized issue summary). */
   fingerprint: string;
   category: FindingCategory;
   severity: FindingSeverity;
