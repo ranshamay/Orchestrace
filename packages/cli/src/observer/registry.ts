@@ -50,13 +50,14 @@ export class FindingRegistry {
       category: FindingCategory;
       severity: FindingSeverity;
       title: string;
-      description: string;
-      suggestedFix: string;
+      issueSummary: string;
+      evidence: string[];
+      severityRationale?: string;
       relevantFiles?: string[];
     },
     sessionIds: string[],
   ): { fingerprint: string; isNew: boolean } {
-    const fingerprint = computeFingerprint(finding.category, finding.title, finding.description);
+    const fingerprint = computeFingerprint(finding.category, finding.title, finding.issueSummary);
     const existing = this.findings.find((f) => f.fingerprint === fingerprint);
 
     if (existing) {
@@ -130,9 +131,9 @@ export class FindingRegistry {
 
 /**
  * Compute a deterministic fingerprint for deduplication.
- * Uses category + normalized title + first 200 chars of description.
+ * Uses category + normalized title + first 200 chars of issue summary.
  */
-function computeFingerprint(category: string, title: string, description: string): string {
-  const normalized = `${category}::${title.toLowerCase().trim()}::${description.slice(0, 200).toLowerCase().trim()}`;
+function computeFingerprint(category: string, title: string, issueSummary: string): string {
+  const normalized = `${category}::${title.toLowerCase().trim()}::${issueSummary.slice(0, 200).toLowerCase().trim()}`;
   return createHash('sha256').update(normalized).digest('hex').slice(0, 16);
 }
