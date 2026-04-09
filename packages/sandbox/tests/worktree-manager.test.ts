@@ -17,7 +17,7 @@ afterEach(async () => {
 
 describe('worktree manager', () => {
   it('creates a managed worktree and reuses it on subsequent ensure calls', async () => {
-    const repoRoot = await createTempRepo();
+    const repoRoot = await createTempRepoWithOrigin();
     const worktreePath = join(repoRoot, '.managed-worktrees', 'session-1');
     const branchName = 'orchestrace/session-1';
 
@@ -31,6 +31,7 @@ describe('worktree manager', () => {
     expect(first.recreated).toBe(true);
     expect(await pathExists(worktreePath)).toBe(true);
     expect((await git(worktreePath, ['rev-parse', '--abbrev-ref', 'HEAD'])).trim()).toBe(branchName);
+    expect((await git(worktreePath, ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}']).catch(() => '')).trim()).toBe('origin/main');
 
     const second = await ensureWorktreeExists({
       repoPath: repoRoot,
@@ -83,6 +84,18 @@ async function createTempRepo(): Promise<string> {
   await writeFile(join(repoRoot, 'README.md'), '# temp\n', 'utf8');
   await git(repoRoot, ['add', 'README.md']);
   await git(repoRoot, ['commit', '-m', 'init']);
+  return repoRoot;
+}
+
+async function createTempRepoWithOrigin(): Promise<string> {
+  const remoteRoot = await mkdtemp(join(tmpdir(), 'orchestrace-worktree-manager-remote-'));
+  tempDirs.push(remoteRoot);
+  await git(remoteRoot, ['init', '--bare']);
+
+  const repoRoot = await createTempRepo();
+  await git(repoRoot, ['remote', 'add', 'origin', remoteRoot]);
+  await git(repoRoot, ['push', '-u', 'origin', 'main']);
+
   return repoRoot;
 }
 
