@@ -25,8 +25,13 @@ import { ProviderAuthManager } from '../../src/auth.js';
 describe('ProviderAuthManager Copilot TTL awareness', () => {
   let authPath: string;
 
-  beforeEach(async () => {
+    beforeEach(async () => {
     vi.clearAllMocks();
+    piAiMock.getEnvApiKey.mockReset();
+    piAiMock.getEnvApiKey.mockReturnValue(undefined);
+    piAiMock.getProviders.mockReset();
+    piAiMock.getProviders.mockReturnValue(['github-copilot']);
+
     const root = await mkdtemp(join(tmpdir(), 'orchestrace-auth-ttl-'));
     authPath = join(root, 'auth.json');
   });
