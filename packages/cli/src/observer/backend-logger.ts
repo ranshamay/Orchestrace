@@ -8,6 +8,7 @@
 
 import { createWriteStream, existsSync, statSync, renameSync, mkdirSync, type WriteStream } from 'node:fs';
 import { join } from 'node:path';
+import { sanitizeLogLine } from '../runner/log-sanitizer.js';
 
 export interface BackendLoggerOptions {
   /** Root .orchestrace directory path. */
@@ -91,7 +92,8 @@ export class BackendLogger {
   /** Append a raw line from a runner process (stdout/stderr). */
   appendRunnerLine(sessionId: string, stream: 'stdout' | 'stderr', line: string): void {
     const level = stream === 'stderr' ? 'ERROR' : 'INFO';
-    this.append(level, `[runner:${sessionId}] ${line}`);
+    const sanitized = sanitizeLogLine(line);
+    this.append(level, `[runner:${sessionId}] ${sanitized}`);
   }
 
   /** Register a listener that receives every log line written. */
@@ -131,7 +133,7 @@ export class BackendLogger {
     const message = args
       .map((a) => (typeof a === 'string' ? a : safeStringify(a)))
       .join(' ');
-    this.append(level, message);
+    this.append(level, sanitizeLogLine(message));
   }
 
   private append(level: string, message: string): void {
