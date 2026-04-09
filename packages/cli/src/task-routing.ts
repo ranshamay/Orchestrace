@@ -54,7 +54,14 @@ export interface ShellExecutionValidation {
   reason?: string;
 }
 
+export interface AllowedShellProgramValidation {
+  ok: boolean;
+  normalizedProgram?: string;
+  reason?: string;
+}
+
 const DEFAULT_SHELL_VALIDATION_FAILURE_REASON = 'input did not pass centralized validation';
+
 
 export function formatShellValidationRejection(entrypoint: string, reason?: string): string {
   return `[shell-guard] rejected shell execution at ${entrypoint}: ${reason ?? DEFAULT_SHELL_VALIDATION_FAILURE_REASON}`;
@@ -341,7 +348,37 @@ export function extractShellCommand(prompt: string): string | undefined {
   return command || undefined;
 }
 
+export function validateAllowedShellProgram(program: string): AllowedShellProgramValidation {
+  const normalizedProgram = program.trim().toLowerCase();
+  if (!normalizedProgram) {
+    return {
+      ok: false,
+      reason: 'Rejected shell execution: command is empty.',
+    };
+  }
+
+  if (!/^[a-z0-9][a-z0-9._-]*$/i.test(normalizedProgram)) {
+    return {
+      ok: false,
+      reason: `Rejected shell execution: command '${program}' includes unsupported characters.`,
+    };
+  }
+
+  if (!ALLOWED_SHELL_PROGRAMS_SET.has(normalizedProgram)) {
+    return {
+      ok: false,
+      reason: `Rejected shell execution: command '${program}' is not in the allowed shell command list.`,
+    };
+  }
+
+  return {
+    ok: true,
+    normalizedProgram,
+  };
+}
+
 function tokenizeCommandPreservingQuotes(command: string): { ok: boolean; tokens?: string[]; reason?: string } {
+
   const tokens: string[] = [];
   let current = '';
   let quote: 'single' | 'double' | null = null;
@@ -446,12 +483,12 @@ export function parseShellCommandToArgv(command: string): ShellExecutionValidati
     };
   }
 
-  const [program, ...args] = tokenized.tokens;
-  const normalizedProgram = program.toLowerCase();
-  if (!ALLOWED_SHELL_PROGRAMS_SET.has(normalizedProgram)) {
+    const [program, ...args] = tokenized.tokens;
+  const allowedProgram = validateAllowedShellProgram(program);
+  if (!allowedProgram.ok || !allowedProgram.normalizedProgram) {
     return {
       ok: false,
-      reason: `Rejected shell execution: command '${program}' is not in the allowed shell command list.`,
+      reason: allowedProgram.reason ?? `Rejected shell execution: command '${program}' is not in the allowed shell command list.`,
     };
   }
 
@@ -459,9 +496,10 @@ export function parseShellCommandToArgv(command: string): ShellExecutionValidati
     ok: true,
     command: normalized,
     parsed: {
-      program,
+      program: allowedProgram.normalizedProgram,
       args,
     },
   };
 }
+
 

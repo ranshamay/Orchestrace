@@ -2,12 +2,14 @@ import { describe, expect, it } from 'vitest';
 import {
   enforceSafeShellDispatch,
   extractShellCommand,
-  parseShellCommandToArgv,
+    parseShellCommandToArgv,
   parseTaskRouteOverride,
   resolveTaskRoute,
+  validateAllowedShellProgram,
   validateShellExecutionPrompt,
   validateShellInput,
 } from '../src/task-routing.js';
+
 
 
 describe('task routing config', () => {
@@ -85,11 +87,18 @@ describe('task routing config', () => {
     expect(validation.parsed).toEqual({ program: 'git', args: ['status'] });
   });
 
-  it('parses quoted argv safely for direct process execution', () => {
+    it('parses quoted argv safely for direct process execution', () => {
     const parsed = parseShellCommandToArgv('echo "hello world"');
     expect(parsed.ok).toBe(true);
     expect(parsed.parsed).toEqual({ program: 'echo', args: ['hello world'] });
   });
+
+  it('normalizes allowlisted executable casing for deterministic dispatch', () => {
+    const parsed = parseShellCommandToArgv('GIT status');
+    expect(parsed.ok).toBe(true);
+    expect(parsed.parsed).toEqual({ program: 'git', args: ['status'] });
+  });
+
 
   it('rejects shell operator injection patterns before execution', () => {
     const validation = validateShellInput('git status; rm -rf /');
@@ -122,11 +131,18 @@ describe('task routing config', () => {
     expect(validation.reason).toContain('no executable command was found');
   });
 
-    it('rejects disallowed executable when parsed directly', () => {
+      it('rejects disallowed executable when parsed directly', () => {
     const parsed = parseShellCommandToArgv('ruby -v');
     expect(parsed.ok).toBe(false);
     expect(parsed.reason).toContain('not in the allowed shell command list');
   });
+
+  it('rejects malformed executable names before allowlist matching', () => {
+    const validation = validateAllowedShellProgram('git/status');
+    expect(validation.ok).toBe(false);
+    expect(validation.reason).toContain('unsupported characters');
+  });
+
 
   it('rejects control characters when parsed directly', () => {
     const parsed = parseShellCommandToArgv('git\u0000status');
