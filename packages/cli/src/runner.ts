@@ -69,6 +69,7 @@ import {
   resolveRunnerPolicy,
   type ResolutionConflict,
 } from './runner-config-resolution.js';
+import { parseAndSanitizeVerifyCommands } from './verify-commands.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -2261,10 +2262,7 @@ function toUiEvent(
 }
 
 function buildSingleTaskGraph(id: string, prompt: string, routeCategory: TaskRouteCategory = 'code_change'): TaskGraph {
-  const raw = process.env.ORCHESTRACE_VERIFY_COMMANDS;
-  const commands = raw
-    ? raw.split(';').map((s) => s.trim()).filter(Boolean)
-    : ['pnpm typecheck', 'pnpm test'];
+  const commands = parseAndSanitizeVerifyCommands(process.env.ORCHESTRACE_VERIFY_COMMANDS);
   const nodeType = routeCategory === 'refactor' ? 'refactor' : 'code';
   const validationCommands = routeCategory === 'investigation' ? [] : commands;
 
