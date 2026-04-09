@@ -162,13 +162,14 @@ export class PiAiAdapter implements LlmAdapter {
             }
 
 
-            throw createLlmFailureError({
+                        throw createLlmFailureError({
               provider: request.provider,
               model: request.model,
               failureType,
-              message: mapped.message,
+              message: withAuthRemediationGuidance(request.provider, failureType, mapped.message),
               cause: error,
             });
+
           }
 
           let text = '';
@@ -241,13 +242,18 @@ export class PiAiAdapter implements LlmAdapter {
               continue;
             }
 
-            throw createLlmFailureError({
+                        throw createLlmFailureError({
 
               provider: request.provider,
               model: request.model,
               failureType,
-              message: `Model ${request.provider}/${request.model} failed. ${reason}`,
+              message: withAuthRemediationGuidance(
+                request.provider,
+                failureType,
+                `Model ${request.provider}/${request.model} failed. ${reason}`,
+              ),
             });
+
           }
 
           if (response.content.length === 0 && totalTokens === 0) {
@@ -388,7 +394,20 @@ export class PiAiAdapter implements LlmAdapter {
 
 const MISSING_TOOL_CALL_MAPPING_RE = /(no tool call found\s+for\s+function\s+call\s+output|function call output\s+with\s+call_id)/i;
 
+function withAuthRemediationGuidance(provider: string, failureType: string, message: string): string {
+  if (failureType !== 'auth') {
+    return message;
+  }
+
+  if (provider === 'github-copilot') {
+    return `${message} Re-authenticate GitHub Copilot via \`orchestrace auth github-copilot\` or set \`GITHUB_COPILOT_API_KEY\`.`;
+  }
+
+  return `${message} Re-authenticate this provider via \`orchestrace auth\` or refresh its API key configuration.`;
+}
+
 function isMissingToolCallMappingFailureMessage(message: string | undefined): boolean {
+
   if (typeof message !== 'string') {
     return false;
   }

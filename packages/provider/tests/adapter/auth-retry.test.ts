@@ -90,7 +90,7 @@ describe('PiAiAdapter auth refresh retry', () => {
     expect(secondCall.options.apiKey).toBe('fresh-token');
   });
 
-  it('does not refresh more than once when retried auth request fails again', async () => {
+    it('does not refresh more than once when retried auth request fails again', async () => {
     const executeMock = vi.mocked(executeWithOptionalTools);
     executeMock.mockRejectedValue(new Error('401 IDE token expired: unauthorized: token expired'));
 
@@ -109,10 +109,31 @@ describe('PiAiAdapter auth refresh retry', () => {
     await expect(agent.complete('hello')).rejects.toMatchObject({
       name: 'LlmFailureError',
       failureType: 'auth',
+      message: expect.stringContaining('orchestrace auth github-copilot'),
     });
     expect(refreshApiKey).toHaveBeenCalledTimes(1);
     expect(executeMock).toHaveBeenCalledTimes(2);
   });
+
+  it('includes generic re-auth guidance for non-copilot auth failures', async () => {
+    const executeMock = vi.mocked(executeWithOptionalTools);
+    executeMock.mockRejectedValueOnce(new Error('401 unauthorized'));
+
+    const adapter = new PiAiAdapter();
+    const agent = await adapter.spawnAgent({
+      provider: 'anthropic',
+      model: 'claude-sonnet-4-20250514',
+      systemPrompt: 'system',
+    });
+
+    await expect(agent.complete('hello')).rejects.toMatchObject({
+      name: 'LlmFailureError',
+      failureType: 'auth',
+      message: expect.stringContaining('orchestrace auth'),
+    });
+    expect(executeMock).toHaveBeenCalledTimes(1);
+  });
+
 
   it('retries timeout once and succeeds without session-level replay pressure', async () => {
 
