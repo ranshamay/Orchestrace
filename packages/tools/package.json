@@ -6,6 +6,7 @@
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "scripts": {
+    "prebuild": "pnpm --filter @orchestrace/core build",
     "build": "tsc",
     "pretypecheck": "pnpm --filter @orchestrace/provider build && pnpm --filter @orchestrace/context build && pnpm --filter @orchestrace/tools build",
     "typecheck": "tsc --noEmit",
@@ -16,6 +17,7 @@
   "dependencies": {
     "@mariozechner/pi-ai": "^0.64.0",
     "@orchestrace/context": "workspace:*",
+    "@orchestrace/core": "workspace:*",
     "@orchestrace/provider": "workspace:*"
   },
   "devDependencies": {

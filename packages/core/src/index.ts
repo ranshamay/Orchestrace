@@ -31,6 +31,9 @@ export type {
 } from './session/validation.js';
 export { classifyTaskPrompt, strategyForTaskRoute } from './task-router.js';
 export type { TaskRouteCategory, TaskRouteResult, TaskRouteStrategy } from './task-router.js';
+export { extractShellCommand, parseShellCommandToArgv, validateShellInput } from './shell-command-validation.js';
+export type { ParsedShellCommand, ShellExecutionValidation } from './shell-command-validation.js';
+
 
 export type {
   TaskStatus,
