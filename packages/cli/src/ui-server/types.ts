@@ -8,6 +8,14 @@ export interface UiServerOptions {
 
 export type WorkState = 'running' | 'completed' | 'failed' | 'cancelled';
 export type SessionCreationReason = 'start' | 'retry';
+export type ExecutionContext = 'workspace' | 'git-worktree';
+export type SessionWorktreePathSessionIdRelation = 'match' | 'mismatch' | 'none';
+
+export interface SessionWorkspaceAssignmentProvenance {
+  assignmentSource: 'workspace-root' | 'selected-worktree' | 'fallback-worktree' | 'auto-created-worktree';
+  relation?: SessionWorktreePathSessionIdRelation;
+  pathSessionId?: string;
+}
 
 export type LlmSessionState =
   | 'queued'

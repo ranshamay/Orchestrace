@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import type { Dirent } from 'node:fs';
 import { access, mkdir, readFile, readdir, rm } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
@@ -256,7 +257,7 @@ async function forceCleanupWorktreeMetadata(repoPath: string, worktreePath: stri
 
 async function findWorktreeAdminName(commonDir: string, worktreePath: string): Promise<string | undefined> {
   const metadataRoot = join(commonDir, 'worktrees');
-  let entries: Awaited<ReturnType<typeof readdir>>;
+  let entries: Dirent<string>[];
   try {
     entries = await readdir(metadataRoot, { withFileTypes: true });
   } catch (error) {
