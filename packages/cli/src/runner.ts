@@ -1792,7 +1792,6 @@ function buildSingleTaskGraph(id: string, prompt: string, routeCategory: TaskRou
 
 async function runShellCommandRoute(command: string, cwd: string): Promise<Map<string, TaskOutput>> {
   const startedAt = Date.now();
-
   try {
     const { stdout, stderr } = await execFileAsync('sh', ['-lc', command], { cwd });
     const text = `${stdout ?? ''}${stderr ?? ''}`.trim();
