@@ -90,6 +90,8 @@ import { ObserverDaemon, SessionObserver, BackendLogger, LogWatcher } from './ob
 import type { RealtimeFinding } from './observer/index.js';
 import { sanitizeLogLine, sanitizeToolPayload } from './runner/log-sanitizer.js';
 import { parseTaskRouteOverride } from './task-routing.js';
+import { PrMergeScanner } from './pr-merge-scanner.js';
+
 
 
 const GITHUB_PROVIDER_ID = 'github';
