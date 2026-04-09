@@ -9,6 +9,42 @@ export const PLANNING_FIRST_TOOL_RETRY_DIRECTIVE =
 
 const RETRY_CONTEXT_MAX_CHARS = 2_000;
 
+export function roleToPhase(role: AgentRole): 'planning' | 'implementation' {
+  return role === 'planner' ? 'planning' : 'implementation';
+}
+
+export function buildRoleTaskPrompt(params: {
+  role: AgentRole;
+  node: TaskNode;
+  depOutputs: Map<string, TaskOutput>;
+  effort?: TaskEffort;
+  attempt: number;
+  approvedPlan?: string;
+  previousResponse?: string;
+  previousFailureType?: ReplayFailureType;
+  previousValidationError?: string;
+}): string {
+  if (params.role === 'planner') {
+    return buildPlanningPrompt(
+      params.node,
+      params.depOutputs,
+      params.attempt,
+      params.effort,
+    );
+  }
+
+  return buildImplementationPrompt({
+    node: params.node,
+    depOutputs: params.depOutputs,
+    approvedPlan: params.approvedPlan,
+    attempt: params.attempt,
+    previousResponse: params.previousResponse ?? '',
+    previousFailureType: params.previousFailureType,
+    previousValidationError: params.previousValidationError ?? '',
+    effort: params.effort,
+  });
+}
+
 export function buildPlanningPrompt(
   node: TaskNode,
   depOutputs: Map<string, TaskOutput>,

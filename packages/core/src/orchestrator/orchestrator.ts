@@ -20,8 +20,7 @@ import { classifyTrivialTaskNode, classifyTaskEffort, resolveTrivialTaskGateConf
 import type { TaskEffort } from './task-complexity.js';
 import {
   PLANNING_FIRST_TOOL_RETRY_DIRECTIVE,
-  buildImplementationPrompt,
-  buildPlanningPrompt,
+  buildRoleTaskPrompt,
   buildRoleSystemPrompt,
 } from './role-config.js';
 import { executeRole, spawnRoleAgent } from './role-executor.js';
@@ -267,7 +266,13 @@ export async function orchestrate(
       let consecutivePlanningContractStagnationAttempts = 0;
 
       for (let planningAttempt = 1; planningAttempt <= MAX_PLANNING_ATTEMPTS; planningAttempt++) {
-        const planningPrompt = buildPlanningPrompt(node, context.depOutputs, planningAttempt, effort);
+        const planningPrompt = buildRoleTaskPrompt({
+          role: 'planner',
+          node,
+          depOutputs: context.depOutputs,
+          attempt: planningAttempt,
+          effort,
+        });
         planningToolCalls = [];
         const planningAttemptStart = new Date().toISOString();
         planningResult = undefined;
@@ -713,7 +718,8 @@ export async function orchestrate(
         maxAttempts,
       });
 
-      const implementationPrompt = buildImplementationPrompt({
+      const implementationPrompt = buildRoleTaskPrompt({
+        role: 'implementer',
         node,
         depOutputs: context.depOutputs,
         approvedPlan: planningResult?.text,

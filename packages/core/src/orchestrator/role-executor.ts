@@ -10,7 +10,7 @@ import type {
   LlmToolCallEvent,
   LlmToolset,
 } from '@orchestrace/provider';
-import { buildRoleSystemPrompt, type AgentRole } from './role-config.js';
+import { buildRoleSystemPrompt, roleToPhase, type AgentRole } from './role-config.js';
 
 export interface SpawnRoleAgentParams {
   llm: LlmAdapter;
@@ -143,10 +143,6 @@ export async function executeRole(params: {
       });
     },
   });
-}
-
-function roleToPhase(role: AgentRole): 'planning' | 'implementation' {
-  return role === 'planner' ? 'planning' : 'implementation';
 }
 
 function toReplayToolCallRecord(event: LlmToolCallEvent): ReplayToolCallRecord {
