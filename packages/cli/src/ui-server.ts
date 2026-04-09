@@ -31,7 +31,7 @@ import {
   type ModelInfo,
 } from '@orchestrace/context';
 import { now } from './ui-server/clock.js';
-import { cleanupSessionWorktree, ensureSessionWorktree } from './session-worktree.js';
+import { cleanupSessionWorktree, ensureSessionWorktree, resolveSessionWorktreeBranch } from './session-worktree.js';
 import {
   buildChatContinuationInput,
   cloneChatContentParts,
@@ -1027,15 +1027,37 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         type: 'session:status-change',
         payload: { status: 'cancelled' },
       });
-    }
+        }
 
     // Clean up any auto-created per-session worktree.
     if (session.cleanupWorktree) {
       void session.cleanupWorktree().catch(() => {});
       session.cleanupWorktree = undefined;
+    } else if (session.worktreePath && session.worktreeBranch === resolveSessionWorktreeBranch(id)) {
+      const worktreePath = session.worktreePath;
+      const worktreeBranch = session.worktreeBranch;
+      // Persisted/restored sessions do not retain cleanupWorktree callback.
+      // Fall back to direct cleanup so deleting a session always removes its managed worktree from disk.
+      void (async () => {
+        try {
+          const repoRoot = (await gitExec(worktreePath, ['rev-parse', '--show-toplevel'])).trim();
+          if (!repoRoot) {
+            return;
+          }
+          await cleanupSessionWorktree({
+            repoRoot,
+            sessionId: id,
+            worktreePath,
+            branchName: worktreeBranch,
+          });
+        } catch {
+          // Ignore cleanup failures during delete.
+        }
+      })();
     }
 
     closeWorkStream(workStreamClients, id);
+
     workSessions.delete(id);
     sessionChats.delete(id);
     sessionTodos.delete(id);
