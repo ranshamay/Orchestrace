@@ -120,14 +120,24 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
           };
         }
 
-        if (globValidation.value && targetKind === 'file') {
+                if (globValidation.value && targetKind === 'file') {
           return {
             content: 'Invalid glob usage: glob can only be used when path points to a directory.',
             isError: true,
           };
         }
 
-              const args = ['-n', '--no-heading', '--color', 'never', '-e', query];
+        // Re-check right before spawning rg to avoid deterministic path-miss noise
+        // when a target is removed between earlier normalization and command execution.
+        const targetKindBeforeSearch = await getPathKind(canonicalTarget ?? target);
+        if (targetKindBeforeSearch === 'missing') {
+          return {
+            content: `(skipped invalid search path: ${relTarget})`,
+          };
+        }
+
+        const args = ['-n', '--no-heading', '--color', 'never', '-e', query];
+
         if (!useRegex) {
           args.push('--fixed-strings');
         }
@@ -159,7 +169,7 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
         const stderr = result.stderr.trim();
         const hasPathError = hasRipgrepPathError(stderr);
 
-        if (hasPathError) {
+                if (hasPathError) {
           try {
             const fallback = await fallbackSearchFromFs({
               cwd: resolvedCwd.cwd,
@@ -174,12 +184,19 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
               content: fallback,
             };
           } catch (error) {
+            if (isMissingPathErrorLike(error)) {
+              return {
+                content: `(skipped invalid search path: ${relTarget})`,
+              };
+            }
+
             return {
               content: error instanceof Error ? error.message : String(error),
               isError: true,
             };
           }
         }
+
 
         if (result.exitCode === 1 && result.stdout.trim().length === 0) {
           return { content: '(no matches)' };
@@ -952,8 +969,24 @@ function isDeterministicRipgrepPathError(stderr: string): boolean {
   return /\bNo such file or directory\b|\bos error 2\b|\bENOENT\b/i.test(normalized);
 }
 
+function isMissingPathErrorLike(error: unknown): boolean {
+  if (!error) {
+    return false;
+  }
+
+  if (typeof error === 'object' && error !== null) {
+    const code = Reflect.get(error, 'code');
+    if (code === 'ENOENT') {
+      return true;
+    }
+  }
+
+  const message = error instanceof Error ? error.message : String(error);
+  return /\bNo such file or directory\b|\bos error 2\b|\bENOENT\b/i.test(message);
+}
 
 interface FallbackSearchInput {
+
   cwd: string;
   target: string;
   relTarget: string;
@@ -972,8 +1005,17 @@ async function fallbackSearchFromFs(input: FallbackSearchInput): Promise<string>
   const lines: string[] = [];
   const matcher = createLineMatcher(input.query, input.useRegex);
 
-  for (const filePath of files) {
-    const content = await readFile(filePath, 'utf-8');
+    for (const filePath of files) {
+    let content: string;
+    try {
+      content = await readFile(filePath, 'utf-8');
+    } catch (error) {
+      if (isMissingPathErrorLike(error)) {
+        continue;
+      }
+      throw error;
+    }
+
     const rows = content.split(/\r?\n/);
     for (let i = 0; i < rows.length; i += 1) {
       const line = rows[i] ?? '';
@@ -983,6 +1025,7 @@ async function fallbackSearchFromFs(input: FallbackSearchInput): Promise<string>
       }
     }
   }
+
 
   if (lines.length === 0) {
     return '(no matches)';
@@ -1022,13 +1065,22 @@ async function collectSearchCandidateFiles(target: string, glob: string | undefi
   const files: string[] = [];
   const stack = [target];
 
-  while (stack.length > 0) {
+    while (stack.length > 0) {
     const current = stack.pop();
     if (!current) {
       continue;
     }
 
-    const entries = await readdir(current, { withFileTypes: true });
+    let entries;
+    try {
+      entries = await readdir(current, { withFileTypes: true });
+    } catch (error) {
+      if (isMissingPathErrorLike(error)) {
+        continue;
+      }
+      throw error;
+    }
+
     for (const entry of entries) {
       const fullPath = join(current, entry.name);
       if (entry.isDirectory()) {
@@ -1040,6 +1092,7 @@ async function collectSearchCandidateFiles(target: string, glob: string | undefi
       }
     }
   }
+
 
   files.sort((a, b) => a.localeCompare(b));
   return files;
