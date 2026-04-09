@@ -7249,20 +7249,22 @@ export async function assertWorkspaceIsClean(
   );
 }
 
-export function getSessionPlanningGuardState(): SessionPlanningGuardState {
+function getSessionPlanningGuardState(): SessionPlanningGuardState {
   return {
     consecutiveNonWriteToolCalls: 0,
     forcedImplementation: false,
   };
 }
 
-export function isSimpleSessionTaskPrompt(prompt: string): boolean {
+
+function isSimpleSessionTaskPrompt(prompt: string): boolean {
   const normalized = prompt.toLowerCase();
   return normalized.includes('single-file')
     || normalized.includes('single file')
     || normalized.includes('small')
     || normalized.includes('one file');
 }
+
 
 export function validateAndNormalizeSessionPromptInput(params: {
   prompt: unknown;
@@ -7316,7 +7318,7 @@ function resolvePlanningBudgetPercent(): number {
   return Math.min(100, Math.max(1, parsed));
 }
 
-export function enforcePlanningToolCallGuard(params: {
+function enforcePlanningToolCallGuard(params: {
   session: WorkSession;
   continuationPhase: SessionPromptPhase;
   toolEvent: LlmToolCallEvent;
@@ -7324,6 +7326,7 @@ export function enforcePlanningToolCallGuard(params: {
   persistEvent: (sessionId: string, event: SessionEventInput) => void | Promise<void>;
   uiStatePersistence: { schedule: () => void; flush: () => Promise<void> };
 }): SessionPlanningGuardState {
+
   const existing = params.sessionPlanningGuards.get(params.session.id) ?? getSessionPlanningGuardState();
   params.sessionPlanningGuards.set(params.session.id, existing);
 
@@ -8102,7 +8105,8 @@ export function resolveRunnerTaskRouteEnvValue(
   return parseTaskRouteOverride(routeOverrideRaw) ?? 'code_change';
 }
 
-export function buildSessionSystemPrompt(session: WorkSession, phase: SessionPromptPhase): string {
+function buildSessionSystemPrompt(session: WorkSession, phase: SessionPromptPhase): string {
+
 
   const quickStartMode = session.quickStartMode
     ?? (parseBooleanSetting(process.env.ORCHESTRACE_QUICK_START_MODE) ?? false);
@@ -8269,8 +8273,16 @@ function buildFollowUpSuggestionsBlock(phase: FollowUpSuggestionPhase): string {
         'Start implementation on the highest-priority todo item and keep progress synchronized.',
       ];
 
-  return [
+    return [
     'Next Follow-up Suggestions:',
     ...suggestions.map((item, index) => `${index + 1}. ${item}`),
   ].join('\n');
 }
+
+export {
+  buildSessionSystemPrompt,
+  enforcePlanningToolCallGuard,
+  getSessionPlanningGuardState,
+  isSimpleSessionTaskPrompt,
+};
+

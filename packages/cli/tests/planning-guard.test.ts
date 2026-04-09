@@ -7,6 +7,8 @@ import {
   getSessionPlanningGuardState,
   isSimpleSessionTaskPrompt,
 } from '../src/ui-server.js';
+import * as uiServer from '../src/ui-server.js';
+
 
 function createSession(overrides: Partial<WorkSession> = {}): WorkSession {
   const controller = new AbortController();
@@ -59,6 +61,14 @@ function startedTool(toolName: string): LlmToolCallEvent {
 }
 
 describe('planning guard behavior', () => {
+  it('exports planning guard and prompt helpers from ui-server module', () => {
+    expect(typeof uiServer.buildSessionSystemPrompt).toBe('function');
+    expect(typeof uiServer.enforcePlanningToolCallGuard).toBe('function');
+    expect(typeof uiServer.getSessionPlanningGuardState).toBe('function');
+    expect(typeof uiServer.isSimpleSessionTaskPrompt).toBe('function');
+  });
+
+
   it('forces implementation phase after exceeding no-write threshold while planning', () => {
     process.env.ORCHESTRACE_MAX_TOOL_CALLS_WITHOUT_WRITE = '2';
     process.env.ORCHESTRACE_PLANNING_BUDGET_PERCENT = '25';
