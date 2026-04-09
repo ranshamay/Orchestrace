@@ -227,7 +227,7 @@ function isSingleShellCommandPrompt(normalizedPrompt: string): boolean {
     .replace(/^run\s+command\s+/, 'run ')
     .trim();
 
-  if (stripped.length === 0 || stripped.length > 160) {
+  if (stripped.length === 0) {
     return false;
   }
 
@@ -235,10 +235,6 @@ function isSingleShellCommandPrompt(normalizedPrompt: string): boolean {
 }
 
 function isInformationalQueryPrompt(normalizedPrompt: string): boolean {
-  if (normalizedPrompt.length > 160) {
-    return false;
-  }
-
   if (INFO_PREFIXES.some((prefix) => normalizedPrompt.startsWith(prefix))) {
     return true;
   }
@@ -247,6 +243,7 @@ function isInformationalQueryPrompt(normalizedPrompt: string): boolean {
     && !containsAny(normalizedPrompt, FILE_EDIT_MARKERS)
     && !containsAny(normalizedPrompt, MULTISTEP_MARKERS);
 }
+
 
 function parseBoolean(raw: string | undefined): boolean | undefined {
   if (!raw) return undefined;
@@ -303,6 +300,25 @@ const MULTI_AREA_MARKERS = [
 
 const LOW_EFFORT_SHELL_OK = /^(echo|pwd|ls|cat|head|tail|whoami|date|uname|node\s+--version|npm\s+-v|pnpm\s+-v|git\s+(status|log|branch|diff))(\s|$)/i;
 const LOW_EFFORT_SIMPLE_EDIT = /^(fix|change|update|add|remove|rename|set|toggle)\s+/i;
+const ACTION_MARKERS = [
+  'fix ',
+  'change ',
+  'update ',
+  'add ',
+  'remove ',
+  'rename ',
+  'set ',
+  'toggle ',
+  'implement ',
+  'refactor ',
+  'rewrite ',
+  'create ',
+  'delete ',
+  'migrate ',
+  'open a pull request',
+  'open pull request',
+];
+
 
 /**
  * Classify the effort level of a task prompt.
@@ -319,61 +335,52 @@ export function classifyTaskEffort(prompt: string): TaskEffortClassification {
     return { effort: 'low', reason: 'Empty prompt; defaulting to low effort.', promptLength: 0 };
   }
 
-  // Trivial: very short shell commands or informational queries
-  if (len <= 120) {
-    const stripped = normalized
-      .replace(/^please\s+/, '')
-      .replace(/^can you\s+/, '')
-      .replace(/^could you\s+/, '')
-      .replace(/^just\s+/, '')
-      .trim();
+  const stripped = normalized
+    .replace(/^please\s+/, '')
+    .replace(/^can you\s+/, '')
+    .replace(/^could you\s+/, '')
+    .replace(/^just\s+/, '')
+    .trim();
 
-    const isShellCmd = SHELL_COMMAND_PATTERNS.some((p) => p.test(stripped));
-    if (isShellCmd) {
-      return { effort: 'trivial', reason: 'Single shell command prompt.', promptLength: len };
-    }
-
-    const isInfoQuery = INFO_PREFIXES.some((p) => stripped.startsWith(p))
-      || (stripped.endsWith('?') && !containsAny(stripped, FILE_EDIT_MARKERS));
-    if (isInfoQuery) {
-      return { effort: 'trivial', reason: 'Informational query prompt.', promptLength: len };
-    }
+  if (isSingleShellCommandPrompt(stripped)) {
+    return { effort: 'trivial', reason: 'Single shell command prompt.', promptLength: len };
   }
 
-  // High: explicit large-scale markers or very long prompts with multi-area signals
+  if (isInformationalQueryPrompt(stripped)) {
+    return { effort: 'trivial', reason: 'Informational query prompt.', promptLength: len };
+  }
+
   const hasHighMarker = HIGH_EFFORT_MARKERS.some((m) => normalized.includes(m));
   if (hasHighMarker) {
     return { effort: 'high', reason: 'Prompt contains large-scale/cross-cutting markers.', promptLength: len };
   }
 
-  // Count complexity signals
   const multiAreaCount = MULTI_AREA_MARKERS.filter((m) => normalized.includes(m)).length;
   const hasFileEditSignal = containsAny(normalized, FILE_EDIT_MARKERS);
   const hasPrMarkers = normalized.includes('pull request') || normalized.includes('pr ') || normalized.includes('github');
   const hasMultipleNewlines = (raw.match(/\n/g) || []).length >= 3;
+  const actionCount = ACTION_MARKERS.filter((marker) => normalized.includes(marker)).length;
 
-  // High: long prompt with multiple complexity indicators
-  if (len > 500 && (multiAreaCount >= 2 || hasPrMarkers || hasMultipleNewlines)) {
-    return { effort: 'high', reason: 'Long prompt with multiple complexity indicators.', promptLength: len };
+  if ((multiAreaCount >= 3 && (hasPrMarkers || hasMultipleNewlines))
+    || (hasPrMarkers && hasMultipleNewlines && hasFileEditSignal)) {
+    return { effort: 'high', reason: 'Prompt indicates cross-area coordination and staged execution.', promptLength: len };
   }
 
-  // Medium: moderate length or multi-area signals
-  if (len > 300 || multiAreaCount >= 2 || (hasFileEditSignal && hasMultipleNewlines)) {
+  if (multiAreaCount >= 2
+    || (hasFileEditSignal && hasMultipleNewlines)
+    || (hasPrMarkers && hasFileEditSignal)
+    || actionCount >= 3) {
     return { effort: 'medium', reason: 'Prompt suggests multi-file or multi-step work.', promptLength: len };
   }
 
-  // Low: short, focused prompts — simple edits, single-file fixes, etc.
-  if (len <= 200) {
-    const isSimpleEdit = LOW_EFFORT_SIMPLE_EDIT.test(normalized);
-    const isSimpleShell = LOW_EFFORT_SHELL_OK.test(normalized.replace(/^(run|execute|exec)\s+/i, ''));
-    if (isSimpleEdit || isSimpleShell) {
-      return { effort: 'low', reason: 'Short, focused task prompt.', promptLength: len };
-    }
+  const isSimpleEdit = LOW_EFFORT_SIMPLE_EDIT.test(normalized);
+  const isSimpleShell = LOW_EFFORT_SHELL_OK.test(normalized.replace(/^(run|execute|exec)\s+/i, ''));
+  if (isSimpleEdit || isSimpleShell) {
+    return { effort: 'low', reason: 'Focused task prompt with limited scope.', promptLength: len };
   }
 
-  // Default: if short enough, low; otherwise medium
-  if (len <= 250 && multiAreaCount <= 1 && !hasPrMarkers) {
-    return { effort: 'low', reason: 'Concise prompt without multi-area indicators.', promptLength: len };
+  if (hasFileEditSignal && multiAreaCount <= 1 && actionCount <= 2 && !hasPrMarkers) {
+    return { effort: 'low', reason: 'Single-scope implementation task.', promptLength: len };
   }
 
   return { effort: 'medium', reason: 'Moderate prompt complexity.', promptLength: len };

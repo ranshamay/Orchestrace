@@ -84,7 +84,7 @@ describe('task effort classifier', () => {
     expect(classifyTaskEffort('rewrite the entire orchestration pipeline from scratch').effort).toBe('high');
   });
 
-  it('classifies long prompts with complexity indicators as high effort', () => {
+        it('classifies complex coordinated work as high effort independent of length', () => {
     const longPrompt = 'Implement a comprehensive multi-package change that requires a full overhaul of the system. ' +
       'First update the core module, then modify the CLI, also update the provider layer, ' +
       'and finally ensure all tests pass across the monorepo. Open a pull request with all changes. ' +
@@ -93,8 +93,15 @@ describe('task effort classifier', () => {
     expect(classifyTaskEffort(longPrompt).effort).toBe('high');
   });
 
+  it('does not classify long single-scope prompts as high effort based on length alone', () => {
+    const repeatedContext = 'for context only '.repeat(80);
+    const longSimplePrompt = `fix the typo in runner.ts ${repeatedContext}`;
+    expect(classifyTaskEffort(longSimplePrompt).effort).toBe('low');
+  });
+
   it('returns reason for classification', () => {
     const result = classifyTaskEffort('echo hello');
+
     expect(result.reason).toBeTruthy();
     expect(result.promptLength).toBeGreaterThan(0);
   });
