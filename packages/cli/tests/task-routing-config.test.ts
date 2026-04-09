@@ -82,11 +82,18 @@ describe('task routing config', () => {
     expect(validation.command).toBe('git status');
   });
 
-  it('rejects markdown-like single-line payloads through canonical shell validator', () => {
+    it('rejects markdown-like single-line payloads through canonical shell validator', () => {
     const validation = validateShellInput('## Task: run git status');
     expect(validation.ok).toBe(false);
     expect(validation.reason).toContain('markdown/instructional');
   });
+
+  it('rejects single-line natural language prompts that are not executable commands', () => {
+    const validation = validateShellInput('please investigate why the session fails to start');
+    expect(validation.ok).toBe(false);
+    expect(validation.reason).toContain('no executable command was found');
+  });
+
 
   it('keeps validateShellExecutionPrompt aligned with canonical validator', () => {
     const canonical = validateShellInput('run pnpm test');

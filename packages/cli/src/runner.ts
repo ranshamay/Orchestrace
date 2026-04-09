@@ -488,12 +488,22 @@ async function main(): Promise<void> {
     }
   }
 
-  async function runShellCommandWithTimeout(
+    async function runShellCommandWithTimeout(
     command: string,
     timeout: number,
   ): Promise<{ ok: boolean; stdout: string; stderr: string; error?: string }> {
+    const validation = validateShellInput(command);
+    if (!validation.ok || !validation.command) {
+      return {
+        ok: false,
+        stdout: '',
+        stderr: '',
+        error: validation.reason ?? 'shell_input_validation_failed',
+      };
+    }
+
     try {
-      const { stdout, stderr } = await execFileAsync('sh', ['-lc', command], {
+      const { stdout, stderr } = await execFileAsync('sh', ['-lc', validation.command], {
         cwd: config.workspacePath,
         timeout,
         maxBuffer: 5 * 1024 * 1024,
@@ -509,6 +519,7 @@ async function main(): Promise<void> {
       };
     }
   }
+
 
   async function runRequiredValidationBeforeDelivery(): Promise<void> {
     const verifyCommands = parseAndSanitizeVerifyCommands(process.env.ORCHESTRACE_VERIFY_COMMANDS);

@@ -56,7 +56,7 @@ describe('runner task routing parity', () => {
     expect(route.result.strategy).toBe('direct_shell');
   });
 
-  it('forces observer sessions to code_change route even when shell override is set', () => {
+    it('forces observer sessions to code_change route even when shell override is set', () => {
     const observerPrompt = [
       '[Observer Fix] Broken routing',
       '',
@@ -70,7 +70,13 @@ describe('runner task routing parity', () => {
     expect(route.result.category).toBe('code_change');
     expect(route.result.strategy).toBe('full_planning_pipeline');
     expect(route.result.source).toBe('override');
+
+    const dispatch = enforceSafeShellDispatch(observerPrompt, route.result, 'observer');
+    expect(dispatch.route.category).toBe('code_change');
+    expect(dispatch.shell.ok).toBe(false);
+    expect(dispatch.shell.reason).toContain('Route is not shell_command');
   });
+
 
   it('demotes shell override for user prose prompt before execution', () => {
     const prompt = 'we want to make sure we will use git worktrees natively (probably by using git tool) each new session when impl starts';
