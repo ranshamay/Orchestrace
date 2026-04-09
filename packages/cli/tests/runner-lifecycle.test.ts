@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { appendCleanupErrors, formatLifecyclePhaseFailure } from '../src/runner.js';
+import { appendCleanupErrors, formatLifecyclePhaseFailure } from '../src/runner-lifecycle-diagnostics.js';
 
 describe('runner lifecycle diagnostics', () => {
   it('formats failed phase prefix in error message', () => {

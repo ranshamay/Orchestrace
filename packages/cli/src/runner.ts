@@ -61,6 +61,10 @@ import {
   SessionLifecycleError,
   type SessionLifecyclePhase,
 } from './session-lifecycle.js';
+import {
+  appendCleanupErrors,
+  formatLifecyclePhaseFailure,
+} from './runner-lifecycle-diagnostics.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -1623,25 +1627,6 @@ async function main(): Promise<void> {
     }
     return changed;
   }
-}
-
-// ---------------------------------------------------------------------------
-// Lifecycle diagnostics helpers
-// ---------------------------------------------------------------------------
-
-export function formatLifecyclePhaseFailure(phase: SessionLifecyclePhase, message: string): string {
-  return `[phase=${phase}] ${message}`;
-}
-
-export function appendCleanupErrors(
-  baseError: string,
-  cleanupErrors: Array<{ phase: SessionLifecyclePhase; actionLabel: string; error: unknown }>,
-): string {
-  if (cleanupErrors.length === 0) {
-    return baseError;
-  }
-  const details = cleanupErrors.map((entry) => `${entry.phase}:${entry.actionLabel}:${errorMsg(entry.error)}`).join(' | ');
-  return `${baseError}\nCleanup errors: ${details}`;
 }
 
 // ---------------------------------------------------------------------------
