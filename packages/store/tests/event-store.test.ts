@@ -336,6 +336,42 @@ describe('materializeSession', () => {
     expect(session.lastSeq).toBe(8);
   });
 
+  it('preserves retry metadata for session:dag-event materialization', () => {
+    const t = now();
+    const config = makeConfig();
+    const events: SessionEvent[] = [
+      { seq: 1, time: t, type: 'session:created', payload: { config } },
+      {
+        seq: 2,
+        time: t,
+        type: 'session:dag-event',
+        payload: {
+          event: {
+            time: t,
+            type: 'task:failed',
+            taskId: 'task',
+            failureType: 'validation',
+            attempt: 3,
+            maxRetries: 2,
+            totalDurationMs: 2450,
+            message: '[run:sess-1] task: failed',
+          },
+        },
+      },
+    ];
+
+    const session = materializeSession(events)!;
+    expect(session.events).toHaveLength(1);
+    expect(session.events[0]).toMatchObject({
+      type: 'task:failed',
+      taskId: 'task',
+      failureType: 'validation',
+      attempt: 3,
+      maxRetries: 2,
+      totalDurationMs: 2450,
+    });
+  });
+
   it('materializes failed session', () => {
     const t = now();
     const config = makeConfig();

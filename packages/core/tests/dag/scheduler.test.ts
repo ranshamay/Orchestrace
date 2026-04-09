@@ -98,6 +98,55 @@ describe('runDag', () => {
     expect(outputs.get('b')!.error).toContain('Blocked by failed dependency');
   });
 
+  it('emits retry metadata on terminal task:failed events', async () => {
+    const graph = makeGraph([
+      { ...node('flaky'), validation: { maxRetries: 2, retryDelayMs: 0 } },
+    ]);
+    const failedEvents: Extract<DagEvent, { type: 'task:failed' }>[] = [];
+
+    const executor = async (n: TaskNode): Promise<TaskOutput> => {
+      return { taskId: n.id, status: 'failed', error: 'still failing', durationMs: 1, retries: 0 };
+    };
+
+    await runDag(graph, executor, {
+      onEvent: (event) => {
+        if (event.type === 'task:failed') failedEvents.push(event);
+      },
+    });
+
+    expect(failedEvents).toHaveLength(1);
+    const failedEvent = failedEvents[0];
+    expect(failedEvent.retries).toBe(2);
+    expect(failedEvent.attempt).toBe(3);
+    expect(failedEvent.maxRetries).toBe(2);
+    expect(failedEvent.totalDurationMs).toBeGreaterThanOrEqual(0);
+  });
+
+  it('emits retry metadata when executor throws and retries are exhausted', async () => {
+    const graph = makeGraph([
+      { ...node('throws'), validation: { maxRetries: 1, retryDelayMs: 0 } },
+    ]);
+    const failedEvents: Extract<DagEvent, { type: 'task:failed' }>[] = [];
+
+    const executor = async (): Promise<TaskOutput> => {
+      throw new Error('kaboom');
+    };
+
+    await runDag(graph, executor, {
+      onEvent: (event) => {
+        if (event.type === 'task:failed') failedEvents.push(event);
+      },
+    });
+
+    expect(failedEvents).toHaveLength(1);
+    const failedEvent = failedEvents[0];
+    expect(failedEvent.error).toBe('kaboom');
+    expect(failedEvent.retries).toBe(1);
+    expect(failedEvent.attempt).toBe(2);
+    expect(failedEvent.maxRetries).toBe(1);
+    expect(failedEvent.totalDurationMs).toBeGreaterThanOrEqual(0);
+  });
+
   it('emits lifecycle events', async () => {
     const events: DagEvent['type'][] = [];
     const graph = makeGraph([node('a')]);

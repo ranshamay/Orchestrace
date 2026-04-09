@@ -121,7 +121,17 @@ export interface WorkSession {
     updatedAt: string;
   };
   taskStatus: Record<string, string>;
-  events: Array<{ time: string; type: string; runId?: string; taskId?: string; failureType?: string; message: string }>;
+  events: Array<{
+    time: string;
+    type: string;
+    runId?: string;
+    taskId?: string;
+    failureType?: string;
+    attempt?: number;
+    maxRetries?: number;
+    totalDurationMs?: number;
+    message: string;
+  }>;
   agentGraph?: Array<{
     id: string;
     name?: string;
