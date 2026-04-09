@@ -1371,6 +1371,14 @@ function resolveReplayFailureType(error: unknown): ReplayFailureType {
     return 'empty_response';
   }
 
+  if (/(context length|context window|max(imum)? context|too many tokens|prompt too long|request too large|input is too long|token limit exceeded|maximum prompt length|length exceeded)/.test(normalized)) {
+    return 'prompt_too_large';
+  }
+
+  if (/(service unavailable|temporarily unavailable|upstream unavailable|bad gateway|gateway timeout|overloaded|provider unavailable|connection reset|socket hang up|network error|econnreset|eai_again|enotfound|fetch failed|request was aborted)/.test(normalized)) {
+    return 'provider_unresponsive';
+  }
+
   return 'unknown';
 }
 
@@ -1382,6 +1390,8 @@ function isReplayFailureType(value: unknown): value is ReplayFailureType {
     || value === 'tool_runtime'
     || value === 'validation'
     || value === 'empty_response'
+    || value === 'prompt_too_large'
+    || value === 'provider_unresponsive'
     || value === 'unknown';
 }
 
@@ -1419,6 +1429,18 @@ function buildCompletionFailureRetryHint(params: {
       return [
         'Previous attempt returned empty model output.',
         'Retry with concise reasoning and continue implementation from known plan context.',
+        `Failure detail: ${params.errorMessage}`,
+      ].join('\n');
+    case 'prompt_too_large':
+      return [
+        'Previous attempt exceeded prompt/context limits.',
+        'Reduce prompt size or split the task into smaller bounded steps before retrying.',
+        `Failure detail: ${params.errorMessage}`,
+      ].join('\n');
+    case 'provider_unresponsive':
+      return [
+        'Provider remained unresponsive after bounded retries.',
+        'Stop immediate retries and retry later or switch provider/model.',
         `Failure detail: ${params.errorMessage}`,
       ].join('\n');
     default:
