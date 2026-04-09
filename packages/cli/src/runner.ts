@@ -2605,7 +2605,10 @@ function normalizeTodoStatus(value: unknown): 'todo' | 'in_progress' | 'done' | 
 // Run
 // ---------------------------------------------------------------------------
 
-void main().catch((err) => {
-  console.error('[runner] Fatal error:', err);
-  process.exit(1);
-});
+// Only run main if this is the actual CLI entry point, not when imported as a module (e.g., for testing)
+if (process.argv[2] && process.argv[3]) {
+  void main().catch((err) => {
+    console.error('[runner] Fatal error:', err);
+    process.exit(1);
+  });
+}
