@@ -36,7 +36,14 @@ import {
 } from '@orchestrace/tools';
 import { InMemorySharedContextStore } from '@orchestrace/context';
 import { FileEventStore, materializeSession } from '@orchestrace/store';
-import type { SessionEventInput, SessionConfig, SessionLlmStatus, LlmSessionState, SessionAgentGraphNode } from '@orchestrace/store';
+import type {
+  SessionEventInput,
+  SessionConfig,
+  SessionLlmStatus,
+  LlmSessionState,
+  SessionAgentGraphNode,
+  LlmProviderFailurePolicy,
+} from '@orchestrace/store';
 import {
   llmStatusIdentityKey,
   parseTimestamp,
@@ -65,6 +72,11 @@ import {
   appendCleanupErrors,
   formatLifecyclePhaseFailure,
 } from './runner-lifecycle-diagnostics.js';
+import {
+  isDegradableProviderFailureType,
+  isRetryableProviderFailureType,
+  normalizeLlmProviderFailurePolicy,
+} from './runner-provider-failure-policy.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -72,6 +84,7 @@ import {
 
 const SUBAGENT_RETRY_MAX_ATTEMPTS = 2;
 const SUBAGENT_RETRY_BASE_DELAY_MS = 300;
+const PROVIDER_FAILURE_RETRY_BASE_DELAY_MS = 1_000;
 const SUBAGENT_WORKER_PROMPT_PREVIEW_MAX_CHARS = 220;
 const SUBAGENT_WORKER_OUTPUT_PREVIEW_MAX_CHARS = 420;
 const TOOL_EVENT_PREVIEW_MAX_CHARS = resolvePositiveIntEnv(
@@ -220,6 +233,13 @@ async function main(): Promise<void> {
   const planningNoToolGuardMode = normalizePlanningNoToolGuardMode(config.planningNoToolGuardMode)
     ?? normalizePlanningNoToolGuardMode(process.env.ORCHESTRACE_PLANNING_NO_TOOL_GUARD_MODE)
     ?? 'enforce';
+  const llmProviderFailurePolicy = normalizeLlmProviderFailurePolicy(config.llmProviderFailurePolicy)
+    ?? normalizeLlmProviderFailurePolicy(process.env.ORCHESTRACE_LLM_PROVIDER_FAILURE_POLICY)
+    ?? 'strict';
+  const llmProviderFailureRetries = normalizeNonNegativeInt(
+    config.llmProviderFailureRetries,
+    normalizeNonNegativeInt(process.env.ORCHESTRACE_LLM_PROVIDER_FAILURE_RETRIES, 0),
+  );
   const checkpointFilePath = join(workspaceRoot, '.orchestrace', 'sessions', sessionId, CHECKPOINT_METADATA_FILE);
   const checkpointName = `${CHECKPOINT_STASH_PREFIX}:${sessionId}:${Date.now()}`;
   const checkpointState = {
@@ -1369,7 +1389,13 @@ async function main(): Promise<void> {
 
     const outputs = route.category === 'shell_command'
       ? await runShellCommandRoute(dispatch.shell.command!, config.workspacePath)
-      : await orchestrate(graph, {
+      : await runOrchestrationWithProviderRetry();
+
+    async function runOrchestrationWithProviderRetry(): Promise<Map<string, TaskOutput>> {
+      let attempt = 0;
+      while (true) {
+        attempt += 1;
+        const runOutputs = await orchestrate(graph, {
       llm,
       cwd: config.workspacePath,
       planOutputDir: join(config.workspacePath, '.orchestrace', 'plans'),
@@ -1582,6 +1608,28 @@ async function main(): Promise<void> {
       },
     });
 
+        const runFailedOutput = [...runOutputs.values()].find((candidate) => candidate.status === 'failed');
+        const failureType = runFailedOutput?.failureType;
+        if (!runFailedOutput || !isRetryableProviderFailureType(failureType) || attempt > llmProviderFailureRetries) {
+          return runOutputs;
+        }
+
+        const retryDelayMs = PROVIDER_FAILURE_RETRY_BASE_DELAY_MS * attempt;
+        const retryMessage = `Retrying orchestration after provider failure (${failureType ?? 'unknown'}) attempt ${attempt}/${llmProviderFailureRetries}.`;
+        console.warn(`[runner:${sessionId}] ${retryMessage}`);
+        const llmStatus = makeLlmStatus('retrying', retryMessage, failureType, 'task', 'implementation');
+        lastLlmStatusEmission = {
+          key: llmStatusIdentityKey(llmStatus),
+          emittedAt: parseTimestamp(llmStatus.updatedAt),
+        };
+        await emit({ time: iso(), type: 'session:llm-status-change', payload: { llmStatus } });
+
+        if (retryDelayMs > 0) {
+          await new Promise<void>((resolve) => setTimeout(resolve, retryDelayMs));
+        }
+      }
+    }
+
     if (cancelled) {
       await finalizeCheckpoint('cancelled', iso());
       await lifecycle.cleanup();
@@ -1615,17 +1663,23 @@ async function main(): Promise<void> {
       deliveryError = errorMsg(error);
     }
 
-    const terminalFailed = failed || Boolean(deliveryError);
+    const failureType = failedOutput?.failureType ?? (deliveryError ? 'delivery_failure' : undefined);
+    const failureError = [failedOutput?.error ?? (failed ? 'Execution failed' : undefined), deliveryError ? `Remote delivery failed: ${deliveryError}` : undefined]
+      .filter((line): line is string => Boolean(line))
+      .join('\n') || 'Execution failed';
+    const degradedCompletion = Boolean(
+      failedOutput
+      && llmProviderFailurePolicy === 'degraded_noop'
+      && isDegradableProviderFailureType(failureType)
+      && !deliveryError,
+    );
+    const terminalFailed = (failed && !degradedCompletion) || Boolean(deliveryError);
 
     if (terminalFailed) {
-      const error = [failedOutput?.error ?? (failed ? 'Execution failed' : undefined), deliveryError ? `Remote delivery failed: ${deliveryError}` : undefined]
-        .filter((line): line is string => Boolean(line))
-        .join('\n') || 'Execution failed';
-      const failureType = failedOutput?.failureType ?? (deliveryError ? 'delivery_failure' : undefined);
-      await emit({ time: t, type: 'session:error-change', payload: { error } });
+      await emit({ time: t, type: 'session:error-change', payload: { error: failureError } });
       const llmStatus = makeLlmStatus(
         'failed',
-        failureType ? `${failureType}: ${error}` : error,
+        failureType ? `${failureType}: ${failureError}` : failureError,
         failureType,
       );
       lastLlmStatusEmission = {
@@ -1635,12 +1689,23 @@ async function main(): Promise<void> {
       await emit({ time: t, type: 'session:llm-status-change', payload: { llmStatus } });
       await emit({ time: t, type: 'session:status-change', payload: { status: 'failed' } });
     } else {
-      const llmStatus = makeLlmStatus('completed', 'Run completed successfully.');
-      lastLlmStatusEmission = {
-        key: llmStatusIdentityKey(llmStatus),
-        emittedAt: parseTimestamp(llmStatus.updatedAt),
-      };
-      await emit({ time: t, type: 'session:llm-status-change', payload: { llmStatus } });
+      if (degradedCompletion) {
+        const degradedDetail = `Degraded completion: provider failure (${failureType ?? 'unknown'}) after retries. Marking run completed with noop fallback.`;
+        await emit({ time: t, type: 'session:error-change', payload: { error: degradedDetail } });
+        const llmStatus = makeLlmStatus('completed', degradedDetail, failureType, 'task', 'implementation');
+        lastLlmStatusEmission = {
+          key: llmStatusIdentityKey(llmStatus),
+          emittedAt: parseTimestamp(llmStatus.updatedAt),
+        };
+        await emit({ time: t, type: 'session:llm-status-change', payload: { llmStatus } });
+      } else {
+        const llmStatus = makeLlmStatus('completed', 'Run completed successfully.');
+        lastLlmStatusEmission = {
+          key: llmStatusIdentityKey(llmStatus),
+          emittedAt: parseTimestamp(llmStatus.updatedAt),
+        };
+        await emit({ time: t, type: 'session:llm-status-change', payload: { llmStatus } });
+      }
       await emit({ time: t, type: 'session:status-change', payload: { status: 'completed' } });
     }
 
@@ -2070,6 +2135,20 @@ function normalizePlanningNoToolGuardMode(value: unknown): PlanningNoToolGuardMo
 
   return undefined;
 }
+
+export function normalizeNonNegativeInt(value: unknown, fallback: number): number {
+  const parsed = typeof value === 'number'
+    ? Math.floor(value)
+    : typeof value === 'string'
+      ? Number.parseInt(value, 10)
+      : Number.NaN;
+  if (Number.isFinite(parsed) && parsed >= 0) {
+    return parsed;
+  }
+  return fallback;
+}
+
+// provider failure policy helpers moved to runner-provider-failure-policy.ts
 
 function logDagEventTrace(sessionId: string, event: DagEvent): void {
   const taskId = 'taskId' in event ? event.taskId : undefined;

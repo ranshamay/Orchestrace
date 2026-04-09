@@ -9,6 +9,7 @@ export interface UiServerOptions {
 export type WorkState = 'running' | 'completed' | 'failed' | 'cancelled';
 export type ExecutionContext = 'workspace' | 'git-worktree';
 export type SessionCreationReason = 'start' | 'retry';
+export type LlmProviderFailurePolicy = 'strict' | 'degraded_noop';
 
 export type LlmSessionState =
   | 'queued'
@@ -180,6 +181,8 @@ export interface WorkSession {
   planningNoToolGuardMode: 'enforce' | 'warn';
   quickStartMode?: boolean;
   quickStartMaxPreDelegationToolCalls?: number;
+  llmProviderFailurePolicy: LlmProviderFailurePolicy;
+  llmProviderFailureRetries: number;
   executionContext: ExecutionContext;
   selectedWorktreePath?: string;
   useWorktree: boolean;
@@ -229,6 +232,8 @@ export interface PersistedWorkSession {
   planningNoToolGuardMode?: 'enforce' | 'warn';
   quickStartMode?: boolean;
   quickStartMaxPreDelegationToolCalls?: number;
+  llmProviderFailurePolicy?: LlmProviderFailurePolicy;
+  llmProviderFailureRetries?: number;
   executionContext?: ExecutionContext;
   selectedWorktreePath?: string;
   useWorktree?: boolean;
@@ -263,6 +268,8 @@ export interface UiPreferences {
   defaultImplementationProvider: string;
   defaultImplementationModel: string;
   planningNoToolGuardMode: 'enforce' | 'warn';
+  llmProviderFailurePolicy: LlmProviderFailurePolicy;
+  llmProviderFailureRetries: number;
   executionContext: ExecutionContext;
   selectedWorktreePath?: string;
   useWorktree: boolean;
@@ -283,6 +290,8 @@ export interface PersistedUiPreferences {
   defaultImplementationProvider?: string;
   defaultImplementationModel?: string;
   planningNoToolGuardMode?: 'enforce' | 'warn';
+  llmProviderFailurePolicy?: LlmProviderFailurePolicy;
+  llmProviderFailureRetries?: number;
   executionContext?: ExecutionContext;
   selectedWorktreePath?: string;
   useWorktree?: boolean;

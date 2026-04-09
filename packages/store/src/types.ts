@@ -110,6 +110,8 @@ export interface SessionWorkspaceAssignmentProvenance {
   workspacePathSessionId?: string;
 }
 
+export type LlmProviderFailurePolicy = 'strict' | 'degraded_noop';
+
 export interface SessionConfig {
   id: string;
   workspaceId: string;
@@ -130,6 +132,10 @@ export interface SessionConfig {
   quickStartMode?: boolean;
   /** Max successful tool calls allowed before first successful sub-agent delegation in quick-start mode. */
   quickStartMaxPreDelegationToolCalls?: number;
+  /** Session terminal behavior when provider/LLM failures exhaust retries. Defaults to `strict`. */
+  llmProviderFailurePolicy?: LlmProviderFailurePolicy;
+  /** Additional whole-run retries for retryable provider failure classes after orchestrator retries are exhausted. */
+  llmProviderFailureRetries?: number;
   executionContext?: 'workspace' | 'git-worktree';
   selectedWorktreePath?: string;
   useWorktree?: boolean;

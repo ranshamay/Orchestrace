@@ -64,6 +64,7 @@ import type {
   LlmSessionState,
   ExecutionContext,
   SessionCreationReason,
+  LlmProviderFailurePolicy,
   SessionWorkspaceAssignmentProvenance,
   SessionWorktreePathSessionIdRelation,
 } from './ui-server/types.js';
@@ -353,6 +354,12 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
             ?? resolvePlanningNoToolGuardModeDefault(),
           quickStartMode: c.quickStartMode,
           quickStartMaxPreDelegationToolCalls: c.quickStartMaxPreDelegationToolCalls,
+          llmProviderFailurePolicy: normalizeLlmProviderFailurePolicy(c.llmProviderFailurePolicy)
+            ?? resolveLlmProviderFailurePolicyDefault(),
+          llmProviderFailureRetries: normalizeNonNegativeSetting(
+            c.llmProviderFailureRetries,
+            resolveLlmProviderFailureRetriesDefault(),
+          ),
           executionContext: c.executionContext ?? 'workspace',
           selectedWorktreePath: c.selectedWorktreePath,
           useWorktree: c.useWorktree ?? c.executionContext === 'git-worktree',
@@ -505,7 +512,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
               uiStatePersistence.schedule();
             });
           } else {
-            // Runner is dead — mark session as failed with recovery guidance
+            // Runner is dead — mark terminal with recovery guidance.
             const failedAt = now();
             const recoveryGit = await inspectGitRecoveryState(session.worktreePath ?? session.workspacePath);
             session.lastRecovery = {
@@ -517,11 +524,14 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
             const recoveryHint = recoveryGit.dirty
               ? 'Uncommitted changes were detected; review git diff/status to recover work from the crash.'
               : 'No uncommitted changes were detected; resume from the latest checkpoint commit.';
-            session.status = 'failed';
+            const allowDegradedTerminal = session.llmProviderFailurePolicy === 'degraded_noop';
+            session.status = allowDegradedTerminal ? 'completed' : 'failed';
             session.error = `Session interrupted because the runner process exited. ${recoveryHint}`;
             session.updatedAt = failedAt;
-            session.llmStatus = createLlmStatus('failed', failedAt, {
-              detail: session.error,
+            session.llmStatus = createLlmStatus(allowDegradedTerminal ? 'completed' : 'failed', failedAt, {
+              detail: allowDegradedTerminal
+                ? `Recovered with degraded/noop fallback after runner interruption. ${session.error}`
+                : session.error,
             });
             emitSessionEvent(sessionId, {
               time: failedAt,
@@ -534,7 +544,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
             });
             emitSessionEvent(sessionId, { time: failedAt, type: 'session:error-change', payload: { error: session.error } });
             emitSessionEvent(sessionId, { time: failedAt, type: 'session:llm-status-change', payload: { llmStatus: session.llmStatus } });
-            emitSessionEvent(sessionId, { time: failedAt, type: 'session:status-change', payload: { status: 'failed' } });
+            emitSessionEvent(sessionId, { time: failedAt, type: 'session:status-change', payload: { status: session.status } });
           }
         }
 
@@ -601,6 +611,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
               planningNoToolGuardMode: session.planningNoToolGuardMode,
               quickStartMode: session.quickStartMode,
               quickStartMaxPreDelegationToolCalls: session.quickStartMaxPreDelegationToolCalls,
+              llmProviderFailurePolicy: session.llmProviderFailurePolicy,
+              llmProviderFailureRetries: session.llmProviderFailureRetries,
               executionContext: session.executionContext,
               selectedWorktreePath: session.selectedWorktreePath,
               useWorktree: session.useWorktree,
@@ -1075,6 +1087,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       planningNoToolGuardMode: session.planningNoToolGuardMode,
       quickStartMode: session.quickStartMode,
       quickStartMaxPreDelegationToolCalls: session.quickStartMaxPreDelegationToolCalls,
+      llmProviderFailurePolicy: session.llmProviderFailurePolicy,
+      llmProviderFailureRetries: session.llmProviderFailureRetries,
       executionContext: session.executionContext,
       selectedWorktreePath: session.selectedWorktreePath,
       useWorktree: session.useWorktree,
@@ -1369,7 +1383,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       // Give event store watcher time to deliver final events.
       setTimeout(async () => {
         if (session.status === 'running') {
-          // Runner exited without writing terminal event — mark as failed with recovery guidance.
+          // Runner exited without writing terminal event — mark terminal with recovery guidance.
           const t = now();
           const recoveryGit = await inspectGitRecoveryState(session.worktreePath ?? session.workspacePath);
           session.lastRecovery = {
@@ -1381,9 +1395,16 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           const recoveryHint = recoveryGit.dirty
             ? 'Uncommitted changes were detected; review git diff/status to recover work from the crash.'
             : 'No uncommitted changes were detected; resume from the latest checkpoint commit.';
-          session.status = 'failed';
+          const allowDegradedTerminal = session.llmProviderFailurePolicy === 'degraded_noop';
+          session.status = allowDegradedTerminal ? 'completed' : 'failed';
           session.error = `Runner process exited unexpectedly (code ${code}). ${recoveryHint}`;
-          session.llmStatus = createLlmStatus('failed', t, { detail: session.error });
+          session.llmStatus = createLlmStatus(
+            allowDegradedTerminal ? 'completed' : 'failed',
+            t,
+            { detail: allowDegradedTerminal
+              ? `Recovered with degraded/noop fallback after runner exit. ${session.error}`
+              : session.error },
+          );
           session.updatedAt = t;
 
           emitSessionEvent(id, {
@@ -1397,9 +1418,9 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           });
           emitSessionEvent(id, { time: t, type: 'session:error-change', payload: { error: session.error } });
           emitSessionEvent(id, { time: t, type: 'session:llm-status-change', payload: { llmStatus: session.llmStatus } });
-          emitSessionEvent(id, { time: t, type: 'session:status-change', payload: { status: 'failed' } });
+          emitSessionEvent(id, { time: t, type: 'session:status-change', payload: { status: session.status } });
 
-          broadcastWorkStream(workStreamClients, id, 'error', {
+          broadcastWorkStream(workStreamClients, id, session.status === 'completed' ? 'end' : 'error', {
             id,
             error: session.error,
             llmStatus: session.llmStatus,
@@ -1539,6 +1560,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     planningNoToolGuardMode?: 'enforce' | 'warn';
     quickStartMode?: boolean;
     quickStartMaxPreDelegationToolCalls?: number;
+    llmProviderFailurePolicy?: LlmProviderFailurePolicy;
+    llmProviderFailureRetries?: number;
     executionContext?: ExecutionContext;
     selectedWorktreePath?: string;
     useWorktree?: boolean;
@@ -1637,6 +1660,12 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     );
     const planningNoToolGuardMode = normalizePlanningNoToolGuardMode(request.planningNoToolGuardMode)
       ?? uiPreferences.planningNoToolGuardMode;
+    const llmProviderFailurePolicy = normalizeLlmProviderFailurePolicy(request.llmProviderFailurePolicy)
+      ?? uiPreferences.llmProviderFailurePolicy;
+    const llmProviderFailureRetries = normalizeNonNegativeSetting(
+      request.llmProviderFailureRetries,
+      uiPreferences.llmProviderFailureRetries,
+    );
     const enableTrivialTaskGate = request.enableTrivialTaskGate ?? uiPreferences.enableTrivialTaskGate;
     const trivialTaskMaxPromptLength = normalizePositiveSetting(
       request.trivialTaskMaxPromptLength,
@@ -1789,6 +1818,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       planningNoToolGuardMode,
       quickStartMode,
       quickStartMaxPreDelegationToolCalls,
+      llmProviderFailurePolicy,
+      llmProviderFailureRetries,
       executionContext,
       selectedWorktreePath,
       useWorktree: executionContext === 'git-worktree',
@@ -2469,6 +2500,12 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         const quickStartMaxPreDelegationToolCalls = parsePositiveSetting(body.quickStartMaxPreDelegationToolCalls)
           ?? parsePositiveSetting(body.quickStartToolCallLimit)
           ?? parsePositiveSetting(body.maxPreDelegationToolCalls);
+        const llmProviderFailurePolicy = normalizeLlmProviderFailurePolicy(body.llmProviderFailurePolicy)
+          ?? normalizeLlmProviderFailurePolicy(body.providerFailurePolicy)
+          ?? (parseBooleanSetting(body.allowDegradedOnProviderFailure) ? 'degraded_noop' : undefined);
+        const llmProviderFailureRetries = parseNonNegativeSetting(body.llmProviderFailureRetries)
+          ?? parseNonNegativeSetting(body.providerFailureRetries)
+          ?? parseNonNegativeSetting(body.maxProviderRetries);
         const executionContext = normalizeExecutionContext(body.executionContext)
           ?? normalizeExecutionContext(body.mode)
           ?? normalizeExecutionContext(body.executionMode);
@@ -2502,6 +2539,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           planningNoToolGuardMode,
           quickStartMode,
           quickStartMaxPreDelegationToolCalls,
+          llmProviderFailurePolicy,
+          llmProviderFailureRetries,
           executionContext,
           selectedWorktreePath,
           useWorktree,
@@ -4347,6 +4386,8 @@ function toPersistedSession(session: WorkSession): PersistedWorkSession {
     planningNoToolGuardMode: session.planningNoToolGuardMode,
     quickStartMode: session.quickStartMode,
     quickStartMaxPreDelegationToolCalls: session.quickStartMaxPreDelegationToolCalls,
+    llmProviderFailurePolicy: session.llmProviderFailurePolicy,
+    llmProviderFailureRetries: session.llmProviderFailureRetries,
     executionContext: session.executionContext,
     selectedWorktreePath: session.selectedWorktreePath,
     useWorktree: session.useWorktree,
@@ -4408,6 +4449,12 @@ function hydratePersistedSession(session: PersistedWorkSession): WorkSession {
     quickStartMaxPreDelegationToolCalls: normalizePositiveSetting(
       session.quickStartMaxPreDelegationToolCalls,
       parsePositiveSetting(process.env.ORCHESTRACE_QUICK_START_MAX_PRE_DELEGATION_TOOL_CALLS) ?? 3,
+    ),
+    llmProviderFailurePolicy: normalizeLlmProviderFailurePolicy(session.llmProviderFailurePolicy)
+      ?? resolveLlmProviderFailurePolicyDefault(),
+    llmProviderFailureRetries: normalizeNonNegativeSetting(
+      session.llmProviderFailureRetries,
+      resolveLlmProviderFailureRetriesDefault(),
     ),
     executionContext: normalizeExecutionContext(session.executionContext)
       ?? (Boolean(session.useWorktree) ? 'git-worktree' : 'workspace'),
@@ -5018,6 +5065,28 @@ function normalizePositiveSetting(value: unknown, fallback: number): number {
   return parsePositiveSetting(value) ?? fallback;
 }
 
+function parseNonNegativeSetting(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    const normalized = Math.floor(value);
+    return normalized >= 0 ? normalized : undefined;
+  }
+
+  if (typeof value !== 'string') {
+    return undefined;
+  }
+
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return undefined;
+  }
+
+  return parsed;
+}
+
+function normalizeNonNegativeSetting(value: unknown, fallback: number): number {
+  return parseNonNegativeSetting(value) ?? fallback;
+}
+
 function resolveLongTurnTimeoutMs(): number {
   return resolveConfiguredTimeoutMs(
     ['ORCHESTRACE_LLM_LONG_TURN_TIMEOUT_MS', 'ORCHESTRACE_LLM_TIMEOUT_MS'],
@@ -5051,6 +5120,19 @@ function parsePositiveInt(raw: string | undefined): number | undefined {
 
   const parsed = Number.parseInt(raw, 10);
   if (!Number.isFinite(parsed) || parsed <= 0) {
+    return undefined;
+  }
+
+  return parsed;
+}
+
+function parseNonNegativeInt(raw: string | undefined): number | undefined {
+  if (!raw) {
+    return undefined;
+  }
+
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed < 0) {
     return undefined;
   }
 
@@ -5133,6 +5215,8 @@ function resolveUiPreferencesDefaults(): UiPreferences {
   const defaultImplementationProvider = resolveDefaultImplementationProviderPreferenceDefault(defaultProvider);
   const defaultImplementationModel = resolveDefaultImplementationModelPreferenceDefault(defaultModel);
   const planningNoToolGuardMode = resolvePlanningNoToolGuardModeDefault();
+  const llmProviderFailurePolicy = resolveLlmProviderFailurePolicyDefault();
+  const llmProviderFailureRetries = resolveLlmProviderFailureRetriesDefault();
   return {
     activeTab: resolveUiTabDefault(),
     observerShowFindings: resolveObserverShowFindingsDefault(),
@@ -5143,6 +5227,8 @@ function resolveUiPreferencesDefaults(): UiPreferences {
     defaultImplementationProvider,
     defaultImplementationModel,
     planningNoToolGuardMode,
+    llmProviderFailurePolicy,
+    llmProviderFailureRetries,
     executionContext,
     selectedWorktreePath: asString(process.env.ORCHESTRACE_UI_SELECTED_WORKTREE_PATH) || undefined,
     useWorktree: executionContext === 'git-worktree',
@@ -5191,6 +5277,13 @@ function normalizeUiPreferences(value: unknown, fallback: UiPreferences): UiPref
   const planningNoToolGuardMode = normalizePlanningNoToolGuardMode(value.planningNoToolGuardMode)
     ?? (parseBooleanSetting(value.planningNoToolWarnOnly) ? 'warn' : undefined)
     ?? fallback.planningNoToolGuardMode;
+  const llmProviderFailurePolicy = normalizeLlmProviderFailurePolicy(value.llmProviderFailurePolicy)
+    ?? normalizeLlmProviderFailurePolicy(value.providerFailurePolicy)
+    ?? fallback.llmProviderFailurePolicy;
+  const llmProviderFailureRetries = normalizeNonNegativeSetting(
+    value.llmProviderFailureRetries,
+    fallback.llmProviderFailureRetries,
+  );
 
   return {
     activeTab: normalizeUiTab(value.activeTab) ?? fallback.activeTab,
@@ -5202,6 +5295,8 @@ function normalizeUiPreferences(value: unknown, fallback: UiPreferences): UiPref
     defaultImplementationProvider,
     defaultImplementationModel,
     planningNoToolGuardMode,
+    llmProviderFailurePolicy,
+    llmProviderFailureRetries,
     executionContext,
     selectedWorktreePath,
     useWorktree: executionContext === 'git-worktree',
@@ -5265,6 +5360,23 @@ function resolvePlanningNoToolGuardModeDefault(): 'enforce' | 'warn' {
 function normalizePlanningNoToolGuardMode(value: unknown): 'enforce' | 'warn' | undefined {
   const normalized = asString(value).toLowerCase();
   if (normalized === 'enforce' || normalized === 'warn') {
+    return normalized;
+  }
+
+  return undefined;
+}
+
+function resolveLlmProviderFailurePolicyDefault(): LlmProviderFailurePolicy {
+  return normalizeLlmProviderFailurePolicy(process.env.ORCHESTRACE_LLM_PROVIDER_FAILURE_POLICY) ?? 'strict';
+}
+
+function resolveLlmProviderFailureRetriesDefault(): number {
+  return parseNonNegativeInt(process.env.ORCHESTRACE_LLM_PROVIDER_FAILURE_RETRIES) ?? 0;
+}
+
+function normalizeLlmProviderFailurePolicy(value: unknown): LlmProviderFailurePolicy | undefined {
+  const normalized = asString(value).toLowerCase();
+  if (normalized === 'strict' || normalized === 'degraded_noop') {
     return normalized;
   }
 

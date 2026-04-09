@@ -33,6 +33,7 @@ export type {
   SessionStreamDeltaPayload,
   // Value types
   SessionConfig,
+  LlmProviderFailurePolicy,
   WorkState,
   SessionCreationReason,
   LlmSessionState,
