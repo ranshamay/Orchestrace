@@ -659,16 +659,18 @@ describe('search_files tool', () => {
       },
     });
 
-    expect(result.isError).toBeFalsy();
+        expect(result.isError).toBeFalsy();
     expect(result.content).toContain('src/coordination-tools.ts:1:async function mapWithAdaptiveConcurrency() {}');
-    expect(result.content).toContain('No such file or directory (os error 2)');
+    expect(result.content.toLowerCase()).not.toContain('no such file or directory');
+    expect(result.content.toLowerCase()).not.toContain('os error 2');
     expect(result.details).toBeUndefined();
+
 
     runCommandSpy.mockRestore();
   });
 
 
-  it('marks search_files as error for genuine command failures without match output', async () => {
+    it('marks search_files as error for genuine command failures without match output', async () => {
     const cwd = await makeWorkspace();
     const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
 
@@ -693,15 +695,45 @@ describe('search_files tool', () => {
       errorType: 'command_failed',
       toolName: 'search_files',
       exitCode: 2,
-      command: 'rg',
+      command: expect.stringContaining('rg -n --no-heading --color never -e value --fixed-strings -- src'),
       path: 'src',
     });
 
     runCommandSpy.mockRestore();
   });
 
+    it('recovers from ENOENT command stderr via filesystem fallback without surfacing ripgrep path noise', async () => {
+    const cwd = await makeWorkspace();
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
 
-    it('treats regression tokens as query text, not file paths', async () => {
+    const runCommandSpy = vi.spyOn(commandRunner, 'runCommand').mockResolvedValueOnce({
+      exitCode: 2,
+      stdout: '',
+      stderr: 'rg: startWorkSession: No such file or directory (os error 2)',
+    });
+
+    const result = await toolset.executeTool({
+      id: 'enoent-no-matches',
+      name: 'search_files',
+      arguments: {
+        query: 'value',
+        path: 'src',
+      },
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.content).toContain('src/file.ts:1:export const value = 1;');
+    expect(result.content.toLowerCase()).not.toContain('no such file or directory');
+    expect(result.content.toLowerCase()).not.toContain('os error 2');
+    expect(result.details).toBeUndefined();
+
+    runCommandSpy.mockRestore();
+  });
+
+
+
+  it('treats regression tokens as query text, not file paths', async () => {
+
     const cwd = await makeWorkspace();
     await writeFile(
       join(cwd, 'src', 'tokens.txt'),

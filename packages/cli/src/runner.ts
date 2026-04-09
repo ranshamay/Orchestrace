@@ -1595,12 +1595,14 @@ async function main(): Promise<void> {
       }
 
       const toolResult = await lightweightToolset.executeTool(toolCall, controller.signal);
-      const resultEvent: Extract<DagEvent, { type: 'task:tool-call' }> = {
+            const resultEvent: Extract<DagEvent, { type: 'task:tool-call' }> = {
         ...started,
         status: 'result',
         output: toolResult.content,
         isError: toolResult.isError,
+        details: toolResult.details,
       };
+
       const resultUiEvent = toUiEvent(sessionId, resultEvent, iso());
       if (resultUiEvent) {
         await emit({ time: iso(), type: 'session:dag-event', payload: { event: resultUiEvent } });

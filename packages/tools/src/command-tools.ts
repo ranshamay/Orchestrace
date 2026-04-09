@@ -6,12 +6,18 @@ import type { AgentToolsetOptions, RegisteredAgentTool } from './types.js';
 import { resolveWorkspacePath, toWorkspaceRelative } from './path-utils.js';
 import { formatCommandOutput, runCommand } from './command-tools/command-runner.js';
 import {
+  isRipgrepPathError,
+  mapRipgrepPathError,
+  runSafeRipgrep,
+} from './command-tools/safe-ripgrep.js';
+import {
   asRequiredString,
   asString,
   looksDestructive,
   matchesAllowedPrefix,
   validateShellCommandPayload,
 } from './command-tools/guards.js';
+
 
 const GITHUB_API_BASE_URL = 'https://api.github.com';
 const PLAYWRIGHT_ALLOWED_COMMANDS = new Set([
@@ -169,20 +175,16 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
         }
 
 
-        const args = ['-n', '--no-heading', '--color', 'never', '-e', query];
-        if (!useRegex) {
-          args.push('--fixed-strings');
-        }
-        if (globValidation.value) {
-          args.push('--glob', globValidation.value);
-        }
-        args.push('--', relTarget);
-
-        const result = await runCommand('rg', args, {
+                const result = await runSafeRipgrep({
           cwd: resolvedCwd.cwd,
+          query,
+          relTarget,
+          useRegex,
+          glob: globValidation.value,
           timeoutMs: options.commandTimeoutMs ?? 20000,
           signal,
         });
+
 
         const stderr = result.stderr.trim();
 
@@ -222,18 +224,26 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
           }
         }
 
-                const output = formatCommandOutput(result, options.maxOutputChars ?? 16000);
+                        const output = formatCommandOutput(result, options.maxOutputChars ?? 16000);
         const hasMatches = result.stdout.trim().length > 0;
 
         // Prefer successful match output when available. ripgrep may emit stderr
         // diagnostics in mixed-result scenarios; only escalate error behavior
         // when there are no matches to return.
         if (hasMatches) {
+          if (result.isPathError) {
+            return {
+              content: truncateText(result.stdout.trimEnd(), options.maxOutputChars ?? 16000),
+              isError: false,
+            };
+          }
+
           return {
             content: output,
             isError: false,
           };
         }
+
 
         if (result.exitCode === 2 && useRegex) {
           return createSearchFilesErrorResult({
@@ -246,7 +256,8 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
           });
         }
 
-        const hasPathError = hasRipgrepPathError(stderr);
+                const hasPathError = result.isPathError;
+
 
 
                 if (result.exitCode === 1 && result.stdout.trim().length === 0) {
@@ -297,16 +308,18 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
             });
           }
         }
-        if (result.exitCode > 1) {
+                if (result.exitCode > 1) {
+          const message = hasPathError ? mapRipgrepPathError(stderr) : output;
           return createSearchFilesErrorResult({
             errorType: 'command_failed',
-            message: output,
+            message,
             stderr,
             exitCode: result.exitCode,
-            command: 'rg',
+            command: `rg ${result.args.join(' ')}`,
             path: relTarget,
           });
         }
+
 
         return {
           content: output,
@@ -1144,17 +1157,9 @@ async function normalizeRequestedSearchPath(rawPath: string): Promise<string> {
 }
 
 function hasRipgrepPathError(stderr: string): boolean {
-  return isDeterministicRipgrepPathError(stderr);
+  return isRipgrepPathError(stderr);
 }
 
-function isDeterministicRipgrepPathError(stderr: string): boolean {
-  const normalized = stderr.trim();
-  if (normalized.length === 0) {
-    return false;
-  }
-
-  return /\bNo such file or directory\b|\bos error 2\b|\bENOENT\b/i.test(normalized);
-}
 
 function isMissingPathErrorLike(error: unknown): boolean {
   if (!error) {
