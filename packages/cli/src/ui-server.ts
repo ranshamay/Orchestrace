@@ -1519,6 +1519,18 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     creationReason?: SessionCreationReason;
     sourceSessionId?: string;
     source?: 'user' | 'observer';
+    routingAuditContext?: {
+      eventType: 'observer_fix_prompt_conversion';
+      findingFingerprint: string;
+      findingTitle: string;
+      findingCategory: string;
+      findingSeverity: string;
+      observedSessionCount: number;
+      relevantFileCount: number;
+      promptCharLength: number;
+      routeIntent: 'code_change';
+      reason: string;
+    };
   }): Promise<{ id: string; warnings?: string[] } | { error: string; statusCode: number }> {
     const promptParts = cloneChatContentParts(request.promptParts ?? []);
     const prompt = asString(request.prompt);
@@ -1682,6 +1694,22 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           taskPrompt: normalizedPrompt,
         },
       });
+      if (request.routingAuditContext) {
+        const ctx = request.routingAuditContext;
+        await eventStore.append(id, {
+          time: createdAt,
+          type: 'session:dag-event',
+          payload: {
+            event: {
+              time: createdAt,
+              runId: id,
+              type: 'task:routing',
+              taskId: 'task',
+              message: `Observer conversion audit: event=${ctx.eventType}; findingFingerprint=${ctx.findingFingerprint}; findingTitle=${ctx.findingTitle}; category=${ctx.findingCategory}; severity=${ctx.findingSeverity}; observedSessionCount=${ctx.observedSessionCount}; relevantFileCount=${ctx.relevantFileCount}; promptCharLength=${ctx.promptCharLength}; routeIntent=${ctx.routeIntent}; source=observer; reason=${ctx.reason}`,
+            },
+          },
+        });
+      }
     } catch (error) {
       void managedWorkspace.cleanupWorktree().catch(() => {});
       workSessions.delete(id);

@@ -28,6 +28,19 @@ export interface ShellDispatchSourceValidation {
   reason?: string;
 }
 
+export type RoutingCoercionType =
+  | 'route_mismatch'
+  | 'shell_source_guard_demotion'
+  | 'shell_prompt_validation_demotion';
+
+export interface RoutingCoercionAudit {
+  coercionType: RoutingCoercionType;
+  originalRoute: TaskRouteCategory;
+  finalRoute: TaskRouteCategory;
+  reason: string;
+  risk: 'high' | 'medium';
+}
+
 export function parseTaskRouteOverride(raw: string | undefined): TaskRouteCategory | undefined {
   if (!raw) return undefined;
   const normalized = raw.trim().toLowerCase();
@@ -75,6 +88,38 @@ export function resolveTaskRoute(prompt: string, overrideRaw?: string): Resolved
  *
  * Any guard failure deterministically demotes dispatch to code_change.
  */
+export function deriveRoutingCoercionAudit(
+  resolvedRoute: TaskRouteResult,
+  dispatch: SafeDispatchResolution,
+): RoutingCoercionAudit | undefined {
+  const finalRoute = dispatch.route;
+  if (resolvedRoute.category === finalRoute.category) {
+    return undefined;
+  }
+
+  const reason = finalRoute.reason ?? dispatch.shell.reason ?? 'Route was coerced to satisfy dispatch safety constraints.';
+  const sourceGuardDemotion = resolvedRoute.category === 'shell_command'
+    && finalRoute.category !== 'shell_command'
+    && dispatch.shell.reason?.includes('source')
+    ? true
+    : false;
+  const shellValidationDemotion = resolvedRoute.category === 'shell_command'
+    && finalRoute.category !== 'shell_command'
+    && !sourceGuardDemotion;
+
+  return {
+    coercionType: sourceGuardDemotion
+      ? 'shell_source_guard_demotion'
+      : shellValidationDemotion
+        ? 'shell_prompt_validation_demotion'
+        : 'route_mismatch',
+    originalRoute: resolvedRoute.category,
+    finalRoute: finalRoute.category,
+    reason,
+    risk: resolvedRoute.category === 'shell_command' || finalRoute.category === 'shell_command' ? 'high' : 'medium',
+  };
+}
+
 export function enforceSafeShellDispatch(
   prompt: string,
   route: TaskRouteResult,

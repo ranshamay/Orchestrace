@@ -52,9 +52,11 @@ import {
   updateThinkingCircuitBreaker,
 } from './thinking-circuit-breaker.js';
 import {
+  deriveRoutingCoercionAudit,
   enforceSafeShellDispatch,
   resolveTaskRouteForSource,
   stripRetryContinuationContext,
+  type RoutingCoercionAudit,
 } from './task-routing.js';
 import {
   SessionLifecycle,
@@ -252,6 +254,25 @@ async function main(): Promise<void> {
     }
   }
 
+  function emitRoutingCoercionAudit(input: RoutingCoercionAudit & {
+    source?: 'user' | 'observer';
+  }): void {
+    const source = input.source ?? 'undefined';
+    void emit({
+      time: iso(),
+      type: 'session:dag-event',
+      payload: {
+        event: {
+          time: iso(),
+          runId: sessionId,
+          type: 'task:routing',
+          taskId: 'task',
+          message: `Routing coercion audit: type=${input.coercionType}; originalRoute=${input.originalRoute}; finalRoute=${input.finalRoute}; source=${source}; risk=${input.risk}; reason=${input.reason}`,
+        },
+      },
+    });
+  }
+
   const lifecycle = new SessionLifecycle('VALIDATING');
 
   function lifecycleDetailForPhase(phase: SessionLifecyclePhase): string {
@@ -337,19 +358,11 @@ async function main(): Promise<void> {
     },
   });
 
-  if (resolvedRoute.category === 'shell_command' && route.category !== 'shell_command') {
-    void emit({
-      time: iso(),
-      type: 'session:dag-event',
-      payload: {
-        event: {
-          time: iso(),
-          runId: sessionId,
-          type: 'task:routing',
-          taskId: 'task',
-          message: `Shell route fallback applied: ${dispatch.shell.reason ?? 'prompt failed shell validation'}`,
-        },
-      },
+  const routingCoercionAudit = deriveRoutingCoercionAudit(resolvedRoute, dispatch);
+  if (routingCoercionAudit) {
+    emitRoutingCoercionAudit({
+      ...routingCoercionAudit,
+      source: config.source,
     });
   }
 
