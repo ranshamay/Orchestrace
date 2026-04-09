@@ -2,6 +2,7 @@ import { classifyTaskPrompt, type TaskRouteCategory, type TaskRouteResult } from
 import type { TaskType } from '@orchestrace/core';
 
 const SHELL_COMMAND_START = /^(pnpm|npm|yarn|node|npx|git|cat|echo|grep|find|sed|awk|curl|bash|zsh|python|make|docker|kubectl|ls|pwd)(?:\s|$)/i;
+const MARKDOWN_LIKE_PAYLOAD = /(^\s*\[[^\]]+\])|(^\s*#{1,6}\s+\S)|(```)|(^\s*(?:Category|Severity|Issue|Task):\s)/im;
 
 const RETRY_CONTINUATION_MARKER = 'Retry continuation context from previous attempt:';
 const FOLLOW_UP_MARKER = 'Follow-up request:';
@@ -140,7 +141,7 @@ export function enforceSafeShellDispatch(
     };
   }
 
-  const shell = validateShellExecutionPrompt(prompt);
+  const shell = validateShellInput(prompt);
   if (shell.ok) {
     return { route, shell };
   }
@@ -195,11 +196,11 @@ export function resolveTaskRouteForSource(
 }
 
 /**
- * Final safety check before executing sh -lc.
- * Rejects multiline markdown/prose payloads and returns a validated command.
+ * Canonical shell-input validator used by all shell execution entrypoints.
+ * Accepts only single-line executable command text and rejects markdown/prose.
  */
-export function validateShellExecutionPrompt(prompt: string): ShellExecutionValidation {
-  const normalized = prompt.trim();
+export function validateShellInput(input: string): ShellExecutionValidation {
+  const normalized = input.trim();
   if (!normalized) {
     return {
       ok: false,
@@ -212,6 +213,12 @@ export function validateShellExecutionPrompt(prompt: string): ShellExecutionVali
       reason: 'Rejected shell execution: prompt contains multiple lines and appears to be instructions/markdown, not a single command.',
     };
   }
+  if (MARKDOWN_LIKE_PAYLOAD.test(normalized)) {
+    return {
+      ok: false,
+      reason: 'Rejected shell execution: prompt appears to contain markdown/instructional content, not a direct command.',
+    };
+  }
   const command = extractShellCommand(normalized);
   if (!command) {
     return {
@@ -220,6 +227,13 @@ export function validateShellExecutionPrompt(prompt: string): ShellExecutionVali
     };
   }
   return { ok: true, command };
+}
+
+/**
+ * Backward-compatible alias for existing call sites/tests.
+ */
+export function validateShellExecutionPrompt(prompt: string): ShellExecutionValidation {
+  return validateShellInput(prompt);
 }
 
 /**

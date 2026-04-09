@@ -57,6 +57,7 @@ import {
   resolveTaskRouteForSource,
   stripRetryContinuationContext,
   type RoutingCoercionAudit,
+  validateShellInput,
 } from './task-routing.js';
 import {
   SessionLifecycle,
@@ -1004,6 +1005,8 @@ async function main(): Promise<void> {
       prMeta.branchName = fallbackBranch;
     }
 
+    await runRequiredValidationBeforeDelivery();
+
     const pushRes = await runGitSafeWithTimeout(
       ['push', '--set-upstream', 'origin', prMeta.branchName],
       SESSION_DELIVERY_GIT_TIMEOUT_MS,
@@ -1038,9 +1041,16 @@ async function main(): Promise<void> {
       body: prMeta.prDescription,
     });
 
+    await waitForGitHubCiChecks({
+      owner: remote.owner,
+      repo: remote.repo,
+      prNumber: pr.number,
+      prUrl: pr.url,
+    });
+
     const deliveryMessage = pr.created
-      ? `Committed session changes were pushed to origin/${prMeta.branchName} and PR #${pr.number} was created: ${pr.url}`
-      : `Committed session changes were pushed to origin/${prMeta.branchName} and existing PR #${pr.number} was reused: ${pr.url}`;
+      ? `Committed session changes were validated, pushed to origin/${prMeta.branchName}, PR #${pr.number} was created, and GitHub CI checks passed: ${pr.url}`
+      : `Committed session changes were validated, pushed to origin/${prMeta.branchName}, existing PR #${pr.number} was reused, and GitHub CI checks passed: ${pr.url}`;
 
     await emit({
       time: iso(),
@@ -2343,14 +2353,29 @@ function buildSingleTaskGraph(id: string, prompt: string, routeCategory: TaskRou
 
 async function runShellCommandRoute(command: string, cwd: string): Promise<Map<string, TaskOutput>> {
   const startedAt = Date.now();
+  const validation = validateShellInput(command);
+
+  if (!validation.ok || !validation.command) {
+    return new Map([
+      ['task', {
+        taskId: 'task',
+        status: 'failed',
+        response: validation.reason,
+        durationMs: Date.now() - startedAt,
+        retries: 0,
+        error: 'shell_input_validation_failed',
+      }],
+    ]);
+  }
+
   try {
-    const { stdout, stderr } = await execFileAsync('sh', ['-lc', command], { cwd });
+    const { stdout, stderr } = await execFileAsync('sh', ['-lc', validation.command], { cwd });
     const text = `${stdout ?? ''}${stderr ?? ''}`.trim();
     return new Map([
       ['task', {
         taskId: 'task',
         status: 'completed',
-        response: text || `Command executed: ${command}`,
+        response: text || `Command executed: ${validation.command}`,
         durationMs: Date.now() - startedAt,
         retries: 0,
       }],
@@ -2369,6 +2394,69 @@ async function runShellCommandRoute(command: string, cwd: string): Promise<Map<s
       }],
     ]);
   }
+}
+
+export function assessGitHubStatusCheckRollup(rollup: unknown): {
+  total: number;
+  passing: number;
+  pending: number;
+  failing: number;
+} {
+  if (!Array.isArray(rollup)) {
+    return { total: 0, passing: 0, pending: 0, failing: 0 };
+  }
+
+  let passing = 0;
+  let pending = 0;
+  let failing = 0;
+  const passingConclusions = new Set(['SUCCESS', 'NEUTRAL', 'SKIPPED']);
+  const failingConclusions = new Set(['FAILURE', 'TIMED_OUT', 'CANCELLED', 'STARTUP_FAILURE', 'STALE', 'ACTION_REQUIRED']);
+
+  for (const entry of rollup) {
+    if (!entry || typeof entry !== 'object') {
+      pending += 1;
+      continue;
+    }
+
+    const record = entry as Record<string, unknown>;
+    const typeName = typeof record.__typename === 'string' ? record.__typename : '';
+
+    if (typeName === 'CheckRun') {
+      const status = typeof record.status === 'string' ? record.status.toUpperCase() : '';
+      const conclusion = typeof record.conclusion === 'string' ? record.conclusion.toUpperCase() : '';
+      if (status && status !== 'COMPLETED') {
+        pending += 1;
+      } else if (passingConclusions.has(conclusion)) {
+        passing += 1;
+      } else if (failingConclusions.has(conclusion)) {
+        failing += 1;
+      } else {
+        pending += 1;
+      }
+      continue;
+    }
+
+    if (typeName === 'StatusContext') {
+      const state = typeof record.state === 'string' ? record.state.toUpperCase() : '';
+      if (state === 'SUCCESS') {
+        passing += 1;
+      } else if (state === 'FAILURE' || state === 'ERROR') {
+        failing += 1;
+      } else {
+        pending += 1;
+      }
+      continue;
+    }
+
+    pending += 1;
+  }
+
+  return {
+    total: rollup.length,
+    passing,
+    pending,
+    failing,
+  };
 }
 
 function buildSystemPrompt(config: SessionConfig, phase: 'planning' | 'implementation', effort: TaskEffort = 'high'): string {
@@ -2416,9 +2504,9 @@ function buildSystemPrompt(config: SessionConfig, phase: 'planning' | 'implement
       'For multi-file inspection, use read_files with concurrency to reduce latency.',
       '',
       `Task effort: ${effort}. Scale coordination overhead accordingly.`,
-      'Use github_api for GitHub REST/GraphQL operations; do not use gh CLI.',
+      'Use gh tools/CLI for GitHub operations when available; fallback to github_api only when needed.',
       'Iterate until validation passes or a true blocker is reached.',
-      'After each push or PR update, query remote CI/check status with github_api and keep fixing/re-pushing until checks pass or a true blocker is reached.',
+      'After each push or PR update, query remote CI/check status via gh and keep fixing/re-pushing until checks pass or a true blocker is reached.',
       'Always run `git fetch origin` before checking remote branch state, merge status, or pushing.',
       'Do not ask the user to continue after partial progress; continue autonomously until completion or a concrete blocker is reached.',
       'For transient tool or sub-agent failures (timeouts, aborts, rate limits), retry automatically before surfacing a blocker.',
