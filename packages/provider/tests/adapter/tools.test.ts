@@ -367,6 +367,126 @@ describe('executeWithOptionalTools', () => {
     expect(parsed.inlineInstructions).toContain('Inline fallback required for critical nodes');
   });
 
+  it('trips subagent batch circuit breaker on third identical failure and escalates', async () => {
+    const consumeStreamMock = vi.mocked(consumeStream);
+
+    const firstResponse = makeAssistantMessage([
+      {
+        type: 'toolCall',
+        id: 'batch-breaker',
+        name: 'subagent_spawn_batch',
+        arguments: {
+          agents: [
+            { nodeId: 'graph_cli_task_entrypoint', prompt: 'critical node' },
+            { nodeId: 'graph_runner_session_flow', prompt: 'critical node 2' },
+          ],
+        },
+      },
+    ], 'tool_calls');
+    const finalResponse = makeAssistantMessage([{ type: 'text', text: 'done' }]);
+
+    consumeStreamMock.mockResolvedValueOnce(firstResponse as never);
+    consumeStreamMock.mockResolvedValueOnce(finalResponse as never);
+
+    const failurePayload = JSON.stringify({
+      failedNodeIds: ['graph_cli_task_entrypoint', 'graph_runner_session_flow'],
+      runs: [
+        { nodeId: 'graph_cli_task_entrypoint', status: 'failed', error: 'timeout' },
+        { nodeId: 'graph_runner_session_flow', status: 'failed', error: 'aborted' },
+      ],
+    });
+
+    const executeTool = vi.fn()
+      .mockResolvedValueOnce({ isError: true, content: failurePayload })
+      .mockResolvedValueOnce({ isError: true, content: failurePayload })
+      .mockResolvedValueOnce({ isError: true, content: failurePayload });
+
+    const context: TestContext = {
+      messages: [],
+      tools: [{ name: 'subagent_spawn_batch', description: 'spawn many', parameters: { type: 'object' } }],
+    };
+
+    await executeWithOptionalTools({
+      model: {} as never,
+      context,
+      options: {},
+      toolset: {
+        tools: [],
+        executeTool,
+      },
+      onUsage: () => {},
+    });
+
+    const toolResult = context.messages.find((message) => message.role === 'toolResult');
+    const parsed = JSON.parse(String(toolResult?.content?.[0]?.text ?? '{}')) as {
+      status: string;
+      reason: string;
+      failedNodeIds: string[];
+      consecutiveIdenticalFailures: number;
+      actionRequired: string;
+    };
+
+    expect(toolResult?.isError).toBe(true);
+    expect(parsed.status).toBe('escalated_error');
+    expect(parsed.reason).toBe('identical_subagent_batch_failures_repeated');
+    expect(parsed.failedNodeIds).toEqual(['graph_cli_task_entrypoint', 'graph_runner_session_flow']);
+    expect(parsed.consecutiveIdenticalFailures).toBe(3);
+    expect(parsed.actionRequired).toContain('manual_intervention_or_backoff_before_retry');
+  });
+
+  it('continues subagent batch retries when failure signature changes between attempts', async () => {
+    const consumeStreamMock = vi.mocked(consumeStream);
+
+    const firstResponse = makeAssistantMessage([
+      {
+        type: 'toolCall',
+        id: 'batch-changed-signature',
+        name: 'subagent_spawn_batch',
+        arguments: {
+          agents: [
+            { nodeId: 'n1', prompt: 'one' },
+            { nodeId: 'n2', prompt: 'two' },
+          ],
+        },
+      },
+    ], 'tool_calls');
+    const finalResponse = makeAssistantMessage([{ type: 'text', text: 'done' }]);
+
+    consumeStreamMock.mockResolvedValueOnce(firstResponse as never);
+    consumeStreamMock.mockResolvedValueOnce(finalResponse as never);
+
+    const executeTool = vi.fn()
+      .mockResolvedValueOnce({
+        isError: true,
+        content: JSON.stringify({ failedNodeIds: ['n1'], runs: [{ nodeId: 'n1', status: 'failed', error: 'timeout' }] }),
+      })
+      .mockResolvedValueOnce({
+        isError: true,
+        content: JSON.stringify({ failedNodeIds: ['n2'], runs: [{ nodeId: 'n2', status: 'failed', error: 'rate limit' }] }),
+      })
+      .mockResolvedValueOnce({ isError: false, content: JSON.stringify({ completed: 1, failed: 0 }) });
+
+    const context: TestContext = {
+      messages: [],
+      tools: [{ name: 'subagent_spawn_batch', description: 'spawn many', parameters: { type: 'object' } }],
+    };
+
+    await executeWithOptionalTools({
+      model: {} as never,
+      context,
+      options: {},
+      toolset: {
+        tools: [],
+        executeTool,
+      },
+      onUsage: () => {},
+    });
+
+    expect(executeTool).toHaveBeenCalledTimes(3);
+    const toolResult = context.messages.find((message) => message.role === 'toolResult');
+    expect(toolResult?.isError).toBeFalsy();
+  });
+
   it('skips non-critical research nodes after retry cap exhaustion', async () => {
     const consumeStreamMock = vi.mocked(consumeStream);
 

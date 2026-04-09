@@ -370,6 +370,39 @@ describe('orchestrate replay capture', () => {
     }
   });
 
+  it('does not retry implementation when circuit-breaker escalation is raised', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'orchestrace-replay-circuit-breaker-'));
+
+    try {
+      const outputs = await orchestrate(makeSingleNodeGraph(), {
+        llm: createAdapter({
+          implementationBehavior: async ({ implementationCall }) => {
+            if (implementationCall === 1) {
+              throw new Error('Circuit breaker tripped: identical subagent batch failures repeated more than twice consecutively. Manual intervention or explicit backoff is required before retrying this batch.');
+            }
+            return {
+              text: 'unexpected success',
+            };
+          },
+        }),
+        cwd,
+        requirePlanApproval: false,
+        planningSystemPrompt: 'planning',
+        implementationSystemPrompt: 'implementation',
+        maxImplementationAttempts: 3,
+      });
+
+      const output = outputs.get('task-1');
+      expect(output).toBeDefined();
+      expect(output?.status).toBe('failed');
+      expect(output?.retries).toBe(0);
+      expect(output?.replay?.attempts.length).toBe(2);
+      expect(output?.replay?.attempts[1]?.failureType).toBe('validation');
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
   it('passes read-only classification to planning and implementation toolsets', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'orchestrace-replay-read-only-route-'));
     const calls: Array<{ phase: 'planning' | 'implementation'; taskRequiresWrites: boolean }> = [];

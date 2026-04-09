@@ -1363,6 +1363,10 @@ function resolveReplayFailureType(error: unknown): ReplayFailureType {
     return 'tool_schema';
   }
 
+  if (/(circuit breaker tripped|identical subagent batch failures repeated|manual intervention or explicit backoff is required)/.test(normalized)) {
+    return 'validation';
+  }
+
   if (/(tool execution failed|unknown tool|blocked command|not allowed while mode|tool failed)/.test(normalized)) {
     return 'tool_runtime';
   }
