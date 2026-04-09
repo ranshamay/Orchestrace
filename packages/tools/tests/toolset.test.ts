@@ -567,6 +567,82 @@ describe('search_files tool', () => {
     expect(result.content).toBe('(skipped invalid search path: src/missing-directory)');
     expect(result.content.toLowerCase()).not.toContain('no such file or directory');
   });
+
+  it('returns a clear validation error for empty query text', async () => {
+    const cwd = await makeWorkspace();
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+
+    const result = await toolset.executeTool({
+      id: '1',
+      name: 'search_files',
+      arguments: {
+        query: '   ',
+        path: 'src',
+      },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content).toBe('Invalid query: query must not be empty.');
+    expect(result.content.toLowerCase()).not.toContain('no such file or directory');
+  });
+
+  it('returns a clear validation error for invalid regex query syntax', async () => {
+    const cwd = await makeWorkspace();
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+
+    const result = await toolset.executeTool({
+      id: '1',
+      name: 'search_files',
+      arguments: {
+        query: '[unterminated',
+        queryMode: 'regex',
+        path: 'src',
+      },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content).toBe('Invalid regex query.');
+    expect(result.content.toLowerCase()).not.toContain('no such file or directory');
+  });
+
+  it('returns a clear validation error for empty glob text', async () => {
+    const cwd = await makeWorkspace();
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+
+    const result = await toolset.executeTool({
+      id: '1',
+      name: 'search_files',
+      arguments: {
+        query: 'value',
+        path: 'src',
+        glob: '   ',
+      },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content).toBe('Invalid glob: expected a non-empty string when provided.');
+    expect(result.content.toLowerCase()).not.toContain('no such file or directory');
+  });
+
+  it('returns a clear validation error when glob is used with a file path', async () => {
+    const cwd = await makeWorkspace();
+    await writeFile(join(cwd, 'src', 'file-only.txt'), 'value\n', 'utf-8');
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+
+    const result = await toolset.executeTool({
+      id: '1',
+      name: 'search_files',
+      arguments: {
+        query: 'value',
+        path: 'src/file-only.txt',
+        glob: '*.txt',
+      },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content).toBe('Invalid glob usage: glob can only be used when path points to a directory.');
+    expect(result.content.toLowerCase()).not.toContain('no such file or directory');
+  });
 });
 
 describe('git_status and git_diff session gating', () => {

@@ -52,23 +52,46 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
         }),
       },
       execute: async (toolArgs, signal) => {
-        const query = asRequiredString(toolArgs.query, 'query');
-        const requestedPath = asString(toolArgs.path) ?? '.';
-        const regexFlag = typeof toolArgs.regex === 'boolean' ? toolArgs.regex : undefined;
-        const glob = normalizeGlob(asString(toolArgs.glob));
-        const queryModeRaw = asString(toolArgs.queryMode);
-
-        if (queryModeRaw !== undefined && queryModeRaw !== 'regex' && queryModeRaw !== 'literal') {
+        const queryValidation = validateSearchQuery(toolArgs.query);
+        if (!queryValidation.ok) {
           return {
-            content: "Invalid queryMode. Expected 'regex' or 'literal'.",
+            content: queryValidation.error,
             isError: true,
           };
         }
 
-        const useRegex = queryModeRaw !== undefined
-          ? queryModeRaw === 'regex'
+        const queryModeValidation = validateQueryMode(asString(toolArgs.queryMode));
+        if (!queryModeValidation.ok) {
+          return {
+            content: queryModeValidation.error,
+            isError: true,
+          };
+        }
+
+        const regexFlag = typeof toolArgs.regex === 'boolean' ? toolArgs.regex : undefined;
+        const useRegex = queryModeValidation.value !== undefined
+          ? queryModeValidation.value === 'regex'
           : regexFlag ?? false;
 
+        if (useRegex) {
+          const regexValidation = validateRegexQuery(queryValidation.value);
+          if (!regexValidation.ok) {
+            return {
+              content: regexValidation.error,
+              isError: true,
+            };
+          }
+        }
+
+        const globValidation = validateSearchGlob(toolArgs.glob);
+        if (!globValidation.ok) {
+          return {
+            content: globValidation.error,
+            isError: true,
+          };
+        }
+
+        const requestedPath = asString(toolArgs.path) ?? '.';
         const target = resolveWorkspacePath(options.cwd, requestedPath);
         const relTarget = toWorkspaceRelative(options.cwd, target);
         const targetKind = await getPathKind(target);
@@ -79,14 +102,21 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
           };
         }
 
-        const args = ['-n', '--no-heading', '--color', 'never'];
+        if (globValidation.value && targetKind === 'file') {
+          return {
+            content: 'Invalid glob usage: glob can only be used when path points to a directory.',
+            isError: true,
+          };
+        }
+
+        const args = ['-n', '--no-heading', '--color', 'never', '-e', queryValidation.value];
         if (!useRegex) {
           args.push('--fixed-strings');
         }
-        if (glob) {
-          args.push('--glob', glob);
+        if (globValidation.value) {
+          args.push('--glob', globValidation.value);
         }
-        args.push('-e', query, relTarget);
+        args.push('--', relTarget);
 
         const result = await runCommand('rg', args, {
           cwd: options.cwd,
@@ -101,6 +131,13 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
           };
         }
 
+        if (result.exitCode === 2 && useRegex) {
+          return {
+            content: 'Invalid regex query.',
+            isError: true,
+          };
+        }
+
         const stderr = result.stderr.trim();
         const hasPathError = hasRipgrepPathError(stderr);
 
@@ -110,9 +147,9 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
               cwd: options.cwd,
               target,
               relTarget,
-              query,
+              query: queryValidation.value,
               useRegex,
-              glob,
+              glob: globValidation.value,
               maxChars: options.maxOutputChars ?? 16000,
             });
             return {
@@ -675,12 +712,92 @@ async function getPathKind(path: string): Promise<PathKind> {
   }
 }
 
-function normalizeGlob(glob: string | undefined): string | undefined {
-  if (!glob) {
-    return undefined;
+type ValidationResult<T> =
+  | { ok: true; value: T }
+  | { ok: false; error: string };
+
+function validateSearchQuery(rawQuery: unknown): ValidationResult<string> {
+  if (typeof rawQuery !== 'string') {
+    return {
+      ok: false,
+      error: 'Missing query',
+    };
   }
 
-  return glob.replace(/\\/g, '/');
+  if (rawQuery.trim().length === 0) {
+    return {
+      ok: false,
+      error: 'Invalid query: query must not be empty.',
+    };
+  }
+
+  if (rawQuery.includes('\u0000')) {
+    return {
+      ok: false,
+      error: 'Invalid query: null bytes are not allowed.',
+    };
+  }
+
+  return { ok: true, value: rawQuery.trim() };
+}
+
+function validateQueryMode(rawMode: string | undefined): ValidationResult<'regex' | 'literal' | undefined> {
+  if (rawMode === undefined) {
+    return { ok: true, value: undefined };
+  }
+
+  if (rawMode !== 'regex' && rawMode !== 'literal') {
+    return {
+      ok: false,
+      error: "Invalid queryMode. Expected 'regex' or 'literal'.",
+    };
+  }
+
+  return { ok: true, value: rawMode };
+}
+
+function validateRegexQuery(query: string): ValidationResult<string> {
+  try {
+    // Validate deterministically before invoking rg to avoid runtime stderr noise.
+    // eslint-disable-next-line no-new
+    new RegExp(query);
+    return { ok: true, value: query };
+  } catch {
+    return {
+      ok: false,
+      error: 'Invalid regex query.',
+    };
+  }
+}
+
+function validateSearchGlob(rawGlob: unknown): ValidationResult<string | undefined> {
+  if (rawGlob === undefined) {
+    return { ok: true, value: undefined };
+  }
+
+  if (typeof rawGlob !== 'string') {
+    return {
+      ok: false,
+      error: 'Invalid glob: expected a string value.',
+    };
+  }
+
+  const glob = rawGlob.trim();
+  if (glob.length === 0) {
+    return {
+      ok: false,
+      error: 'Invalid glob: expected a non-empty string when provided.',
+    };
+  }
+
+  if (glob.includes('\u0000')) {
+    return {
+      ok: false,
+      error: 'Invalid glob: null bytes are not allowed.',
+    };
+  }
+
+  return { ok: true, value: glob.replace(/\\/g, '/') };
 }
 
 function hasRipgrepPathError(stderr: string): boolean {
