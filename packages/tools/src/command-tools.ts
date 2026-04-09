@@ -1,6 +1,6 @@
 import { constants } from 'node:fs';
 import { access, readdir, readFile, realpath, stat } from 'node:fs/promises';
-import { extname, isAbsolute, join } from 'node:path';
+import { extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { Type } from '@mariozechner/pi-ai';
 import type { AgentToolsetOptions, RegisteredAgentTool } from './types.js';
 import { resolveWorkspacePath, toWorkspaceRelative } from './path-utils.js';
@@ -459,7 +459,7 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
             path: Type.Optional(Type.String({ description: 'Optional relative working directory inside workspace.' })),
           }),
         },
-        execute: async (toolArgs, signal) => {
+                execute: async (toolArgs, signal) => {
           const command = asRequiredString(toolArgs.command, 'command');
           const path = asString(toolArgs.path) ?? '.';
           const cwd = resolveWorkspacePath(options.cwd, path);
@@ -471,7 +471,7 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
             };
           }
 
-                    if (!matchesAllowedPrefix(command, options.runCommandAllowPrefixes)) {
+          if (!matchesAllowedPrefix(command, options.runCommandAllowPrefixes)) {
             const allowed = options.runCommandAllowPrefixes?.join(', ') ?? '(none configured)';
             return {
               content: `Blocked command outside allowlist: ${command}\nAllowed prefixes: ${allowed}`,
@@ -487,14 +487,24 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
             };
           }
 
-          const result = await runCommand(shellExecutable, ['-lc', command], {
-            cwd,
+          let normalized: NormalizedShellCommand;
+          try {
+            normalized = normalizeShellCommandForExecution(command, cwd, options.cwd);
+          } catch (error) {
+            return {
+              content: error instanceof Error ? error.message : String(error),
+              isError: true,
+            };
+          }
+
+          const result = await runCommand(shellExecutable, ['-lc', normalized.command], {
+            cwd: normalized.cwd,
             timeoutMs: options.commandTimeoutMs ?? 120000,
             signal,
           });
 
           const output = formatCommandOutput(result, options.maxOutputChars ?? 24000);
-          const header = `cwd: ${toWorkspaceRelative(options.cwd, cwd)}\nexitCode: ${result.exitCode}`;
+          const header = `cwd: ${toWorkspaceRelative(options.cwd, normalized.cwd)}\nexitCode: ${result.exitCode}`;
 
           return {
             content: `${header}\n${output}`,
@@ -537,15 +547,14 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
           );
           const maxCharsPerCommand = asPositiveInteger(toolArgs.maxCharsPerCommand) ?? DEFAULT_COMMAND_BATCH_MAX_CHARS_PER_COMMAND;
 
-          const mapper = async (entry: CommandBatchRequest, index: number) => {
+                    const mapper = async (entry: CommandBatchRequest, index: number) => {
             const cwd = resolveWorkspacePath(options.cwd, entry.path);
-            const relativeCwd = toWorkspaceRelative(options.cwd, cwd);
 
             if (looksDestructive(entry.command)) {
               return {
                 index,
                 command: entry.command,
-                cwd: relativeCwd,
+                cwd: toWorkspaceRelative(options.cwd, cwd),
                 ok: false,
                 blocked: true,
                 exitCode: -1,
@@ -553,12 +562,12 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
               };
             }
 
-                        if (!matchesAllowedPrefix(entry.command, options.runCommandAllowPrefixes)) {
+            if (!matchesAllowedPrefix(entry.command, options.runCommandAllowPrefixes)) {
               const allowed = options.runCommandAllowPrefixes?.join(', ') ?? '(none configured)';
               return {
                 index,
                 command: entry.command,
-                cwd: relativeCwd,
+                cwd: toWorkspaceRelative(options.cwd, cwd),
                 ok: false,
                 blocked: true,
                 exitCode: -1,
@@ -571,7 +580,7 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
               return {
                 index,
                 command: entry.command,
-                cwd: relativeCwd,
+                cwd: toWorkspaceRelative(options.cwd, cwd),
                 ok: false,
                 blocked: true,
                 exitCode: -1,
@@ -579,8 +588,23 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
               };
             }
 
-            const result = await runCommand(shellExecutable, ['-lc', entry.command], {
-              cwd,
+            let normalized: NormalizedShellCommand;
+            try {
+              normalized = normalizeShellCommandForExecution(entry.command, cwd, options.cwd);
+            } catch (error) {
+              return {
+                index,
+                command: entry.command,
+                cwd: toWorkspaceRelative(options.cwd, cwd),
+                ok: false,
+                blocked: true,
+                exitCode: -1,
+                output: error instanceof Error ? error.message : String(error),
+              };
+            }
+
+            const result = await runCommand(shellExecutable, ['-lc', normalized.command], {
+              cwd: normalized.cwd,
               timeoutMs: options.commandTimeoutMs ?? 120000,
               signal,
             });
@@ -588,7 +612,7 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
             return {
               index,
               command: entry.command,
-              cwd: relativeCwd,
+              cwd: toWorkspaceRelative(options.cwd, normalized.cwd),
               ok: result.exitCode === 0,
               blocked: false,
               exitCode: result.exitCode,
@@ -1394,7 +1418,13 @@ interface CommandBatchRequest {
   path: string;
 }
 
+interface NormalizedShellCommand {
+  command: string;
+  cwd: string;
+}
+
 function asCommandBatchRequests(value: unknown): CommandBatchRequest[] {
+
   if (!Array.isArray(value) || value.length === 0) {
     throw new Error('Missing commands');
   }
@@ -1468,7 +1498,145 @@ function asStringArray(value: unknown, field: string): string[] | undefined {
   });
 }
 
+function normalizeShellCommandForExecution(command: string, baseCwd: string, workspaceRoot: string): NormalizedShellCommand {
+  const trimmed = command.trim();
+  if (!trimmed) {
+    return { command, cwd: baseCwd };
+  }
+
+  const tokens = tokenizeShellCommand(trimmed);
+  if (tokens.length === 0 || tokens[0] !== 'pnpm') {
+    return { command: trimmed, cwd: baseCwd };
+  }
+
+  let nextCwd = baseCwd;
+  const normalizedTokens: string[] = [];
+
+  for (let i = 0; i < tokens.length; i += 1) {
+    const token = tokens[i] ?? '';
+
+    if (token === '-C' || token === '--dir') {
+      const rawDir = tokens[i + 1];
+      if (!rawDir) {
+        throw new Error(`Invalid pnpm command: ${token} requires a directory value.`);
+      }
+      nextCwd = resolvePnpmDirectoryTarget(workspaceRoot, nextCwd, rawDir, token);
+      i += 1;
+      continue;
+    }
+
+    if (token.startsWith('--dir=')) {
+      const rawDir = token.slice('--dir='.length);
+      if (!rawDir) {
+        throw new Error('Invalid pnpm command: --dir requires a non-empty directory value.');
+      }
+      nextCwd = resolvePnpmDirectoryTarget(workspaceRoot, nextCwd, rawDir, '--dir');
+      continue;
+    }
+
+    if (token.startsWith('-C=')) {
+      const rawDir = token.slice('-C='.length);
+      if (!rawDir) {
+        throw new Error('Invalid pnpm command: -C requires a non-empty directory value.');
+      }
+      nextCwd = resolvePnpmDirectoryTarget(workspaceRoot, nextCwd, rawDir, '-C');
+      continue;
+    }
+
+    normalizedTokens.push(token);
+  }
+
+  if (normalizedTokens.length === 0) {
+    throw new Error('Invalid pnpm command: missing executable tokens after pnpm directory flags.');
+  }
+
+  return {
+    command: normalizedTokens.join(' '),
+    cwd: nextCwd,
+  };
+}
+
+function resolvePnpmDirectoryTarget(workspaceRoot: string, currentCwd: string, rawDir: string, flagName: string): string {
+  const resolved = isAbsolute(rawDir) ? resolve(rawDir) : resolve(currentCwd, rawDir);
+  const rel = relative(workspaceRoot, resolved);
+  if (rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
+    throw new Error(`Invalid pnpm command: ${flagName} path escapes workspace root: ${rawDir}`);
+  }
+  return resolved;
+}
+
+
+function tokenizeShellCommand(command: string): string[] {
+  const tokens: string[] = [];
+  let current = '';
+  let quote: 'single' | 'double' | undefined;
+
+  for (let i = 0; i < command.length; i += 1) {
+    const char = command[i] ?? '';
+
+    if (char === '\\') {
+      const next = command[i + 1];
+      if (next !== undefined) {
+        current += next;
+        i += 1;
+      } else {
+        current += char;
+      }
+      continue;
+    }
+
+    if (quote === 'single') {
+      if (char === "'") {
+        quote = undefined;
+      } else {
+        current += char;
+      }
+      continue;
+    }
+
+    if (quote === 'double') {
+      if (char === '"') {
+        quote = undefined;
+      } else {
+        current += char;
+      }
+      continue;
+    }
+
+    if (char === "'") {
+      quote = 'single';
+      continue;
+    }
+
+    if (char === '"') {
+      quote = 'double';
+      continue;
+    }
+
+    if (/\s/.test(char)) {
+      if (current.length > 0) {
+        tokens.push(current);
+        current = '';
+      }
+      continue;
+    }
+
+    current += char;
+  }
+
+  if (quote) {
+    throw new Error('Invalid shell command: unmatched quote in command.');
+  }
+
+  if (current.length > 0) {
+    tokens.push(current);
+  }
+
+  return tokens;
+}
+
 async function mapWithConcurrency<T, U>(
+
   values: readonly T[],
   concurrency: number,
   mapper: (value: T, index: number) => Promise<U>,
