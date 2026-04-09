@@ -512,8 +512,7 @@ export async function orchestrate(
           }
 
           if (
-            planningAttempt < MAX_PLANNING_ATTEMPTS
-            && !nextPlanningCandidate
+            !nextPlanningCandidate
             && planningConsecutiveTriggerFailures >= failoverPolicy.consecutiveFailureThreshold
           ) {
             emit({
@@ -538,6 +537,10 @@ export async function orchestrate(
         } finally {
           clearInterval(planningNoProgressInterval);
           context.signal?.removeEventListener('abort', abortPlanningAttemptOnParentCancel);
+        }
+
+        if (!planningResult) {
+          continue;
         }
 
         const activePlanningModel = getActivePlanningModel();
@@ -826,8 +829,7 @@ export async function orchestrate(
         }
 
         if (
-          attempt < maxAttempts
-          && !nextImplementationCandidate
+          !nextImplementationCandidate
           && implementationConsecutiveTriggerFailures >= failoverPolicy.consecutiveFailureThreshold
         ) {
           emit({

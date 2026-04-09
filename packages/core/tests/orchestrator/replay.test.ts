@@ -48,6 +48,7 @@ function createAdapter(params: {
   failImplementationOnceWithType?: 'timeout' | 'rate_limit' | 'tool_runtime' | 'empty_response';
   omitPlanningCoordination?: boolean;
   planningDelegationDelaySuccessfulCalls?: number;
+  onSpawn?: (request: SpawnAgentRequest, phase: 'planning' | 'implementation') => void;
   onPrompt?: (phase: 'planning' | 'implementation', prompt: LlmPromptInput, systemPrompt: string) => void;
   planningBehavior?: (args: {
     prompt: LlmPromptInput;
@@ -82,6 +83,8 @@ function createAdapter(params: {
       || systemPrompt.includes('Do not edit files in planning mode.')
       ? 'planning'
       : 'implementation';
+
+    params.onSpawn?.(request, phase);
 
     return {
       complete: async (
@@ -1076,4 +1079,112 @@ describe('orchestrate replay capture', () => {
       await rm(cwd, { recursive: true, force: true });
     }
   });
+
+  it('fails over implementation provider after repeated timeout/abort failures and records provider sequence', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'orchestrace-replay-provider-failover-success-'));
+    const events: DagEvent[] = [];
+    const spawnedImplementationProviders: string[] = [];
+
+    try {
+      const outputs = await orchestrate(makeSingleNodeGraph(), {
+        llm: createAdapter({
+          onSpawn: (request, phase) => {
+            if (phase === 'implementation') {
+              spawnedImplementationProviders.push(`${request.provider}/${request.model}`);
+            }
+          },
+          implementationBehavior: async ({ implementationCall, systemPrompt }) => {
+            const provider = systemPrompt.includes('Model: openai/gpt-4o-mini') ? 'openai' : 'github-copilot';
+            if (provider === 'github-copilot') {
+              const error = new Error(`provider aborted request on ${provider}`) as Error & { failureType?: string };
+              error.failureType = 'timeout';
+              throw error;
+            }
+
+            return {
+              text: `Implemented successfully via ${provider} on call ${implementationCall}.`,
+              filesChanged: ['src/a.ts'],
+              usage: { input: 8, output: 4, cost: 0 },
+              metadata: { stopReason: 'end_turn', endpoint: 'https://example.test' },
+            };
+          },
+        }),
+        cwd,
+        requirePlanApproval: false,
+        planningSystemPrompt: 'planning',
+        implementationSystemPrompt: undefined,
+        maxImplementationAttempts: 3,
+        defaultImplementationModel: { provider: 'github-copilot', model: 'gpt-4.1' },
+        providerFailover: {
+          implementationCandidates: [{ provider: 'openai', model: 'gpt-4o-mini' }],
+          triggerFailureTypes: ['timeout'],
+          consecutiveFailureThreshold: 2,
+        },
+        onEvent: (event) => events.push(event),
+      });
+
+      const output = outputs.get('task-1');
+      expect(output?.status).toBe('completed');
+      expect(spawnedImplementationProviders).toEqual([
+        'github-copilot/gpt-4.1',
+        'openai/gpt-4o-mini',
+      ]);
+
+      const implAttempts = output?.replay?.attempts.filter((attempt) => attempt.phase === 'implementation') ?? [];
+      expect(implAttempts.length).toBe(3);
+      expect(implAttempts[0]?.provider).toBe('github-copilot');
+      expect(implAttempts[1]?.provider).toBe('github-copilot');
+      expect(implAttempts[2]?.provider).toBe('openai');
+
+      expect(events.some((event) => {
+        return event.type === 'task:verification-failed'
+          && 'error' in event
+          && typeof event.error === 'string'
+          && event.error.includes('Provider fallback triggered for implementation');
+      })).toBe(true);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('returns failure with clear diagnostics when implementation provider fallback candidates are exhausted', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'orchestrace-replay-provider-failover-exhausted-'));
+    const events: DagEvent[] = [];
+
+    try {
+      const outputs = await orchestrate(makeSingleNodeGraph(), {
+        llm: createAdapter({
+          implementationBehavior: async ({ systemPrompt }) => {
+            const provider = systemPrompt.includes('Model: openai/gpt-4o-mini') ? 'openai' : 'github-copilot';
+            const error = new Error(`provider aborted request on ${provider}`) as Error & { failureType?: string };
+            error.failureType = 'timeout';
+            throw error;
+          },
+        }),
+        cwd,
+        requirePlanApproval: false,
+        maxImplementationAttempts: 4,
+        defaultImplementationModel: { provider: 'github-copilot', model: 'gpt-4.1' },
+        providerFailover: {
+          implementationCandidates: [{ provider: 'openai', model: 'gpt-4o-mini' }],
+          triggerFailureTypes: ['timeout'],
+          consecutiveFailureThreshold: 2,
+        },
+        onEvent: (event) => events.push(event),
+      });
+
+      const output = outputs.get('task-1');
+      expect(output?.status).toBe('failed');
+      expect(output?.failureType).toBe('timeout');
+      expect(output?.error).toContain('provider aborted request');
+      expect(events.some((event) => {
+        return event.type === 'task:verification-failed'
+          && 'error' in event
+          && typeof event.error === 'string'
+          && event.error.includes('Provider fallback exhausted for implementation');
+      })).toBe(true);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  }, 15_000);
 });
