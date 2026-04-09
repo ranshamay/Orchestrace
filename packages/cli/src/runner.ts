@@ -309,6 +309,7 @@ async function main(): Promise<void> {
 
   const sessionHeadAtStart = await getGitHeadSha();
   let deliveryFinalized = false;
+  const committedCheckpointShas: string[] = [];
 
   async function maybeCheckpoint(reason: 'edit-threshold' | 'todo-completed' | 'terminal', opts?: {
     todoId?: string;
@@ -385,6 +386,14 @@ async function main(): Promise<void> {
         return;
       }
 
+      const fullHead = await runGitSafe(['rev-parse', 'HEAD']);
+      if (fullHead.ok) {
+        const fullSha = fullHead.stdout.trim();
+        if (fullSha) {
+          committedCheckpointShas.push(fullSha);
+        }
+      }
+
       const head = await runGitSafe(['rev-parse', '--short', 'HEAD']);
       await emit({
         time: iso(),
@@ -444,35 +453,53 @@ async function main(): Promise<void> {
   }
 
   async function ensureRemoteDeliveryForCommittedSession(): Promise<void> {
-    if (deliveryFinalized || !SESSION_DELIVERY_REQUIRED) {
-      return;
-    }
-    deliveryFinalized = true;
-
-    if (!sessionHeadAtStart) {
+    if (deliveryFinalized) {
       return;
     }
 
     const currentHead = await getGitHeadSha();
-    if (!currentHead || currentHead === sessionHeadAtStart) {
+    const fallbackHead = committedCheckpointShas.at(-1);
+    const targetHead = currentHead ?? fallbackHead;
+    if (!targetHead) {
       return;
     }
 
-    const commitCountRes = await runGitSafeWithTimeout(
-      ['rev-list', '--count', `${sessionHeadAtStart}..${currentHead}`],
-      SESSION_DELIVERY_GIT_TIMEOUT_MS,
-    );
-    if (!commitCountRes.ok) {
-      throw new Error(`Unable to determine session commit delta: ${(commitCountRes.error ?? commitCountRes.stderr) || 'git rev-list failed'}`);
+    let commitCount = 0;
+    if (sessionHeadAtStart) {
+      const commitCountRes = await runGitSafeWithTimeout(
+        ['rev-list', '--count', `${sessionHeadAtStart}..${targetHead}`],
+        SESSION_DELIVERY_GIT_TIMEOUT_MS,
+      );
+      if (!commitCountRes.ok) {
+        if (committedCheckpointShas.length === 0) {
+          throw new Error(`Unable to determine session commit delta: ${(commitCountRes.error ?? commitCountRes.stderr) || 'git rev-list failed'}`);
+        }
+      } else {
+        const parsedCount = Number.parseInt(commitCountRes.stdout.trim(), 10);
+        if (Number.isFinite(parsedCount) && parsedCount > 0) {
+          commitCount = parsedCount;
+        }
+      }
     }
 
-    const commitCount = Number.parseInt(commitCountRes.stdout.trim(), 10);
-    if (!Number.isFinite(commitCount) || commitCount <= 0) {
+    if (commitCount <= 0 && committedCheckpointShas.length > 0) {
+      commitCount = committedCheckpointShas.length;
+    }
+
+    if (commitCount <= 0) {
       return;
     }
+
+    if (!SESSION_DELIVERY_REQUIRED) {
+      throw new Error(
+        'Session created committed code changes, but ORCHESTRACE_SESSION_DELIVERY_REQUIRED is disabled. Re-enable delivery to enforce mandatory PR creation.',
+      );
+    }
+
+    deliveryFinalized = true;
 
     const baseBranch = await resolveBaseBranch();
-    const headBranch = await ensureDeliveryBranch(baseBranch);
+    const headBranch = await ensureDeliveryBranch(baseBranch, targetHead);
 
     const pushRes = await runGitSafeWithTimeout(
       ['push', '--set-upstream', 'origin', headBranch],
@@ -553,19 +580,24 @@ async function main(): Promise<void> {
     return 'main';
   }
 
-  async function ensureDeliveryBranch(baseBranch: string): Promise<string> {
+  async function ensureDeliveryBranch(baseBranch: string, targetHead?: string): Promise<string> {
     const branchRes = await runGitSafeWithTimeout(['rev-parse', '--abbrev-ref', 'HEAD'], SESSION_DELIVERY_GIT_TIMEOUT_MS);
     if (!branchRes.ok) {
       throw new Error(`Unable to determine current branch: ${(branchRes.error ?? branchRes.stderr) || 'git rev-parse failed'}`);
     }
 
     const currentBranch = branchRes.stdout.trim();
-    if (currentBranch && currentBranch !== 'HEAD' && currentBranch !== baseBranch) {
+    const currentHead = await getGitHeadSha();
+    const currentHeadMatchesTarget = !targetHead || (currentHead === targetHead);
+    if (currentBranch && currentBranch !== 'HEAD' && currentBranch !== baseBranch && currentHeadMatchesTarget) {
       return currentBranch;
     }
 
     const generatedBranch = `orchestrace/session-${sessionId.slice(0, 8)}-${Date.now().toString(36)}`;
-    const checkoutRes = await runGitSafeWithTimeout(['checkout', '-b', generatedBranch], SESSION_DELIVERY_GIT_TIMEOUT_MS);
+    const checkoutArgs = targetHead
+      ? ['checkout', '-B', generatedBranch, targetHead]
+      : ['checkout', '-b', generatedBranch];
+    const checkoutRes = await runGitSafeWithTimeout(checkoutArgs, SESSION_DELIVERY_GIT_TIMEOUT_MS);
     if (!checkoutRes.ok) {
       throw new Error(`Unable to create delivery branch ${generatedBranch}: ${(checkoutRes.error ?? checkoutRes.stderr) || 'git checkout failed'}`);
     }

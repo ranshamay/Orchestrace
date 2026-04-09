@@ -827,6 +827,83 @@ describe('mode tools smoke test', () => {
 });
 
 describe('subagent prompt enrichment', () => {
+  it('subagent_spawn validates args synchronously and skips sub-agent invocation on malformed payload', async () => {
+    const cwd = await makeWorkspace();
+    const runSubAgent = vi.fn(async () => ({ text: 'unexpected dispatch' }));
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    try {
+      const toolset = createAgentToolset({
+        cwd,
+        phase: 'planning',
+        taskType: 'code',
+        graphId: 'g1',
+        taskId: 't-sync-validation-single',
+        runSubAgent,
+      });
+
+      const result = await toolset.executeTool({
+        id: '1',
+        name: 'subagent_spawn',
+        arguments: {
+          contextPacket: {
+            objective: 'Investigate failing task',
+            boundaries: {
+              timeoutMs: 0,
+            },
+          },
+        },
+      });
+
+      expect(result.isError).toBe(true);
+      expect(result.content).toContain('subagent_spawn argument validation failed before spawn');
+      expect(result.content).toContain('contextPacket.boundaries.timeoutMs');
+      expect(runSubAgent).not.toHaveBeenCalled();
+      expect(warnSpy).toHaveBeenCalled();
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('subagent_spawn_batch validates args synchronously and skips all sub-agent invocations on malformed payload', async () => {
+    const cwd = await makeWorkspace();
+    const runSubAgent = vi.fn(async () => ({ text: 'unexpected dispatch' }));
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    try {
+      const toolset = createAgentToolset({
+        cwd,
+        phase: 'planning',
+        taskType: 'code',
+        graphId: 'g1',
+        taskId: 't-sync-validation-batch',
+        runSubAgent,
+      });
+
+      const result = await toolset.executeTool({
+        id: '1',
+        name: 'subagent_spawn_batch',
+        arguments: {
+          agents: [
+            {
+              contextPacket: {
+                objective: 'Review code',
+              },
+              unexpected: true,
+            },
+          ],
+        },
+      });
+
+      expect(result.isError).toBe(true);
+      expect(result.content).toContain('subagent_spawn_batch argument validation failed before spawn');
+      expect(result.content).toContain('agents.0.unexpected');
+      expect(runSubAgent).not.toHaveBeenCalled();
+      expect(warnSpy).toHaveBeenCalled();
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
   it('prefers provided context packet snippets over disk reads', async () => {
     const cwd = await makeWorkspace();
     const delegatedPrompts: string[] = [];

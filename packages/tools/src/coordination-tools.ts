@@ -887,6 +887,29 @@ function usageOrZero(usage: { input: number; output: number; cost: number } | un
   };
 }
 
+function validateSubAgentToolArgs(
+  toolName: SubAgentToolName,
+  schema: typeof subAgentSpawnArgsSchema | typeof subAgentSpawnBatchArgsSchema,
+  args: Record<string, unknown>,
+): { ok: true } | { ok: false; message: string } {
+  const errors = [...Value.Errors(schema, args)];
+  if (errors.length === 0) {
+    return { ok: true };
+  }
+
+  const issues = errors.slice(0, 8).map((error) => formatValidationIssue(error.path, error.message));
+  const message = `${toolName} argument validation failed before spawn: ${issues.join('; ')}`;
+  console.warn(`[coordination-tools] ${message}`);
+  return { ok: false, message };
+}
+
+function formatValidationIssue(path: string, message: string): string {
+  const normalizedPath = path
+    ? path.replace(/^\//, '').replace(/\//g, '.')
+    : '(root)';
+  return `${normalizedPath}: ${message}`;
+}
+
 async function buildSubAgentRequestFromToolArgs(
   cwd: string,
   toolArgs: Record<string, unknown>,
