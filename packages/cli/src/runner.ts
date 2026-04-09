@@ -73,6 +73,9 @@ const TRACE_LOG_STREAM_DELTAS = resolveBooleanEnv(process.env.ORCHESTRACE_TRACE_
 const AUTO_CHECKPOINT_ENABLED = resolveBooleanEnv(process.env.ORCHESTRACE_AUTO_CHECKPOINT, true);
 const AUTO_CHECKPOINT_EVERY_N_EDITS = resolvePositiveIntEnv(process.env.ORCHESTRACE_AUTO_CHECKPOINT_EVERY_N_EDITS, 3);
 const AUTO_CHECKPOINT_GIT_TIMEOUT_MS = resolvePositiveIntEnv(process.env.ORCHESTRACE_AUTO_CHECKPOINT_GIT_TIMEOUT_MS, 15_000);
+const SESSION_DELIVERY_REQUIRED = resolveBooleanEnv(process.env.ORCHESTRACE_SESSION_DELIVERY_REQUIRED, true);
+const SESSION_DELIVERY_GIT_TIMEOUT_MS = resolvePositiveIntEnv(process.env.ORCHESTRACE_SESSION_DELIVERY_GIT_TIMEOUT_MS, 120_000);
+const SESSION_DELIVERY_API_TIMEOUT_MS = resolvePositiveIntEnv(process.env.ORCHESTRACE_SESSION_DELIVERY_API_TIMEOUT_MS, 20_000);
 const CHECKPOINT_STASH_PREFIX = 'orchestrace-checkpoint';
 const CHECKPOINT_METADATA_FILE = 'checkpoint.json';
 const execFileAsync = promisify(execFile);
@@ -96,6 +99,18 @@ interface CheckpointMetadata {
   hasUntrackedChanges?: boolean;
   dirtySummary?: string[];
   notes?: string;
+}
+
+interface PullRequestInfo {
+  number: number;
+  url: string;
+  created: boolean;
+}
+
+interface GitHubApiResponse {
+  ok: boolean;
+  status: number;
+  body: unknown;
 }
 
 // ---------------------------------------------------------------------------
@@ -277,6 +292,24 @@ async function main(): Promise<void> {
     }
   }
 
+  async function runGitSafeWithTimeout(
+    args: string[],
+    timeout: number,
+  ): Promise<{ ok: boolean; stdout: string; stderr: string; error?: string }> {
+    try {
+      const { stdout, stderr } = await execFileAsync('git', args, {
+        cwd: config.workspacePath,
+        timeout,
+      });
+      return { ok: true, stdout, stderr };
+    } catch (err) {
+      return { ok: false, stdout: '', stderr: '', error: errorMsg(err) };
+    }
+  }
+
+  const sessionHeadAtStart = await getGitHeadSha();
+  let deliveryFinalized = false;
+
   async function maybeCheckpoint(reason: 'edit-threshold' | 'todo-completed' | 'terminal', opts?: {
     todoId?: string;
     todoTitle?: string;
@@ -407,6 +440,219 @@ async function main(): Promise<void> {
       hasStagedChanges: stagedLines.length > 0,
       hasUntrackedChanges: untrackedLines.length > 0,
       dirtySummary: [...unstagedLines, ...stagedLines, ...untrackedLines.map((line) => `?? ${line}`)].slice(0, 200),
+    };
+  }
+
+  async function ensureRemoteDeliveryForCommittedSession(): Promise<void> {
+    if (deliveryFinalized || !SESSION_DELIVERY_REQUIRED) {
+      return;
+    }
+    deliveryFinalized = true;
+
+    if (!sessionHeadAtStart) {
+      return;
+    }
+
+    const currentHead = await getGitHeadSha();
+    if (!currentHead || currentHead === sessionHeadAtStart) {
+      return;
+    }
+
+    const commitCountRes = await runGitSafeWithTimeout(
+      ['rev-list', '--count', `${sessionHeadAtStart}..${currentHead}`],
+      SESSION_DELIVERY_GIT_TIMEOUT_MS,
+    );
+    if (!commitCountRes.ok) {
+      throw new Error(`Unable to determine session commit delta: ${(commitCountRes.error ?? commitCountRes.stderr) || 'git rev-list failed'}`);
+    }
+
+    const commitCount = Number.parseInt(commitCountRes.stdout.trim(), 10);
+    if (!Number.isFinite(commitCount) || commitCount <= 0) {
+      return;
+    }
+
+    const baseBranch = await resolveBaseBranch();
+    const headBranch = await ensureDeliveryBranch(baseBranch);
+
+    const pushRes = await runGitSafeWithTimeout(
+      ['push', '--set-upstream', 'origin', headBranch],
+      SESSION_DELIVERY_GIT_TIMEOUT_MS,
+    );
+    if (!pushRes.ok) {
+      throw new Error(`git push failed for ${headBranch}: ${(pushRes.error ?? pushRes.stderr) || 'unknown error'}`);
+    }
+
+    const remoteRes = await runGitSafeWithTimeout(['remote', 'get-url', 'origin'], SESSION_DELIVERY_GIT_TIMEOUT_MS);
+    if (!remoteRes.ok) {
+      throw new Error(`Unable to resolve origin remote URL: ${(remoteRes.error ?? remoteRes.stderr) || 'origin missing'}`);
+    }
+
+    const remote = parseGitHubRemote(remoteRes.stdout.trim());
+    if (!remote) {
+      throw new Error(`Origin remote is not a supported GitHub remote: ${remoteRes.stdout.trim()}`);
+    }
+
+    const token = await githubAuthManager.resolveApiKey('github').catch(() => undefined);
+    if (!token) {
+      throw new Error('GitHub auth is not configured. Connect GitHub in Settings before finishing a committed session.');
+    }
+
+    const pr = await ensurePullRequest({
+      host: remote.host,
+      owner: remote.owner,
+      repo: remote.repo,
+      headBranch,
+      baseBranch,
+      token,
+      title: `Session ${sessionId.slice(0, 8)}: ${compact(config.prompt, 72)}`,
+      body: [
+        `Automated delivery for session ${sessionId}.`,
+        '',
+        `- Source: ${config.source ?? 'user'}`,
+        `- Commits created in this session: ${commitCount}`,
+        `- Branch: ${headBranch}`,
+      ].join('\n'),
+    });
+
+    const deliveryMessage = pr.created
+      ? `Committed session changes were pushed to origin/${headBranch} and PR #${pr.number} was created: ${pr.url}`
+      : `Committed session changes were pushed to origin/${headBranch} and existing PR #${pr.number} was reused: ${pr.url}`;
+
+    await emit({
+      time: iso(),
+      type: 'session:chat-message',
+      payload: {
+        message: {
+          role: 'system',
+          content: deliveryMessage,
+          time: iso(),
+        },
+      },
+    });
+  }
+
+  async function resolveBaseBranch(): Promise<string> {
+    const remoteHead = await runGitSafeWithTimeout(['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'], SESSION_DELIVERY_GIT_TIMEOUT_MS);
+    if (remoteHead.ok) {
+      const ref = remoteHead.stdout.trim();
+      if (ref.startsWith('origin/')) {
+        const branch = ref.slice('origin/'.length).trim();
+        if (branch) {
+          return branch;
+        }
+      }
+    }
+
+    for (const candidate of ['main', 'master']) {
+      const head = await runGitSafeWithTimeout(['ls-remote', '--heads', 'origin', candidate], SESSION_DELIVERY_GIT_TIMEOUT_MS);
+      if (head.ok && head.stdout.trim()) {
+        return candidate;
+      }
+    }
+
+    return 'main';
+  }
+
+  async function ensureDeliveryBranch(baseBranch: string): Promise<string> {
+    const branchRes = await runGitSafeWithTimeout(['rev-parse', '--abbrev-ref', 'HEAD'], SESSION_DELIVERY_GIT_TIMEOUT_MS);
+    if (!branchRes.ok) {
+      throw new Error(`Unable to determine current branch: ${(branchRes.error ?? branchRes.stderr) || 'git rev-parse failed'}`);
+    }
+
+    const currentBranch = branchRes.stdout.trim();
+    if (currentBranch && currentBranch !== 'HEAD' && currentBranch !== baseBranch) {
+      return currentBranch;
+    }
+
+    const generatedBranch = `orchestrace/session-${sessionId.slice(0, 8)}-${Date.now().toString(36)}`;
+    const checkoutRes = await runGitSafeWithTimeout(['checkout', '-b', generatedBranch], SESSION_DELIVERY_GIT_TIMEOUT_MS);
+    if (!checkoutRes.ok) {
+      throw new Error(`Unable to create delivery branch ${generatedBranch}: ${(checkoutRes.error ?? checkoutRes.stderr) || 'git checkout failed'}`);
+    }
+
+    return generatedBranch;
+  }
+
+  async function ensurePullRequest(params: {
+    host: string;
+    owner: string;
+    repo: string;
+    headBranch: string;
+    baseBranch: string;
+    token: string;
+    title: string;
+    body: string;
+  }): Promise<PullRequestInfo> {
+    const createRes = await callGitHubApi(params, 'POST', `/repos/${params.owner}/${params.repo}/pulls`, {
+      title: params.title,
+      body: params.body,
+      head: params.headBranch,
+      base: params.baseBranch,
+      maintainer_can_modify: true,
+    });
+
+    if (createRes.ok) {
+      const created = createRes.body as { number?: unknown; html_url?: unknown };
+      const number = typeof created.number === 'number' ? created.number : undefined;
+      const url = typeof created.html_url === 'string' ? created.html_url : undefined;
+      if (!number || !url) {
+        throw new Error('GitHub create PR response was missing number or html_url.');
+      }
+      return { number, url, created: true };
+    }
+
+    if (createRes.status === 422) {
+      const headQuery = encodeURIComponent(`${params.owner}:${params.headBranch}`);
+      const existingRes = await callGitHubApi(
+        params,
+        'GET',
+        `/repos/${params.owner}/${params.repo}/pulls?state=open&head=${headQuery}&base=${encodeURIComponent(params.baseBranch)}`,
+      );
+      if (existingRes.ok && Array.isArray(existingRes.body) && existingRes.body.length > 0) {
+        const existing = existingRes.body[0] as { number?: unknown; html_url?: unknown };
+        const number = typeof existing.number === 'number' ? existing.number : undefined;
+        const url = typeof existing.html_url === 'string' ? existing.html_url : undefined;
+        if (number && url) {
+          return { number, url, created: false };
+        }
+      }
+    }
+
+    throw new Error(`Unable to create pull request: ${formatGitHubApiError(createRes)}`);
+  }
+
+  async function callGitHubApi(
+    params: { host: string; token: string },
+    method: 'GET' | 'POST',
+    path: string,
+    body?: Record<string, unknown>,
+  ): Promise<GitHubApiResponse> {
+    const apiBase = buildGitHubApiBaseUrl(params.host);
+    const response = await fetch(`${apiBase}${path}`, {
+      method,
+      headers: {
+        Accept: 'application/vnd.github+json',
+        Authorization: `Bearer ${params.token}`,
+        'Content-Type': 'application/json',
+        'User-Agent': 'orchestrace-runner',
+        'X-GitHub-Api-Version': '2022-11-28',
+      },
+      body: body ? JSON.stringify(body) : undefined,
+      signal: AbortSignal.timeout(SESSION_DELIVERY_API_TIMEOUT_MS),
+    });
+
+    const contentType = response.headers.get('content-type') ?? '';
+    let responseBody: unknown;
+    if (contentType.includes('application/json')) {
+      responseBody = await response.json().catch(() => undefined);
+    } else {
+      responseBody = await response.text().catch(() => undefined);
+    }
+
+    return {
+      ok: response.ok,
+      status: response.status,
+      body: responseBody,
     };
   }
 
@@ -648,15 +894,33 @@ async function main(): Promise<void> {
         payload: { output: { text: outputText } },
       });
 
-      if (toolResult.isError) {
-        await emit({ time: iso(), type: 'session:error-change', payload: { error: outputText } });
-        const failedStatus = makeLlmStatus('failed', outputText, 'tool_runtime', 'task', 'implementation');
+      await maybeCheckpoint('terminal');
+      let deliveryError: string | undefined;
+      try {
+        await ensureRemoteDeliveryForCommittedSession();
+      } catch (error) {
+        deliveryError = errorMsg(error);
+      }
+
+      if (toolResult.isError || deliveryError) {
+        const errorLines = [toolResult.isError ? outputText : undefined, deliveryError ? `Remote delivery failed: ${deliveryError}` : undefined]
+          .filter((line): line is string => Boolean(line));
+        const errorText = errorLines.join('\n');
+        await emit({ time: iso(), type: 'session:error-change', payload: { error: errorText } });
+        const failedStatus = makeLlmStatus(
+          'failed',
+          errorText,
+          toolResult.isError ? 'tool_runtime' : 'delivery_failure',
+          'task',
+          'implementation',
+        );
         lastLlmStatusEmission = {
           key: llmStatusIdentityKey(failedStatus),
           emittedAt: parseTimestamp(failedStatus.updatedAt),
         };
         await emit({ time: iso(), type: 'session:llm-status-change', payload: { llmStatus: failedStatus } });
         await emit({ time: iso(), type: 'session:status-change', payload: { status: 'failed' } });
+        await finalizeCheckpoint('failed', iso());
         clearInterval(heartbeatInterval);
         process.exit(1);
       }
@@ -673,6 +937,7 @@ async function main(): Promise<void> {
         type: 'session:chat-message',
         payload: { message: { role: 'assistant', content: outputText, time: iso() } },
       });
+      await finalizeCheckpoint('completed', iso());
       clearInterval(heartbeatInterval);
       process.exit(0);
     }
@@ -914,13 +1179,26 @@ async function main(): Promise<void> {
     resetThinkingCircuitBreaker(thinkingCircuitBreaker);
     await emit({ time: t, type: 'session:output-set', payload: { output } });
     await maybeCheckpoint('terminal');
+    let deliveryError: string | undefined;
+    try {
+      await ensureRemoteDeliveryForCommittedSession();
+    } catch (error) {
+      deliveryError = errorMsg(error);
+    }
 
-    if (failed) {
-      const error = failedOutput?.error ?? 'Execution failed';
+    const terminalFailed = failed || Boolean(deliveryError);
+
+    if (terminalFailed) {
+      const error = [failedOutput?.error ?? (failed ? 'Execution failed' : undefined), deliveryError ? `Remote delivery failed: ${deliveryError}` : undefined]
+        .filter((line): line is string => Boolean(line))
+        .join('\n') || 'Execution failed';
+      const failureType = failedOutput?.failureType ?? (deliveryError ? 'delivery_failure' : undefined);
       await emit({ time: t, type: 'session:error-change', payload: { error } });
-      const llmStatus = makeLlmStatus('failed', failedOutput?.failureType
-        ? `${failedOutput.failureType}: ${failedOutput.error || 'Execution failed.'}`
-        : (failedOutput?.error || 'Execution failed.'), failedOutput?.failureType);
+      const llmStatus = makeLlmStatus(
+        'failed',
+        failureType ? `${failureType}: ${error}` : error,
+        failureType,
+      );
       lastLlmStatusEmission = {
         key: llmStatusIdentityKey(llmStatus),
         emittedAt: parseTimestamp(llmStatus.updatedAt),
@@ -937,7 +1215,7 @@ async function main(): Promise<void> {
       await emit({ time: t, type: 'session:status-change', payload: { status: 'completed' } });
     }
 
-    await finalizeCheckpoint(failed ? 'failed' : 'completed', t);
+    await finalizeCheckpoint(terminalFailed ? 'failed' : 'completed', t);
 
     // Write assistant response as chat message
     if (primaryOutput?.response) {
@@ -945,7 +1223,7 @@ async function main(): Promise<void> {
     }
 
     clearInterval(heartbeatInterval);
-    process.exit(failed ? 1 : 0);
+    process.exit(terminalFailed ? 1 : 0);
   } catch (error) {
     if (cancelled) {
       await markCheckpointInterrupted(iso(), 'Interrupted during cancellation path.');
@@ -956,9 +1234,18 @@ async function main(): Promise<void> {
     const t = iso();
     const errorText = errorMsg(error);
     resetThinkingCircuitBreaker(thinkingCircuitBreaker);
-    await emit({ time: t, type: 'session:error-change', payload: { error: errorText } });
     await maybeCheckpoint('terminal');
-    const llmStatus = makeLlmStatus('failed', errorText);
+    let deliveryError: string | undefined;
+    try {
+      await ensureRemoteDeliveryForCommittedSession();
+    } catch (deliveryFailure) {
+      deliveryError = errorMsg(deliveryFailure);
+    }
+    const finalError = deliveryError
+      ? `${errorText}\nRemote delivery failed: ${deliveryError}`
+      : errorText;
+    await emit({ time: t, type: 'session:error-change', payload: { error: finalError } });
+    const llmStatus = makeLlmStatus('failed', finalError, deliveryError ? 'delivery_failure' : undefined);
     lastLlmStatusEmission = {
       key: llmStatusIdentityKey(llmStatus),
       emittedAt: parseTimestamp(llmStatus.updatedAt),
@@ -1200,6 +1487,80 @@ function str(value: unknown): string {
 function compact(text: string, maxChars: number): string {
   const c = text.replace(/\s+/g, ' ').trim();
   return c.length <= maxChars ? c : `${c.slice(0, Math.max(0, maxChars - 3))}...`;
+}
+
+interface ParsedGitHubRemote {
+  host: string;
+  owner: string;
+  repo: string;
+}
+
+function parseGitHubRemote(remoteUrl: string): ParsedGitHubRemote | undefined {
+  const trimmed = remoteUrl.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+
+  const sshMatch = trimmed.match(/^git@([^:]+):(.+)$/);
+  if (sshMatch) {
+    return normalizeGitHubRemote(sshMatch[1], sshMatch[2]);
+  }
+
+  const sshProtocolMatch = trimmed.match(/^ssh:\/\/git@([^/]+)\/(.+)$/);
+  if (sshProtocolMatch) {
+    return normalizeGitHubRemote(sshProtocolMatch[1], sshProtocolMatch[2]);
+  }
+
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol === 'https:' || parsed.protocol === 'http:') {
+      return normalizeGitHubRemote(parsed.hostname, parsed.pathname.replace(/^\/+/, ''));
+    }
+  } catch {
+    return undefined;
+  }
+
+  return undefined;
+}
+
+function normalizeGitHubRemote(host: string, path: string): ParsedGitHubRemote | undefined {
+  const cleanHost = host.trim().toLowerCase();
+  const cleanPath = path.trim().replace(/\.git$/, '').replace(/^\/+/, '');
+  const parts = cleanPath.split('/').filter(Boolean);
+  if (parts.length < 2) {
+    return undefined;
+  }
+
+  return {
+    host: cleanHost,
+    owner: parts[0],
+    repo: parts[1],
+  };
+}
+
+function buildGitHubApiBaseUrl(host: string): string {
+  const normalizedHost = host.trim().toLowerCase();
+  if (normalizedHost === 'github.com') {
+    return 'https://api.github.com';
+  }
+  return `https://${normalizedHost}/api/v3`;
+}
+
+function formatGitHubApiError(response: GitHubApiResponse): string {
+  const statusPart = `HTTP ${response.status}`;
+  if (response.body && typeof response.body === 'object' && !Array.isArray(response.body)) {
+    const body = response.body as Record<string, unknown>;
+    const message = typeof body.message === 'string' ? body.message : undefined;
+    if (message) {
+      return `${statusPart}: ${message}`;
+    }
+  }
+
+  if (typeof response.body === 'string' && response.body.trim()) {
+    return `${statusPart}: ${response.body.trim()}`;
+  }
+
+  return statusPart;
 }
 
 function previewToolPayload(value: string | undefined): string {

@@ -249,6 +249,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
   const hmrClients = new Set<ServerResponse>();
   const workStreamClients = new Map<string, Set<ServerResponse>>();
   const chatStreamClients = new Map<string, Set<ServerResponse>>();
+  const sessionStatusStreamClients = new Set<ServerResponse>();
   const logStreamClients = new Set<ServerResponse>();
   const uiStatePath = join(workspaceManager.getRootDir(), '.orchestrace', 'ui-state.json');
 
@@ -262,6 +263,57 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     void eventStore.append(sessionId, event).catch((err) => {
       console.error(`[orchestrace][event-store] Failed to append event for ${sessionId}:`, err);
     });
+  }
+
+  function serializeSessionsSnapshot(): Record<string, unknown>[] {
+    return [...workSessions.values()]
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+      .map((session) => serializeWorkSession(session, sessionTodos.get(session.id) ?? []));
+  }
+
+  function broadcastSessionStatusReady(target: ServerResponse): void {
+    sendSse(target, 'ready', {
+      sessions: serializeSessionsSnapshot(),
+      time: now(),
+    });
+  }
+
+  function broadcastSessionStatusUpsert(session: WorkSession): void {
+    if (sessionStatusStreamClients.size === 0) {
+      return;
+    }
+
+    const payload = {
+      session: serializeWorkSession(session, sessionTodos.get(session.id) ?? []),
+      time: now(),
+    };
+
+    for (const client of [...sessionStatusStreamClients]) {
+      try {
+        sendSse(client, 'session-upsert', payload);
+      } catch {
+        sessionStatusStreamClients.delete(client);
+      }
+    }
+  }
+
+  function broadcastSessionStatusDelete(id: string): void {
+    if (sessionStatusStreamClients.size === 0) {
+      return;
+    }
+
+    const payload = {
+      id,
+      time: now(),
+    };
+
+    for (const client of [...sessionStatusStreamClients]) {
+      try {
+        sendSse(client, 'session-delete', payload);
+      } catch {
+        sessionStatusStreamClients.delete(client);
+      }
+    }
   }
 
   /**
@@ -445,6 +497,11 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
               if (event.type !== 'session:stream-delta') {
                 broadcastSessionUpdate(workStreamClients, sessionId, serializeWorkSession(session, sessionTodos.get(sessionId) ?? []));
               }
+
+              if (event.type === 'session:status-change' || event.type === 'session:llm-status-change' || event.type === 'session:error-change') {
+                broadcastSessionStatusUpsert(session);
+              }
+
               uiStatePersistence.schedule();
             });
           } else {
@@ -994,6 +1051,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       console.error(`[orchestrace][event-store] Failed to delete session ${id}:`, err);
     });
 
+    broadcastSessionStatusDelete(id);
+
     uiStatePersistence.schedule();
     return true;
   }
@@ -1214,6 +1273,10 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       // Broadcast session state for all events except high-frequency stream deltas and observer events.
       if (event.type !== 'session:stream-delta' && event.type !== 'session:observer-status-change' && event.type !== 'session:observer-finding') {
         broadcastSessionUpdate(workStreamClients, id, serializeWorkSession(session, sessionTodos.get(id) ?? []));
+      }
+
+      if (event.type === 'session:status-change' || event.type === 'session:llm-status-change' || event.type === 'session:error-change') {
+        broadcastSessionStatusUpsert(session);
       }
 
       uiStatePersistence.schedule();
@@ -1455,6 +1518,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     });
 
     broadcastSessionUpdate(workStreamClients, session.id, serializeWorkSession(session, sessionTodos.get(session.id) ?? []));
+    broadcastSessionStatusUpsert(session);
     uiStatePersistence.schedule();
 
     await launchSessionRunner(session);
@@ -1802,6 +1866,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       };
     }
 
+    broadcastSessionStatusUpsert(session);
+
     await launchSessionRunner(session);
 
     return { id };
@@ -1959,6 +2025,23 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           if (group.size === 0) {
             workStreamClients.delete(id);
           }
+        });
+        return;
+      }
+
+      if (req.method === 'GET' && pathname === '/api/work/sessions/stream') {
+        res.writeHead(200, {
+          'Content-Type': 'text/event-stream',
+          'Cache-Control': 'no-cache, no-transform',
+          Connection: 'keep-alive',
+        });
+        res.write(': connected\n\n');
+
+        sessionStatusStreamClients.add(res);
+        broadcastSessionStatusReady(res);
+
+        req.on('close', () => {
+          sessionStatusStreamClients.delete(res);
         });
         return;
       }
@@ -2540,6 +2623,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
             llmStatus: session.llmStatus,
             time: now(),
           });
+          broadcastSessionStatusUpsert(session);
 
           // Dual-write: cancellation events
           emitSessionEvent(session.id, {
@@ -2580,9 +2664,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       }
 
       if (req.method === 'GET' && pathname === '/api/work') {
-        const sessions = [...workSessions.values()]
-          .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
-          .map((session) => serializeWorkSession(session, sessionTodos.get(session.id) ?? []));
+        const sessions = serializeSessionsSnapshot();
         sendJson(res, 200, { sessions });
         return;
       }
@@ -3829,6 +3911,14 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     for (const [id] of chatStreamClients) {
       closeWorkStream(chatStreamClients, id);
     }
+    for (const client of sessionStatusStreamClients) {
+      try {
+        client.end();
+      } catch {
+        // ignore close errors
+      }
+    }
+    sessionStatusStreamClients.clear();
   });
 }
 
