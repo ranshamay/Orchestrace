@@ -13,7 +13,8 @@ import type {
 } from '../dag/types.js';
 import type { TaskExecutionContext } from '../dag/scheduler.js';
 import { runDag } from '../dag/scheduler.js';
-import type { LlmAdapter, LlmToolset } from '@orchestrace/provider';
+import type { ApiKeyRefreshOptions, LlmAdapter, LlmToolset } from '@orchestrace/provider';
+
 import { classifyTrivialTaskNode, classifyTaskEffort, resolveTrivialTaskGateConfig } from './task-complexity.js';
 import type { TaskEffort } from './task-complexity.js';
 import {
@@ -71,7 +72,8 @@ export interface OrchestratorConfig extends RunnerConfig {
   /** Callback used to approve/reject persisted plans. */
   onPlanApproval?: (request: PlanApprovalRequest) => Promise<boolean>;
   /** Optional provider auth resolver (env, OAuth store, secret manager, etc.). */
-  resolveApiKey?: (provider: string) => Promise<string | undefined>;
+    resolveApiKey?: (provider: string, options?: ApiKeyRefreshOptions) => Promise<string | undefined>;
+
   /** Optional factory for phase-specific agent tools. */
   createToolset?: (params: {
     phase: 'planning' | 'implementation';

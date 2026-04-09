@@ -10,11 +10,13 @@ import type {
 } from '../dag/types.js';
 import { validate } from '../validation/validator.js';
 import type {
+  ApiKeyRefreshOptions,
   LlmAdapter,
   LlmAgent,
   LlmToolCallEvent,
   LlmToolset,
 } from '@orchestrace/provider';
+
 import { buildRoleSystemPrompt, buildRoleTaskPrompt, roleToPhase, type AgentRole } from './role-config.js';
 import {
   buildCompletionFailureRetryHint,
@@ -43,7 +45,8 @@ export interface SpawnRoleAgentParams {
     attempt?: number;
     taskRequiresWrites: boolean;
   }) => LlmToolset | undefined;
-  resolveApiKey?: (provider: string) => Promise<string | undefined>;
+    resolveApiKey?: (provider: string, options?: ApiKeyRefreshOptions) => Promise<string | undefined>;
+
   taskRequiresWrites: boolean;
 }
 
@@ -64,9 +67,10 @@ export async function spawnRoleAgent(params: SpawnRoleAgentParams): Promise<LlmA
 
   const phase = roleToPhase(role);
   const apiKey = await resolveApiKey?.(model.provider);
-  const refreshApiKey = resolveApiKey
-    ? async () => resolveApiKey(model.provider)
+      const refreshApiKey = resolveApiKey
+    ? async (options?: ApiKeyRefreshOptions) => resolveApiKey(model.provider, options)
     : undefined;
+
 
   return llm.spawnAgent({
     provider: model.provider,

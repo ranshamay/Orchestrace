@@ -8,7 +8,8 @@
 // ---------------------------------------------------------------------------
 
 import type { EventStore, SessionEvent } from '@orchestrace/store';
-import type { LlmAdapter } from '@orchestrace/provider';
+import type { ApiKeyRefreshOptions, LlmAdapter } from '@orchestrace/provider';
+
 import type { ObserverConfig, FindingCategory, FindingSeverity } from './types.js';
 import { ALL_FINDING_CATEGORIES } from './types.js';
 import { REALTIME_OBSERVER_SYSTEM_PROMPT } from './prompts.js';
@@ -96,7 +97,8 @@ export class SessionObserver {
   private readonly llm: LlmAdapter;
   private readonly config: ObserverConfig;
   private readonly emit: ObserverEventEmitter;
-  private readonly resolveApiKey: (provider: string) => Promise<string | undefined>;
+    private readonly resolveApiKey: (provider: string, options?: ApiKeyRefreshOptions) => Promise<string | undefined>;
+
   private readonly ctx: AccumulatedContext;
   private state: SessionObserverState;
   private unwatch: (() => void) | null = null;
@@ -111,7 +113,8 @@ export class SessionObserver {
     llm: LlmAdapter;
     config: ObserverConfig;
     emit: ObserverEventEmitter;
-    resolveApiKey: (provider: string) => Promise<string | undefined>;
+        resolveApiKey: (provider: string, options?: ApiKeyRefreshOptions) => Promise<string | undefined>;
+
   }) {
     this.sessionId = options.sessionId;
     this.eventStore = options.eventStore;
@@ -363,7 +366,7 @@ export class SessionObserver {
         prompt,
         signal: this.abortController.signal,
                 apiKey,
-        refreshApiKey: () => this.resolveApiKey(provider),
+                        refreshApiKey: (options) => this.resolveApiKey(provider, options),
         allowAuthRefreshRetry: true,
 
 

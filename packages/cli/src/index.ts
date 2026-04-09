@@ -538,7 +538,7 @@ async function runGraph(
             ?? 'You are a focused sub-agent. Solve the given sub-task and return concise actionable output.',
           toolset: subAgentToolset,
                     apiKey: await authManager.resolveApiKey(subProvider),
-          refreshApiKey: () => authManager.resolveApiKey(subProvider),
+                    refreshApiKey: (options) => authManager.resolveApiKey(subProvider, options),
           allowAuthRefreshRetry: true,
 
 

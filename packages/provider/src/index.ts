@@ -1,8 +1,10 @@
 export { PiAiAdapter } from './adapter.js';
 export { ProviderAuthManager } from './auth.js';
 export type {
-	AgentModelConfig,
+		AgentModelConfig,
+	ApiKeyRefreshOptions,
 	LlmAdapter,
+
 	LlmAgent,
 	LlmImagePart,
 	LlmModelInfo,
@@ -25,8 +27,10 @@ export type {
 	ProviderAuthManagerOptions,
 	ProviderAuthStatus,
 	ProviderInfo,
-	ProviderReadinessResult,
+		ProviderReadinessResult,
 	ProviderReadinessErrorCode,
 	ProviderTokenTtlStatus,
+	ResolveApiKeyOptions,
 } from './auth.js';
+
 

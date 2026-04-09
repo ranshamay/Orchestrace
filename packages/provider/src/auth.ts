@@ -73,11 +73,18 @@ export interface ResolveApiKeyOptions {
    */
   allowRefresh?: boolean;
   /**
+   * Force OAuth refresh even when stored credentials appear healthy.
+   * Useful after upstream auth failures (e.g. server-reported token expiration)
+   * to avoid reusing a stale cached access token.
+   */
+  forceRefresh?: boolean;
+  /**
    * Optional minimum remaining TTL required for a resolved token.
    * For GitHub Copilot, tokens below this threshold trigger refresh/reacquisition logic.
    */
   minimumTtlSeconds?: number;
 }
+
 
 export type ProviderReadinessErrorCode = 'provider_missing_credentials';
 
@@ -210,10 +217,12 @@ export class ProviderAuthManager {
     return { path: this.authFilePath, removed };
   }
 
-        async resolveApiKey(providerId: string, options: ResolveApiKeyOptions = {}): Promise<string | undefined> {
+                async resolveApiKey(providerId: string, options: ResolveApiKeyOptions = {}): Promise<string | undefined> {
     const store = await this.loadStore();
     const allowRefresh = options.allowRefresh ?? true;
+    const forceRefresh = options.forceRefresh === true;
     const minimumTtlSeconds = normalizeMinimumTtlSeconds(options.minimumTtlSeconds);
+
 
     const storedApiKey = store.apiKeys[providerId];
     if (storedApiKey) {
@@ -226,7 +235,8 @@ export class ProviderAuthManager {
         if (providerId === GITHUB_COPILOT_PROVIDER_ID) {
           const ttl = computeTokenTtlStatus(providerId, oauthCredentials);
           const belowMinimumTtl = isTokenBelowMinimumTtl(ttl, minimumTtlSeconds);
-          if (!ttl || ttl.refreshRecommended || belowMinimumTtl) {
+                    if (forceRefresh || !ttl || ttl.refreshRecommended || belowMinimumTtl) {
+
             if (!allowRefresh) {
               return undefined;
             }

@@ -4,7 +4,8 @@
 // Sends session summaries to an LLM and extracts structured findings.
 // ---------------------------------------------------------------------------
 
-import type { LlmAdapter } from '@orchestrace/provider';
+import type { ApiKeyRefreshOptions, LlmAdapter } from '@orchestrace/provider';
+
 import {
   ALL_FINDING_CATEGORIES,
   type AnalysisResult,
@@ -24,7 +25,8 @@ export async function analyzeSessionSummaries(
   config: ObserverConfig,
   summaries: SessionSummary[],
   signal?: AbortSignal,
-  resolveApiKey?: (provider: string) => Promise<string | undefined>,
+    resolveApiKey?: (provider: string, options?: ApiKeyRefreshOptions) => Promise<string | undefined>,
+
 ): Promise<AnalysisResult> {
   if (summaries.length === 0) return { findings: [] };
 
@@ -43,7 +45,7 @@ export async function analyzeSessionSummaries(
     prompt: userPrompt,
     signal,
         apiKey,
-    refreshApiKey: resolveApiKey ? () => resolveApiKey(config.provider) : undefined,
+            refreshApiKey: resolveApiKey ? (options) => resolveApiKey(config.provider, options) : undefined,
     allowAuthRefreshRetry: true,
 
 

@@ -6,7 +6,8 @@
 // issues, and improvement opportunities in the running system.
 // ---------------------------------------------------------------------------
 
-import type { LlmAdapter } from '@orchestrace/provider';
+import type { ApiKeyRefreshOptions, LlmAdapter } from '@orchestrace/provider';
+
 import type { ObserverConfig, FindingCategory, FindingSeverity } from './types.js';
 import { ALL_FINDING_CATEGORIES } from './types.js';
 import type { BackendLogger } from './backend-logger.js';
@@ -56,7 +57,8 @@ export interface LogWatcherOptions {
   llm: LlmAdapter;
   config: ObserverConfig;
   logger: BackendLogger;
-  resolveApiKey: (provider: string) => Promise<string | undefined>;
+    resolveApiKey: (provider: string, options?: ApiKeyRefreshOptions) => Promise<string | undefined>;
+
   /** Called when status or findings change. */
   onStateChange?: (state: LogWatcherState) => void;
   /** Called only with findings newly detected in the latest analysis batch. */
@@ -122,7 +124,8 @@ Respond ONLY with valid JSON matching this schema:
 export class LogWatcher {
   private readonly llm: LlmAdapter;
   private config: ObserverConfig;
-  private readonly resolveApiKey: (provider: string) => Promise<string | undefined>;
+    private readonly resolveApiKey: (provider: string, options?: ApiKeyRefreshOptions) => Promise<string | undefined>;
+
   private readonly onStateChange?: (state: LogWatcherState) => void;
   private readonly onFindings?: (findings: LogFinding[]) => void | Promise<void>;
   private readonly batchSize: number;
@@ -239,7 +242,7 @@ export class LogWatcher {
         prompt,
         signal: this.abortController.signal,
                 apiKey,
-        refreshApiKey: () => this.resolveApiKey(provider),
+                        refreshApiKey: (options) => this.resolveApiKey(provider, options),
         allowAuthRefreshRetry: true,
 
 

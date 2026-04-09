@@ -146,7 +146,7 @@ export class PiAiAdapter implements LlmAdapter {
             if (canRetryAuth) {
               authRetryUsed = true;
               try {
-                activeApiKey = await request.refreshApiKey?.();
+                                activeApiKey = await request.refreshApiKey?.({ forceRefresh: true });
               } catch {
                 // Ignore refresh errors and retry once with the current key path.
               }
@@ -162,13 +162,18 @@ export class PiAiAdapter implements LlmAdapter {
             }
 
 
-            throw createLlmFailureError({
+                        throw createLlmFailureError({
               provider: request.provider,
               model: request.model,
               failureType,
-              message: mapped.message,
+              message: enrichAuthErrorMessage({
+                provider: request.provider,
+                failureType,
+                message: mapped.message,
+              }),
               cause: error,
             });
+
           }
 
           let text = '';
@@ -228,7 +233,7 @@ export class PiAiAdapter implements LlmAdapter {
                         if (canRetryAuth) {
               authRetryUsed = true;
               try {
-                activeApiKey = await request.refreshApiKey?.();
+                                activeApiKey = await request.refreshApiKey?.({ forceRefresh: true });
               } catch {
                 // Ignore refresh errors and fall through to throw.
               }
@@ -241,13 +246,18 @@ export class PiAiAdapter implements LlmAdapter {
               continue;
             }
 
-            throw createLlmFailureError({
+                        throw createLlmFailureError({
 
               provider: request.provider,
               model: request.model,
               failureType,
-              message: `Model ${request.provider}/${request.model} failed. ${reason}`,
+              message: enrichAuthErrorMessage({
+                provider: request.provider,
+                failureType,
+                message: `Model ${request.provider}/${request.model} failed. ${reason}`,
+              }),
             });
+
           }
 
           if (response.content.length === 0 && totalTokens === 0) {
@@ -388,7 +398,25 @@ export class PiAiAdapter implements LlmAdapter {
 
 const MISSING_TOOL_CALL_MAPPING_RE = /(no tool call found\s+for\s+function\s+call\s+output|function call output\s+with\s+call_id)/i;
 
+function enrichAuthErrorMessage(params: {
+  provider: string;
+  failureType: ReturnType<typeof classifyLlmFailure>;
+  message: string;
+}): string {
+  const { provider, failureType, message } = params;
+  if (failureType !== 'auth' || provider !== 'github-copilot') {
+    return message;
+  }
+
+  if (!/token expired|ide token expired/i.test(message)) {
+    return message;
+  }
+
+  return `${message} Re-authenticate with \`orchestrace auth github-copilot\` and retry.`;
+}
+
 function isMissingToolCallMappingFailureMessage(message: string | undefined): boolean {
+
   if (typeof message !== 'string') {
     return false;
   }

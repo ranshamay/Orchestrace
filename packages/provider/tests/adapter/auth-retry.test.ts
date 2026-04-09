@@ -61,7 +61,8 @@ describe('PiAiAdapter auth refresh retry', () => {
     expect(executeMock).toHaveBeenCalledTimes(1);
   });
 
-    it('refreshes credentials once and retries once only when explicitly enabled', async () => {
+      it('refreshes credentials once with forced refresh intent and retries once only when explicitly enabled', async () => {
+
     const executeMock = vi.mocked(executeWithOptionalTools);
     executeMock.mockRejectedValueOnce(new Error('401 IDE token expired: unauthorized: token expired'));
     executeMock.mockResolvedValueOnce(makeAssistantTextResponse('Recovered after refresh.') as never);
@@ -81,8 +82,10 @@ describe('PiAiAdapter auth refresh retry', () => {
     const result = await agent.complete('hello');
 
     expect(result.text).toBe('Recovered after refresh.');
-    expect(refreshApiKey).toHaveBeenCalledTimes(1);
+        expect(refreshApiKey).toHaveBeenCalledTimes(1);
+    expect(refreshApiKey).toHaveBeenCalledWith({ forceRefresh: true });
     expect(executeMock).toHaveBeenCalledTimes(2);
+
 
     const firstCall = executeMock.mock.calls[0][0] as { options: Record<string, unknown> };
     const secondCall = executeMock.mock.calls[1][0] as { options: Record<string, unknown> };
@@ -110,11 +113,34 @@ describe('PiAiAdapter auth refresh retry', () => {
       name: 'LlmFailureError',
       failureType: 'auth',
     });
-    expect(refreshApiKey).toHaveBeenCalledTimes(1);
+        expect(refreshApiKey).toHaveBeenCalledTimes(1);
+    expect(refreshApiKey).toHaveBeenCalledWith({ forceRefresh: true });
     expect(executeMock).toHaveBeenCalledTimes(2);
+
+  });
+
+    it('adds actionable Copilot re-auth guidance for token-expired auth failures', async () => {
+    const executeMock = vi.mocked(executeWithOptionalTools);
+    executeMock.mockRejectedValueOnce(new Error('401 IDE token expired: unauthorized: token expired'));
+
+    const adapter = new PiAiAdapter();
+    const agent = await adapter.spawnAgent({
+      provider: 'github-copilot',
+      model: 'gpt-5.3-codex',
+      systemPrompt: 'system',
+      apiKey: 'stale-token',
+    });
+
+    await expect(agent.complete('hello')).rejects.toMatchObject({
+      name: 'LlmFailureError',
+      failureType: 'auth',
+      message: expect.stringContaining('Re-authenticate with `orchestrace auth github-copilot` and retry.'),
+    });
+    expect(executeMock).toHaveBeenCalledTimes(1);
   });
 
   it('retries timeout once and succeeds without session-level replay pressure', async () => {
+
 
     process.env.ORCHESTRACE_LLM_TRANSIENT_RETRY_ATTEMPTS = '1';
 

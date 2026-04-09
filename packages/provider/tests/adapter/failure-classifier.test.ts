@@ -10,9 +10,14 @@ describe('classifyLlmFailure', () => {
     expect(classifyLlmFailure({ message: 'LLM request timed out after 120000ms' })).toBe('timeout');
   });
 
-  it('classifies auth errors', () => {
+    it('classifies auth errors', () => {
     expect(classifyLlmFailure({ message: '401 Unauthorized: invalid api key' })).toBe('auth');
   });
+
+  it('classifies Copilot token-expired auth failures', () => {
+    expect(classifyLlmFailure({ message: '401 IDE token expired: unauthorized: token expired' })).toBe('auth');
+  });
+
 
   it('classifies rate limit errors', () => {
     expect(classifyLlmFailure({ message: '429 too many requests' })).toBe('rate_limit');

@@ -83,7 +83,13 @@ export interface AgentModelConfig {
 }
 
 /** Options for an LLM completion request. */
+export interface ApiKeyRefreshOptions {
+  /** Force credential renewal and bypass healthy-token short-circuiting when supported. */
+  forceRefresh?: boolean;
+}
+
 export interface LlmRequest {
+
   provider: string;
   model: string;
   systemPrompt: string;
@@ -101,7 +107,8 @@ export interface LlmRequest {
    * Optional credential refresh hook.
    * Used only when `allowAuthRefreshRetry` is explicitly true.
    */
-  refreshApiKey?: () => Promise<string | undefined>;
+    refreshApiKey?: (options?: ApiKeyRefreshOptions) => Promise<string | undefined>;
+
   /**
    * Explicit opt-in for one auth-refresh retry.
    * Defaults to false so auth failures fast-fail with structured errors.
@@ -140,7 +147,8 @@ export interface SpawnAgentRequest extends AgentModelConfig {
    * Optional credential refresh hook.
    * Used only when `allowAuthRefreshRetry` is explicitly true.
    */
-  refreshApiKey?: () => Promise<string | undefined>;
+    refreshApiKey?: (options?: ApiKeyRefreshOptions) => Promise<string | undefined>;
+
   /**
    * Explicit opt-in for one auth-refresh retry.
    * Defaults to false so auth failures fast-fail with structured errors.

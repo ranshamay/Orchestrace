@@ -57,7 +57,33 @@ describe('ProviderAuthManager Copilot TTL awareness', () => {
     await writeFile(authPath, `${JSON.stringify(store, null, 2)}\n`, 'utf-8');
   }
 
+    it('forces refresh even when stored token TTL is healthy when explicitly requested', async () => {
+    const now = Math.floor(Date.now() / 1000);
+    await writeAuthStore(now + 3600);
+
+    oauthMock.getOAuthApiKey.mockResolvedValue({
+      apiKey: 'force-refreshed-token',
+      newCredentials: {
+        access: 'force-refreshed-access',
+        refresh: 'refresh-token',
+        expires: now + 7200,
+      },
+    });
+
+    const auth = new ProviderAuthManager({ authFilePath: authPath });
+    const token = await auth.resolveApiKey('github-copilot', { forceRefresh: true });
+
+    expect(token).toBe('force-refreshed-token');
+    expect(oauthMock.getOAuthApiKey).toHaveBeenCalledTimes(1);
+
+    const persisted = JSON.parse(await readFile(authPath, 'utf-8')) as {
+      oauth: Record<string, { access: string }>;
+    };
+    expect(persisted.oauth['github-copilot'].access).toBe('force-refreshed-access');
+  });
+
   it('refreshes token proactively when near expiry', async () => {
+
     const now = Math.floor(Date.now() / 1000);
     await writeAuthStore(now + 30);
 

@@ -14,7 +14,14 @@ import {
 } from '@orchestrace/core';
 import type { DagEvent, PromptSection, TaskPromptValidationErrorCode } from '@orchestrace/core';
 import { getModels } from '@mariozechner/pi-ai';
-import { PiAiAdapter, ProviderAuthManager, type LlmPromptInput, type LlmToolCallEvent } from '@orchestrace/provider';
+import {
+  PiAiAdapter,
+  ProviderAuthManager,
+  type LlmPromptInput,
+  type LlmToolCallEvent,
+  type ResolveApiKeyOptions,
+} from '@orchestrace/provider';
+
 import {
   createAgentToolset,
   createFileReadCache,
@@ -255,10 +262,11 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
   const githubAuthManager = createGithubAuthManager();
   const llm = new PiAiAdapter();
 
-    const resolveProviderApiKey = async (
+      const resolveProviderApiKey = async (
     providerId: string,
-    options?: { allowRefresh?: boolean },
+    options?: ResolveApiKeyOptions,
   ): Promise<string | undefined> => authManager.resolveApiKey(providerId, options);
+
 
 
   // -- Persistent backend log stream ------------------------------------------
@@ -846,7 +854,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
               timeoutMs: Math.min(resolveLongTurnTimeoutMs(), 20_000),
               signal,
                             apiKey: await resolveProviderApiKey(candidate.provider),
-              refreshApiKey: () => resolveProviderApiKey(candidate.provider),
+                            refreshApiKey: (options) => resolveProviderApiKey(candidate.provider, options),
               allowAuthRefreshRetry: true,
 
 
@@ -3229,7 +3237,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                       signal: subAgentSignal,
                       toolset: subAgentToolset,
                                             apiKey: await resolveProviderApiKey(subProvider),
-                      refreshApiKey: () => resolveProviderApiKey(subProvider),
+                                            refreshApiKey: (options) => resolveProviderApiKey(subProvider, options),
                       allowAuthRefreshRetry: true,
 
 
@@ -3279,7 +3287,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                 },
               }),
                             apiKey: await resolveProviderApiKey(session.provider),
-              refreshApiKey: () => resolveProviderApiKey(session.provider),
+                            refreshApiKey: (options) => resolveProviderApiKey(session.provider, options),
               allowAuthRefreshRetry: true,
 
 
@@ -3640,7 +3648,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                     signal: subAgentSignal,
                     toolset: subAgentToolset,
                                         apiKey: await resolveProviderApiKey(subProvider),
-                    refreshApiKey: () => resolveProviderApiKey(subProvider),
+                                        refreshApiKey: (options) => resolveProviderApiKey(subProvider, options),
                     allowAuthRefreshRetry: true,
 
 
@@ -3690,7 +3698,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
               },
             }),
                         apiKey: await resolveProviderApiKey(session.provider),
-            refreshApiKey: () => resolveProviderApiKey(session.provider),
+                        refreshApiKey: (options) => resolveProviderApiKey(session.provider, options),
             allowAuthRefreshRetry: true,
 
 

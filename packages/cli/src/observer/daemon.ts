@@ -8,7 +8,8 @@
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { EventStore } from '@orchestrace/store';
-import type { LlmAdapter } from '@orchestrace/provider';
+import type { ApiKeyRefreshOptions, LlmAdapter } from '@orchestrace/provider';
+
 import {
   ALL_FINDING_CATEGORIES,
   DEFAULT_OBSERVER_CONFIG,
@@ -59,7 +60,8 @@ export interface ObserverDaemonOptions {
   /** Function to create a new work session (closure from ui-server). */
   startSession: StartSessionFn;
   /** Resolve API key for a given provider (shared auth with ui-server). */
-  resolveApiKey: (provider: string) => Promise<string | undefined>;
+    resolveApiKey: (provider: string, options?: ApiKeyRefreshOptions) => Promise<string | undefined>;
+
 }
 
 export class ObserverDaemon {
@@ -68,7 +70,8 @@ export class ObserverDaemon {
   private readonly eventStore: EventStore;
   private readonly llm: LlmAdapter;
   private readonly startSession: StartSessionFn;
-  private readonly resolveApiKey: (provider: string) => Promise<string | undefined>;
+    private readonly resolveApiKey: (provider: string, options?: ApiKeyRefreshOptions) => Promise<string | undefined>;
+
   private readonly registry: FindingRegistry;
   private config: ObserverConfig = { ...DEFAULT_OBSERVER_CONFIG };
   private state: ObserverDaemonState = {
