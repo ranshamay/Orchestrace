@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react';
 import { API_BASE, type WorkSession } from '../../lib/api';
-import { sortSessionsByActivityAndRecency } from '../utils/sessionSort';
+import { sortSessionsByActivityAndRecency, upsertSessionWithActivityTransition } from '../utils/sessionSort';
 
 type Params = {
   selectedSessionId: string;
@@ -45,13 +45,7 @@ export function useSessionsStatusStream({ selectedSessionId, setSelectedSessionI
         const nextSession = data.session;
 
         setSessions((current) => {
-          const index = current.findIndex((session) => session.id === nextSession.id);
-          if (index >= 0) {
-            const next = [...current];
-            next[index] = nextSession;
-            return sortSessionsByActivityAndRecency(next);
-          }
-          return sortSessionsByActivityAndRecency([nextSession, ...current]);
+          return upsertSessionWithActivityTransition(current, nextSession);
         });
       } catch {
         // Ignore malformed stream payloads.

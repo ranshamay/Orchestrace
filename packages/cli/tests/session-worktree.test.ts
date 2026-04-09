@@ -36,6 +36,27 @@ afterEach(async () => {
 });
 
 describe('session worktree helper', () => {
+  it('defaults managed worktrees under repo-local .worktrees when override is unset', async () => {
+    const repoRoot = await createTempRepo();
+    const sessionId = 'session-local-default';
+
+    const previous = process.env.ORCHESTRACE_WORKTREE_DIR;
+    delete process.env.ORCHESTRACE_WORKTREE_DIR;
+    try {
+      const resolved = resolveSessionWorktreePath(repoRoot, sessionId);
+      const expectedBase = join(repoRoot, '.worktrees');
+      const comparableResolved = normalizeComparablePath(resolved);
+      const comparableExpectedBase = normalizeComparablePath(expectedBase);
+      expect(comparableResolved.startsWith(join(comparableExpectedBase, ''))).toBe(true);
+    } finally {
+      if (previous === undefined) {
+        delete process.env.ORCHESTRACE_WORKTREE_DIR;
+      } else {
+        process.env.ORCHESTRACE_WORKTREE_DIR = previous;
+      }
+    }
+  });
+
   it('creates a deterministic managed worktree and reuses it for retry', async () => {
     const repoRoot = await createTempRepo();
     const sessionId = 'session-123';
@@ -81,4 +102,8 @@ async function pathExists(path: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+function normalizeComparablePath(path: string): string {
+  return path.replace(/^\/private(?=\/var\/)/, '');
 }
