@@ -381,8 +381,9 @@ export interface ObserverFinding {
   category: string;
   severity: string;
   title: string;
-  description: string;
-  suggestedFix: string;
+  issueSummary: string;
+  evidence: string[];
+  severityRationale?: string;
   relevantFiles?: string[];
   observedInSessions: string[];
   detectedAt: string;
@@ -488,8 +489,9 @@ export interface SessionObserverFinding {
   category: string;
   severity: string;
   title: string;
-  description: string;
-  suggestedFix: string;
+  issueSummary: string;
+  evidence: string[];
+  severityRationale?: string;
   relevantFiles?: string[];
   phase: string;
   detectedAt: string;
@@ -528,8 +530,9 @@ export interface LogFinding {
   category: LogFindingCategory;
   severity: string;
   title: string;
-  description: string;
-  suggestedFix: string;
+  issueSummary: string;
+  evidence: string[];
+  severityRationale?: string;
   relevantFiles?: string[];
   logSnippet: string;
   detectedAt: string;
