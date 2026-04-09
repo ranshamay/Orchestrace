@@ -993,22 +993,82 @@ function validateSearchQuery(rawQuery: unknown): ValidationResult<string> {
     };
   }
 
-  if (rawQuery.trim().length === 0) {
+  const trimmedQuery = rawQuery.trim();
+  if (trimmedQuery.length === 0) {
     return {
       ok: false,
       error: 'Invalid query: query must not be empty.',
     };
   }
 
-  if (rawQuery.includes('\u0000')) {
+  if (trimmedQuery.includes('\u0000')) {
     return {
       ok: false,
       error: 'Invalid query: null bytes are not allowed.',
     };
   }
 
-  return { ok: true, value: rawQuery.trim() };
+  if (/[\r\n]/.test(trimmedQuery)) {
+    return {
+      ok: false,
+      error: 'Invalid query: query must be a single-line string.',
+    };
+  }
+
+  if (hasUnsupportedSearchControlChars(trimmedQuery)) {
+    return {
+      ok: false,
+      error: 'Invalid query: control characters are not allowed.',
+    };
+  }
+
+  if (looksLikeRipgrepPathSpecFragment(trimmedQuery)) {
+    return {
+      ok: false,
+      error: 'Invalid query: query appears to be a ripgrep path/filter fragment. Provide search text in query and file scope in path/glob.',
+    };
+  }
+
+  return { ok: true, value: trimmedQuery };
 }
+
+function hasUnsupportedSearchControlChars(query: string): boolean {
+  return /[\u0001-\u0008\u000B\u000C\u000E-\u001F\u007F]/.test(query);
+}
+
+function looksLikeRipgrepPathSpecFragment(query: string): boolean {
+  const normalized = query.trim();
+  if (normalized.length === 0) {
+    return false;
+  }
+
+  if (/\s--\s/.test(` ${normalized} `)) {
+    return true;
+  }
+
+  const tokens = normalized.split(/\s+/);
+  const first = (tokens[0] ?? '').toLowerCase();
+
+  if (
+    first === '--'
+    || first === '-g'
+    || first === '--glob'
+    || first.startsWith('--glob=')
+    || first === '--iglob'
+    || first.startsWith('--iglob=')
+    || first === '-t'
+    || first === '--type'
+    || first.startsWith('--type=')
+    || first === '-T'
+    || first === '--type-not'
+    || first.startsWith('--type-not=')
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
 
 function validateQueryMode(rawMode: string | undefined): ValidationResult<'regex' | 'literal' | undefined> {
   if (rawMode === undefined) {
