@@ -7,7 +7,9 @@
   "types": "./dist/index.d.ts",
   "scripts": {
     "build": "tsc",
+    "pretypecheck": "pnpm --filter @orchestrace/evals... build",
     "typecheck": "tsc --noEmit",
+    "pretest": "pnpm --filter @orchestrace/evals... build",
     "test": "vitest run",
     "run": "tsx src/run-evals.ts",
     "clean": "rm -rf dist"

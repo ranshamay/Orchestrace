@@ -150,6 +150,21 @@ pnpm build
 pnpm test
 ```
 
+### Monorepo internal package resolution
+
+Internal `@orchestrace/*` packages publish `main`/`types` from `dist/`, so build outputs must exist before strict typecheck/test flows in dependent packages.
+
+- Use the root workflow in clean environments:
+
+```bash
+pnpm install
+pnpm build
+pnpm typecheck
+pnpm test
+```
+
+- Package-level `typecheck`/`test` scripts include `pretypecheck`/`pretest` hooks that build that package and its internal workspace dependencies first (via `pnpm --filter <pkg>... build`).
+
 ## License
 
 MIT
