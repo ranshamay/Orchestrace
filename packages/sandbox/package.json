@@ -10,7 +10,7 @@
     "pretypecheck": "pnpm --filter @orchestrace/sandbox... build",
     "typecheck": "tsc --noEmit",
     "pretest": "pnpm --filter @orchestrace/sandbox... build",
-    "test": "vitest run",
+    "test": "vitest run --config vitest.config.ts",
     "clean": "rm -rf dist"
   },
   "devDependencies": {
