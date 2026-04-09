@@ -191,6 +191,8 @@ export class PiAiAdapter implements LlmAdapter {
               stopReason: response.stopReason,
               kind: 'empty-zero-token',
             });
+            const shouldRetry = attempt < maxAttempts;
+            const retryDelayMs = shouldRetry ? await scheduleRetryDelay(attempt) : 0;
             logFailureDump({
               kind: 'empty-zero-token',
               failureType,
@@ -199,6 +201,10 @@ export class PiAiAdapter implements LlmAdapter {
               baseUrl: model.baseUrl,
               attempt,
               maxAttempts,
+              timeoutMs,
+              elapsedMs,
+              retryScheduled: shouldRetry,
+              retryDelayMs,
               stopReason: response.stopReason,
               errorMessage: upstreamError,
               totalTokens,
@@ -206,7 +212,7 @@ export class PiAiAdapter implements LlmAdapter {
               prompt: summarizePromptInput(prompt),
             });
 
-            if (attempt < maxAttempts) {
+            if (shouldRetry) {
               continue;
             }
 
@@ -229,6 +235,8 @@ export class PiAiAdapter implements LlmAdapter {
               stopReason: response.stopReason,
               kind: 'empty-text',
             });
+            const shouldRetry = attempt < maxAttempts;
+            const retryDelayMs = shouldRetry ? await scheduleRetryDelay(attempt) : 0;
             logFailureDump({
               kind: 'empty-text',
               failureType,
@@ -237,6 +245,10 @@ export class PiAiAdapter implements LlmAdapter {
               baseUrl: model.baseUrl,
               attempt,
               maxAttempts,
+              timeoutMs,
+              elapsedMs,
+              retryScheduled: shouldRetry,
+              retryDelayMs,
               stopReason: response.stopReason,
               errorMessage: upstreamError,
               totalTokens,
@@ -244,7 +256,7 @@ export class PiAiAdapter implements LlmAdapter {
               prompt: summarizePromptInput(prompt),
             });
 
-            if (attempt < maxAttempts) {
+            if (shouldRetry) {
               continue;
             }
 

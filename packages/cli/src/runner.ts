@@ -2215,12 +2215,22 @@ async function completeWithRetry(
 ): Promise<{ text: string; usage?: { input: number; output: number; cost: number } }> {
   let lastError: unknown;
   for (let attempt = 1; attempt <= SUBAGENT_RETRY_MAX_ATTEMPTS; attempt++) {
+    const startedAt = Date.now();
     try {
       return await agent.complete(prompt, signal);
     } catch (err) {
       lastError = err;
-      if (attempt >= SUBAGENT_RETRY_MAX_ATTEMPTS || !isRetryable(err)) throw err;
-      await new Promise<void>((r) => setTimeout(r, SUBAGENT_RETRY_BASE_DELAY_MS * attempt));
+      const elapsedMs = Date.now() - startedAt;
+      const retryable = isRetryable(err);
+      const exhausted = attempt >= SUBAGENT_RETRY_MAX_ATTEMPTS;
+      const retryDelayMs = retryable && !exhausted ? SUBAGENT_RETRY_BASE_DELAY_MS * attempt : 0;
+
+      console.warn(
+        `[runner] Sub-agent LLM attempt failed (attempt=${attempt}/${SUBAGENT_RETRY_MAX_ATTEMPTS}, elapsedMs=${elapsedMs}, retryable=${retryable}, retryDelayMs=${retryDelayMs}): ${errorMsg(err)}`,
+      );
+
+      if (exhausted || !retryable) throw err;
+      await new Promise<void>((r) => setTimeout(r, retryDelayMs));
     }
   }
   throw lastError instanceof Error ? lastError : new Error(errorMsg(lastError));
