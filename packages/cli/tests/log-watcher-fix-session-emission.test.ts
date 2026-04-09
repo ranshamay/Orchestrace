@@ -26,7 +26,7 @@ function createEventStoreStub(): EventStore {
 }
 
 describe('log watcher fix-session emission', () => {
-  it('registers realtime session observer findings and spawns fix sessions', async () => {
+    it('registers realtime session observer findings and spawns fix sessions', async () => {
     const orchestraceDir = await mkdtemp(join(tmpdir(), 'orchestrace-observer-'));
 
     try {
@@ -79,10 +79,33 @@ describe('log watcher fix-session emission', () => {
 
       expect(duplicate).toEqual({ registered: 0, spawned: 0 });
       expect(startSession).toHaveBeenCalledTimes(1);
+
+      const equivalentQueued = await daemon.ingestSessionObserverFindings('session-456', [
+        {
+          category: 'architecture',
+          severity: 'critical',
+          title: 'Unsafe cross session mutable state',
+          description: 'Completely different wording for body should still merge by equivalent queue title.',
+          suggestedFix: 'Apply synchronization and isolate state.',
+          relevantFiles: ['packages/cli/src/observer/daemon.ts'],
+        },
+      ]);
+
+      expect(equivalentQueued).toEqual({ registered: 0, spawned: 0 });
+      expect(startSession).toHaveBeenCalledTimes(1);
+      const findings = daemon.getFindings();
+      expect(findings).toHaveLength(1);
+      expect(findings[0]?.severity).toBe('critical');
+      expect(findings[0]?.additionalSessions).toContain('session-456');
+      expect(findings[0]?.relevantFiles).toEqual(expect.arrayContaining([
+        'packages/cli/src/ui-server.ts',
+        'packages/cli/src/observer/daemon.ts',
+      ]));
     } finally {
       await rm(orchestraceDir, { recursive: true, force: true });
     }
   });
+
 
   it('registers log findings and spawns fix sessions immediately', async () => {
     const orchestraceDir = await mkdtemp(join(tmpdir(), 'orchestrace-observer-'));
@@ -218,7 +241,64 @@ describe('log watcher fix-session emission', () => {
     }
   });
 
+    it('does not merge into completed findings when matching equivalent tasks', async () => {
+    const orchestraceDir = await mkdtemp(join(tmpdir(), 'orchestrace-observer-'));
+
+    try {
+      const observerDir = join(orchestraceDir, 'observer');
+      await mkdir(observerDir, { recursive: true });
+      await writeFile(
+        join(observerDir, 'findings.json'),
+        JSON.stringify([
+          {
+            fingerprint: 'completed-finding-1',
+            category: 'architecture',
+            severity: 'medium',
+            title: 'Unsafe cross-session mutable state',
+            description: 'Old equivalent finding already completed.',
+            suggestedFix: 'Historical fix',
+            observedInSessions: ['legacy-session'],
+            detectedAt: new Date().toISOString(),
+            fixSessionId: 'legacy-fix-session',
+            fixStatus: 'completed',
+            additionalSessions: [],
+          },
+        ], null, 2),
+        'utf-8',
+      );
+
+      const startSession = vi.fn(async () => ({ id: `fix-${String(startSession.mock.calls.length + 1)}` }));
+      const daemon = new ObserverDaemon({
+        orchestraceDir,
+        eventStore: createEventStoreStub(),
+        llm: { complete: vi.fn() } as ObserverDaemonOptions['llm'],
+        startSession,
+        resolveApiKey: async () => undefined,
+      });
+
+      await daemon.start();
+      await daemon.updateConfig({ maxConcurrentFixSessions: 0 });
+
+      const created = await daemon.ingestSessionObserverFindings('fresh-session', [
+        {
+          category: 'architecture',
+          severity: 'high',
+          title: 'Unsafe cross session mutable state',
+          description: 'Fresh finding should become a new queued task because prior one is completed.',
+          suggestedFix: 'Apply synchronization and isolate state.',
+        },
+      ]);
+
+      expect(created).toEqual({ registered: 1, spawned: 1 });
+      expect(startSession).toHaveBeenCalledTimes(1);
+      expect(daemon.getFindings()).toHaveLength(2);
+    } finally {
+      await rm(orchestraceDir, { recursive: true, force: true });
+    }
+  });
+
   it('does not count historical spawned findings against current process concurrency', async () => {
+
     const orchestraceDir = await mkdtemp(join(tmpdir(), 'orchestrace-observer-'));
 
     try {

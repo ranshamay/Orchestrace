@@ -45,7 +45,7 @@ export class FindingRegistry {
    * If a finding with the same fingerprint already exists, merges the session
    * into additionalSessions instead of creating a duplicate.
    */
-  register(
+    register(
     finding: {
       category: FindingCategory;
       severity: FindingSeverity;
@@ -59,18 +59,26 @@ export class FindingRegistry {
     const fingerprint = computeFingerprint(finding.category, finding.title, finding.description);
     const existing = this.findings.find((f) => f.fingerprint === fingerprint);
 
+    // Exact-match dedup always wins.
     if (existing) {
-      // Merge session IDs that aren't already tracked
-      for (const sid of sessionIds) {
-        if (
-          !existing.observedInSessions.includes(sid) &&
-          !existing.additionalSessions.includes(sid)
-        ) {
-          existing.additionalSessions.push(sid);
-        }
-      }
+      mergeFindingSignal(existing, finding, sessionIds);
       this.dirty = true;
       return { fingerprint, isNew: false };
+    }
+
+    // If a somewhat equivalent finding is already in the active queue,
+    // merge into that queued task instead of creating another queue item.
+    const equivalentQueued = this.findings.find((record) => {
+      if (!isQueueStatus(record.fixStatus)) {
+        return false;
+      }
+      return isEquivalentFinding(record, finding);
+    });
+
+    if (equivalentQueued) {
+      mergeFindingSignal(equivalentQueued, finding, sessionIds);
+      this.dirty = true;
+      return { fingerprint: equivalentQueued.fingerprint, isNew: false };
     }
 
     // New finding
@@ -87,6 +95,7 @@ export class FindingRegistry {
     this.dirty = true;
     return { fingerprint, isNew: true };
   }
+
 
   /** Get all findings that haven't been spawned as fix sessions yet. */
   getPending(): FindingRecord[] {
@@ -128,6 +137,85 @@ export class FindingRegistry {
   }
 }
 
+function mergeFindingSignal(
+  record: FindingRecord,
+  incoming: {
+    severity: FindingSeverity;
+    relevantFiles?: string[];
+  },
+  sessionIds: string[],
+): void {
+  // Track additional source sessions.
+  for (const sid of sessionIds) {
+    if (
+      !record.observedInSessions.includes(sid) &&
+      !record.additionalSessions.includes(sid)
+    ) {
+      record.additionalSessions.push(sid);
+    }
+  }
+
+  // Escalate severity when a stronger signal appears.
+  if (compareSeverity(incoming.severity, record.severity) > 0) {
+    record.severity = incoming.severity;
+  }
+
+  // Merge relevant file hints without duplicates.
+  if (incoming.relevantFiles && incoming.relevantFiles.length > 0) {
+    const merged = new Set([...(record.relevantFiles ?? []), ...incoming.relevantFiles]);
+    record.relevantFiles = [...merged];
+  }
+}
+
+function isQueueStatus(status: FindingRecord['fixStatus']): boolean {
+  return status === 'pending' || status === 'spawned';
+}
+
+function isEquivalentFinding(
+  existing: FindingRecord,
+  incoming: {
+    category: FindingCategory;
+    title: string;
+    description: string;
+  },
+): boolean {
+  if (existing.category !== incoming.category) {
+    return false;
+  }
+
+  const existingTitle = normalizeForComparison(existing.title);
+  const incomingTitle = normalizeForComparison(incoming.title);
+  if (existingTitle.length > 0 && existingTitle === incomingTitle) {
+    return true;
+  }
+
+  const existingDesc = normalizeForComparison(existing.description);
+  const incomingDesc = normalizeForComparison(incoming.description);
+  if (existingDesc.length === 0 || incomingDesc.length === 0) {
+    return false;
+  }
+
+  return existingDesc === incomingDesc;
+}
+
+function normalizeForComparison(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+    .replace(/\s+/g, ' ');
+}
+
+function compareSeverity(a: FindingSeverity, b: FindingSeverity): number {
+  const rank: Record<FindingSeverity, number> = {
+    low: 0,
+    medium: 1,
+    high: 2,
+    critical: 3,
+  };
+  return rank[a] - rank[b];
+}
+
 /**
  * Compute a deterministic fingerprint for deduplication.
  * Uses category + normalized title + first 200 chars of description.
@@ -136,3 +224,4 @@ function computeFingerprint(category: string, title: string, description: string
   const normalized = `${category}::${title.toLowerCase().trim()}::${description.slice(0, 200).toLowerCase().trim()}`;
   return createHash('sha256').update(normalized).digest('hex').slice(0, 16);
 }
+
