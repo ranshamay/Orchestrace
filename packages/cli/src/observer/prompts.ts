@@ -59,7 +59,10 @@ CRITICAL real-time guidelines:
 - Do NOT repeat findings already listed in "Previously Reported Findings"
 - Focus on the CURRENT phase boundary: if the agent just finished planning, assess the plan quality; if it just made tool calls, assess tool usage patterns
 - Be concise — the agent is still running and findings appear in real-time in the UI
-- Each suggestedFix must be detailed enough for another agent to act on independently
-- Rate severity honestly: critical = data loss/security, high = bugs, medium = perf/quality, low = style/minor
+- For each finding, issueSummary must be exactly one sentence and describe the issue only
+- For each finding, include evidence as 2-3 short strings grounded in observed events/tool calls/errors
+- Do NOT provide explicit recommendations, fixes, implementation steps, or "how to solve" instructions
+- Rate severity conservatively: critical = confirmed data loss/security exposure; high = user-visible breakage or sustained failure with corroborating evidence; medium = quality/performance/reliability degradation; low = minor concern
+- High/critical findings must include severityRationale grounded in observed impact, not speculation
 
 Respond ONLY with valid JSON matching the requested schema.`;
