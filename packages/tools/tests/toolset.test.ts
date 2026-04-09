@@ -1058,7 +1058,7 @@ describe('search_files tool', () => {
   });
 
 
-    it('auto-escapes unbalanced parentheses for explicit regex queries', async () => {
+        it('returns a clear invalid_regex error for malformed explicit regex input', async () => {
     const cwd = await makeWorkspace();
     await writeFile(
       join(cwd, 'src', 'routes.ts'),
@@ -1077,11 +1077,16 @@ describe('search_files tool', () => {
       },
     });
 
-    expect(result.isError).toBeFalsy();
-    expect(result.content).toContain('routes.ts:1:runShellCommandRoute(');
-    expect(result.content).not.toContain('routes.ts:2:runShellCommandRoute');
-    expect(result.content.toLowerCase()).not.toContain('regex parse error');
+    expect(result.isError).toBe(true);
+    expect(result.content).toBe('Invalid regex query.');
+    expect(result.details).toMatchObject({
+      errorType: 'invalid_regex',
+      message: 'Invalid regex query.',
+      toolName: 'search_files',
+      path: 'src',
+    });
   });
+
 
   it('returns a clear validation error for malformed regex that cannot be repaired', async () => {
     const cwd = await makeWorkspace();

@@ -128,23 +128,27 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
           : normalizedRequestedPath;
 
         let target: string;
-        try {
+                try {
           target = resolveWorkspacePath(resolvedCwd.cwd, normalizedPathForResolution);
         } catch {
           return {
             content: `(skipped invalid search path: ${normalizedRequestedPath.replace(/\\/g, '/')})`,
+            isError: false,
           };
         }
+
 
         const canonicalTarget = await canonicalizeExistingPath(target);
         const relTarget = toWorkspaceRelative(resolvedCwd.cwd, canonicalTarget ?? target).replace(/\\/g, '/');
         const targetKind = await getPathKind(canonicalTarget ?? target);
 
-        if (targetKind === 'missing') {
+                if (targetKind === 'missing') {
           return {
             content: `(skipped invalid search path: ${relTarget})`,
+            isError: false,
           };
         }
+
 
         if (globValidation.value && targetKind === 'file') {
           return createSearchFilesErrorResult({
@@ -157,11 +161,13 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
         // Re-check right before spawning rg to avoid deterministic path-miss noise
         // when a target is removed between earlier normalization and command execution.
         const targetKindBeforeSearch = await getPathKind(canonicalTarget ?? target);
-        if (targetKindBeforeSearch === 'missing') {
+                if (targetKindBeforeSearch === 'missing') {
           return {
             content: `(skipped invalid search path: ${relTarget})`,
+            isError: false,
           };
         }
+
 
         const args = ['-n', '--no-heading', '--color', 'never', '-e', query];
         if (!useRegex) {
@@ -191,15 +197,19 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
               glob: globValidation.value,
               maxChars: options.maxOutputChars ?? 16000,
             });
-            return {
+                        return {
               content: fallback,
+              isError: false,
             };
+
           } catch (error) {
-            if (isMissingPathErrorLike(error)) {
+                        if (isMissingPathErrorLike(error)) {
               return {
                 content: `(skipped invalid search path: ${relTarget})`,
+                isError: false,
               };
             }
+
 
             return createSearchFilesErrorResult({
               errorType: 'filesystem_fallback_failed',
@@ -239,16 +249,19 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
         const hasPathError = hasRipgrepPathError(stderr);
 
 
-        if (result.exitCode === 1 && result.stdout.trim().length === 0) {
-          return { content: '(no matches)' };
+                if (result.exitCode === 1 && result.stdout.trim().length === 0) {
+          return { content: '(no matches)', isError: false };
         }
+
         if (hasPathError) {
           const targetKindAfterSearch = await getPathKind(canonicalTarget ?? target);
-          if (targetKindAfterSearch === 'missing') {
+                    if (targetKindAfterSearch === 'missing') {
             return {
               content: `(skipped invalid search path: ${relTarget})`,
+              isError: false,
             };
           }
+
 
           try {
             const fallback = await fallbackSearchFromFs({
@@ -260,15 +273,19 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
               glob: globValidation.value,
               maxChars: options.maxOutputChars ?? 16000,
             });
-            return {
+                        return {
               content: fallback,
+              isError: false,
             };
+
           } catch (error) {
-            if (isMissingPathErrorLike(error)) {
+                        if (isMissingPathErrorLike(error)) {
               return {
                 content: `(skipped invalid search path: ${relTarget})`,
+                isError: false,
               };
             }
+
 
             return createSearchFilesErrorResult({
               errorType: 'filesystem_fallback_failed',
@@ -924,66 +941,36 @@ function sanitizeSearchQueryAndMode(input: SanitizedSearchQueryAndModeInput): Va
     return queryModeValidation;
   }
 
-  const hasExplicitRegexIntent = queryModeValidation.value === 'regex' || input.regex === true;
-  let useRegex = queryModeValidation.value !== undefined
-    ? queryModeValidation.value === 'regex'
-    : input.regex ?? false;
-
-  // Prefer literal semantics for shell-like query text unless regex intent is explicit.
-  if (!hasExplicitRegexIntent && isRiskyLiteralCandidate(queryValidation.value)) {
-    useRegex = false;
-  }
-
-  let sanitizedQuery = queryValidation.value;
-  if (useRegex) {
-    sanitizedQuery = sanitizeMalformedRegexQuery(sanitizedQuery);
-  }
+  const resolvedMode = resolveSearchQueryMode({
+    queryMode: queryModeValidation.value,
+    regex: input.regex,
+  });
 
   return {
     ok: true,
     value: {
-      query: sanitizedQuery,
-      useRegex,
+      query: queryValidation.value,
+      useRegex: resolvedMode === 'regex',
     },
   };
 }
 
-
-function isRiskyLiteralCandidate(query: string): boolean {
-  const normalized = query.trim().toLowerCase();
-
-  if (/\b(?:ba|z)?sh\s+-[cl]\b/.test(normalized)) {
-    return true;
+function resolveSearchQueryMode(input: {
+  queryMode: 'regex' | 'literal' | undefined;
+  regex: boolean | undefined;
+}): 'regex' | 'literal' {
+  if (input.queryMode !== undefined) {
+    return input.queryMode;
   }
 
-  if (/\b(?:exec|eval)\b/.test(normalized)) {
-    return true;
+  if (input.regex === true) {
+    return 'regex';
   }
 
-  if (looksLikeFunctionCallLiteral(normalized)) {
-    return true;
-  }
-
-  if (/\s(?:--?[a-z][a-z0-9-]*)\b/.test(normalized)) {
-    return true;
-  }
-
-  return false;
+  return 'literal';
 }
 
-function looksLikeFunctionCallLiteral(query: string): boolean {
-  // Protect punctuation-heavy call snippets (e.g. execFileAsync('sh', ['-lc', ...))
-  // by forcing literal semantics unless regex intent is explicit.
-  if (/\b[a-z_$][a-z0-9_$]*\s*\(/i.test(query)) {
-    return true;
-  }
 
-  if (/[()[\]{}'"`,]/.test(query)) {
-    return true;
-  }
-
-  return false;
-}
 
 
 function validateSearchQuery(rawQuery: unknown): ValidationResult<string> {
@@ -1087,114 +1074,9 @@ function validateQueryMode(rawMode: string | undefined): ValidationResult<'regex
   return { ok: true, value: rawMode };
 }
 
-function sanitizeMalformedRegexQuery(query: string): string {
-  if (isValidRegexQuery(query)) {
-    return query;
-  }
+// Intentionally no regex auto-repair helpers: invalid regex input should remain deterministic.
 
-  const repaired = escapeUnbalancedRegexTokens(query);
-  if (repaired === query) {
-    return query;
-  }
 
-  return isValidRegexQuery(repaired) ? repaired : query;
-}
-
-function escapeUnbalancedRegexTokens(query: string): string {
-  const chars = Array.from(query);
-  const stack: Array<{ kind: 'group' | 'class' | 'brace'; index: number }> = [];
-  const unmatchedClosingIndexes = new Set<number>();
-
-  for (let i = 0; i < chars.length; i += 1) {
-    const char = chars[i];
-    const isEscaped = isRegexCharEscaped(chars, i);
-
-    if (isEscaped) {
-      continue;
-    }
-
-    if (char === '(') {
-      stack.push({ kind: 'group', index: i });
-      continue;
-    }
-
-    if (char === '[') {
-      stack.push({ kind: 'class', index: i });
-      continue;
-    }
-
-    if (char === '{') {
-      stack.push({ kind: 'brace', index: i });
-      continue;
-    }
-
-    if (char === ')') {
-      const matchIndex = findMatchingOpenToken(stack, 'group');
-      if (matchIndex >= 0) {
-        stack.splice(matchIndex, 1);
-      } else {
-        unmatchedClosingIndexes.add(i);
-      }
-      continue;
-    }
-
-    if (char === ']') {
-      const matchIndex = findMatchingOpenToken(stack, 'class');
-      if (matchIndex >= 0) {
-        stack.splice(matchIndex, 1);
-      } else {
-        unmatchedClosingIndexes.add(i);
-      }
-      continue;
-    }
-
-    if (char === '}') {
-      const matchIndex = findMatchingOpenToken(stack, 'brace');
-      if (matchIndex >= 0) {
-        stack.splice(matchIndex, 1);
-      } else {
-        unmatchedClosingIndexes.add(i);
-      }
-    }
-  }
-
-  const unmatchedOpenIndexes = new Set(stack.map((entry) => entry.index));
-  if (unmatchedOpenIndexes.size === 0 && unmatchedClosingIndexes.size === 0) {
-    return query;
-  }
-
-  let repaired = '';
-  for (let i = 0; i < chars.length; i += 1) {
-    if (unmatchedOpenIndexes.has(i) || unmatchedClosingIndexes.has(i)) {
-      repaired += '\\';
-    }
-    repaired += chars[i];
-  }
-
-  return repaired;
-}
-
-function findMatchingOpenToken(
-  stack: Array<{ kind: 'group' | 'class' | 'brace'; index: number }>,
-  kind: 'group' | 'class' | 'brace',
-): number {
-  for (let i = stack.length - 1; i >= 0; i -= 1) {
-    if (stack[i].kind === kind) {
-      return i;
-    }
-  }
-
-  return -1;
-}
-
-function isRegexCharEscaped(chars: string[], index: number): boolean {
-  let backslashCount = 0;
-  for (let i = index - 1; i >= 0 && chars[i] === '\\'; i -= 1) {
-    backslashCount += 1;
-  }
-
-  return backslashCount % 2 === 1;
-}
 
 function isValidRegexQuery(query: string): boolean {
   try {
