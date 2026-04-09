@@ -7,7 +7,7 @@
 // them inline alongside the session's own output.
 // ---------------------------------------------------------------------------
 
-import type { EventStore, SessionEvent, SessionEventInput } from '@orchestrace/store';
+import type { EventStore, SessionEvent } from '@orchestrace/store';
 import type { LlmAdapter } from '@orchestrace/provider';
 import type { ObserverConfig, FindingCategory, FindingSeverity } from './types.js';
 import { ALL_FINDING_CATEGORIES } from './types.js';
@@ -39,10 +39,9 @@ export interface SessionObserverState {
 }
 
 /** Callback to emit observer events into the session's event/SSE stream. */
-type ObserverSessionEvent = Extract<
-  SessionEventInput,
-  { type: 'session:observer-status-change' | 'session:observer-finding' }
->;
+type ObserverSessionEvent =
+  | Omit<Extract<SessionEvent, { type: 'session:observer-status-change' }>, 'seq' | 'time'>
+  | Omit<Extract<SessionEvent, { type: 'session:observer-finding' }>, 'seq' | 'time'>;
 
 export type ObserverEventEmitter = (event: ObserverSessionEvent) => void;
 
