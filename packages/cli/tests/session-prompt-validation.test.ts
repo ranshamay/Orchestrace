@@ -31,7 +31,7 @@ describe('validateAndNormalizeSessionPromptInput', () => {
     expect(result.code).toBe('TASK_PROMPT_EMPTY');
   });
 
-  it('rejects prompts with unsupported control characters', () => {
+    it('rejects prompts with unsupported control characters', () => {
     const result = validateAndNormalizeSessionPromptInput({
       prompt: 'Investigate bug\u0000with details',
       promptParts: [],
@@ -44,6 +44,21 @@ describe('validateAndNormalizeSessionPromptInput', () => {
 
     expect(result.code).toBe('TASK_PROMPT_INVALID_CONTENT');
   });
+
+  it('rejects prompts above the shared max length threshold', () => {
+    const result = validateAndNormalizeSessionPromptInput({
+      prompt: 'a'.repeat(12_001),
+      promptParts: [],
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) {
+      throw new Error('Expected invalid result');
+    }
+
+    expect(result.code).toBe('TASK_PROMPT_TOO_LONG');
+  });
+
 
   it('normalizes observer-style prompt and preserves valid markdown structure', () => {
     const result = validateAndNormalizeSessionPromptInput({
