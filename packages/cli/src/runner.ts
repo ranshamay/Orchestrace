@@ -56,6 +56,11 @@ import {
   resolveTaskRouteForSource,
   stripRetryContinuationContext,
 } from './task-routing.js';
+import {
+  SessionLifecycle,
+  SessionLifecycleError,
+  type SessionLifecyclePhase,
+} from './session-lifecycle.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -225,6 +230,67 @@ async function main(): Promise<void> {
     } catch (err) {
       console.error(`[runner] Failed to emit event:`, err);
     }
+  }
+
+  const lifecycle = new SessionLifecycle('VALIDATING');
+
+  function lifecycleDetailForPhase(phase: SessionLifecyclePhase): string {
+    switch (phase) {
+      case 'VALIDATING': return 'Validating prompt/session configuration.';
+      case 'SETTING_UP': return 'Setting up runtime resources.';
+      case 'DISPATCHING': return 'Dispatching execution strategy.';
+      case 'EXECUTING': return 'Executing selected route.';
+      case 'COMPLETING': return 'Finalizing outputs and status.';
+      case 'CLEANING_UP': return 'Cleaning up runner resources.';
+      case 'COMPLETED': return 'Run completed successfully.';
+      case 'FAILED': return 'Run failed.';
+      case 'CANCELLED': return 'Run cancelled.';
+      default: return `Lifecycle phase: ${phase}`;
+    }
+  }
+
+  async function emitLifecyclePhaseChange(phase: SessionLifecyclePhase): Promise<void> {
+    const detail = lifecycleDetailForPhase(phase);
+    const state: LlmSessionState = phase === 'FAILED'
+      ? 'failed'
+      : phase === 'CANCELLED'
+        ? 'cancelled'
+        : phase === 'COMPLETED'
+          ? 'completed'
+          : phase === 'VALIDATING'
+            ? 'analyzing'
+            : phase === 'COMPLETING'
+              ? 'validating'
+              : 'implementing';
+
+    const llmStatus = makeLlmStatus(state, detail, undefined, 'task', 'implementation');
+    lastLlmStatusEmission = {
+      key: llmStatusIdentityKey(llmStatus),
+      emittedAt: parseTimestamp(llmStatus.updatedAt),
+    };
+    await emit({ time: iso(), type: 'session:llm-status-change', payload: { llmStatus } });
+
+    await emit({
+      time: iso(),
+      type: 'session:dag-event',
+      payload: {
+        event: {
+          time: iso(),
+          runId: sessionId,
+          type: 'task:started',
+          taskId: 'task',
+          message: `Lifecycle phase: ${phase}`,
+        },
+      },
+    });
+  }
+
+  async function enterLifecyclePhase(
+    phase: SessionLifecyclePhase,
+    options: { precondition?: () => boolean | Promise<boolean>; preconditionMessage?: string } = {},
+  ): Promise<void> {
+    await lifecycle.enterPhase(phase, options);
+    await emitLifecyclePhaseChange(phase);
   }
 
   void emit({
@@ -849,6 +915,12 @@ async function main(): Promise<void> {
     }
 
   try {
+    await emitLifecyclePhaseChange('VALIDATING');
+    await enterLifecyclePhase('SETTING_UP', {
+      precondition: () => Boolean(config.prompt && config.prompt.trim()) && Boolean(config.workspacePath && config.workspacePath.trim()),
+      preconditionMessage: 'Prompt and workspacePath are required before setup.',
+    });
+
     const trivialTaskGate = resolveTrivialTaskGateConfig({
       enabled: config.enableTrivialTaskGate,
       maxPromptLength: config.trivialTaskMaxPromptLength,
