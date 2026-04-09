@@ -1,6 +1,6 @@
 import { constants } from 'node:fs';
 import { access, readdir, readFile, realpath, stat } from 'node:fs/promises';
-import { extname, join } from 'node:path';
+import { extname, isAbsolute, join } from 'node:path';
 import { Type } from '@mariozechner/pi-ai';
 import type { AgentToolsetOptions, RegisteredAgentTool } from './types.js';
 import { resolveWorkspacePath, toWorkspaceRelative } from './path-utils.js';
@@ -94,13 +94,27 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
           };
         }
 
-        const requestedPath = asString(toolArgs.path) ?? '.';
-        const target = resolveWorkspacePath(resolvedCwd.cwd, requestedPath);
+                                const requestedPath = asString(toolArgs.path) ?? '.';
+        const normalizedRequestedPath = await normalizeRequestedSearchPath(requestedPath);
+        const normalizedPathForResolution = isAbsolute(normalizedRequestedPath)
+          ? (await canonicalizeExistingPath(normalizedRequestedPath)) ?? normalizedRequestedPath
+          : normalizedRequestedPath;
+
+        let target: string;
+        try {
+          target = resolveWorkspacePath(resolvedCwd.cwd, normalizedPathForResolution);
+        } catch {
+          return {
+            content: `(skipped invalid search path: ${normalizedRequestedPath.replace(/\\/g, '/')})`,
+          };
+        }
+
         const canonicalTarget = await canonicalizeExistingPath(target);
         const relTarget = toWorkspaceRelative(resolvedCwd.cwd, canonicalTarget ?? target).replace(/\\/g, '/');
         const targetKind = await getPathKind(canonicalTarget ?? target);
 
         if (targetKind === 'missing') {
+
           return {
             content: `(skipped invalid search path: ${relTarget})`,
           };
@@ -893,7 +907,21 @@ function validateSearchGlob(rawGlob: unknown): ValidationResult<string | undefin
   return { ok: true, value: glob.replace(/\\/g, '/') };
 }
 
+async function normalizeRequestedSearchPath(rawPath: string): Promise<string> {
+  const trimmed = rawPath.trim();
+  if (trimmed.length === 0) {
+    return '.';
+  }
+
+  if (trimmed.includes('\u0000')) {
+    throw new Error('Invalid search path: null bytes are not allowed.');
+  }
+
+    return trimmed;
+}
+
 function hasRipgrepPathError(stderr: string): boolean {
+
   return /\bNo such file or directory\b|\bos error 2\b/i.test(stderr);
 }
 
