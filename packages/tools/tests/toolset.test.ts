@@ -659,10 +659,12 @@ describe('search_files tool', () => {
       },
     });
 
-    expect(result.isError).toBeFalsy();
+        expect(result.isError).toBeFalsy();
     expect(result.content).toContain('src/coordination-tools.ts:1:async function mapWithAdaptiveConcurrency() {}');
-    expect(result.content).toContain('No such file or directory (os error 2)');
+    expect(result.content).not.toContain('No such file or directory (os error 2)');
+    expect(result.content).not.toContain('stderr:\n');
     expect(result.details).toBeUndefined();
+
 
     runCommandSpy.mockRestore();
   });

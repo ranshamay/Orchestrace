@@ -222,7 +222,7 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
           }
         }
 
-                const output = formatCommandOutput(result, options.maxOutputChars ?? 16000);
+                        const output = formatCommandOutput(result, options.maxOutputChars ?? 16000);
         const hasMatches = result.stdout.trim().length > 0;
 
         // Prefer successful match output when available. ripgrep may emit stderr
@@ -230,10 +230,11 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
         // when there are no matches to return.
         if (hasMatches) {
           return {
-            content: output,
+            content: formatSearchFilesSuccessOutput(result, options.maxOutputChars ?? 16000),
             isError: false,
           };
         }
+
 
         if (result.exitCode === 2 && useRegex) {
           return createSearchFilesErrorResult({
@@ -1147,6 +1148,37 @@ function hasRipgrepPathError(stderr: string): boolean {
   return isDeterministicRipgrepPathError(stderr);
 }
 
+function formatSearchFilesSuccessOutput(result: { stdout: string; stderr: string }, maxChars: number): string {
+  const stdout = result.stdout.trim();
+  const filteredStderr = filterRipgrepPathErrorLines(result.stderr);
+
+  const parts = [
+    stdout,
+    filteredStderr.length > 0 ? `stderr:\n${filteredStderr}` : '',
+  ].filter((part) => part.length > 0);
+
+  const combined = parts.join('\n\n');
+  if (combined.length <= maxChars) {
+    return combined;
+  }
+
+  return `${combined.slice(0, maxChars)}\n... (truncated)`;
+}
+
+function filterRipgrepPathErrorLines(stderr: string): string {
+  const trimmed = stderr.trim();
+  if (trimmed.length === 0) {
+    return '';
+  }
+
+  return trimmed
+    .split(/\r?\n/)
+    .map((line) => line.trimEnd())
+    .filter((line) => !isDeterministicRipgrepPathError(line))
+    .join('\n')
+    .trim();
+}
+
 function isDeterministicRipgrepPathError(stderr: string): boolean {
   const normalized = stderr.trim();
   if (normalized.length === 0) {
@@ -1155,6 +1187,7 @@ function isDeterministicRipgrepPathError(stderr: string): boolean {
 
   return /\bNo such file or directory\b|\bos error 2\b|\bENOENT\b/i.test(normalized);
 }
+
 
 function isMissingPathErrorLike(error: unknown): boolean {
   if (!error) {
