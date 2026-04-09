@@ -2,6 +2,7 @@ import { execFile } from 'node:child_process';
 import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { config as loadDotEnv } from 'dotenv';
 import { orchestrate, type TaskRouteCategory } from '@orchestrace/core';
 import type { TaskGraph, DagEvent, PlanApprovalRequest, TaskOutput } from '@orchestrace/core';
@@ -11,7 +12,7 @@ import { DEFAULT_AGENT_TOOL_POLICY_VERSION, createAgentToolset } from '@orchestr
 import { createInterface } from 'node:readline/promises';
 import { promisify } from 'node:util';
 import { startUiServer } from './ui-server.js';
-import { enforceSafeShellDispatch, resolveTaskRoute, validateShellInput } from './task-routing.js';
+import { enforceSafeShellDispatch, formatShellValidationRejection, resolveTaskRoute, validateShellInput } from './task-routing.js';
 import { WorkspaceManager } from './workspace-manager.js';
 import type { WorkspaceEntry } from './workspace-manager.js';
 import { parseAndSanitizeVerifyCommands } from './verify-commands.js';
@@ -637,29 +638,52 @@ export function buildSingleTaskGraph(prompt: string, routeCategory: TaskRouteCat
   };
 }
 
-async function runShellCommandRoute(command: string, cwd: string): Promise<number> {
-    const validation = validateShellInput(command);
+interface ShellRouteDependencies {
+  execFile: typeof execFileAsync;
+  stdoutWrite: (message: string) => void;
+  stderrWrite: (message: string) => void;
+  logError: (message: string) => void;
+}
+
+const defaultShellRouteDependencies: ShellRouteDependencies = {
+  execFile: execFileAsync,
+  stdoutWrite: (message) => process.stdout.write(message),
+  stderrWrite: (message) => process.stderr.write(message),
+  logError: (message) => console.error(message),
+};
+
+export async function runShellCommandRouteWithDeps(
+  command: string,
+  cwd: string,
+  deps: ShellRouteDependencies,
+): Promise<number> {
+  const validation = validateShellInput(command);
   if (!validation.ok || !validation.parsed) {
-    console.error(`Shell command validation failed: ${validation.reason ?? 'input did not pass centralized validation'}`);
+    deps.logError(formatShellValidationRejection('cli.runShellCommandRoute', validation.reason));
     return 1;
   }
 
   try {
-    const { stdout, stderr } = await execFileAsync(validation.parsed.program, validation.parsed.args, { cwd });
+    const { stdout, stderr } = await deps.execFile(validation.parsed.program, validation.parsed.args, { cwd });
     if (stdout) {
-      process.stdout.write(stdout);
+      deps.stdoutWrite(stdout);
     }
 
     if (stderr) {
-      process.stderr.write(stderr);
+      deps.stderrWrite(stderr);
     }
     return 0;
   } catch (error) {
     const details = error instanceof Error ? error.message : String(error);
-    console.error(`Shell command failed: ${details}`);
+    deps.logError(`Shell command failed: ${details}`);
     return 1;
   }
 }
+
+async function runShellCommandRoute(command: string, cwd: string): Promise<number> {
+  return runShellCommandRouteWithDeps(command, cwd, defaultShellRouteDependencies);
+}
+
 
 function parseVerifyCommands(): string[] {
   return parseAndSanitizeVerifyCommands(process.env.ORCHESTRACE_VERIFY_COMMANDS);
@@ -1205,7 +1229,20 @@ async function promptForApiKey(provider: ProviderInfo): Promise<string | undefin
   return apiKey.trim() || undefined;
 }
 
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+function isCliEntryPoint(): boolean {
+  const entry = process.argv[1];
+  if (!entry) {
+    return false;
+  }
+
+  const thisFile = fileURLToPath(import.meta.url);
+  return resolve(entry) === resolve(thisFile);
+}
+
+if (isCliEntryPoint()) {
+  void main().catch((err) => {
+    console.error(err);
+    process.exit(1);
+  });
+}
+

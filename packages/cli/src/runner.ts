@@ -52,8 +52,9 @@ import {
   updateThinkingCircuitBreaker,
 } from './thinking-circuit-breaker.js';
 import {
-  deriveRoutingCoercionAudit,
+    deriveRoutingCoercionAudit,
   enforceSafeShellDispatch,
+  formatShellValidationRejection,
   resolveTaskRouteForSource,
   stripRetryContinuationContext,
   type RoutingCoercionAudit,
@@ -153,7 +154,18 @@ interface GitHubApiResponse {
   body: unknown;
 }
 
+interface RunnerShellExecutionDependencies {
+  execFile: typeof execFileAsync;
+  logError: (message: string) => void;
+}
+
+const defaultRunnerShellExecutionDependencies: RunnerShellExecutionDependencies = {
+  execFile: execFileAsync,
+  logError: (message) => console.error(message),
+};
+
 // sub-agent failure types are imported from runner-subagent-failure.ts
+
 
 // ---------------------------------------------------------------------------
 // EPIPE resilience — when the parent UI server restarts, the pipe reader
@@ -512,38 +524,13 @@ async function main(): Promise<void> {
     }
   }
 
-    async function runShellCommandWithTimeout(
+      async function runShellCommandWithTimeout(
     command: string,
     timeout: number,
   ): Promise<{ ok: boolean; stdout: string; stderr: string; error?: string }> {
-        const validation = validateShellInput(command);
-    if (!validation.ok || !validation.parsed) {
-      return {
-        ok: false,
-        stdout: '',
-        stderr: '',
-        error: validation.reason ?? 'shell_input_validation_failed',
-      };
-    }
-
-    try {
-      const { stdout, stderr } = await execFileAsync(validation.parsed.program, validation.parsed.args, {
-        cwd: config.workspacePath,
-        timeout,
-        maxBuffer: 5 * 1024 * 1024,
-      });
-      return { ok: true, stdout, stderr };
-
-    } catch (err) {
-      const typed = err as ExecFileException;
-      return {
-        ok: false,
-        stdout: typeof typed.stdout === 'string' ? typed.stdout : '',
-        stderr: typeof typed.stderr === 'string' ? typed.stderr : '',
-        error: errorMsg(err),
-      };
-    }
+    return runShellCommandWithTimeoutWithDeps(command, config.workspacePath, timeout, defaultRunnerShellExecutionDependencies);
   }
+
 
 
   async function runRequiredValidationBeforeDelivery(): Promise<void> {
@@ -2629,11 +2616,51 @@ function buildSingleTaskGraph(id: string, prompt: string, routeCategory: TaskRou
   };
 }
 
-async function runShellCommandRoute(command: string, cwd: string): Promise<Map<string, TaskOutput>> {
+export async function runShellCommandWithTimeoutWithDeps(
+  command: string,
+  cwd: string,
+  timeout: number,
+  deps: RunnerShellExecutionDependencies,
+): Promise<{ ok: boolean; stdout: string; stderr: string; error?: string }> {
+  const validation = validateShellInput(command);
+  if (!validation.ok || !validation.parsed) {
+    deps.logError(formatShellValidationRejection('runner.runShellCommandWithTimeout', validation.reason));
+    return {
+      ok: false,
+      stdout: '',
+      stderr: '',
+      error: validation.reason ?? 'shell_input_validation_failed',
+    };
+  }
+
+  try {
+    const { stdout, stderr } = await deps.execFile(validation.parsed.program, validation.parsed.args, {
+      cwd,
+      timeout,
+      maxBuffer: 5 * 1024 * 1024,
+    });
+    return { ok: true, stdout, stderr };
+  } catch (err) {
+    const typed = err as ExecFileException;
+    return {
+      ok: false,
+      stdout: typeof typed.stdout === 'string' ? typed.stdout : '',
+      stderr: typeof typed.stderr === 'string' ? typed.stderr : '',
+      error: errorMsg(err),
+    };
+  }
+}
+
+export async function runShellCommandRouteWithDeps(
+  command: string,
+  cwd: string,
+  deps: RunnerShellExecutionDependencies,
+): Promise<Map<string, TaskOutput>> {
   const startedAt = Date.now();
-    const validation = validateShellInput(command);
+  const validation = validateShellInput(command);
 
   if (!validation.ok || !validation.parsed) {
+    deps.logError(formatShellValidationRejection('runner.runShellCommandRoute', validation.reason));
     return new Map([
       ['task', {
         taskId: 'task',
@@ -2647,7 +2674,7 @@ async function runShellCommandRoute(command: string, cwd: string): Promise<Map<s
   }
 
   try {
-    const { stdout, stderr } = await execFileAsync(validation.parsed.program, validation.parsed.args, { cwd });
+    const { stdout, stderr } = await deps.execFile(validation.parsed.program, validation.parsed.args, { cwd });
     const text = `${stdout ?? ''}${stderr ?? ''}`.trim();
     return new Map([
       ['task', {
@@ -2658,7 +2685,6 @@ async function runShellCommandRoute(command: string, cwd: string): Promise<Map<s
         retries: 0,
       }],
     ]);
-
   } catch (error) {
     const err = error as ExecFileException;
     const details = `${err.stdout ?? ''}${err.stderr ?? ''}`.trim();
@@ -2674,6 +2700,11 @@ async function runShellCommandRoute(command: string, cwd: string): Promise<Map<s
     ]);
   }
 }
+
+async function runShellCommandRoute(command: string, cwd: string): Promise<Map<string, TaskOutput>> {
+  return runShellCommandRouteWithDeps(command, cwd, defaultRunnerShellExecutionDependencies);
+}
+
 
 export function assessGitHubStatusCheckRollup(rollup: unknown): {
   total: number;
