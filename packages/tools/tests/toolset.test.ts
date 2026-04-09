@@ -611,7 +611,7 @@ describe('search_files tool', () => {
 
   });
 
-  it('keeps successful match payload non-error when ripgrep returns non-zero with stdout matches', async () => {
+    it('keeps successful match payload non-error when ripgrep returns non-zero with stdout matches', async () => {
     const cwd = await makeWorkspace();
     await writeFile(join(cwd, 'src', 'match.ts'), 'validateShellCommandPrompt();\n', 'utf-8');
     const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
@@ -634,9 +634,39 @@ describe('search_files tool', () => {
     expect(result.isError).toBeFalsy();
     expect(result.content).toContain('src/match.ts:1:validateShellCommandPrompt();');
     expect(result.content).toContain('stderr:\nrg warning: simulated warning without blocking matches');
+    expect(result.details).toBeUndefined();
 
     runCommandSpy.mockRestore();
   });
+
+  it('treats ENOENT-like stderr as non-fatal when stdout already contains valid matches', async () => {
+    const cwd = await makeWorkspace();
+    await writeFile(join(cwd, 'src', 'coordination-tools.ts'), 'async function mapWithAdaptiveConcurrency() {}\n', 'utf-8');
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+
+    const runCommandSpy = vi.spyOn(commandRunner, 'runCommand').mockResolvedValueOnce({
+      exitCode: 2,
+      stdout: 'src/coordination-tools.ts:1:async function mapWithAdaptiveConcurrency() {}\n',
+      stderr: 'rg: async function mapWithAdaptiveConcurrency: No such file or directory (os error 2)',
+    });
+
+    const result = await toolset.executeTool({
+      id: 'enoent-with-matches',
+      name: 'search_files',
+      arguments: {
+        query: 'async function mapWithAdaptiveConcurrency',
+        path: 'src',
+      },
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.content).toContain('src/coordination-tools.ts:1:async function mapWithAdaptiveConcurrency() {}');
+    expect(result.content).toContain('No such file or directory (os error 2)');
+    expect(result.details).toBeUndefined();
+
+    runCommandSpy.mockRestore();
+  });
+
 
   it('marks search_files as error for genuine command failures without match output', async () => {
     const cwd = await makeWorkspace();
