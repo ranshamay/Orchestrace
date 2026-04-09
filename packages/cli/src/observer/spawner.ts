@@ -43,10 +43,17 @@ export async function spawnFixSessions(
   let spawned = 0;
 
   for (const finding of toSpawn) {
+    // Atomic dedupe guard: only one concurrent dispatcher may claim this finding.
+    if (!registry.claimPendingForSpawn(finding.fingerprint)) {
+      continue;
+    }
+
     const sessionId = await spawnFixSession(finding, config, startSession);
     if (sessionId) {
       registry.markSpawned(finding.fingerprint, sessionId);
       spawned++;
+    } else {
+      registry.releaseSpawnClaim(finding.fingerprint);
     }
   }
 

@@ -93,10 +93,36 @@ export class FindingRegistry {
     return this.findings.filter((f) => f.fixStatus === 'pending');
   }
 
+  /**
+   * Atomically claim a pending finding for spawn.
+   * Returns true only when transitioning pending -> spawning.
+   */
+  claimPendingForSpawn(fingerprint: string): boolean {
+    const record = this.findings.find((f) => f.fingerprint === fingerprint);
+    if (!record || record.fixStatus !== 'pending') {
+      return false;
+    }
+
+    record.fixStatus = 'spawning';
+    this.dirty = true;
+    return true;
+  }
+
+  /**
+   * Release an in-flight spawn claim back to pending (for retry after failure).
+   */
+  releaseSpawnClaim(fingerprint: string): void {
+    const record = this.findings.find((f) => f.fingerprint === fingerprint);
+    if (record && record.fixStatus === 'spawning') {
+      record.fixStatus = 'pending';
+      this.dirty = true;
+    }
+  }
+
   /** Mark a finding as having a fix session spawned. */
   markSpawned(fingerprint: string, fixSessionId: string): void {
     const record = this.findings.find((f) => f.fingerprint === fingerprint);
-    if (record) {
+    if (record && record.fixStatus === 'spawning') {
       record.fixSessionId = fixSessionId;
       record.fixStatus = 'spawned';
       this.dirty = true;
