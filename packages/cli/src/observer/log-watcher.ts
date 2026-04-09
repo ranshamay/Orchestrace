@@ -238,9 +238,10 @@ export class LogWatcher {
         systemPrompt: LOG_WATCHER_SYSTEM_PROMPT,
         prompt,
         signal: this.abortController.signal,
-        apiKey,
-                refreshApiKey: () => this.resolveApiKey(provider),
-        allowAuthRefreshRetry: false,
+                apiKey,
+        refreshApiKey: () => this.resolveApiKey(provider),
+        allowAuthRefreshRetry: true,
+
 
       });
 

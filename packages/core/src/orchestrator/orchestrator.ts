@@ -262,9 +262,10 @@ export async function orchestrate(
           reasoning: planningModel.reasoning,
           taskRequiresWrites,
         }),
-        apiKey: planningApiKey,
-                refreshApiKey: planningRefreshApiKey,
-        allowAuthRefreshRetry: false,
+                apiKey: planningApiKey,
+        refreshApiKey: planningRefreshApiKey,
+        allowAuthRefreshRetry: true,
+
 
       });
 
@@ -721,9 +722,10 @@ export async function orchestrate(
         reasoning: implementationModel.reasoning,
         taskRequiresWrites,
       }),
-      apiKey: implementationApiKey,
-            refreshApiKey: implementationRefreshApiKey,
-      allowAuthRefreshRetry: false,
+            apiKey: implementationApiKey,
+      refreshApiKey: implementationRefreshApiKey,
+      allowAuthRefreshRetry: true,
+
 
     });
 

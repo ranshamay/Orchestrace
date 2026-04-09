@@ -42,9 +42,10 @@ export async function analyzeSessionSummaries(
     systemPrompt: OBSERVER_SYSTEM_PROMPT,
     prompt: userPrompt,
     signal,
-    apiKey,
-        refreshApiKey: resolveApiKey ? () => resolveApiKey(config.provider) : undefined,
-    allowAuthRefreshRetry: false,
+        apiKey,
+    refreshApiKey: resolveApiKey ? () => resolveApiKey(config.provider) : undefined,
+    allowAuthRefreshRetry: true,
+
 
   });
 

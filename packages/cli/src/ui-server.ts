@@ -797,9 +797,10 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
               prompt: text,
               timeoutMs: Math.min(resolveLongTurnTimeoutMs(), 20_000),
               signal,
-              apiKey: await resolveProviderApiKey(candidate.provider),
-                            refreshApiKey: () => resolveProviderApiKey(candidate.provider, { allowRefresh: false }),
-              allowAuthRefreshRetry: false,
+                            apiKey: await resolveProviderApiKey(candidate.provider),
+              refreshApiKey: () => resolveProviderApiKey(candidate.provider),
+              allowAuthRefreshRetry: true,
+
 
             });
 
@@ -3099,9 +3100,10 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                       systemPrompt: resolveSubAgentSystemPrompt(runSubAgentRequest),
                       signal: subAgentSignal,
                       toolset: subAgentToolset,
-                      apiKey: await resolveProviderApiKey(subProvider),
-                                            refreshApiKey: () => resolveProviderApiKey(subProvider, { allowRefresh: false }),
-                      allowAuthRefreshRetry: false,
+                                            apiKey: await resolveProviderApiKey(subProvider),
+                      refreshApiKey: () => resolveProviderApiKey(subProvider),
+                      allowAuthRefreshRetry: true,
+
 
                     });
 
@@ -3148,9 +3150,10 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                   }
                 },
               }),
-              apiKey: await resolveProviderApiKey(session.provider),
-                                refreshApiKey: () => resolveProviderApiKey(session.provider, { allowRefresh: false }),
-                allowAuthRefreshRetry: false,
+                            apiKey: await resolveProviderApiKey(session.provider),
+              refreshApiKey: () => resolveProviderApiKey(session.provider),
+              allowAuthRefreshRetry: true,
+
 
             });
 
@@ -3496,9 +3499,10 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                     systemPrompt: resolveSubAgentSystemPrompt(runSubAgentRequest),
                     signal: subAgentSignal,
                     toolset: subAgentToolset,
-                    apiKey: await resolveProviderApiKey(subProvider),
-                                          refreshApiKey: () => resolveProviderApiKey(subProvider, { allowRefresh: false }),
-                      allowAuthRefreshRetry: false,
+                                        apiKey: await resolveProviderApiKey(subProvider),
+                    refreshApiKey: () => resolveProviderApiKey(subProvider),
+                    allowAuthRefreshRetry: true,
+
 
                   });
 
@@ -3545,9 +3549,10 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                 }
               },
             }),
-            apiKey: await resolveProviderApiKey(session.provider),
-                            refreshApiKey: () => resolveProviderApiKey(session.provider, { allowRefresh: false }),
-                allowAuthRefreshRetry: false,
+                        apiKey: await resolveProviderApiKey(session.provider),
+            refreshApiKey: () => resolveProviderApiKey(session.provider),
+            allowAuthRefreshRetry: true,
+
 
           });
 
