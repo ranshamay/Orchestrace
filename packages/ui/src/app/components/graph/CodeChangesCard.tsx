@@ -31,6 +31,12 @@ type DirectoryImpact = {
 };
 
 const STATUS_FILTERS: StatusFilter[] = ['all', 'added', 'modified', 'deleted', 'renamed', 'copied', 'unmerged', 'unknown'];
+const PROMPT_STOP_WORDS = new Set([
+  'this', 'that', 'with', 'from', 'into', 'your', 'have', 'will', 'would', 'should', 'could', 'also', 'there',
+  'their', 'about', 'after', 'before', 'while', 'where', 'when', 'make', 'made', 'does', 'done', 'just', 'than',
+  'then', 'them', 'they', 'were', 'what', 'want', 'need', 'show', 'mean', 'code', 'changes', 'change', 'session',
+  'main', 'diff', 'file', 'files', 'line', 'lines', 'panel', 'view', 'worktree',
+]);
 
 const REFRESH_INTERVAL_MS = 8_000;
 
@@ -145,6 +151,13 @@ export function CodeChangesCard({ selectedSession, selectedSessionRunning }: Pro
     }
     return extractHunkHeaders(activeSection.lines);
   }, [activeSection]);
+
+  const activeWhyHint = useMemo(() => {
+    if (!activeSection) {
+      return undefined;
+    }
+    return inferChangeWhyHint(activeSection, selectedSession?.prompt);
+  }, [activeSection, selectedSession?.prompt]);
 
   useEffect(() => {
     if (!activeSection) {
@@ -327,6 +340,11 @@ export function CodeChangesCard({ selectedSession, selectedSessionRunning }: Pro
                           </span>
                         </div>
                         <p className="mt-1 text-[10px] text-slate-500 dark:text-slate-400">{describeSectionNarrative(activeSection)}</p>
+                        {activeWhyHint && (
+                          <p className="mt-1 rounded border border-violet-200 bg-violet-50 px-1.5 py-1 text-[10px] text-violet-700 dark:border-violet-900/60 dark:bg-violet-900/25 dark:text-violet-300">
+                            Why hint: {activeWhyHint}
+                          </p>
+                        )}
                         <div className="mt-1.5 flex flex-wrap items-center gap-1 text-[10px]">
                           <span className="rounded bg-emerald-100 px-1.5 py-0.5 font-mono text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300">+{activeSection.additions}</span>
                           <span className="rounded bg-red-100 px-1.5 py-0.5 font-mono text-red-700 dark:bg-red-900/40 dark:text-red-300">-{activeSection.deletions}</span>
@@ -723,4 +741,31 @@ function formatHunkHeader(header: string): string {
     return compact;
   }
   return `${compact.slice(0, 55)}…`;
+}
+
+function inferChangeWhyHint(section: DiffFileSection, prompt?: string): string | undefined {
+  const promptText = prompt?.trim();
+  if (!promptText) {
+    return undefined;
+  }
+
+  const tokens = promptText
+    .toLowerCase()
+    .match(/[a-z0-9_/-]{4,}/g)
+    ?.filter((token) => !PROMPT_STOP_WORDS.has(token)) ?? [];
+
+  const uniqueTokens = [...new Set(tokens)].slice(0, 40);
+  if (uniqueTokens.length === 0) {
+    return undefined;
+  }
+
+  const pathLower = section.path.toLowerCase();
+  const hunkText = section.lines.filter((line) => line.startsWith('@@')).join(' ').toLowerCase();
+  const matched = uniqueTokens.filter((token) => pathLower.includes(token) || hunkText.includes(token));
+
+  if (matched.length === 0) {
+    return 'No direct keyword match with the prompt; this may be a supporting/internal change.';
+  }
+
+  return `Matched prompt terms: ${matched.slice(0, 3).join(', ')}.`;
 }
