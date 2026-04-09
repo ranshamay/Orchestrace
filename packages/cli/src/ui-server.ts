@@ -2270,7 +2270,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       if (req.method === 'POST' && pathname === '/api/work/start') {
         const body = await readJsonBody(req);
         const workspaceId = asString(body.workspaceId);
-        const prompt = asString(body.prompt);
+        const prompt = body.prompt;
         const promptParts = parseChatContentParts(body.promptParts);
         const legacyProvider = asString(body.provider);
         const implementationProvider = asString(body.implementationProvider)
@@ -2356,7 +2356,11 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         });
 
         if ('error' in result) {
-          sendJson(res, result.statusCode, { error: result.error });
+          sendJson(res, result.statusCode, {
+            error: result.error,
+            code: result.code,
+            details: result.details,
+          });
           return;
         }
 
