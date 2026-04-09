@@ -1,4 +1,10 @@
-export { createWorktree, listWorktrees, mergeWorktree, WorktreeLockError } from './worktree.js';
-export type { WorktreeHandle, WorktreeStartupWarning } from './worktree.js';
+export {
+	cleanupWorktree,
+	ensureWorktreeDependenciesInstalled,
+	ensureWorktreeExists,
+	listWorktrees,
+	resolveManagedWorktreeBaseDir,
+} from './worktree-manager.js';
+export type { CleanupWorktreeOptions, EnsureWorktreeOptions, ManagedWorktree } from './worktree-manager.js';
 export { createContainer } from './container.js';
 export type { ContainerHandle, ContainerConfig } from './container.js';

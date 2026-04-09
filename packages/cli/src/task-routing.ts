@@ -23,6 +23,11 @@ export interface SafeDispatchResolution {
   shell: ShellExecutionValidation;
 }
 
+export interface ShellDispatchSourceValidation {
+  ok: boolean;
+  reason?: string;
+}
+
 export function parseTaskRouteOverride(raw: string | undefined): TaskRouteCategory | undefined {
   if (!raw) return undefined;
   const normalized = raw.trim().toLowerCase();
@@ -63,14 +68,30 @@ export function resolveTaskRoute(prompt: string, overrideRaw?: string): Resolved
 
 /**
  * Enforces the final dispatch contract shared by runner + CLI entrypoints.
- * Shell dispatch is only allowed when route selects shell_command AND prompt
- * passes command extraction validation; otherwise dispatch is demoted to code_change.
+ * Shell dispatch is only allowed when:
+ * 1) route selects shell_command,
+ * 2) source guard explicitly allows shell execution,
+ * 3) prompt passes command extraction validation.
+ *
+ * Any guard failure deterministically demotes dispatch to code_change.
  */
-export function enforceSafeShellDispatch(prompt: string, route: TaskRouteResult): SafeDispatchResolution {
+export function enforceSafeShellDispatch(
+  prompt: string,
+  route: TaskRouteResult,
+  source: 'user' | 'observer' | undefined,
+): SafeDispatchResolution {
   if (route.category !== 'shell_command') {
     return {
       route,
       shell: { ok: false, reason: 'Route is not shell_command.' },
+    };
+  }
+
+  const sourceValidation = validateShellDispatchSource(source);
+  if (!sourceValidation.ok) {
+    return {
+      route: fallbackToCodeChangeRoute(route, `Shell dispatch blocked by source guard: ${sourceValidation.reason}`),
+      shell: { ok: false, reason: sourceValidation.reason },
     };
   }
 
@@ -87,6 +108,28 @@ export function enforceSafeShellDispatch(prompt: string, route: TaskRouteResult)
   return {
     route: demotedRoute,
     shell,
+  };
+}
+
+/**
+ * Source-aware shell gate used as defense-in-depth at dispatch boundary.
+ * Only explicit user-originated sessions may execute shell routes.
+ */
+export function validateShellDispatchSource(
+  source: 'user' | 'observer' | undefined,
+): ShellDispatchSourceValidation {
+  if (source === 'user') {
+    return { ok: true };
+  }
+  if (source === 'observer') {
+    return {
+      ok: false,
+      reason: 'Rejected shell execution for source observer; observer prompts must route through planning pipeline.',
+    };
+  }
+  return {
+    ok: false,
+    reason: 'Rejected shell execution because source is undefined; only source user is allowed.',
   };
 }
 

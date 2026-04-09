@@ -102,8 +102,8 @@ export interface WorkSession {
   adaptiveConcurrency?: boolean;
   batchConcurrency?: number;
   batchMinConcurrency?: number;
-  worktreePath: string;
-  worktreeBranch: string;
+  worktreePath?: string;
+  worktreeBranch?: string;
   creationReason?: SessionCreationReason;
   sourceSessionId?: string;
   source?: 'user' | 'observer';

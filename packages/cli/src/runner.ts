@@ -206,7 +206,7 @@ async function main(): Promise<void> {
     config.source,
     process.env.ORCHESTRACE_TASK_ROUTE,
   ).result;
-  const dispatch = enforceSafeShellDispatch(promptForRoutingAndEffort, resolvedRoute);
+  const dispatch = enforceSafeShellDispatch(promptForRoutingAndEffort, resolvedRoute, config.source);
   const route = dispatch.route;
   const effortClassification = classifyTaskEffort(promptForRoutingAndEffort);
   const taskEffort: TaskEffort = (process.env.ORCHESTRACE_TASK_EFFORT as TaskEffort) || effortClassification.effort;
@@ -1409,6 +1409,8 @@ async function main(): Promise<void> {
 
     await enterLifecyclePhase('DISPATCHING', {
       precondition: () => {
+        // Defense-in-depth: shell execution is only reachable when both the
+        // source-aware guard and prompt command validation already succeeded.
         if (route.category === 'shell_command') {
           return Boolean(dispatch.shell.ok && dispatch.shell.command);
         }

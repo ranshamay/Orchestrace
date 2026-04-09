@@ -87,7 +87,7 @@ describe('task routing config', () => {
     expect(resolved.category).toBe('shell_command');
     expect(resolved.source).toBe('override');
 
-    const dispatch = enforceSafeShellDispatch(prompt, resolved);
+    const dispatch = enforceSafeShellDispatch(prompt, resolved, 'user');
     expect(dispatch.shell.ok).toBe(false);
     expect(dispatch.route.category).toBe('code_change');
     expect(dispatch.route.strategy).toBe('full_planning_pipeline');
@@ -97,10 +97,21 @@ describe('task routing config', () => {
   it('keeps explicit shell route when override prompt is a real command', () => {
     const prompt = 'run git status';
     const resolved = resolveTaskRoute(prompt, 'shell_command').result;
-    const dispatch = enforceSafeShellDispatch(prompt, resolved);
+    const dispatch = enforceSafeShellDispatch(prompt, resolved, 'user');
 
     expect(dispatch.route.category).toBe('shell_command');
     expect(dispatch.shell.ok).toBe(true);
     expect(dispatch.shell.command).toBe('git status');
+  });
+
+  it('demotes shell route when source is undefined at dispatch boundary', () => {
+    const prompt = 'git status';
+    const resolved = resolveTaskRoute(prompt, 'shell_command').result;
+    const dispatch = enforceSafeShellDispatch(prompt, resolved, undefined);
+
+    expect(dispatch.shell.ok).toBe(false);
+    expect(dispatch.shell.reason).toContain('source is undefined');
+    expect(dispatch.route.category).toBe('code_change');
+    expect(dispatch.route.reason).toContain('source guard');
   });
 });

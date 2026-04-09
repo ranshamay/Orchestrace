@@ -56,8 +56,6 @@ export interface TaskNode {
   model?: ModelConfig;
   /** Validation/retry configuration. */
   validation?: ValidationConfig;
-  /** If true, spawn in an isolated sub-agent (separate worktree). */
-  isolated?: boolean;
   /** Arbitrary metadata. */
   meta?: Record<string, unknown>;
 }
