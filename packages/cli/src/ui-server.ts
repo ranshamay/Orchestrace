@@ -1059,9 +1059,6 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       planningNoToolGuardMode: session.planningNoToolGuardMode,
       quickStartMode: session.quickStartMode,
       quickStartMaxPreDelegationToolCalls: session.quickStartMaxPreDelegationToolCalls,
-      executionContext: session.executionContext,
-      selectedWorktreePath: session.selectedWorktreePath,
-      useWorktree: session.useWorktree,
       adaptiveConcurrency: session.adaptiveConcurrency,
       batchConcurrency: session.batchConcurrency,
       batchMinConcurrency: session.batchMinConcurrency,
@@ -1069,10 +1066,49 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       trivialTaskMaxPromptLength: session.trivialTaskMaxPromptLength,
       worktreePath: session.worktreePath,
       worktreeBranch: session.worktreeBranch,
-      workspaceAssignment: session.workspaceAssignment,
       creationReason: session.creationReason,
       sourceSessionId: session.sourceSessionId,
       source: session.source,
+    };
+  }
+
+  async function initializeManagedSessionWorkspace(params: {
+    sessionId: string;
+    workspaceRoot: string;
+    worktreePath?: string;
+    worktreeBranch?: string;
+  }): Promise<{
+    workspacePath: string;
+    worktreePath: string;
+    worktreeBranch: string;
+    cleanupWorktree: () => Promise<void>;
+    warnings: string[];
+  }> {
+    const managedWorktree = await ensureSessionWorktree({
+      repoRoot: params.workspaceRoot,
+      sessionId: params.sessionId,
+      worktreePath: params.worktreePath,
+      branchName: params.worktreeBranch,
+    });
+
+    const warnings: string[] = [];
+    if (managedWorktree.recreated && !managedWorktree.created) {
+      warnings.push(`Recreated session worktree for session ${params.sessionId}.`);
+    }
+
+    return {
+      workspacePath: managedWorktree.worktreePath,
+      worktreePath: managedWorktree.worktreePath,
+      worktreeBranch: managedWorktree.branchName,
+      cleanupWorktree: async () => {
+        await cleanupSessionWorktree({
+          repoRoot: params.workspaceRoot,
+          sessionId: params.sessionId,
+          worktreePath: managedWorktree.worktreePath,
+          branchName: managedWorktree.branchName,
+        });
+      },
+      warnings,
     };
   }
 
@@ -1108,8 +1144,6 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
               obs.stop();
               sessionObservers.delete(id);
             }
-            // Release the workspace path lock so new sessions can use the same path.
-            releaseWorkspacePathLock(session.workspacePath, id);
             // Notify the observer daemon: close the loop on findings (auto-resolve if PR opened)
             observerDaemon.onFixSessionCompleted(id, newStatus, session.output?.text);
             broadcastWorkStream(workStreamClients, id, newStatus === 'completed' ? 'end' : 'error', {
@@ -1419,11 +1453,19 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       return { error: 'Cannot retry a running session.', statusCode: 409 };
     }
 
-    const lockResult = acquireWorkspacePathLock(session.workspacePath, session.id);
-    if (!lockResult.ok) {
+    const workspace = await workspaceManager.selectWorkspace(session.workspaceId);
+    let managedWorkspace;
+    try {
+      managedWorkspace = await initializeManagedSessionWorkspace({
+        sessionId: session.id,
+        workspaceRoot: workspace.path,
+        worktreePath: session.worktreePath,
+        worktreeBranch: session.worktreeBranch,
+      });
+    } catch (error) {
       return {
-        error: `Workspace path is currently in use by another session (${lockResult.ownerSessionId}). Select a different worktree path or wait for the session to be deleted.`,
-        statusCode: 409,
+        error: `Failed to initialize session worktree: ${toErrorMessage(error)}`,
+        statusCode: 500,
       };
     }
 
@@ -1431,7 +1473,6 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     const displayPrompt = asString(params.displayPrompt);
     const executionPrompt = asString(params.executionPrompt);
     if (!displayPrompt && promptParts.length === 0) {
-      releaseWorkspacePathLock(session.workspacePath, session.id);
       return { error: 'Missing prompt', statusCode: 400 };
     }
 
@@ -1441,6 +1482,11 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     const normalizedExecutionPrompt = executionPrompt.trim() || normalizedDisplayPrompt;
 
     const retryStartedAt = now();
+    session.workspaceName = workspace.name;
+    session.workspacePath = managedWorkspace.workspacePath;
+    session.worktreePath = managedWorkspace.worktreePath;
+    session.worktreeBranch = managedWorkspace.worktreeBranch;
+    session.cleanupWorktree = managedWorkspace.cleanupWorktree;
     session.prompt = normalizedDisplayPrompt;
     session.executionPromptOverride = normalizedExecutionPrompt;
     session.promptParts = promptParts.length > 0 ? cloneChatContentParts(promptParts) : undefined;
@@ -1472,7 +1518,6 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     try {
       await appendSessionCreatedEvent(session, retryStartedAt);
     } catch (error) {
-      releaseWorkspacePathLock(session.workspacePath, session.id);
       session.status = 'failed';
       session.error = `Failed to persist retry session config: ${toErrorMessage(error)}`;
       session.llmStatus = createLlmStatus('failed', now(), { detail: session.error });
