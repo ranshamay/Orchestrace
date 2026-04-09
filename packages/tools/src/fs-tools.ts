@@ -2,7 +2,7 @@ import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { Type } from '@mariozechner/pi-ai';
 import type { AgentToolsetOptions, RegisteredAgentTool } from './types.js';
-import type { FileReadCache } from './file-read-cache.js';
+import type { FileReadCache, SessionFileReadCache } from './file-read-cache.js';
 import { resolveWorkspacePath, toWorkspaceRelative } from './path-utils.js';
 import { runCommand } from './command-tools/command-runner.js';
 
@@ -21,7 +21,7 @@ const DEFAULT_BATCH_MIN_CONCURRENCY = 1;
 
 export function createFilesystemTools(options: FilesystemToolOptions): RegisteredAgentTool[] {
   const resolveRevision = createRevisionResolver(options.cwd);
-  const fileReadCache = options.fileReadCache;
+  const fileReadCache = asFileReadCache(options.fileReadCache);
   const tools: RegisteredAgentTool[] = [
     {
       tool: {
@@ -545,6 +545,13 @@ function createRevisionResolver(cwd: string): () => Promise<string> {
 
     return cachedRevision;
   };
+}
+
+function asFileReadCache(cache: FileReadCache | SessionFileReadCache | undefined): FileReadCache | undefined {
+  if (!cache || cache instanceof Map) {
+    return undefined;
+  }
+  return cache;
 }
 
 function invalidateCacheForPath(cache: FileReadCache | undefined, target: string): void {
