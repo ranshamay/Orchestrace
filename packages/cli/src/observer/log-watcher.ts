@@ -22,8 +22,9 @@ export interface LogFinding {
   category: LogFindingCategory;
   severity: FindingSeverity;
   title: string;
-  description: string;
-  suggestedFix: string;
+  issueSummary: string;
+  evidence: string[];
+  severityRationale?: string;
   relevantFiles?: string[];
   logSnippet: string;
   detectedAt: string;
@@ -90,12 +91,15 @@ You look for these categories:
 5. **Security** — credential exposure, unsafe operations, missing validation
 
 Guidelines:
-- Only report CONCRETE, ACTIONABLE issues backed by evidence from the logs
+- Only report concrete issues backed by evidence from the logs
+- issueSummary must be exactly one sentence that describes the issue only
+- evidence must contain 2-3 short items quoting or paraphrasing real log lines/events
+- Do NOT provide explicit recommendations, fixes, implementation steps, or "how to solve" instructions
 - Include the relevant log snippet (1-3 key lines) in each finding
-- Each suggestedFix must be a specific code change or configuration adjustment
 - Don't flag normal operational logs (startup messages, successful operations)
 - Focus on patterns — a single transient error is less important than a recurring one
-- Rate severity honestly: critical = data loss/security, high = breaking errors, medium = perf/reliability, low = minor improvements
+- Rate severity conservatively: critical = confirmed data loss/security exposure; high = user-visible breakage or sustained failure with corroborating evidence; medium = perf/reliability degradation; low = minor improvements
+- High/critical findings must include severityRationale tied to concrete observed impact
 - If no significant issues are found in the batch, return an empty findings array
 
 Respond ONLY with valid JSON matching this schema:
