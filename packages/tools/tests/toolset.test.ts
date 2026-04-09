@@ -102,7 +102,7 @@ describe('createAgentToolset phase policy', () => {
 });
 
 describe('batch filesystem tools', () => {
-  it('read_files returns results per file and reports missing files as failures', async () => {
+  it('read_files reports required missing files as failures', async () => {
     const cwd = await makeWorkspace();
     await writeFile(join(cwd, 'src', 'second.ts'), 'export const second = 2;\n', 'utf-8');
     const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
@@ -126,15 +126,69 @@ describe('batch filesystem tools', () => {
       total: number;
       successes: number;
       failures: number;
-      files: Array<{ path: string; ok: boolean; content?: string; error?: string }>;
+      optionalMissing: number;
+      files: Array<{
+        path: string;
+        ok: boolean;
+        required: boolean;
+        status: 'ok' | 'optional_missing' | 'required_missing' | 'read_error';
+        content?: string;
+        error?: string;
+      }>;
     };
 
     expect(parsed.total).toBe(3);
     expect(parsed.successes).toBe(2);
     expect(parsed.failures).toBe(1);
-    expect(parsed.files[0]).toMatchObject({ path: 'src/file.ts', ok: true });
-    expect(parsed.files[1]).toMatchObject({ path: 'src/second.ts', ok: true });
-    expect(parsed.files[2]).toMatchObject({ path: 'src/missing.ts', ok: false });
+    expect(parsed.optionalMissing).toBe(0);
+    expect(parsed.files[0]).toMatchObject({ path: 'src/file.ts', ok: true, status: 'ok', required: true });
+    expect(parsed.files[1]).toMatchObject({ path: 'src/second.ts', ok: true, status: 'ok', required: true });
+    expect(parsed.files[2]).toMatchObject({ path: 'src/missing.ts', ok: false, status: 'required_missing', required: true });
+    expect(parsed.files[2].error).toBeDefined();
+  });
+
+  it('read_files reports optional missing files without escalating tool error', async () => {
+    const cwd = await makeWorkspace();
+    await writeFile(join(cwd, 'src', 'second.ts'), 'export const second = 2;\n', 'utf-8');
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+
+    const result = await toolset.executeTool({
+      id: 'optional-missing',
+      name: 'read_files',
+      arguments: {
+        files: [
+          { path: 'src/file.ts' },
+          { path: 'src/second.ts' },
+          { path: 'src/missing.ts', required: false },
+        ],
+        concurrency: 3,
+      },
+    });
+
+    expect(result.isError).toBeFalsy();
+
+    const parsed = JSON.parse(result.content) as {
+      total: number;
+      successes: number;
+      failures: number;
+      optionalMissing: number;
+      files: Array<{
+        path: string;
+        ok: boolean;
+        required: boolean;
+        status: 'ok' | 'optional_missing' | 'required_missing' | 'read_error';
+        content?: string;
+        error?: string;
+      }>;
+    };
+
+    expect(parsed.total).toBe(3);
+    expect(parsed.successes).toBe(2);
+    expect(parsed.failures).toBe(0);
+    expect(parsed.optionalMissing).toBe(1);
+    expect(parsed.files[0]).toMatchObject({ path: 'src/file.ts', ok: true, status: 'ok', required: true });
+    expect(parsed.files[1]).toMatchObject({ path: 'src/second.ts', ok: true, status: 'ok', required: true });
+    expect(parsed.files[2]).toMatchObject({ path: 'src/missing.ts', ok: false, status: 'optional_missing', required: false });
     expect(parsed.files[2].error).toBeDefined();
   });
 
