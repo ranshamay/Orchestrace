@@ -222,20 +222,26 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
           }
         }
 
-                const output = formatCommandOutput(result, options.maxOutputChars ?? 16000);
+                        const output = formatCommandOutput(result, options.maxOutputChars ?? 16000);
         const hasMatches = result.stdout.trim().length > 0;
+        const hasPathError = hasRipgrepPathError(stderr);
 
         // Prefer successful match output when available. ripgrep may emit stderr
         // diagnostics in mixed-result scenarios; only escalate error behavior
         // when there are no matches to return.
         if (hasMatches) {
+          const content = hasPathError
+            ? truncateText(result.stdout.trim(), options.maxOutputChars ?? 16000)
+            : output;
+
           return {
-            content: output,
+            content,
             isError: false,
           };
         }
 
         if (result.exitCode === 2 && useRegex) {
+
           return createSearchFilesErrorResult({
             errorType: 'invalid_regex',
             message: 'Invalid regex query.',
@@ -246,10 +252,10 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
           });
         }
 
-        const hasPathError = hasRipgrepPathError(stderr);
-
+        
 
                 if (result.exitCode === 1 && result.stdout.trim().length === 0) {
+
           return { content: '(no matches)', isError: false };
         }
 
