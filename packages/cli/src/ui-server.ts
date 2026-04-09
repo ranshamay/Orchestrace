@@ -83,6 +83,8 @@ import type {
 import { ObserverDaemon, SessionObserver, BackendLogger, LogWatcher } from './observer/index.js';
 import type { RealtimeFinding } from './observer/index.js';
 import { sanitizeLogLine, sanitizeToolPayload } from './runner/log-sanitizer.js';
+import { parseTaskRouteOverride } from './task-routing.js';
+
 
 const GITHUB_PROVIDER_ID = 'github';
 const GITHUB_API_BASE_URL = 'https://api.github.com';
@@ -1285,7 +1287,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       uiStatePersistence.schedule();
     });
 
-    // Spawn runner as a detached child process.
+        // Spawn runner as a detached child process.
     const runnerPath = join(dirname(fileURLToPath(import.meta.url)), 'runner.ts');
     const runnerProcess = spawn(
       process.execPath,
@@ -1294,9 +1296,14 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         detached: true,
         stdio: ['ignore', 'pipe', 'pipe'],
         cwd: session.workspacePath,
-        env: { ...process.env, ORCHESTRACE_SESSION_ID: id },
+        env: {
+          ...process.env,
+          ORCHESTRACE_SESSION_ID: id,
+          ORCHESTRACE_TASK_ROUTE: resolveRunnerTaskRouteEnvValue(process.env.ORCHESTRACE_TASK_ROUTE),
+        },
       },
     );
+
 
     // Capture runner stdout/stderr to persistent log stream.
     if (runnerProcess.stdout) {
@@ -7632,7 +7639,14 @@ function buildContextExecutionStateSummary(session: WorkSession, todos: AgentTod
   return lines.join('\n');
 }
 
+export function resolveRunnerTaskRouteEnvValue(
+  routeOverrideRaw: string | undefined,
+): 'shell_command' | 'investigation' | 'code_change' | 'refactor' {
+  return parseTaskRouteOverride(routeOverrideRaw) ?? 'code_change';
+}
+
 export function buildSessionSystemPrompt(session: WorkSession, phase: SessionPromptPhase): string {
+
   const quickStartMode = session.quickStartMode
     ?? (parseBooleanSetting(process.env.ORCHESTRACE_QUICK_START_MODE) ?? false);
   const quickStartMaxPreDelegationToolCalls = normalizePositiveSetting(
