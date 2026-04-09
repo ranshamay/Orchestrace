@@ -44,6 +44,7 @@ import {
   type LlmStatusEmissionState,
 } from './ui-server/llm-status-emission.js';
 import {
+  THINKING_CIRCUIT_BREAKER_ABORT,
   THINKING_CIRCUIT_BREAKER_NUDGE,
   createThinkingCircuitBreakerState,
   isThinkingCycleEvent,
@@ -1216,8 +1217,8 @@ async function main(): Promise<void> {
         logDagEventTrace(sessionId, event);
 
         if (isThinkingCycleEvent(event)) {
-          const shouldEmitNudge = updateThinkingCircuitBreaker(thinkingCircuitBreaker, event);
-          if (shouldEmitNudge) {
+          const breakerAction = updateThinkingCircuitBreaker(thinkingCircuitBreaker, event);
+          if (breakerAction === 'nudge') {
             void emit({
               time: t,
               type: 'session:chat-message',
@@ -1229,6 +1230,19 @@ async function main(): Promise<void> {
                 },
               },
             });
+          } else if (breakerAction === 'abort') {
+            void emit({
+              time: t,
+              type: 'session:chat-message',
+              payload: {
+                message: {
+                  role: 'system',
+                  content: THINKING_CIRCUIT_BREAKER_ABORT,
+                  time: t,
+                },
+              },
+            });
+            throw new Error(THINKING_CIRCUIT_BREAKER_ABORT);
           }
         } else if (shouldResetThinkingCircuitBreakerOnEvent(event)) {
           resetThinkingCircuitBreaker(thinkingCircuitBreaker);
