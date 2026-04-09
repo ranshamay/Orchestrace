@@ -6,6 +6,7 @@ import type { EventStore } from '@orchestrace/store';
 import { DEFAULT_OBSERVER_CONFIG } from '../src/observer/types.js';
 import { ObserverDaemon } from '../src/observer/daemon.js';
 import { LogWatcher } from '../src/observer/log-watcher.js';
+import { validateShellExecutionPrompt } from '../src/task-routing.js';
 
 function createEventStoreStub(): EventStore {
   return {
@@ -99,9 +100,13 @@ describe('log watcher fix-session emission', () => {
       expect(first).toEqual({ registered: 1, spawned: 1 });
       expect(startSession).toHaveBeenCalledTimes(1);
       expect(startSession.mock.calls[0]?.[0].source).toBe('observer');
-      expect(startSession.mock.calls[0]?.[0].prompt).toContain('[Observer Fix] Crash loop in API handler');
-      expect(startSession.mock.calls[0]?.[0].prompt).toContain('## Issue');
-      expect(startSession.mock.calls[0]?.[0].prompt).toContain('\n## Task\n');
+      const firstPrompt = startSession.mock.calls[0]?.[0].prompt ?? '';
+      expect(firstPrompt).toContain('[Observer Fix] Crash loop in API handler');
+      expect(firstPrompt).toContain('## Issue');
+      expect(firstPrompt).toContain('\n## Task\n');
+      const shellValidation = validateShellExecutionPrompt(firstPrompt);
+      expect(shellValidation.ok).toBe(false);
+      expect(shellValidation.command).toBeUndefined();
       expect(daemon.getFindings()[0]?.category).toBe('code-quality');
 
       const duplicate = await daemon.ingestLogWatcherFindings([
