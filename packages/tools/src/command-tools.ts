@@ -68,11 +68,11 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
           regex: Type.Optional(Type.Boolean({ description: 'When true, interpret query as regex. Defaults to false (literal search via --fixed-strings).' })),
           path: Type.Optional(Type.String({ description: 'Relative path to search inside. Defaults to workspace root.' })),
           glob: Type.Optional(Type.String({ description: 'Optional glob include filter, e.g. src/**/*.ts' })),
-          queryMode: Type.Optional(Type.Union([
+                    queryMode: Type.Optional(Type.Union([
             Type.Literal('regex'),
             Type.Literal('literal'),
           ], {
-            description: 'How to interpret query: regex (default) or literal fixed-string search.',
+            description: 'How to interpret query: literal fixed-string search (default) or regex.',
           })),
         }),
       },
@@ -941,16 +941,19 @@ function sanitizeSearchQueryAndMode(input: SanitizedSearchQueryAndModeInput): Va
     return queryModeValidation;
   }
 
-  const resolvedMode = resolveSearchQueryMode({
+    const resolvedMode = resolveSearchQueryMode({
     queryMode: queryModeValidation.value,
     regex: input.regex,
   });
+  if (!resolvedMode.ok) {
+    return resolvedMode;
+  }
 
   return {
     ok: true,
     value: {
       query: queryValidation.value,
-      useRegex: resolvedMode === 'regex',
+      useRegex: resolvedMode.value === 'regex',
     },
   };
 }
@@ -958,17 +961,28 @@ function sanitizeSearchQueryAndMode(input: SanitizedSearchQueryAndModeInput): Va
 function resolveSearchQueryMode(input: {
   queryMode: 'regex' | 'literal' | undefined;
   regex: boolean | undefined;
-}): 'regex' | 'literal' {
+}): ValidationResult<'regex' | 'literal'> {
+  if (input.queryMode !== undefined && input.regex !== undefined) {
+    const modeFromRegex = input.regex ? 'regex' : 'literal';
+    if (modeFromRegex !== input.queryMode) {
+      return {
+        ok: false,
+        error: "Invalid query mode: queryMode and regex disagree. Use queryMode only, or make both values consistent.",
+      };
+    }
+  }
+
   if (input.queryMode !== undefined) {
-    return input.queryMode;
+    return { ok: true, value: input.queryMode };
   }
 
   if (input.regex === true) {
-    return 'regex';
+    return { ok: true, value: 'regex' };
   }
 
-  return 'literal';
+  return { ok: true, value: 'literal' };
 }
+
 
 
 
