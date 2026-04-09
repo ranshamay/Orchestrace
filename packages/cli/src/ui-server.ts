@@ -192,8 +192,7 @@ function createInheritedSubAgentToolset(
     adaptiveConcurrency?: boolean;
     batchConcurrency?: number;
     batchMinConcurrency?: number;
-        resolveGithubToken: (options?: { allowRefresh?: boolean; minimumTtlSeconds?: number }) => Promise<string | undefined>;
-
+    resolveGithubToken: (options?: { allowRefresh?: boolean; minimumTtlSeconds?: number }) => Promise<string | undefined>;
     sharedContextStore?: import('@orchestrace/context').SharedContextStore;
     agentId?: string;
     fileReadCache?: ReturnType<typeof createFileReadCache> | Map<string, { content: string; mtimeMs: number; size: number; readAt: number }>;
@@ -218,7 +217,32 @@ function createInheritedSubAgentToolset(
   });
 }
 
+export async function validateSessionProvidersReadiness(
+  authManager: Pick<ProviderAuthManager, 'validateProviderReadiness'>,
+  planningProvider: string,
+  implementationProvider: string,
+): Promise<{ ok: true } | { ok: false; error: string; statusCode: 400 }> {
+  const phaseProviders: Array<{ phase: 'planning' | 'implementation'; provider: string }> = [
+    { phase: 'planning', provider: planningProvider },
+    { phase: 'implementation', provider: implementationProvider },
+  ];
+
+  for (const phaseConfig of phaseProviders) {
+    const readiness = await authManager.validateProviderReadiness(phaseConfig.provider);
+    if (!readiness.ok) {
+      return {
+        ok: false,
+        error: `${phaseConfig.phase === 'planning' ? 'Planning' : 'Implementation'} provider is not ready: ${readiness.message}`,
+        statusCode: 400,
+      };
+    }
+  }
+
+  return { ok: true };
+}
+
 export async function startUiServer(options: UiServerOptions = {}): Promise<void> {
+
   const port = options.port ?? 4310;
   const hmrEnabled = options.hmr ?? process.env.ORCHESTRACE_UI_HMR !== 'false';
   const workspaceManager = new WorkspaceManager(process.cwd());
@@ -1606,41 +1630,16 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       request.deliveryStrategy ?? uiPreferences.defaultDeliveryStrategy,
     );
 
-    const providerStatuses = await authManager.getAllStatus();
-    const phaseProviders: Array<{ phase: 'planning' | 'implementation'; provider: string }> = [
-      { phase: 'planning', provider: planningProvider },
-      { phase: 'implementation', provider: implementationProvider },
-    ];
-
-    for (const phaseConfig of phaseProviders) {
-      const providerStatus = providerStatuses.find((item) => item.provider === phaseConfig.provider);
-      if (!providerStatus || providerStatus.source === 'none') {
-        return {
-          error: `${phaseConfig.phase === 'planning' ? 'Planning' : 'Implementation'} provider ${phaseConfig.provider} is not connected. Connect it in Settings first.`,
-          statusCode: 400,
-        };
-      }
+            const providersReadiness = await validateSessionProvidersReadiness(
+      authManager,
+      planningProvider,
+      implementationProvider,
+    );
+    if (!providersReadiness.ok) {
+      return providersReadiness;
     }
 
-    const uniqueProviders = new Set([planningProvider, implementationProvider]);
-    for (const providerId of uniqueProviders) {
-      try {
-        const apiKey = await resolveProviderApiKey(providerId);
-        if (apiKey) {
-          continue;
-        }
 
-        return {
-          error: `Provider ${providerId} is missing an API key. Connect it in Settings first.`,
-          statusCode: 400,
-        };
-      } catch {
-        return {
-          error: `Provider ${providerId} is missing an API key. Connect it in Settings first.`,
-          statusCode: 400,
-        };
-      }
-    }
 
     const promptValidation = validateAndNormalizeSessionPromptInput({
       prompt: request.prompt,
@@ -2099,12 +2098,12 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           return;
         }
 
-        const providerStatuses = await authManager.getAllStatus();
-        const providerStatus = providerStatuses.find((item) => item.provider === provider);
-        if (!providerStatus || providerStatus.source === 'none') {
-          sendJson(res, 403, { error: `Provider ${provider} is not connected. Connect it in Settings first.` });
+                const readiness = await authManager.validateProviderReadiness(provider, { allowRefresh: false });
+        if (!readiness.ok) {
+          sendJson(res, 403, { error: readiness.message, code: readiness.code, remediation: readiness.remediation });
           return;
         }
+
 
         try {
           const models = getModels(provider as never).map((model) => model.id);
@@ -2966,12 +2965,12 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           return;
         }
 
-        const providerStatuses = await authManager.getAllStatus();
-        const providerStatus = providerStatuses.find((item) => item.provider === session.provider);
-        if (!providerStatus || providerStatus.source === 'none') {
-          sendJson(res, 400, { error: `Provider ${session.provider} is not connected. Connect it in Settings first.` });
+                const readiness = await authManager.validateProviderReadiness(session.provider);
+        if (!readiness.ok) {
+          sendJson(res, 400, { error: readiness.message, code: readiness.code, remediation: readiness.remediation });
           return;
         }
+
 
         await ensureSessionWorkspaceReady(session, workspaceManager, uiStatePersistence);
 
@@ -3395,12 +3394,12 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           return;
         }
 
-        const providerStatuses = await authManager.getAllStatus();
-        const providerStatus = providerStatuses.find((item) => item.provider === session.provider);
-        if (!providerStatus || providerStatus.source === 'none') {
-          sendJson(res, 400, { error: `Provider ${session.provider} is not connected. Connect it in Settings first.` });
+                const readiness = await authManager.validateProviderReadiness(session.provider);
+        if (!readiness.ok) {
+          sendJson(res, 400, { error: readiness.message, code: readiness.code, remediation: readiness.remediation });
           return;
         }
+
 
         await ensureSessionWorkspaceReady(session, workspaceManager, uiStatePersistence);
 

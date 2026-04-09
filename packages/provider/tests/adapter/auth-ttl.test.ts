@@ -7,10 +7,13 @@ const oauthMock = vi.hoisted(() => ({
   loginGitHubCopilot: vi.fn(),
 }));
 
-vi.mock('@mariozechner/pi-ai', () => ({
+const piAiMock = vi.hoisted(() => ({
   getEnvApiKey: vi.fn(() => undefined),
   getProviders: vi.fn(() => ['github-copilot']),
 }));
+
+vi.mock('@mariozechner/pi-ai', () => piAiMock);
+
 
 vi.mock('@mariozechner/pi-ai/oauth', () => oauthMock);
 
@@ -157,7 +160,7 @@ describe('ProviderAuthManager Copilot TTL awareness', () => {
     expect(oauthMock.getOAuthApiKey).toHaveBeenCalledTimes(1);
   });
 
-  it('includes near-expiry metadata in status', async () => {
+    it('includes near-expiry metadata in status', async () => {
 
     const now = Math.floor(Date.now() / 1000);
     await writeAuthStore(now + 60);
@@ -168,5 +171,43 @@ describe('ProviderAuthManager Copilot TTL awareness', () => {
     expect(status.tokenTtl).toBeDefined();
     expect(status.tokenTtl?.isNearExpiry).toBe(true);
     expect(status.tokenTtl?.refreshRecommended).toBe(true);
+  });
+
+  it('allows github-copilot env key fallback when oauth/store is absent', async () => {
+    piAiMock.getEnvApiKey.mockReturnValue('copilot-env-token');
+
+    const auth = new ProviderAuthManager({ authFilePath: authPath });
+    const token = await auth.resolveApiKey('github-copilot', { allowRefresh: false });
+
+    expect(token).toBe('copilot-env-token');
+    expect(piAiMock.getEnvApiKey).toHaveBeenCalledWith('github-copilot');
+  });
+
+  it('returns actionable readiness error when github-copilot credentials are missing', async () => {
+    const auth = new ProviderAuthManager({ authFilePath: authPath });
+    const readiness = await auth.validateProviderReadiness('github-copilot', { allowRefresh: false });
+
+    expect(readiness.ok).toBe(false);
+    if (!readiness.ok) {
+      expect(readiness.code).toBe('provider_missing_credentials');
+      expect(readiness.message).toContain('GitHub Copilot is missing credentials');
+      expect(readiness.remediation).toEqual(expect.arrayContaining([
+        expect.stringContaining('orchestrace auth github-copilot'),
+        expect.stringContaining('GITHUB_COPILOT_API_KEY'),
+      ]));
+    }
+  });
+
+  it('reports readiness success when github-copilot env key is available', async () => {
+    piAiMock.getEnvApiKey.mockReturnValue('copilot-env-token');
+
+    const auth = new ProviderAuthManager({ authFilePath: authPath });
+    const readiness = await auth.validateProviderReadiness('github-copilot', { allowRefresh: false });
+
+    expect(readiness).toEqual({
+      ok: true,
+      provider: 'github-copilot',
+      source: 'none',
+    });
   });
 });

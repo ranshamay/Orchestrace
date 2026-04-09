@@ -25,5 +25,8 @@ export type {
 	ProviderAuthManagerOptions,
 	ProviderAuthStatus,
 	ProviderInfo,
+	ProviderReadinessResult,
+	ProviderReadinessErrorCode,
 	ProviderTokenTtlStatus,
 } from './auth.js';
+

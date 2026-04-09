@@ -14,6 +14,7 @@ import {
 
 const ENV_VAR_BY_PROVIDER: Record<string, string> = {
   anthropic: 'ANTHROPIC_API_KEY',
+  'github-copilot': 'GITHUB_COPILOT_API_KEY',
   openai: 'OPENAI_API_KEY',
   google: 'GEMINI_API_KEY',
   'google-vertex': 'GOOGLE_CLOUD_API_KEY',
@@ -78,9 +79,25 @@ export interface ResolveApiKeyOptions {
   minimumTtlSeconds?: number;
 }
 
+export type ProviderReadinessErrorCode = 'provider_missing_credentials';
 
+export type ProviderReadinessResult =
+  | {
+      ok: true;
+      provider: string;
+      source: ProviderAuthStatus['source'];
+    }
+  | {
+      ok: false;
+      provider: string;
+      code: ProviderReadinessErrorCode;
+      message: string;
+      source: ProviderAuthStatus['source'];
+      remediation: string[];
+    };
 
 export interface PersistedAuthStore {
+
   oauth: Record<string, OAuthCredentials>;
   apiKeys: Record<string, string>;
 }
@@ -254,13 +271,11 @@ export class ProviderAuthManager {
     }
 
 
-    // Optional fallback for users who still prefer environment variables.
-    // GitHub Copilot intentionally does not use this fallback to enforce device OAuth.
-    if (providerId === GITHUB_COPILOT_PROVIDER_ID) {
-      return undefined;
-    }
+    
 
+    // Optional fallback for users who still prefer environment variables.
     const envApiKey = getEnvApiKey(providerId as never);
+
     if (envApiKey) {
       return envApiKey;
     }
@@ -269,7 +284,59 @@ export class ProviderAuthManager {
   }
 
 
+  
+
+  async validateProviderReadiness(
+    providerId: string,
+    options: ResolveApiKeyOptions = {},
+  ): Promise<ProviderReadinessResult> {
+    const status = await this.getStatus(providerId);
+    const apiKey = await this.resolveApiKey(providerId, options);
+
+    if (apiKey) {
+      return {
+        ok: true,
+        provider: providerId,
+        source: status.source,
+      };
+    }
+
+    const providerLabel = providerId === GITHUB_COPILOT_PROVIDER_ID
+      ? 'GitHub Copilot'
+      : `Provider ${providerId}`;
+
+    const remediation = providerId === GITHUB_COPILOT_PROVIDER_ID
+      ? [
+          'Connect OAuth credentials via `orchestrace auth github-copilot`.',
+          'Or set GITHUB_COPILOT_API_KEY in your environment.',
+        ]
+      : [
+          'Connect the provider via `orchestrace auth`.',
+          'Or configure the provider API key in auth.json/environment.',
+        ];
+
+    return {
+      ok: false,
+      provider: providerId,
+      code: 'provider_missing_credentials',
+      message: `${providerLabel} is missing credentials. ${remediation.join(' ')}`,
+      source: status.source,
+      remediation,
+    };
+  }
+
+  async assertProviderReadiness(
+    providerId: string,
+    options: ResolveApiKeyOptions = {},
+  ): Promise<void> {
+    const readiness = await this.validateProviderReadiness(providerId, options);
+    if (!readiness.ok) {
+      throw new Error(readiness.message);
+    }
+  }
+
   async getStatus(providerId: string): Promise<ProviderAuthStatus> {
+
     const provider = this.listProviders().find((item) => item.id === providerId) ?? {
       id: providerId,
       name: providerId,
