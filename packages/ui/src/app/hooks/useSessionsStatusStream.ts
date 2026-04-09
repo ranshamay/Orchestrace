@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react';
-import { API_BASE, type WorkSession } from '../../lib/api';
+import { API_BASE, buildAuthedSseUrl, type WorkSession } from '../../lib/api';
 import { sortSessionsByActivityAndRecency, upsertSessionWithActivityTransition } from '../utils/sessionSort';
 
 type Params = {
@@ -20,7 +20,7 @@ export function useSessionsStatusStream({ selectedSessionId, setSelectedSessionI
   }, [selectedSessionId]);
 
   useEffect(() => {
-    const es = new EventSource(`${API_BASE}/work/sessions/stream`);
+        const es = new EventSource(buildAuthedSseUrl(`${API_BASE}/work/sessions/stream`));
 
     const handleReady = (ev: MessageEvent) => {
       try {

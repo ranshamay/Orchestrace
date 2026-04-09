@@ -1,5 +1,118 @@
 export const API_BASE = '/api';
 
+const AUTH_TOKEN_STORAGE_KEY = 'orchestrace.appAuthToken';
+
+function getStoredAuthToken(): string | undefined {
+  if (typeof window === 'undefined') {
+    return undefined;
+  }
+  const token = window.localStorage.getItem(AUTH_TOKEN_STORAGE_KEY);
+  return token?.trim() || undefined;
+}
+
+export function setStoredAuthToken(token: string): void {
+  if (typeof window === 'undefined') {
+    return;
+  }
+
+  const value = token.trim();
+  if (!value) {
+    window.localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
+    return;
+  }
+
+  window.localStorage.setItem(AUTH_TOKEN_STORAGE_KEY, value);
+}
+
+export function clearStoredAuthToken(): void {
+  if (typeof window === 'undefined') {
+    return;
+  }
+
+  window.localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
+}
+
+function withAuthHeaders(init?: RequestInit): RequestInit {
+  const token = getStoredAuthToken();
+  if (!token) {
+    return init ?? {};
+  }
+
+  const headers = new Headers(init?.headers ?? undefined);
+  headers.set('Authorization', `Bearer ${token}`);
+  return {
+    ...(init ?? {}),
+    headers,
+  };
+}
+
+function withAuthApiPath(path: string): string {
+  const token = getStoredAuthToken();
+  if (!token) {
+    return path;
+  }
+
+  if (!path.startsWith(API_BASE)) {
+    return path;
+  }
+
+  const separator = path.includes('?') ? '&' : '?';
+  return `${path}${separator}token=${encodeURIComponent(token)}`;
+}
+
+async function authedFetch(path: string, init?: RequestInit): Promise<Response> {
+  return fetch(path, withAuthHeaders(init));
+}
+
+export interface AppAuthConfigResponse {
+  authEnabled: boolean;
+  provider: 'google' | null;
+  googleClientId: string | null;
+}
+
+export interface AppAuthStatusResponse {
+  authenticated: boolean;
+  authEnabled: boolean;
+  user?: {
+    email: string;
+    name?: string;
+    picture?: string;
+  };
+  expiresAt?: number;
+}
+
+export interface AppGoogleAuthResponse {
+  token: string;
+  tokenType: 'Bearer';
+  expiresIn: number;
+  user: {
+    email: string;
+    name?: string;
+    picture?: string;
+  };
+}
+
+export async function fetchAppAuthConfig(): Promise<AppAuthConfigResponse> {
+  return readJson(await fetch(`${API_BASE}/app-auth/config`));
+}
+
+export async function fetchAppAuthStatus(): Promise<AppAuthStatusResponse> {
+  return readJson(await authedFetch(`${API_BASE}/app-auth/status`));
+}
+
+export async function loginWithGoogleIdToken(idToken: string): Promise<AppGoogleAuthResponse> {
+  const res = await fetch(`${API_BASE}/app-auth/google`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ idToken }),
+  });
+  return readJson(res);
+}
+
+export function buildAuthedSseUrl(path: string): string {
+  return withAuthApiPath(path);
+}
+
 export interface ProviderInfo {
   id: string;
   authType: string;
@@ -272,11 +385,11 @@ async function readJson<T>(res: Response): Promise<T> {
 }
 
 export async function fetchProviders(): Promise<ProvidersResponse> {
-  return readJson(await fetch(`${API_BASE}/providers`));
+  return readJson(await authedFetch(`${API_BASE}/providers`));
 }
 
 export async function startProviderAuth(providerId: string): Promise<{ sessionId: string }> {
-  const res = await fetch(`${API_BASE}/auth/start`, {
+  const res = await authedFetch(`${API_BASE}/auth/start`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ providerId }),
@@ -285,11 +398,11 @@ export async function startProviderAuth(providerId: string): Promise<{ sessionId
 }
 
 export async function fetchProviderAuthSession(id: string): Promise<{ session: ProviderAuthSession }> {
-  return readJson(await fetch(`${API_BASE}/auth/session?id=${encodeURIComponent(id)}`));
+  return readJson(await authedFetch(`${API_BASE}/auth/session?id=${encodeURIComponent(id)}`));
 }
 
 export async function respondProviderAuthSession(sessionId: string, value: string): Promise<{ ok: boolean }> {
-  const res = await fetch(`${API_BASE}/auth/respond`, {
+  const res = await authedFetch(`${API_BASE}/auth/respond`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ sessionId, value }),
@@ -298,14 +411,14 @@ export async function respondProviderAuthSession(sessionId: string, value: strin
 }
 
 export async function fetchGithubAuthStatus(): Promise<GithubAuthStatusResponse> {
-  return readJson(await fetch(`${API_BASE}/github/auth/status`));
+  return readJson(await authedFetch(`${API_BASE}/github/auth/status`));
 }
 
 export async function startGithubDeviceAuth(payload?: {
   clientId?: string;
   scopes?: string[];
 }): Promise<{ sessionId: string; session: GithubDeviceAuthSession }> {
-  const res = await fetch(`${API_BASE}/github/auth/start`, {
+  const res = await authedFetch(`${API_BASE}/github/auth/start`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload ?? {}),
@@ -314,23 +427,23 @@ export async function startGithubDeviceAuth(payload?: {
 }
 
 export async function fetchGithubDeviceAuthSession(id: string): Promise<{ session: GithubDeviceAuthSession }> {
-  return readJson(await fetch(`${API_BASE}/github/auth/session?id=${encodeURIComponent(id)}`));
+  return readJson(await authedFetch(`${API_BASE}/github/auth/session?id=${encodeURIComponent(id)}`));
 }
 
 export async function fetchModels(provider: string): Promise<{ provider: string; models: string[] }> {
-  return readJson(await fetch(`${API_BASE}/models?provider=${encodeURIComponent(provider)}`));
+  return readJson(await authedFetch(`${API_BASE}/models?provider=${encodeURIComponent(provider)}`));
 }
 
 export async function fetchWorkspaces(): Promise<WorkspacesResponse> {
-  return readJson(await fetch(`${API_BASE}/workspaces`));
+  return readJson(await authedFetch(`${API_BASE}/workspaces`));
 }
 
 export async function fetchUiPreferences(): Promise<{ preferences: UiPreferences }> {
-  return readJson(await fetch(`${API_BASE}/ui/preferences`));
+  return readJson(await authedFetch(`${API_BASE}/ui/preferences`));
 }
 
 export async function updateUiPreferences(patch: Partial<UiPreferences>): Promise<{ preferences: UiPreferences }> {
-  const res = await fetch(`${API_BASE}/ui/preferences`, {
+  const res = await authedFetch(`${API_BASE}/ui/preferences`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(patch),
@@ -339,11 +452,11 @@ export async function updateUiPreferences(patch: Partial<UiPreferences>): Promis
 }
 
 export async function fetchSessions(): Promise<WorkSessionsResponse> {
-  return readJson(await fetch(`${API_BASE}/work`));
+  return readJson(await authedFetch(`${API_BASE}/work`));
 }
 
 export async function fetchWorkAgent(id: string): Promise<WorkAgentResponse> {
-  return readJson(await fetch(`${API_BASE}/work/agent?id=${encodeURIComponent(id)}`));
+  return readJson(await authedFetch(`${API_BASE}/work/agent?id=${encodeURIComponent(id)}`));
 }
 
 export async function fetchWorkTools(
@@ -354,11 +467,11 @@ export async function fetchWorkTools(
   if (mode) {
     params.set('mode', mode);
   }
-  return readJson(await fetch(`${API_BASE}/work/tools?${params.toString()}`));
+  return readJson(await authedFetch(`${API_BASE}/work/tools?${params.toString()}`));
 }
 
 export async function fetchWorkDiff(id: string): Promise<WorkSessionDiffResponse> {
-  return readJson(await fetch(`${API_BASE}/work/diff?id=${encodeURIComponent(id)}`));
+  return readJson(await authedFetch(`${API_BASE}/work/diff?id=${encodeURIComponent(id)}`));
 }
 
 export async function startWork(payload: {
@@ -379,7 +492,7 @@ export async function startWork(payload: {
   batchMinConcurrency?: number;
   promptParts?: ChatContentPart[];
 }): Promise<{ id: string }> {
-  const res = await fetch(`${API_BASE}/work/start`, {
+  const res = await authedFetch(`${API_BASE}/work/start`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -388,7 +501,7 @@ export async function startWork(payload: {
 }
 
 export async function deleteWork(id: string): Promise<{ ok: boolean; id: string }> {
-  const res = await fetch(`${API_BASE}/work/delete`, {
+  const res = await authedFetch(`${API_BASE}/work/delete`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ id }),
@@ -397,7 +510,7 @@ export async function deleteWork(id: string): Promise<{ ok: boolean; id: string 
 }
 
 export async function cancelWork(id: string): Promise<{ ok: boolean }> {
-  const res = await fetch(`${API_BASE}/work/cancel`, {
+  const res = await authedFetch(`${API_BASE}/work/cancel`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ id }),
@@ -406,7 +519,7 @@ export async function cancelWork(id: string): Promise<{ ok: boolean }> {
 }
 
 export async function retryWork(id: string): Promise<{ id: string; sourceId: string }> {
-  const res = await fetch(`${API_BASE}/work/retry`, {
+  const res = await authedFetch(`${API_BASE}/work/retry`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ id }),
@@ -418,7 +531,7 @@ export async function sendChatMessage(
   id: string,
   payload: { message: string; messageParts?: ChatContentPart[] },
 ): Promise<{ ok: boolean; messages: ChatMessage[] }> {
-  const res = await fetch(`${API_BASE}/work/chat/send`, {
+  const res = await authedFetch(`${API_BASE}/work/chat/send`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ id, message: payload.message, messageParts: payload.messageParts }),
@@ -427,7 +540,7 @@ export async function sendChatMessage(
 }
 
 export async function addTodo(id: string, text: string): Promise<{ ok: boolean; todos: AgentTodo[] }> {
-  const res = await fetch(`${API_BASE}/work/todos/add`, {
+  const res = await authedFetch(`${API_BASE}/work/todos/add`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ id, text }),
@@ -436,7 +549,7 @@ export async function addTodo(id: string, text: string): Promise<{ ok: boolean; 
 }
 
 export async function toggleTodo(id: string, todoId: string, done: boolean): Promise<{ ok: boolean; todos: AgentTodo[] }> {
-  const res = await fetch(`${API_BASE}/work/todos/toggle`, {
+  const res = await authedFetch(`${API_BASE}/work/todos/toggle`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ id, todoId, done }),
@@ -511,32 +624,32 @@ export interface ObserverFailedSessionMonitor {
 }
 
 export async function fetchObserverStatus(): Promise<ObserverStatusResponse> {
-  const res = await fetch(`${API_BASE}/observer/status`);
+  const res = await authedFetch(`${API_BASE}/observer/status`);
   return readJson(res);
 }
 
 export async function fetchObserverFindings(): Promise<{ findings: ObserverFinding[] }> {
-  const res = await fetch(`${API_BASE}/observer/findings`);
+  const res = await authedFetch(`${API_BASE}/observer/findings`);
   return readJson(res);
 }
 
 export async function fetchObserverFailedSessions(): Promise<{ sessions: ObserverFailedSessionMonitor[] }> {
-  const res = await fetch(`${API_BASE}/observer/failed-sessions`);
+  const res = await authedFetch(`${API_BASE}/observer/failed-sessions`);
   return readJson(res);
 }
 
 export async function enableObserver(): Promise<{ enabled: boolean }> {
-  const res = await fetch(`${API_BASE}/observer/enable`, { method: 'POST' });
+  const res = await authedFetch(`${API_BASE}/observer/enable`, { method: 'POST' });
   return readJson(res);
 }
 
 export async function disableObserver(): Promise<{ enabled: boolean }> {
-  const res = await fetch(`${API_BASE}/observer/disable`, { method: 'POST' });
+  const res = await authedFetch(`${API_BASE}/observer/disable`, { method: 'POST' });
   return readJson(res);
 }
 
 export async function updateObserverConfig(config: Record<string, unknown>): Promise<{ config: ObserverStatusResponse['config'] }> {
-  const res = await fetch(`${API_BASE}/observer/config`, {
+  const res = await authedFetch(`${API_BASE}/observer/config`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(config),
@@ -545,7 +658,7 @@ export async function updateObserverConfig(config: Record<string, unknown>): Pro
 }
 
 export async function triggerObserverAnalysis(): Promise<{ analyzed: number; findings: number; spawned: number }> {
-  const res = await fetch(`${API_BASE}/observer/trigger`, { method: 'POST' });
+  const res = await authedFetch(`${API_BASE}/observer/trigger`, { method: 'POST' });
   return readJson(res);
 }
 
@@ -578,7 +691,7 @@ export interface SessionObserverResponse {
 }
 
 export async function fetchSessionObserver(sessionId: string): Promise<SessionObserverResponse> {
-  const res = await fetch(`${API_BASE}/observer/session?id=${encodeURIComponent(sessionId)}`);
+  const res = await authedFetch(`${API_BASE}/observer/session?id=${encodeURIComponent(sessionId)}`);
   return readJson(res);
 }
 
@@ -614,11 +727,11 @@ export interface LogWatcherState {
 }
 
 export async function fetchLogWatcherStatus(): Promise<{ state: LogWatcherState }> {
-  const res = await fetch(`${API_BASE}/logs/status`);
+  const res = await authedFetch(`${API_BASE}/logs/status`);
   return readJson(res);
 }
 
 export async function fetchLogWatcherFindings(): Promise<{ findings: LogFinding[] }> {
-  const res = await fetch(`${API_BASE}/logs/findings`);
+  const res = await authedFetch(`${API_BASE}/logs/findings`);
   return readJson(res);
 }

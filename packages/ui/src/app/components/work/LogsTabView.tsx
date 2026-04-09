@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { LogWatcherState } from '../../../lib/api';
-import { API_BASE, fetchLogWatcherStatus } from '../../../lib/api';
+import { API_BASE, buildAuthedSseUrl, fetchLogWatcherStatus } from '../../../lib/api';
 import { LogWatcherPanel } from '../observer/LogWatcherPanel';
 
 const MAX_LOG_LINES = 1200;
@@ -52,7 +52,7 @@ export function LogsTabView() {
   }, []);
 
   useEffect(() => {
-    const url = `${API_BASE}/logs/stream`;
+        const url = buildAuthedSseUrl(`${API_BASE}/logs/stream`);
     const es = new EventSource(url);
 
     const handleOpen = () => {

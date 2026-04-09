@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react';
-import { API_BASE, type AgentTodo, type ChatMessage, type SessionObserverFinding, type SessionObserverState, type WorkSession } from '../../lib/api';
+import { API_BASE, buildAuthedSseUrl, type AgentTodo, type ChatMessage, type SessionObserverFinding, type SessionObserverState, type WorkSession } from '../../lib/api';
 import type { NodeTokenStream } from '../types';
 import { upsertSessionWithActivityTransition } from '../utils/sessionSort';
 
@@ -27,7 +27,7 @@ export function useSessionStream({ selectedSessionId, setSessions, setChatMessag
       return;
     }
 
-    const url = `${API_BASE}/work/stream?id=${encodeURIComponent(selectedSessionId)}`;
+        const url = buildAuthedSseUrl(`${API_BASE}/work/stream?id=${encodeURIComponent(selectedSessionId)}`);
     const es = new EventSource(url);
     connectedIdRef.current = selectedSessionId;
 

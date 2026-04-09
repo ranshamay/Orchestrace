@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import { execFile, spawn } from 'node:child_process';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { existsSync, watch, type FSWatcher } from 'node:fs';
@@ -94,6 +94,8 @@ import { parseTaskRouteOverride } from './task-routing.js';
 
 const GITHUB_PROVIDER_ID = 'github';
 const GITHUB_API_BASE_URL = 'https://api.github.com';
+const GOOGLE_TOKENINFO_URL = 'https://oauth2.googleapis.com/tokeninfo';
+const APP_AUTH_BEARER_PREFIX = 'Bearer ';
 const GITHUB_DEVICE_AUTH_SCOPES_DEFAULT = ['repo', 'workflow', 'read:org'];
 // Public OAuth app client id used for GitHub device flow (mirrors CLI-style auth UX).
 const GITHUB_DEVICE_AUTH_CLIENT_ID_DEFAULT = '178c6fc778ccc68e1d6a';
@@ -180,6 +182,24 @@ type NativeGitWorktree = {
   detached: boolean;
 };
 
+type AppAuthConfig = {
+  enabled: boolean;
+  googleClientId: string;
+  jwtSecret: string;
+  tokenTtlSeconds: number;
+};
+
+type AppAuthJwtPayload = {
+
+  sub: string;
+  email: string;
+  name?: string;
+  picture?: string;
+  iat: number;
+  exp: number;
+};
+
+
 function createInheritedSubAgentToolset(
   cwd: string,
   options: {
@@ -251,9 +271,12 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     await workspaceManager.selectWorkspace(options.workspace);
   }
 
-  const authManager = new ProviderAuthManager();
+    const authManager = new ProviderAuthManager();
   const githubAuthManager = createGithubAuthManager();
   const llm = new PiAiAdapter();
+
+    const appAuthConfig = resolveAppAuthConfig();
+  const appAuthEnabled = appAuthConfig.enabled;
 
     const resolveProviderApiKey = async (
     providerId: string,
@@ -342,7 +365,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     }
   }
 
-  function broadcastSessionStatusDelete(id: string): void {
+    function broadcastSessionStatusDelete(id: string): void {
     if (sessionStatusStreamClients.size === 0) {
       return;
     }
@@ -360,6 +383,57 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       }
     }
   }
+
+  function isPublicRoute(pathname: string): boolean {
+    if (pathname === '/api/health') {
+      return true;
+    }
+
+    if (pathname === '/api/app-auth/config' || pathname === '/api/app-auth/google' || pathname === '/api/app-auth/status') {
+      return true;
+    }
+
+    if (pathname === '/' || pathname === '/settings' || pathname === '/settings/' || pathname === '/logs' || pathname === '/logs/') {
+      return true;
+    }
+
+    if (hmrEnabled && pathname === '/__hmr') {
+      return true;
+    }
+
+    return false;
+  }
+
+  function resolveRequestJwt(req: IncomingMessage, url: URL): string | undefined {
+    const authHeader = asString(req.headers.authorization)?.trim();
+    if (authHeader && authHeader.startsWith(APP_AUTH_BEARER_PREFIX)) {
+      return authHeader.slice(APP_AUTH_BEARER_PREFIX.length).trim() || undefined;
+    }
+
+    const token = asString(url.searchParams.get('token'))?.trim();
+    return token || undefined;
+  }
+
+  function requireAppAuth(req: IncomingMessage, res: ServerResponse, url: URL): AppAuthJwtPayload | undefined {
+    if (!appAuthEnabled) {
+      return undefined;
+    }
+
+    const token = resolveRequestJwt(req, url);
+    if (!token) {
+      sendJson(res, 401, { error: 'Authentication required' });
+      return undefined;
+    }
+
+    const payload = verifyJwtToken(token, appAuthConfig.jwtSecret);
+    if (!payload) {
+      sendJson(res, 401, { error: 'Invalid or expired token' });
+      return undefined;
+    }
+
+    return payload;
+  }
+
 
   /**
    * Restore session state from the event store (event-sourced reads).
@@ -1946,7 +2020,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         return;
       }
 
-      if (hmrEnabled && req.method === 'GET' && pathname === '/__hmr') {
+            if (hmrEnabled && req.method === 'GET' && pathname === '/__hmr') {
         res.writeHead(200, {
           'Content-Type': 'text/event-stream',
           'Cache-Control': 'no-cache, no-transform',
@@ -1960,7 +2034,102 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         return;
       }
 
+      if (req.method === 'GET' && pathname === '/api/app-auth/config') {
+        sendJson(res, 200, {
+          authEnabled: appAuthEnabled,
+          provider: appAuthEnabled ? 'google' : null,
+          googleClientId: appAuthEnabled ? appAuthConfig.googleClientId : null,
+        });
+        return;
+      }
+
+      if (req.method === 'GET' && pathname === '/api/app-auth/status') {
+        const token = resolveRequestJwt(req, url);
+        if (!appAuthEnabled) {
+          sendJson(res, 200, { authenticated: true, authEnabled: false });
+          return;
+        }
+
+        if (!token) {
+          sendJson(res, 200, { authenticated: false, authEnabled: true });
+          return;
+        }
+
+        const payload = verifyJwtToken(token, appAuthConfig.jwtSecret);
+        if (!payload) {
+          sendJson(res, 200, { authenticated: false, authEnabled: true });
+          return;
+        }
+
+        sendJson(res, 200, {
+          authenticated: true,
+          authEnabled: true,
+          user: {
+            email: payload.email,
+            name: payload.name,
+            picture: payload.picture,
+          },
+          expiresAt: payload.exp,
+        });
+        return;
+      }
+
+      if (req.method === 'POST' && pathname === '/api/app-auth/google') {
+        if (!appAuthEnabled) {
+          sendJson(res, 400, { error: 'App authentication is disabled.' });
+          return;
+        }
+
+        const body = await readJsonBody(req);
+        const idToken = asString(body.idToken)?.trim();
+        if (!idToken) {
+          sendJson(res, 400, { error: 'Missing idToken' });
+          return;
+        }
+
+        try {
+          const googleClaims = await verifyGoogleIdToken({
+            idToken,
+            expectedAudience: appAuthConfig.googleClientId,
+          });
+                    const sessionId = randomUUID();
+          const expiresAt = Date.now() + (appAuthConfig.tokenTtlSeconds * 1_000);
+
+          const token = signJwtToken({
+            sub: sessionId,
+
+            email: googleClaims.email,
+            name: googleClaims.name,
+            picture: googleClaims.picture,
+            iat: Math.floor(Date.now() / 1000),
+            exp: Math.floor(expiresAt / 1000),
+          }, appAuthConfig.jwtSecret);
+
+          sendJson(res, 200, {
+            token,
+            tokenType: 'Bearer',
+            expiresIn: appAuthConfig.tokenTtlSeconds,
+            user: {
+              email: googleClaims.email,
+              name: googleClaims.name,
+              picture: googleClaims.picture,
+            },
+          });
+        } catch (error) {
+          sendJson(res, 401, { error: toErrorMessage(error) });
+        }
+        return;
+      }
+
+      if (!isPublicRoute(pathname)) {
+        const authPayload = requireAppAuth(req, res, url);
+        if (appAuthEnabled && !authPayload) {
+          return;
+        }
+      }
+
       if (req.method === 'GET' && pathname === '/api/workspaces') {
+
         const state = await workspaceManager.list();
         sendJson(res, 200, {
           activeWorkspaceId: state.activeWorkspaceId,
@@ -4761,6 +4930,138 @@ function asPositiveInt(value: unknown): number | undefined {
 
   return undefined;
 }
+
+function resolveAppAuthConfig(): AppAuthConfig {
+  const googleClientId = asString(process.env.ORCHESTRACE_GOOGLE_CLIENT_ID)?.trim() ?? '';
+  const jwtSecret = asString(process.env.ORCHESTRACE_APP_JWT_SECRET)?.trim() ?? '';
+  const tokenTtlSeconds = parsePositiveSetting(process.env.ORCHESTRACE_APP_JWT_TTL_SECONDS) ?? 60 * 60 * 8;
+  const enabled = Boolean(googleClientId && jwtSecret);
+
+  return {
+    enabled,
+    googleClientId,
+    jwtSecret,
+    tokenTtlSeconds,
+  };
+}
+
+function base64UrlEncode(input: string | Buffer): string {
+  const source = typeof input === 'string' ? Buffer.from(input, 'utf-8') : input;
+  return source.toString('base64url');
+}
+
+function base64UrlDecode(input: string): string {
+  return Buffer.from(input, 'base64url').toString('utf-8');
+}
+
+function signJwtToken(payload: AppAuthJwtPayload, secret: string): string {
+  const header = { alg: 'HS256', typ: 'JWT' };
+  const headerSegment = base64UrlEncode(JSON.stringify(header));
+  const payloadSegment = base64UrlEncode(JSON.stringify(payload));
+  const signingInput = `${headerSegment}.${payloadSegment}`;
+  const signature = createHmac('sha256', secret).update(signingInput).digest('base64url');
+  return `${signingInput}.${signature}`;
+}
+
+function verifyJwtToken(token: string, secret: string): AppAuthJwtPayload | undefined {
+  const parts = token.split('.');
+  if (parts.length !== 3) {
+    return undefined;
+  }
+
+  const [headerSegment, payloadSegment, signatureSegment] = parts;
+  const signingInput = `${headerSegment}.${payloadSegment}`;
+  const expectedSignature = createHmac('sha256', secret).update(signingInput).digest();
+  const actualSignature = Buffer.from(signatureSegment, 'base64url');
+
+  if (expectedSignature.length !== actualSignature.length) {
+    return undefined;
+  }
+
+  if (!timingSafeEqual(expectedSignature, actualSignature)) {
+    return undefined;
+  }
+
+  let payload: unknown;
+  try {
+    payload = JSON.parse(base64UrlDecode(payloadSegment));
+  } catch {
+    return undefined;
+  }
+
+  if (!isRecord(payload)) {
+    return undefined;
+  }
+
+  const sub = asString(payload.sub)?.trim();
+  const email = asString(payload.email)?.trim();
+  const name = asString(payload.name)?.trim();
+  const picture = asString(payload.picture)?.trim();
+  const iat = typeof payload.iat === 'number' ? payload.iat : Number.NaN;
+  const exp = typeof payload.exp === 'number' ? payload.exp : Number.NaN;
+
+  if (!sub || !email || !Number.isFinite(iat) || !Number.isFinite(exp)) {
+    return undefined;
+  }
+
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  if (exp <= nowSeconds) {
+    return undefined;
+  }
+
+  return {
+    sub,
+    email,
+    ...(name ? { name } : {}),
+    ...(picture ? { picture } : {}),
+    iat,
+    exp,
+  };
+}
+
+async function verifyGoogleIdToken(params: { idToken: string; expectedAudience: string }): Promise<{
+  email: string;
+  name?: string;
+  picture?: string;
+}> {
+  const response = await fetch(`${GOOGLE_TOKENINFO_URL}?id_token=${encodeURIComponent(params.idToken)}`);
+  if (!response.ok) {
+    throw new Error(`Google token verification failed (${response.status}).`);
+  }
+
+  const payload = await readJsonLikeResponse(response);
+  if (!isRecord(payload)) {
+    throw new Error('Google token verification returned an invalid payload.');
+  }
+
+  const audience = asString(payload.aud)?.trim();
+  if (!audience || audience !== params.expectedAudience) {
+    throw new Error('Google token audience mismatch.');
+  }
+
+  const email = asString(payload.email)?.trim();
+  const emailVerified = asString(payload.email_verified)?.trim();
+  if (!email || emailVerified !== 'true') {
+    throw new Error('Google account email is missing or unverified.');
+  }
+
+  const expSecondsRaw = asString(payload.exp)?.trim();
+  const expSeconds = expSecondsRaw ? Number.parseInt(expSecondsRaw, 10) : Number.NaN;
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  if (!Number.isFinite(expSeconds) || expSeconds <= nowSeconds) {
+    throw new Error('Google token is expired.');
+  }
+
+  const name = asString(payload.name)?.trim();
+  const picture = asString(payload.picture)?.trim();
+
+  return {
+    email,
+    ...(name ? { name } : {}),
+    ...(picture ? { picture } : {}),
+  };
+}
+
 
 async function waitMs(ms: number): Promise<void> {
   await new Promise<void>((resolve) => {
