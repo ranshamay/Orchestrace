@@ -35,12 +35,16 @@ export function normalizeSessionStatus(raw?: string): SessionStatus {
   if (value.includes('fail') || value.includes('error')) {
     return 'failed';
   }
-  if (value.includes('cancel') || value.includes('abort')) {
+    if (value.includes('cancel') || value.includes('abort')) {
     return 'cancelled';
+  }
+  if (value.includes('merged')) {
+    return 'merged';
   }
   if (value.includes('complete') || value.includes('done') || value.includes('success')) {
     return 'completed';
   }
+
   if (value.includes('run') || value.includes('progress') || value.includes('start') || value.includes('stream')) {
     return 'running';
   }
@@ -67,9 +71,12 @@ export function sessionStatusBadgeClass(raw?: string, selected = false): string 
   switch (normalizeSessionStatus(raw)) {
     case 'running':
       return 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300';
-    case 'completed':
+        case 'completed':
       return 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300';
+    case 'merged':
+      return 'bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-300';
     case 'failed':
+
       return 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300';
     case 'cancelled':
       return 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300';

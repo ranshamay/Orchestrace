@@ -9,8 +9,10 @@ export type SessionStatusSummary = {
   completed: number;
   failed: number;
   cancelled: number;
-  pending: number;
+    pending: number;
+  merged: number;
   unknown: number;
+
   overall: 'empty' | 'running' | 'attention' | 'idle';
 };
 
