@@ -71,6 +71,7 @@ import type {
   SessionWorktreePathSessionIdRelation,
 } from './ui-server/types.js';
 import { WorkspaceManager } from './workspace-manager.js';
+import { formatMissingSourceDirsWarning, validateWorkspaceRuntime } from './workspace-runtime.js';
 import { FileEventStore } from '@orchestrace/store';
 import { materializeSession as materializeFromEvents } from '@orchestrace/store';
 import type {
@@ -1036,6 +1037,14 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     };
   }
 
+    async function resolveWorkspaceRuntimePath(workspacePath: string): Promise<{ workspacePath: string; warning?: string }> {
+    const check = await validateWorkspaceRuntime(workspacePath);
+    return {
+      workspacePath: check.normalizedPath,
+      warning: formatMissingSourceDirsWarning(check.normalizedPath, check.missingExpectedDirs),
+    };
+  }
+
   async function initializeManagedSessionWorkspace(params: {
     sessionId: string;
     workspaceRoot: string;
@@ -1060,15 +1069,20 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       warnings.push(`Recreated session worktree for session ${params.sessionId}.`);
     }
 
+    const runtimePath = await resolveWorkspaceRuntimePath(managedWorktree.worktreePath);
+    if (runtimePath.warning) {
+      warnings.push(runtimePath.warning);
+    }
+
     return {
-      workspacePath: managedWorktree.worktreePath,
-      worktreePath: managedWorktree.worktreePath,
+      workspacePath: runtimePath.workspacePath,
+      worktreePath: runtimePath.workspacePath,
       worktreeBranch: managedWorktree.branchName,
       cleanupWorktree: async () => {
         await cleanupSessionWorktree({
           repoRoot: params.workspaceRoot,
           sessionId: params.sessionId,
-          worktreePath: managedWorktree.worktreePath,
+          worktreePath: runtimePath.workspacePath,
           branchName: managedWorktree.branchName,
         });
       },
@@ -7066,6 +7080,12 @@ async function ensureSessionWorkspaceReady(
   uiStatePersistence: { schedule: () => void; flush: () => Promise<void> },
 ): Promise<void> {
   if (existsSync(session.workspacePath)) {
+    const runtimePath = await resolveWorkspaceRuntimePath(session.workspacePath);
+    session.workspacePath = runtimePath.workspacePath;
+    session.worktreePath = runtimePath.workspacePath;
+    if (runtimePath.warning) {
+      console.warn(`[ui-server] ${runtimePath.warning}`);
+    }
     return;
   }
 
@@ -7077,18 +7097,22 @@ async function ensureSessionWorkspaceReady(
     branchName: session.worktreeBranch,
   });
 
-  session.workspacePath = managedWorktree.worktreePath;
+  const runtimePath = await resolveWorkspaceRuntimePath(managedWorktree.worktreePath);
+  session.workspacePath = runtimePath.workspacePath;
   session.workspaceName = workspace.name;
-  session.worktreePath = managedWorktree.worktreePath;
+  session.worktreePath = runtimePath.workspacePath;
   session.worktreeBranch = managedWorktree.branchName;
   session.cleanupWorktree = async () => {
     await cleanupSessionWorktree({
       repoRoot: workspace.path,
       sessionId: session.id,
-      worktreePath: managedWorktree.worktreePath,
+      worktreePath: runtimePath.workspacePath,
       branchName: managedWorktree.branchName,
     });
   };
+  if (runtimePath.warning) {
+    console.warn(`[ui-server] ${runtimePath.warning}`);
+  }
   session.updatedAt = now();
   uiStatePersistence.schedule();
 }

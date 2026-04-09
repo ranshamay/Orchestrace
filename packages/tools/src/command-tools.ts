@@ -1,4 +1,5 @@
-import { readdir, readFile, stat } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { access, readdir, readFile, realpath, stat } from 'node:fs/promises';
 import { extname, join } from 'node:path';
 import { Type } from '@mariozechner/pi-ai';
 import type { AgentToolsetOptions, RegisteredAgentTool } from './types.js';
@@ -51,7 +52,7 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
           })),
         }),
       },
-            execute: async (toolArgs, signal) => {
+      execute: async (toolArgs, signal) => {
         const sanitizedQueryAndMode = sanitizeSearchQueryAndMode({
           query: toolArgs.query,
           queryMode: asString(toolArgs.queryMode),
@@ -85,10 +86,19 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
           };
         }
 
+        const resolvedCwd = await normalizeSearchCwd(options.cwd);
+        if (!resolvedCwd.ok) {
+          return {
+            content: `Invalid working directory for search_files: ${resolvedCwd.cwd}`,
+            isError: true,
+          };
+        }
+
         const requestedPath = asString(toolArgs.path) ?? '.';
-        const target = resolveWorkspacePath(options.cwd, requestedPath);
-        const relTarget = toWorkspaceRelative(options.cwd, target);
-        const targetKind = await getPathKind(target);
+        const target = resolveWorkspacePath(resolvedCwd.cwd, requestedPath);
+        const canonicalTarget = await canonicalizeExistingPath(target);
+        const relTarget = toWorkspaceRelative(resolvedCwd.cwd, canonicalTarget ?? target).replace(/\\/g, '/');
+        const targetKind = await getPathKind(canonicalTarget ?? target);
 
         if (targetKind === 'missing') {
           return {
@@ -103,7 +113,7 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
           };
         }
 
-                const args = ['-n', '--no-heading', '--color', 'never', '-e', query];
+              const args = ['-n', '--no-heading', '--color', 'never', '-e', query];
         if (!useRegex) {
           args.push('--fixed-strings');
         }
@@ -113,7 +123,7 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
         args.push('--', relTarget);
 
         const result = await runCommand('rg', args, {
-          cwd: options.cwd,
+          cwd: resolvedCwd.cwd,
           timeoutMs: options.commandTimeoutMs ?? 20000,
           signal,
         });
@@ -138,10 +148,10 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
         if (hasPathError) {
           try {
             const fallback = await fallbackSearchFromFs({
-              cwd: options.cwd,
-              target,
+              cwd: resolvedCwd.cwd,
+              target: canonicalTarget ?? target,
               relTarget,
-                            query,
+              query,
               useRegex,
               glob: globValidation.value,
               maxChars: options.maxOutputChars ?? 16000,
@@ -701,6 +711,29 @@ function parseJson(raw: string, field: string): unknown {
 }
 
 type PathKind = 'missing' | 'file' | 'directory';
+
+async function normalizeSearchCwd(cwd: string): Promise<{ ok: true; cwd: string } | { ok: false; cwd: string }> {
+  const trimmed = cwd.trim();
+  if (!trimmed) {
+    return { ok: false, cwd };
+  }
+
+  try {
+    const normalized = await realpath(trimmed);
+    await access(normalized, constants.R_OK | constants.X_OK);
+    return { ok: true, cwd: normalized };
+  } catch {
+    return { ok: false, cwd: trimmed };
+  }
+}
+
+async function canonicalizeExistingPath(path: string): Promise<string | undefined> {
+  try {
+    return await realpath(path);
+  } catch {
+    return undefined;
+  }
+}
 
 async function getPathKind(path: string): Promise<PathKind> {
   try {

@@ -77,6 +77,7 @@ import {
   type ResolutionConflict,
 } from './runner-config-resolution.js';
 import { parseAndSanitizeVerifyCommands } from './verify-commands.js';
+import { formatMissingSourceDirsWarning, validateWorkspaceRuntime } from './workspace-runtime.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -165,8 +166,23 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  const config: SessionConfig = createdEvent.payload.config;
+    const config: SessionConfig = createdEvent.payload.config;
   const controller = new AbortController();
+
+  try {
+    const workspaceCheck = await validateWorkspaceRuntime(config.workspacePath);
+    config.workspacePath = workspaceCheck.normalizedPath;
+    const workspaceWarning = formatMissingSourceDirsWarning(config.workspacePath, workspaceCheck.missingExpectedDirs);
+    if (workspaceWarning) {
+      console.warn(`[runner] ${workspaceWarning}`);
+    }
+  } catch (error) {
+    const detail = `Workspace runtime validation failed: ${errorMsg(error)}`;
+    console.error(`[runner] ${detail}`);
+    await emit({ time: iso(), type: 'session:error-change', payload: { error: detail } });
+    await emit({ time: iso(), type: 'session:status-change', payload: { status: 'failed' } });
+    process.exit(1);
+  }
 
   // Write runner metadata (PID)
   await eventStore.setMetadata(sessionId, {
