@@ -6904,9 +6904,26 @@ export async function resolveDefaultBranch(repoRoot: string): Promise<string> {
 
 export async function cleanupReusedWorktree(repoRoot: string, workspacePath: string): Promise<{ defaultBranch: string }> {
   const defaultBranch = await resolveDefaultBranch(repoRoot);
-  await gitExec(workspacePath, ['checkout', defaultBranch]);
+  const cleanupTargetRef = await resolveCleanupTargetRef(workspacePath, defaultBranch);
+  // Use detached checkout so cleanup does not try to attach the default branch,
+  // which can already be checked out in another linked worktree.
+  await gitExec(workspacePath, ['checkout', '--detach', '-f', cleanupTargetRef]);
+  await gitExec(workspacePath, ['reset', '--hard', cleanupTargetRef]);
   await gitExec(workspacePath, ['clean', '-fdx']);
   return { defaultBranch };
+}
+
+async function resolveCleanupTargetRef(workspacePath: string, defaultBranch: string): Promise<string> {
+  const candidates = [`origin/${defaultBranch}`, defaultBranch, 'HEAD'];
+  for (const candidate of candidates) {
+    try {
+      await gitExec(workspacePath, ['rev-parse', '--verify', candidate]);
+      return candidate;
+    } catch {
+      // Try next candidate.
+    }
+  }
+  return 'HEAD';
 }
 
 export async function assertWorkspaceIsClean(
