@@ -2,11 +2,14 @@ import { describe, expect, it } from 'vitest';
 import type { LlmToolCallEvent } from '@orchestrace/provider';
 import type { WorkSession } from '../src/ui-server/types.js';
 import {
-  buildSessionSystemPrompt,
   enforcePlanningToolCallGuard,
   getSessionPlanningGuardState,
+} from '../src/planning/guards.js';
+import {
+  buildSessionSystemPrompt,
   isSimpleSessionTaskPrompt,
-} from '../src/ui-server.js';
+} from '../src/session/prompts.js';
+
 
 function createSession(overrides: Partial<WorkSession> = {}): WorkSession {
   const controller = new AbortController();
@@ -59,7 +62,15 @@ function startedTool(toolName: string): LlmToolCallEvent {
 }
 
 describe('planning guard behavior', () => {
+  it('exports callable guard and prompt helpers', () => {
+    expect(typeof enforcePlanningToolCallGuard).toBe('function');
+    expect(typeof getSessionPlanningGuardState).toBe('function');
+    expect(typeof buildSessionSystemPrompt).toBe('function');
+    expect(typeof isSimpleSessionTaskPrompt).toBe('function');
+  });
+
   it('forces implementation phase after exceeding no-write threshold while planning', () => {
+
     process.env.ORCHESTRACE_MAX_TOOL_CALLS_WITHOUT_WRITE = '2';
     process.env.ORCHESTRACE_PLANNING_BUDGET_PERCENT = '25';
 
