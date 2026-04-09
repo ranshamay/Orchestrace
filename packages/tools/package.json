@@ -10,7 +10,7 @@
     "pretypecheck": "pnpm --filter @orchestrace/provider build && pnpm --filter @orchestrace/context build && pnpm --filter @orchestrace/tools build",
     "typecheck": "tsc --noEmit",
     "pretest": "pnpm --filter @orchestrace/provider build && pnpm --filter @orchestrace/context build && pnpm --filter @orchestrace/tools build",
-    "test": "vitest run",
+    "test": "vitest run --config vitest.config.ts",
     "clean": "rm -rf dist"
   },
   "dependencies": {
