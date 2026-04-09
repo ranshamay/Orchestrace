@@ -253,6 +253,10 @@ type ParsedSubagentBatchFailure = {
   runs: Array<{ status?: string; nodeId?: string; id?: string; error?: string }>;
 };
 
+const SUBAGENT_RETRY_CONTEXT_LINE_PREFIX = 'Retry context:';
+const SUBAGENT_RETRY_CONTEXT_MAX_ERROR_CHARS = 240;
+const SUBAGENT_RETRY_CONTEXT_MAX_LINE_CHARS = 360;
+
 async function executeToolWithSubagentBatchRetry(params: {
   toolset: LlmToolset;
   toolCall: ToolCall;
@@ -288,7 +292,11 @@ async function executeToolWithSubagentBatchRetry(params: {
       return latest;
     }
 
-    const retryAgents = buildFailedSubagentRetryAgents(originalAgents, parsedFailure.failedNodeIds);
+    const retryAgents = buildFailedSubagentRetryAgents(
+      originalAgents,
+      parsedFailure.failedNodeIds,
+      parsedFailure.runs,
+    );
     if (retryAgents.length === 0) {
       return latest;
     }
@@ -372,12 +380,114 @@ function dedupeStrings(values: string[]): string[] {
 function buildFailedSubagentRetryAgents(
   originalAgents: Array<Record<string, unknown>>,
   failedNodeIds: string[],
+  runs: Array<{ status?: string; nodeId?: string; id?: string; error?: string }>,
 ): Array<Record<string, unknown>> {
   const failedSet = new Set(failedNodeIds);
-  return originalAgents.filter((agent) => {
-    const nodeId = typeof agent.nodeId === 'string' ? agent.nodeId : undefined;
-    return nodeId ? failedSet.has(nodeId) : false;
-  });
+  const runErrorsByNodeId = buildRunErrorsByNodeId(runs);
+
+  return originalAgents
+    .filter((agent) => {
+      const nodeId = typeof agent.nodeId === 'string' ? agent.nodeId : undefined;
+      return nodeId ? failedSet.has(nodeId) : false;
+    })
+    .map((agent) => {
+      const nodeId = typeof agent.nodeId === 'string' ? agent.nodeId : undefined;
+      if (!nodeId) {
+        return agent;
+      }
+
+      const retryContextLine = buildSubagentRetryContextLine(nodeId, runErrorsByNodeId.get(nodeId));
+      if (!retryContextLine) {
+        return agent;
+      }
+
+      const contextPacket = getRecord(agent.contextPacket);
+      const existingRelevantContext = getStringArray(contextPacket?.relevantContext);
+      const relevantContext = [
+        ...existingRelevantContext.filter((entry) => !entry.startsWith(SUBAGENT_RETRY_CONTEXT_LINE_PREFIX)),
+        retryContextLine,
+      ];
+
+      return {
+        ...agent,
+        contextPacket: {
+          ...(contextPacket ?? {}),
+          relevantContext,
+        },
+      };
+    });
+}
+
+function buildRunErrorsByNodeId(
+  runs: Array<{ status?: string; nodeId?: string; id?: string; error?: string }>,
+): Map<string, string> {
+  const map = new Map<string, string>();
+  for (const run of runs) {
+    if (run.status !== 'failed') {
+      continue;
+    }
+
+    const nodeId = run.nodeId ?? run.id;
+    if (!nodeId || map.has(nodeId)) {
+      continue;
+    }
+
+    if (typeof run.error === 'string' && run.error.trim().length > 0) {
+      map.set(nodeId, run.error);
+    }
+  }
+
+  return map;
+}
+
+function buildSubagentRetryContextLine(nodeId: string, runError: string | undefined): string {
+  const base = `${SUBAGENT_RETRY_CONTEXT_LINE_PREFIX} prior sub-agent attempt failed for node "${nodeId}".`;
+  const cleanError = sanitizeInline(runError, SUBAGENT_RETRY_CONTEXT_MAX_ERROR_CHARS);
+  if (!cleanError) {
+    return truncateWithEllipsis(base, SUBAGENT_RETRY_CONTEXT_MAX_LINE_CHARS);
+  }
+
+  const withError = `${base} Last error: ${cleanError}`;
+  return truncateWithEllipsis(withError, SUBAGENT_RETRY_CONTEXT_MAX_LINE_CHARS);
+}
+
+function sanitizeInline(value: string | undefined, maxChars: number): string | undefined {
+  if (typeof value !== 'string') {
+    return undefined;
+  }
+
+  const normalized = value.replace(/\s+/g, ' ').trim();
+  if (normalized.length === 0) {
+    return undefined;
+  }
+
+  return truncateWithEllipsis(normalized, maxChars);
+}
+
+function truncateWithEllipsis(value: string, maxChars: number): string {
+  if (value.length <= maxChars) {
+    return value;
+  }
+
+  if (maxChars <= 1) {
+    return value.slice(0, maxChars);
+  }
+
+  return `${value.slice(0, maxChars - 1)}…`;
+}
+
+function getRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function getStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.filter((entry): entry is string => typeof entry === 'string' && entry.length > 0);
 }
 
 function buildSubagentBatchRetryMessage(toolCall: ToolCall, errorContent: string): string {

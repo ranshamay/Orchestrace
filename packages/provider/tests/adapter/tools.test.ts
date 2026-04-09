@@ -206,10 +206,97 @@ describe('executeWithOptionalTools', () => {
     expect(retryCall.name).toBe('subagent_spawn_batch');
     expect(retryCall.arguments).toMatchObject({
       agents: [
-        { nodeId: 'graph_cli_task_entrypoint', prompt: 'one' },
-        { nodeId: 'graph_runner_session_flow', prompt: 'two' },
+        {
+          nodeId: 'graph_cli_task_entrypoint',
+          prompt: 'one',
+          contextPacket: {
+            relevantContext: [
+              expect.stringContaining('Retry context: prior sub-agent attempt failed for node "graph_cli_task_entrypoint"'),
+            ],
+          },
+        },
+        {
+          nodeId: 'graph_runner_session_flow',
+          prompt: 'two',
+          contextPacket: {
+            relevantContext: [
+              expect.stringContaining('Retry context: prior sub-agent attempt failed for node "graph_runner_session_flow"'),
+            ],
+          },
+        },
       ],
     });
+    expect(retryCall.arguments.agents).not.toEqual(firstResponse.content[0].arguments.agents.slice(0, 2));
+  });
+
+  it('injects bounded generic retry context when failed runs omit explicit error', async () => {
+    const consumeStreamMock = vi.mocked(consumeStream);
+
+    const firstResponse = makeAssistantMessage([
+      {
+        type: 'toolCall',
+        id: 'batch-2',
+        name: 'subagent_spawn_batch',
+        arguments: {
+          agents: [
+            { nodeId: 'graph_retry_node', prompt: 'retry me' },
+            { nodeId: 'graph_ok_node', prompt: 'ok' },
+          ],
+        },
+      },
+    ], 'tool_calls');
+    const finalResponse = makeAssistantMessage([{ type: 'text', text: 'done' }]);
+
+    consumeStreamMock.mockResolvedValueOnce(firstResponse as never);
+    consumeStreamMock.mockResolvedValueOnce(finalResponse as never);
+
+    const executeTool = vi.fn()
+      .mockResolvedValueOnce({
+        isError: true,
+        content: JSON.stringify({
+          runs: [
+            { nodeId: 'graph_retry_node', status: 'failed' },
+            { nodeId: 'graph_ok_node', status: 'completed' },
+          ],
+        }),
+      })
+      .mockResolvedValueOnce({
+        isError: false,
+        content: JSON.stringify({ completed: 1, failed: 0 }),
+      });
+
+    const context: TestContext = {
+      messages: [],
+      tools: [{ name: 'subagent_spawn_batch', description: 'spawn many', parameters: { type: 'object' } }],
+    };
+
+    await executeWithOptionalTools({
+      model: {} as never,
+      context,
+      options: {},
+      toolset: {
+        tools: [],
+        executeTool,
+      },
+      onUsage: () => {},
+    });
+
+    const retryCall = executeTool.mock.calls[1]?.[0];
+    expect(retryCall.arguments).toMatchObject({
+      agents: [
+        {
+          nodeId: 'graph_retry_node',
+          contextPacket: {
+            relevantContext: [
+              expect.stringContaining('Retry context: prior sub-agent attempt failed for node "graph_retry_node".'),
+            ],
+          },
+        },
+      ],
+    });
+    const retryLine = retryCall.arguments.agents[0].contextPacket.relevantContext[0] as string;
+    expect(retryLine).toContain('Retry context:');
+    expect(retryLine.length).toBeLessThanOrEqual(360);
   });
 
   it('returns inline fallback for critical nodes after retry cap exhaustion', async () => {
