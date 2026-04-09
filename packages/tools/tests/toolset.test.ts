@@ -1098,22 +1098,26 @@ describe('search_files tool', () => {
     expect(result.content.toLowerCase()).not.toContain('os error 2');
   });
 
-  it('keeps missing file path handling deterministic and non-error', async () => {
+    it('keeps missing TypeScript file path handling deterministic and skips ripgrep execution', async () => {
     const cwd = await makeWorkspace();
     const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+    const runCommandSpy = vi.spyOn(commandRunner, 'runCommand');
 
     const result = await toolset.executeTool({
       id: '1',
       name: 'search_files',
       arguments: {
-        query: 'extractShellCommand',
-        path: 'src/runner.ts',
+        query: 'StartWorkSession',
+        path: 'packages/cli/src/ui-server.ts',
       },
     });
 
     expect(result.isError).toBeFalsy();
-    expect(result.content).toBe('(skipped invalid search path: src/runner.ts)');
+    expect(result.content).toBe('(skipped invalid search path: packages/cli/src/ui-server.ts)');
     expect(result.details).toBeUndefined();
+    expect(runCommandSpy).not.toHaveBeenCalled();
+
+    runCommandSpy.mockRestore();
   });
 });
 
