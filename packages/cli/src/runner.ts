@@ -294,6 +294,16 @@ async function main(): Promise<void> {
     await emitLifecyclePhaseChange(phase);
   }
 
+  lifecycle.registerCleanup('SETTING_UP', 'remove-sigterm-listener', () => {
+    process.off('SIGTERM', handleSigterm);
+  });
+  lifecycle.registerCleanup('SETTING_UP', 'clear-heartbeat-interval', () => {
+    clearInterval(heartbeatInterval);
+  });
+  lifecycle.registerCleanup('SETTING_UP', 'abort-controller', () => {
+    controller.abort();
+  });
+
   void emit({
     time: iso(),
     type: 'session:dag-event',
@@ -1031,7 +1041,6 @@ async function main(): Promise<void> {
         await lifecycle.cleanup();
         await lifecycle.complete('FAILED');
         await emitLifecyclePhaseChange('FAILED');
-        clearInterval(heartbeatInterval);
         process.exit(1);
       }
 
@@ -1051,7 +1060,6 @@ async function main(): Promise<void> {
       await lifecycle.cleanup();
       await lifecycle.complete('COMPLETED');
       await emitLifecyclePhaseChange('COMPLETED');
-      clearInterval(heartbeatInterval);
       process.exit(0);
     }
 
@@ -1289,7 +1297,6 @@ async function main(): Promise<void> {
       await lifecycle.cleanup();
       await lifecycle.complete('CANCELLED');
       await emitLifecyclePhaseChange('CANCELLED');
-      clearInterval(heartbeatInterval);
       process.exit(130);
     }
 
@@ -1363,7 +1370,6 @@ async function main(): Promise<void> {
       await emitLifecyclePhaseChange('COMPLETED');
     }
 
-    clearInterval(heartbeatInterval);
     process.exit(terminalFailed ? 1 : 0);
   } catch (error) {
     if (cancelled) {
@@ -1371,7 +1377,6 @@ async function main(): Promise<void> {
       await lifecycle.cleanup();
       await lifecycle.complete('CANCELLED');
       await emitLifecyclePhaseChange('CANCELLED');
-      clearInterval(heartbeatInterval);
       process.exit(130);
     }
 
@@ -1380,8 +1385,7 @@ async function main(): Promise<void> {
     const lifecycleError = error instanceof SessionLifecycleError
       ? error
       : await lifecycle.failAt(lifecyclePhase, errorMsg(error), error);
-    const lifecyclePrefix = `[phase=${lifecycleError.phase}]`;
-    const errorText = `${lifecyclePrefix} ${errorMsg(error)}`;
+    const errorText = formatLifecyclePhaseFailure(lifecycleError.phase, errorMsg(error));
     resetThinkingCircuitBreaker(thinkingCircuitBreaker);
     await maybeCheckpoint('terminal');
     let deliveryError: string | undefined;
@@ -1413,7 +1417,6 @@ async function main(): Promise<void> {
     await lifecycle.complete('FAILED');
     await emitLifecyclePhaseChange('FAILED');
 
-    clearInterval(heartbeatInterval);
     process.exit(1);
   }
 
@@ -1622,6 +1625,25 @@ async function main(): Promise<void> {
     }
     return changed;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Lifecycle diagnostics helpers
+// ---------------------------------------------------------------------------
+
+export function formatLifecyclePhaseFailure(phase: SessionLifecyclePhase, message: string): string {
+  return `[phase=${phase}] ${message}`;
+}
+
+export function appendCleanupErrors(
+  baseError: string,
+  cleanupErrors: Array<{ phase: SessionLifecyclePhase; actionLabel: string; error: unknown }>,
+): string {
+  if (cleanupErrors.length === 0) {
+    return baseError;
+  }
+  const details = cleanupErrors.map((entry) => `${entry.phase}:${entry.actionLabel}:${errorMsg(entry.error)}`).join(' | ');
+  return `${baseError}\nCleanup errors: ${details}`;
 }
 
 // ---------------------------------------------------------------------------
