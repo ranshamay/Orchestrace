@@ -7,7 +7,18 @@
 // them inline alongside the session's own output.
 // ---------------------------------------------------------------------------
 
-import type { EventStore, SessionEvent } from '@orchestrace/store';
+import type { EventStore, SessionEvent }
+
+function isSingleSentence(text: string): boolean {
+  const normalized = text.trim();
+  if (!normalized) return false;
+  const sentenceEndings = (normalized.match(/[.!?](?:\s|$)/g) ?? []).length;
+  return sentenceEndings <= 1;
+}
+
+function containsRecommendationLanguage(text: string): boolean {
+  return /(should\s+|recommend|fix\s+by|to\s+fix|implement\s+|change\s+the\s+code|add\s+this|remove\s+this|update\s+to)/i.test(text);
+} from '@orchestrace/store';
 import type { LlmAdapter } from '@orchestrace/provider';
 import type { ObserverConfig, FindingCategory, FindingSeverity } from './types.js';
 import { ALL_FINDING_CATEGORIES } from './types.js';
@@ -586,7 +597,16 @@ function parseRealtimeFindings(
           : undefined,
         phase: triggerPhase,
         detectedAt: new Date().toISOString(),
-      }));
+      }))
+      .filter((finding) =>
+        isSingleSentence(finding.issueSummary) &&
+        finding.evidence.length >= 2 &&
+        finding.evidence.length <= 3 &&
+        !containsRecommendationLanguage(
+          [finding.issueSummary, ...finding.evidence, finding.severityRationale ?? ''].join(' '),
+        ) &&
+        (!['high', 'critical'].includes(finding.severity) || !!finding.severityRationale),
+      );
   } catch {
     console.error('[orchestrace][observer] Failed to parse real-time analysis response');
     return [];
