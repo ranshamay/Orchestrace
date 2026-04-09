@@ -76,7 +76,7 @@ describe('runner task routing parity', () => {
     const resolvedRoute = resolveTaskRouteForSource(prompt, 'user', 'shell_command').result;
     expect(resolvedRoute.category).toBe('shell_command');
 
-    const dispatch = enforceSafeShellDispatch(prompt, resolvedRoute);
+    const dispatch = enforceSafeShellDispatch(prompt, resolvedRoute, 'user');
     expect(dispatch.shell.ok).toBe(false);
     expect(dispatch.route.category).toBe('code_change');
     expect(dispatch.route.strategy).toBe('full_planning_pipeline');
@@ -85,10 +85,33 @@ describe('runner task routing parity', () => {
   it('keeps shell route for user command prompt under shell override', () => {
     const prompt = '$ pnpm test';
     const resolvedRoute = resolveTaskRouteForSource(prompt, 'user', 'shell_command').result;
-    const dispatch = enforceSafeShellDispatch(prompt, resolvedRoute);
+    const dispatch = enforceSafeShellDispatch(prompt, resolvedRoute, 'user');
 
     expect(dispatch.route.category).toBe('shell_command');
     expect(dispatch.shell.ok).toBe(true);
     expect(dispatch.shell.command).toBe('pnpm test');
+  });
+
+  it('blocks observer source at dispatch boundary even if shell route is forced', () => {
+    const prompt = 'git status';
+    const forcedShellRoute = resolveTaskRoute(prompt, 'shell_command').result;
+    expect(forcedShellRoute.category).toBe('shell_command');
+
+    const dispatch = enforceSafeShellDispatch(prompt, forcedShellRoute, 'observer');
+    expect(dispatch.shell.ok).toBe(false);
+    expect(dispatch.shell.reason).toContain('source observer');
+    expect(dispatch.route.category).toBe('code_change');
+    expect(dispatch.route.reason).toContain('Shell dispatch blocked by source guard');
+  });
+
+  it('blocks undefined source at dispatch boundary for shell routes', () => {
+    const prompt = 'git status';
+    const forcedShellRoute = resolveTaskRoute(prompt, 'shell_command').result;
+    const dispatch = enforceSafeShellDispatch(prompt, forcedShellRoute, undefined);
+
+    expect(dispatch.shell.ok).toBe(false);
+    expect(dispatch.shell.reason).toContain('source is undefined');
+    expect(dispatch.route.category).toBe('code_change');
+    expect(dispatch.route.reason).toContain('Shell dispatch blocked by source guard');
   });
 });

@@ -284,7 +284,7 @@ Environment variables:
     }
 
     const resolvedRoute = resolveTaskRoute(taskPrompt, process.env.ORCHESTRACE_TASK_ROUTE).result;
-    const dispatch = enforceSafeShellDispatch(taskPrompt, resolvedRoute);
+    const dispatch = enforceSafeShellDispatch(taskPrompt, resolvedRoute, 'user');
     const route = dispatch.route;
     console.log(`[route] category=${route.category} strategy=${route.strategy} source=${route.source} confidence=${route.confidence.toFixed(2)} reason=${route.reason}`);
 

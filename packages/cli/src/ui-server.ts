@@ -26,474 +26,330 @@ import {
   type ConversationTurn,
   type ModelInfo,
 } from '@orchestrace/context';
-import { now } from './ui-server/clock.js';
-import { cleanupSessionWorktree, ensureSessionWorktree } from './session-worktree.js';
-import {
-  buildChatContinuationInput,
-  cloneChatContentParts,
-  compactInlineImageMarkdown,
-  createSessionChatMessage,
-  createSessionChatThread,
-  estimateTokensFromText,
-  parseChatContentParts,
-  scheduleChatStreamCleanup,
-  summarizeChatContentParts,
-  trimThreadMessages,
-} from './ui-server/chat.js';
-import { asString, toErrorMessage } from './ui-server/strings.js';
-import { broadcastSessionUpdate, broadcastTodoUpdate, broadcastWorkStream, closeWorkStream, sendSse } from './ui-server/sse.js';
-import type {
-  AgentTodoItem,
-  AuthSession,
-  ChatTokenStream,
-  PersistedUiState,
-  PersistedWorkSession,
-  PersistedUiPreferences,
-  SessionAgentGraphNode,
-  SessionChatContentPart,
-  SessionChatMessage,
-  SessionChatThread,
-  SessionCheckpointInfo,
-  SessionLlmStatus,
-  SessionRecoveryInfo,
-  UiDagEvent,
-  UiPreferences,
-  UiServerOptions,
-  WorkSession,
-  WorkState,
-  LlmSessionState,
-  SessionCreationReason,
-} from './ui-server/types.js';
-import { WorkspaceManager } from './workspace-manager.js';
-import { FileEventStore } from '@orchestrace/store';
-import { materializeSession as materializeFromEvents } from '@orchestrace/store';
-import type {
-  SessionCheckpointPayload,
-  SessionConfig,
-  SessionEventInput,
-  SessionRecoveryDetectedPayload,
-} from '@orchestrace/store';
-import { ObserverDaemon, SessionObserver, BackendLogger, LogWatcher } from './observer/index.js';
-import type { RealtimeFinding } from './observer/index.js';
+  async function retryWorkSessionInPlace(params: {
+    id: string;
+    displayPrompt: string;
+    executionPrompt: string;
+    promptParts?: SessionChatContentPart[];
+  }): Promise<{ id: string } | { error: string; statusCode: number }> {
+    const session = workSessions.get(params.id);
+    if (!session) {
+      return { error: 'Unknown work session', statusCode: 404 };
+    }
 
-const GITHUB_PROVIDER_ID = 'github';
-const GITHUB_API_BASE_URL = 'https://api.github.com';
-const GITHUB_DEVICE_AUTH_SCOPES_DEFAULT = ['repo', 'workflow', 'read:org'];
-// Public OAuth app client id used for GitHub device flow (mirrors CLI-style auth UX).
-const GITHUB_DEVICE_AUTH_CLIENT_ID_DEFAULT = '178c6fc778ccc68e1d6a';
-const DEFAULT_UI_ADAPTIVE_CONCURRENCY = false;
-const DEFAULT_UI_BATCH_CONCURRENCY = 8;
-const DEFAULT_UI_BATCH_MIN_CONCURRENCY = 1;
-const SUBAGENT_WORKER_PROMPT_PREVIEW_MAX_CHARS = 220;
-const SUBAGENT_WORKER_OUTPUT_PREVIEW_MAX_CHARS = 420;
-const SUBAGENT_RETRY_MAX_ATTEMPTS = 2;
-const SUBAGENT_RETRY_BASE_DELAY_MS = 300;
-const CHAT_RETRY_MAX_ATTEMPTS = 2;
-const CHAT_RETRY_BASE_DELAY_MS = 300;
-const RETRY_CONTINUATION_MAX_CHARS = 4_000;
-const RETRY_OUTPUT_EXCERPT_MAX_CHARS = 1_200;
-const DEFAULT_CONTEXT_COMPACTION_MODEL = 'gpt-4.1-mini';
-const CONTEXT_COMPACTION_PROVIDER_ENV = 'ORCHESTRACE_CONTEXT_COMPACTION_PROVIDER';
-const CONTEXT_COMPACTION_MODEL_ENV = 'ORCHESTRACE_CONTEXT_COMPACTION_MODEL';
-const PERSIST_RAW_DEBUG_ENV = 'ORCHESTRACE_PERSIST_RAW_DEBUG';
-const PERSIST_TEXT_MAX_CHARS = 3_000;
-const PERSIST_EVENT_MESSAGE_MAX_CHARS = 1_200;
-const PERSIST_CHAT_MESSAGE_MAX_CHARS = 2_400;
-const SESSION_EVENT_HISTORY_LIMIT = 2_000;
-const TOOL_EVENT_PREVIEW_MAX_CHARS = parsePositiveSetting(process.env.ORCHESTRACE_TOOL_EVENT_PREVIEW_MAX_CHARS) ?? 200_000;
-const PHASE_PROGRESS_PLAN_WEIGHT_DEFAULT = 30;
-const PHASE_PROGRESS_IMPLEMENTATION_WEIGHT_DEFAULT = 70;
-const STARTUP_RECOVERY_MODE_ENV = 'ORCHESTRACE_RECOVERY_MODE';
-const SESSION_CHECKPOINT_FILE = 'checkpoint.json';
-const CHECKPOINT_STASH_PREFIX = 'orchestrace-checkpoint';
-const execFileAsync = promisify(execFile);
+    if (session.status === 'running') {
+      return { error: 'Cannot retry a running session.', statusCode: 409 };
+    }
 
-type SessionCheckpointMetadata = {
-  sessionId: string;
-  workspacePath: string;
-  state: 'idle' | 'active' | 'completed' | 'failed' | 'cancelled' | 'interrupted';
-  createdAt: string;
-  updatedAt: string;
-  stashRef?: string;
-  stashMessage?: string;
-  checkpointName?: string;
-};
+    const promptParts = cloneChatContentParts(params.promptParts ?? []);
+    const displayPrompt = asString(params.displayPrompt);
+    const executionPrompt = asString(params.executionPrompt);
+    if (!displayPrompt && promptParts.length === 0) {
+      return { error: 'Missing prompt', statusCode: 400 };
+    }
 
-type WorkStartModelResolutionFailureCode =
-  | 'MODEL_LIST_FETCH_FAILED'
-  | 'MODEL_NOT_FOUND'
-  | 'MODEL_UNAVAILABLE';
+    const workspace = await workspaceManager.selectWorkspace(session.workspaceId);
 
-type WorkStartModelResolutionResult =
-  | { ok: true; model: string }
-  | {
-      ok: false;
-      statusCode: number;
-      code: WorkStartModelResolutionFailureCode;
-      error: string;
-      details: Record<string, unknown>;
-    };
+    let managedWorkspace;
+    try {
+      managedWorkspace = await initializeManagedSessionWorkspace({
+        sessionId: session.id,
+        workspaceRoot: workspace.path,
+        worktreePath: session.worktreePath,
+        worktreeBranch: session.worktreeBranch,
+      });
+    } catch (error) {
+      return {
+        error: `Failed to initialize session worktree: ${toErrorMessage(error)}`,
+        statusCode: 500,
+      };
+    }
 
-type GithubDeviceAuthSessionState = 'awaiting-user' | 'polling' | 'completed' | 'failed';
+    const normalizedDisplayPrompt = promptParts.length > 0
+      ? compactInlineImageMarkdown(displayPrompt || summarizeChatContentParts(promptParts))
+      : (displayPrompt || summarizeChatContentParts(promptParts));
+    const normalizedExecutionPrompt = executionPrompt.trim() || normalizedDisplayPrompt;
 
-interface GithubDeviceAuthSession {
-  id: string;
-  state: GithubDeviceAuthSessionState;
-  clientId: string;
-  scopes: string[];
-  deviceCode: string;
-  userCode: string;
-  verificationUri: string;
-  verificationUriComplete?: string;
-  intervalSeconds: number;
-  expiresAt: string;
-  createdAt: string;
-  updatedAt: string;
-  error?: string;
-}
+    const retryStartedAt = now();
+    session.workspaceName = workspace.name;
+    session.workspacePath = managedWorkspace.workspacePath;
+    session.worktreePath = managedWorkspace.worktreePath;
+    session.worktreeBranch = managedWorkspace.worktreeBranch;
+    session.cleanupWorktree = managedWorkspace.cleanupWorktree;
+    session.prompt = normalizedDisplayPrompt;
+    session.executionPromptOverride = normalizedExecutionPrompt;
+    session.promptParts = promptParts.length > 0 ? cloneChatContentParts(promptParts) : undefined;
+    session.creationReason = 'retry';
+    session.updatedAt = retryStartedAt;
+    session.status = 'running';
+    session.llmStatus = createLlmStatus('queued', retryStartedAt, {
+      detail: 'Queued for orchestration.',
+    });
+    session.taskStatus = {};
+    session.agentGraph = [];
+    session.error = undefined;
+    session.output = undefined;
+    session.lastRecovery = undefined;
+    session.controller = new AbortController();
 
-interface SessionContextState {
-  turnsSinceLastCompaction: number;
-  previousCompressedHistory?: string;
-}
+    const existingObserver = sessionObservers.get(session.id);
+    if (existingObserver) {
+      existingObserver.stop();
+      sessionObservers.delete(session.id);
+    }
 
-type NativeGitWorktree = {
-  path: string;
-  branch?: string;
-  detached: boolean;
-};
+    const chatThread = sessionChats.get(session.id);
+    if (chatThread) {
+      chatThread.taskPrompt = normalizedDisplayPrompt;
+      chatThread.workspacePath = managedWorkspace.workspacePath;
+      chatThread.updatedAt = retryStartedAt;
+    }
 
-function createInheritedSubAgentToolset(
-  cwd: string,
-  options: {
-    phase: AgentToolPhase;
-    taskId: string;
-    taskType?: string;
-    graphId?: string;
-    provider?: string;
-    model?: string;
-    reasoning?: 'minimal' | 'low' | 'medium' | 'high';
+    try {
+      await appendSessionCreatedEvent(session, retryStartedAt);
+    } catch (error) {
+      session.status = 'failed';
+      session.error = `Failed to persist retry session config: ${toErrorMessage(error)}`;
+      session.llmStatus = createLlmStatus('failed', now(), { detail: session.error });
+      uiStatePersistence.schedule();
+      return { error: session.error, statusCode: 500 };
+    }
+
+    emitSessionEvent(session.id, {
+      time: retryStartedAt,
+      type: 'session:llm-status-change',
+      payload: { llmStatus: session.llmStatus },
+    });
+    emitSessionEvent(session.id, {
+      time: retryStartedAt,
+      type: 'session:status-change',
+      payload: { status: 'running' },
+    });
+    emitSessionEvent(session.id, {
+      time: retryStartedAt,
+      type: 'session:error-change',
+      payload: { error: undefined },
+    });
+    emitSessionEvent(session.id, {
+      time: retryStartedAt,
+      type: 'session:output-set',
+      payload: { output: {} },
+    });
+
+    broadcastSessionUpdate(workStreamClients, session.id, serializeWorkSession(session, sessionTodos.get(session.id) ?? []));
+    broadcastSessionStatusUpsert(session);
+    uiStatePersistence.schedule();
+
+    await launchSessionRunner(session);
+    return { id: session.id };
+  }
+
+  async function startWorkSession(request: {
+    workspaceId?: string;
+    prompt: string;
+    promptParts?: SessionChatContentPart[];
+    provider: string;
+    model: string;
+    planningProvider?: string;
+    planningModel?: string;
+    implementationProvider?: string;
+    implementationModel?: string;
+    autoApprove: boolean;
+    planningNoToolGuardMode?: 'enforce' | 'warn';
+    quickStartMode?: boolean;
+    quickStartMaxPreDelegationToolCalls?: number;
     adaptiveConcurrency?: boolean;
     batchConcurrency?: number;
     batchMinConcurrency?: number;
-    resolveGithubToken: () => Promise<string | undefined>;
-    sharedContextStore?: import('@orchestrace/context').SharedContextStore;
-    agentId?: string;
-    fileReadCache?: ReturnType<typeof createFileReadCache>;
-  },
-) {
-  return createAgentToolset({
-    cwd,
-    phase: options.phase,
-    taskId: options.taskId,
-    taskType: options.taskType,
-    graphId: options.graphId,
-    provider: options.provider,
-    model: options.model,
-    reasoning: options.reasoning,
-    adaptiveConcurrency: options?.adaptiveConcurrency,
-    batchConcurrency: options?.batchConcurrency,
-    batchMinConcurrency: options?.batchMinConcurrency,
-    resolveGithubToken: options.resolveGithubToken,
-    sharedContextStore: options.sharedContextStore,
-    fileReadCache: options.fileReadCache,
-    agentId: options.agentId,
-  });
-}
+    enableTrivialTaskGate?: boolean;
+    trivialTaskMaxPromptLength?: number;
+    creationReason?: SessionCreationReason;
+    sourceSessionId?: string;
+    source?: 'user' | 'observer';
+  }): Promise<{ id: string; warnings?: string[] } | { error: string; statusCode: number }> {
+    const promptParts = cloneChatContentParts(request.promptParts ?? []);
+    const prompt = asString(request.prompt);
+    const implementationProvider = asString(request.implementationProvider) || request.provider;
+    const implementationModel = asString(request.implementationModel) || request.model;
+    const planningProvider = asString(request.planningProvider) || implementationProvider;
+    const planningModel = asString(request.planningModel) || implementationModel;
 
-export async function startUiServer(options: UiServerOptions = {}): Promise<void> {
-  const port = options.port ?? 4310;
-  const hmrEnabled = options.hmr ?? process.env.ORCHESTRACE_UI_HMR !== 'false';
-  const workspaceManager = new WorkspaceManager(process.cwd());
-  if (options.workspace) {
-    await workspaceManager.selectWorkspace(options.workspace);
-  }
+    const providerStatuses = await authManager.getAllStatus();
+    const phaseProviders: Array<{ phase: 'planning' | 'implementation'; provider: string }> = [
+      { phase: 'planning', provider: planningProvider },
+      { phase: 'implementation', provider: implementationProvider },
+    ];
 
-  const authManager = new ProviderAuthManager();
-  const githubAuthManager = createGithubAuthManager();
-  const llm = new PiAiAdapter();
-
-  // -- Persistent backend log stream ------------------------------------------
-  const orchestraceDir = join(workspaceManager.getRootDir(), '.orchestrace');
-  const backendLogger = new BackendLogger({ orchestraceDir });
-  backendLogger.start();
-
-  // Stream log lines to SSE clients
-  backendLogger.onLine((line) => {
-    for (const client of [...logStreamClients]) {
-      try {
-        sendSse(client, 'log', { line });
-      } catch {
-        logStreamClients.delete(client);
-      }
-    }
-  });
-
-  const workSessions = new Map<string, WorkSession>();
-  const authSessions = new Map<string, AuthSession>();
-  const githubDeviceAuthSessions = new Map<string, GithubDeviceAuthSession>();
-  const sessionChats = new Map<string, SessionChatThread>();
-  const sessionTodos = new Map<string, AgentTodoItem[]>();
-  const sessionSharedContextStores = new Map<string, InMemorySharedContextStore>();
-  const sessionFileReadCaches = new Map<string, ReturnType<typeof createFileReadCache>>();
-  const sessionContextEngines = new Map<string, ContextEngine>();
-  const sessionContextStates = new Map<string, SessionContextState>();
-  const pendingSubagentNodeIdsBySession = new Map<string, Map<string, string[]>>();
-  const sessionObservers = new Map<string, SessionObserver>();
-  const chatStreams = new Map<string, ChatTokenStream>();
-  let uiPreferences = resolveUiPreferencesDefaults();
-  const hmrClients = new Set<ServerResponse>();
-  const workStreamClients = new Map<string, Set<ServerResponse>>();
-  const chatStreamClients = new Map<string, Set<ServerResponse>>();
-  const sessionStatusStreamClients = new Set<ServerResponse>();
-  const logStreamClients = new Set<ServerResponse>();
-  const uiStatePath = join(workspaceManager.getRootDir(), '.orchestrace', 'ui-state.json');
-
-  // Event store for durable session event logs (Phase 2: dual-write alongside in-memory state)
-  const eventStore = new FileEventStore(
-    join(workspaceManager.getRootDir(), '.orchestrace', 'sessions'),
-  );
-
-  /** Append a session event to the durable event store. Fire-and-forget; errors are logged. */
-  function emitSessionEvent(sessionId: string, event: SessionEventInput): void {
-    void eventStore.append(sessionId, event).catch((err) => {
-      console.error(`[orchestrace][event-store] Failed to append event for ${sessionId}:`, err);
-    });
-  }
-
-  function serializeSessionsSnapshot(): Record<string, unknown>[] {
-    return [...workSessions.values()]
-      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
-      .map((session) => serializeWorkSession(session, sessionTodos.get(session.id) ?? []));
-  }
-
-  function broadcastSessionStatusReady(target: ServerResponse): void {
-    sendSse(target, 'ready', {
-      sessions: serializeSessionsSnapshot(),
-      time: now(),
-    });
-  }
-
-  function broadcastSessionStatusUpsert(session: WorkSession): void {
-    if (sessionStatusStreamClients.size === 0) {
-      return;
-    }
-
-    const payload = {
-      session: serializeWorkSession(session, sessionTodos.get(session.id) ?? []),
-      time: now(),
-    };
-
-    for (const client of [...sessionStatusStreamClients]) {
-      try {
-        sendSse(client, 'session-upsert', payload);
-      } catch {
-        sessionStatusStreamClients.delete(client);
-      }
-    }
-  }
-
-  function broadcastSessionStatusDelete(id: string): void {
-    if (sessionStatusStreamClients.size === 0) {
-      return;
-    }
-
-    const payload = {
-      id,
-      time: now(),
-    };
-
-    for (const client of [...sessionStatusStreamClients]) {
-      try {
-        sendSse(client, 'session-delete', payload);
-      } catch {
-        sessionStatusStreamClients.delete(client);
-      }
-    }
-  }
-
-  /**
-   * Restore session state from the event store (event-sourced reads).
-   * Returns the number of sessions restored. If no event logs exist,
-   * returns 0 so the caller can fall back to legacy ui-state.json.
-   */
-  async function restoreFromEventStore(): Promise<number> {
-    const sessionIds = await eventStore.listSessions();
-    if (sessionIds.length === 0) return 0;
-
-    let restored = 0;
-    for (const sessionId of sessionIds) {
-      try {
-        const events = await eventStore.read(sessionId);
-        if (events.length === 0) continue;
-
-        const materialized = materializeFromEvents(events);
-        if (!materialized) continue;
-
-        const c = materialized.config;
-        const session: WorkSession = {
-          id: c.id,
-          workspaceId: c.workspaceId,
-          workspaceName: c.workspaceName,
-          workspacePath: c.workspacePath,
-          prompt: c.prompt,
-          promptParts: c.promptParts,
-          provider: c.implementationProvider ?? c.provider,
-          model: c.implementationModel ?? c.model,
-          planningProvider: c.planningProvider ?? c.provider,
-          planningModel: c.planningModel ?? c.model,
-          implementationProvider: c.implementationProvider ?? c.provider,
-          implementationModel: c.implementationModel ?? c.model,
-          autoApprove: c.autoApprove,
-          planningNoToolGuardMode: normalizePlanningNoToolGuardMode(c.planningNoToolGuardMode)
-            ?? resolvePlanningNoToolGuardModeDefault(),
-          quickStartMode: c.quickStartMode,
-          quickStartMaxPreDelegationToolCalls: c.quickStartMaxPreDelegationToolCalls,
-          adaptiveConcurrency: c.adaptiveConcurrency,
-          batchConcurrency: c.batchConcurrency,
-          batchMinConcurrency: c.batchMinConcurrency,
-          enableTrivialTaskGate: c.enableTrivialTaskGate ?? resolveTrivialTaskGateDefault(),
-          trivialTaskMaxPromptLength: c.trivialTaskMaxPromptLength ?? resolveTrivialTaskMaxPromptLengthDefault(),
-          worktreePath: c.worktreePath,
-          worktreeBranch: c.worktreeBranch,
-          creationReason: c.creationReason,
-          sourceSessionId: c.sourceSessionId,
-          source: c.source,
-          createdAt: materialized.createdAt,
-          updatedAt: materialized.updatedAt,
-          status: materialized.status,
-          llmStatus: materialized.llmStatus,
-          taskStatus: materialized.taskStatus,
-          events: materialized.events as UiDagEvent[],
-          agentGraph: materialized.agentGraph,
-          error: materialized.error,
-          output: materialized.output,
-          lastCheckpoint: materialized.lastCheckpoint as SessionCheckpointInfo | undefined,
-          lastRecovery: materialized.lastRecovery as SessionRecoveryInfo | undefined,
-          controller: new AbortController(),
+    for (const phaseConfig of phaseProviders) {
+      const providerStatus = providerStatuses.find((item) => item.provider === phaseConfig.provider);
+      if (!providerStatus || providerStatus.source === 'none') {
+        return {
+          error: `${phaseConfig.phase === 'planning' ? 'Planning' : 'Implementation'} provider ${phaseConfig.provider} is not connected. Connect it in Settings first.`,
+          statusCode: 400,
         };
+      }
+    }
 
-        // If the session was 'running', check if the runner process is still alive
-        if (session.status === 'running') {
-          const meta = await eventStore.getMetadata(sessionId);
-          let runnerAlive = false;
-          if (meta?.pid) {
-            try {
-              process.kill(meta.pid, 0); // Signal 0 checks if process exists
-              runnerAlive = true;
-            } catch {
-              // Process is dead
-            }
-          }
+    const uniqueProviders = new Set([planningProvider, implementationProvider]);
+    for (const providerId of uniqueProviders) {
+      try {
+        const apiKey = await authManager.resolveApiKey(providerId);
+        if (apiKey) {
+          continue;
+        }
 
-          if (runnerAlive) {
-            // Runner is still alive — set up event watcher to observe its progress
-            console.log(`[orchestrace][event-store] Session ${sessionId}: runner PID ${meta!.pid} is alive, reconnecting...`);
-            const lastSeq = events[events.length - 1]?.seq ?? 0;
-            const unwatch = eventStore.watch(sessionId, lastSeq, (event) => {
-              session.updatedAt = event.time;
-              switch (event.type) {
-                case 'session:llm-status-change':
-                  session.llmStatus = event.payload.llmStatus as SessionLlmStatus;
-                  break;
-                case 'session:status-change': {
-                  const newStatus = event.payload.status as WorkState;
-                  session.status = newStatus;
-                  if (newStatus === 'completed' || newStatus === 'failed' || newStatus === 'cancelled') {
-                    broadcastWorkStream(workStreamClients, sessionId, newStatus === 'completed' ? 'end' : 'error', {
-                      id: sessionId, status: session.status, llmStatus: session.llmStatus, error: session.error, time: event.time,
-                    });
-                    unwatch();
-                  }
-                  break;
-                }
-                case 'session:error-change':
-                  session.error = event.payload.error as string | undefined;
-                  break;
-                case 'session:output-set':
-                  session.output = event.payload.output as WorkSession['output'];
-                  break;
-                case 'session:dag-event': {
-                  const uiEvent = event.payload.event as UiDagEvent;
-                  session.events.push(uiEvent);
-                  if (session.events.length > SESSION_EVENT_HISTORY_LIMIT) session.events.shift();
-                  break;
-                }
-                case 'session:stream-delta': {
-                  const p = event.payload as { taskId: string; phase: string; delta: string };
-                  broadcastWorkStream(workStreamClients, sessionId, 'token', {
-                    id: sessionId, taskId: p.taskId, phase: p.phase, delta: p.delta, llmStatus: session.llmStatus, time: event.time,
-                  });
-                  break;
-                }
-                case 'session:task-status-change': {
-                  const p = event.payload as { taskId: string; taskStatus: string };
-                  session.taskStatus[p.taskId] = p.taskStatus;
-                  break;
-                }
-                case 'session:todos-set': {
-                  const items = (event.payload as { items: AgentTodoItem[] }).items;
-                  sessionTodos.set(sessionId, items);
-                  broadcastTodoUpdate(workStreamClients, sessionId, items);
-                  break;
-                }
-                case 'session:todo-item-added': {
-                  const item = (event.payload as { item: AgentTodoItem }).item;
-                  const existing = sessionTodos.get(sessionId) ?? [];
-                  existing.push(item);
-                  sessionTodos.set(sessionId, existing);
-                  broadcastTodoUpdate(workStreamClients, sessionId, existing);
-                  break;
-                }
-                case 'session:todo-item-toggled': {
-                  const p = event.payload as { itemId: string; done: boolean; status?: string };
-                  const items = sessionTodos.get(sessionId) ?? [];
-                  const idx = items.findIndex((i) => i.id === p.itemId);
-                  if (idx >= 0) {
-                    items[idx] = { ...items[idx], done: p.done, status: (p.status as AgentTodoItem['status']) ?? items[idx].status, updatedAt: event.time };
-                    broadcastTodoUpdate(workStreamClients, sessionId, items);
-                  }
-                  break;
-                }
-                case 'session:agent-graph-set': {
-                  session.agentGraph = (event.payload as { graph: SessionAgentGraphNode[] }).graph;
-                  break;
-                }
-                case 'session:checkpoint': {
-                  session.lastCheckpoint = {
-                    ...(event.payload as SessionCheckpointPayload),
-                    time: event.time,
-                  };
-                  break;
-                }
-                case 'session:recovery-detected': {
-                  session.lastRecovery = {
-                    ...(event.payload as SessionRecoveryDetectedPayload),
-                    time: event.time,
-                  };
-                  break;
-                }
-                case 'session:chat-message': {
-                  const msg = (event.payload as { message: SessionChatMessage }).message;
-                  const thread = sessionChats.get(sessionId);
-                  if (thread) {
-                    thread.messages.push(msg);
-                    trimThreadMessages(thread);
-                    thread.updatedAt = event.time;
-                  }
-                  break;
-                }
-                default:
-                  break;
-              }
-              // Broadcast session state for all events except high-frequency stream deltas
-              if (event.type !== 'session:stream-delta') {
-                broadcastSessionUpdate(workStreamClients, sessionId, serializeWorkSession(session, sessionTodos.get(sessionId) ?? []));
-              }
+        return {
+          error: `Provider ${providerId} is missing an API key. Connect it in Settings first.`,
+          statusCode: 400,
+        };
+      } catch {
+        return {
+          error: `Provider ${providerId} is missing an API key. Connect it in Settings first.`,
+          statusCode: 400,
+        };
+      }
+    }
 
-              if (event.type === 'session:status-change' || event.type === 'session:llm-status-change' || event.type === 'session:error-change') {
-                broadcastSessionStatusUpsert(session);
-              }
+    const workspace = request.workspaceId
+      ? await workspaceManager.selectWorkspace(request.workspaceId)
+      : await workspaceManager.getActiveWorkspace();
+
+    if (!prompt && promptParts.length === 0) {
+      return { error: 'Missing prompt', statusCode: 400 };
+    }
+
+    const normalizedPrompt = promptParts.length > 0
+      ? compactInlineImageMarkdown(prompt || summarizeChatContentParts(promptParts))
+      : (prompt || summarizeChatContentParts(promptParts));
+
+    const id = randomUUID();
+    const adaptiveConcurrency = request.adaptiveConcurrency ?? uiPreferences.adaptiveConcurrency;
+    const batchConcurrency = normalizePositiveSetting(request.batchConcurrency, uiPreferences.batchConcurrency);
+    const batchMinConcurrency = Math.min(
+      batchConcurrency,
+      normalizePositiveSetting(request.batchMinConcurrency, uiPreferences.batchMinConcurrency),
+    );
+    const quickStartMode = request.quickStartMode
+      ?? (parseBooleanSetting(process.env.ORCHESTRACE_QUICK_START_MODE) ?? false);
+    const quickStartMaxPreDelegationToolCalls = normalizePositiveSetting(
+      request.quickStartMaxPreDelegationToolCalls,
+      parsePositiveSetting(process.env.ORCHESTRACE_QUICK_START_MAX_PRE_DELEGATION_TOOL_CALLS) ?? 3,
+    );
+    const planningNoToolGuardMode = normalizePlanningNoToolGuardMode(request.planningNoToolGuardMode)
+      ?? uiPreferences.planningNoToolGuardMode;
+    const enableTrivialTaskGate = request.enableTrivialTaskGate ?? uiPreferences.enableTrivialTaskGate;
+    const trivialTaskMaxPromptLength = normalizePositiveSetting(
+      request.trivialTaskMaxPromptLength,
+      uiPreferences.trivialTaskMaxPromptLength,
+    );
+
+    let managedWorkspace;
+    try {
+      managedWorkspace = await initializeManagedSessionWorkspace({
+        sessionId: id,
+        workspaceRoot: workspace.path,
+      });
+    } catch (error) {
+      return {
+        error: `Failed to initialize session worktree: ${toErrorMessage(error)}`,
+        statusCode: 500,
+      };
+    }
+
+    const controller = new AbortController();
+    const createdAt = now();
+
+    const session: WorkSession = {
+      id,
+      workspaceId: workspace.id,
+      workspaceName: workspace.name,
+      workspacePath: managedWorkspace.workspacePath,
+      prompt: normalizedPrompt,
+      promptParts: promptParts.length > 0 ? cloneChatContentParts(promptParts) : undefined,
+      provider: implementationProvider,
+      model: implementationModel,
+      planningProvider,
+      planningModel,
+      implementationProvider,
+      implementationModel,
+      autoApprove: request.autoApprove,
+      planningNoToolGuardMode,
+      quickStartMode,
+      quickStartMaxPreDelegationToolCalls,
+      adaptiveConcurrency,
+      batchConcurrency,
+      batchMinConcurrency,
+      enableTrivialTaskGate,
+      trivialTaskMaxPromptLength,
+      worktreePath: managedWorkspace.worktreePath,
+      worktreeBranch: managedWorkspace.worktreeBranch,
+      creationReason: request.creationReason ?? 'start',
+      sourceSessionId: asString(request.sourceSessionId) || undefined,
+      source: request.source,
+      createdAt,
+      updatedAt: createdAt,
+      status: 'running',
+      llmStatus: createLlmStatus('queued', createdAt, {
+        detail: 'Queued for orchestration.',
+      }),
+      taskStatus: {},
+      events: [],
+      agentGraph: [],
+      controller,
+      cleanupWorktree: managedWorkspace.cleanupWorktree,
+    };
+
+    workSessions.set(id, session);
+    console.log(
+      `[ui-server] session worktree initialized: ${JSON.stringify({
+        sessionId: id,
+        workspaceRoot: workspace.path,
+        workspacePath: managedWorkspace.workspacePath,
+        worktreeBranch: managedWorkspace.worktreeBranch,
+        warnings: managedWorkspace.warnings,
+      })}`,
+    );
+    sessionChats.set(id, createSessionChatThread(session, promptParts));
+    sessionTodos.set(id, []);
+    sessionSharedContextStores.set(id, new InMemorySharedContextStore());
+    sessionContextEngines.set(id, createSessionContextEngine(implementationProvider, implementationModel));
+    sessionContextStates.set(id, { turnsSinceLastCompaction: 0 });
+    uiStatePersistence.schedule();
+    broadcastTodoUpdate(workStreamClients, id, sessionTodos.get(id) ?? []);
+
+    try {
+      await appendSessionCreatedEvent(session, createdAt);
+      await eventStore.append(id, {
+        time: createdAt,
+        type: 'session:chat-thread-created',
+        payload: {
+          provider: implementationProvider,
+          model: implementationModel,
+          workspacePath: managedWorkspace.workspacePath,
+          taskPrompt: normalizedPrompt,
+        },
+      });
+    } catch (error) {
+      void managedWorkspace.cleanupWorktree().catch(() => {});
+      workSessions.delete(id);
+      sessionChats.delete(id);
+      sessionTodos.delete(id);
+      sessionSharedContextStores.delete(id);
+      sessionContextEngines.delete(id);
+      sessionContextStates.delete(id);
+      pendingSubagentNodeIdsBySession.delete(id);
+      return {
+        error: `Failed to persist initial session events: ${toErrorMessage(error)}`,
+        statusCode: 500,
+      };
+    }
+
+    broadcastSessionStatusUpsert(session);
+
+    await launchSessionRunner(session);
+
+    return { id, warnings: managedWorkspace.warnings.length > 0 ? managedWorkspace.warnings : undefined };
+  }
 
               uiStatePersistence.schedule();
             });
