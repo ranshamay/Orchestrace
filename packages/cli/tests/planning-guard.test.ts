@@ -1,12 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import type { LlmToolCallEvent } from '@orchestrace/provider';
 import type { WorkSession } from '../src/ui-server/types.js';
-import {
-  buildSessionSystemPrompt,
-  enforcePlanningToolCallGuard,
-  getSessionPlanningGuardState,
-  isSimpleSessionTaskPrompt,
-} from '../src/ui-server.js';
+import { enforcePlanningToolCallGuard, getSessionPlanningGuardState } from '../src/planning/guards.js';
+import { buildSessionSystemPrompt, isSimpleSessionTaskPrompt } from '../src/session/prompts.js';
+
 
 function createSession(overrides: Partial<WorkSession> = {}): WorkSession {
   const controller = new AbortController();
