@@ -184,9 +184,10 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
           signal,
         });
 
-        const stderr = result.stderr.trim();
+                const stderr = result.stderr.trim();
 
         if (result.exitCode === -1) {
+
           try {
             const fallback = await fallbackSearchFromFs({
               cwd: resolvedCwd.cwd,
@@ -222,18 +223,20 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
           }
         }
 
-                const output = formatCommandOutput(result, options.maxOutputChars ?? 16000);
+                        const output = formatCommandOutput(result, options.maxOutputChars ?? 16000);
         const hasMatches = result.stdout.trim().length > 0;
 
         // Prefer successful match output when available. ripgrep may emit stderr
         // diagnostics in mixed-result scenarios; only escalate error behavior
         // when there are no matches to return.
         if (hasMatches) {
+          const filteredOutput = stripBenignRipgrepPathErrorFromOutput(output);
           return {
-            content: output,
+            content: filteredOutput,
             isError: false,
           };
         }
+
 
         if (result.exitCode === 2 && useRegex) {
           return createSearchFilesErrorResult({
@@ -1147,7 +1150,29 @@ function hasRipgrepPathError(stderr: string): boolean {
   return isDeterministicRipgrepPathError(stderr);
 }
 
+function stripBenignRipgrepPathErrorFromOutput(output: string): string {
+  const trimmed = output.trim();
+  if (!trimmed.includes('stderr:\n')) {
+    return output;
+  }
+
+  const stderrMarker = '\n\nstderr:\n';
+  const stderrIndex = trimmed.indexOf(stderrMarker);
+  if (stderrIndex === -1) {
+    return output;
+  }
+
+  const stdoutPart = trimmed.slice(0, stderrIndex).trim();
+  const stderrPart = trimmed.slice(stderrIndex + stderrMarker.length).trim();
+  if (!isDeterministicRipgrepPathError(stderrPart)) {
+    return output;
+  }
+
+  return stdoutPart.length > 0 ? stdoutPart : output;
+}
+
 function isDeterministicRipgrepPathError(stderr: string): boolean {
+
   const normalized = stderr.trim();
   if (normalized.length === 0) {
     return false;
