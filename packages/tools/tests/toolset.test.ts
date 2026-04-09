@@ -818,10 +818,10 @@ describe('git_status and git_diff session gating', () => {
     const init = await toolset.executeTool({ id: '1', name: 'run_command', arguments: { command: 'git init' } });
     expect(init.isError).toBeFalsy();
 
-    const status = await toolset.executeTool({
+                const status = await toolset.executeTool({
       id: '2',
       name: 'git_status',
-      arguments: {},
+      arguments: { intent: 'write' },
     });
     expect(status.isError).toBeFalsy();
     expect(status.content.toLowerCase()).toContain('##');
@@ -836,10 +836,10 @@ describe('git_status and git_diff session gating', () => {
       taskRequiresWrites: true,
     });
 
-    const status = await toolset.executeTool({
+        const status = await toolset.executeTool({
       id: '2',
       name: 'git_status',
-      arguments: {},
+      arguments: { intent: 'write' },
     });
     expect(status.isError).toBe(true);
   });
@@ -867,7 +867,7 @@ describe('git_status and git_diff session gating', () => {
       taskRequiresWrites: false,
     });
 
-    const diff = await toolset.executeTool({
+        const diff = await toolset.executeTool({
       id: '1',
       name: 'git_diff',
       arguments: {},
@@ -888,10 +888,10 @@ describe('git_status and git_diff session gating', () => {
     const init = await toolset.executeTool({ id: '1', name: 'run_command', arguments: { command: 'git init' } });
     expect(init.isError).toBeFalsy();
 
-    const diff = await toolset.executeTool({
+        const diff = await toolset.executeTool({
       id: '2',
       name: 'git_diff',
-      arguments: {},
+      arguments: { intent: 'write' },
     });
     expect(diff.isError).toBeFalsy();
   });

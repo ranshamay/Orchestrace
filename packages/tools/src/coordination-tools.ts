@@ -505,7 +505,7 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
         name: 'subagent_spawn_batch',
         description: 'Spawn multiple focused sub-agents in parallel for independent sub-tasks.',
         parameters: subAgentSpawnBatchArgsSchema,
-      },
+            },
       execute: async (toolArgs, signal) => {
         if (!options.runSubAgent) {
           return {
@@ -514,7 +514,16 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
           };
         }
 
-        const spawnValidation = validateSubAgentToolArgs('subagent_spawn_batch', subAgentSpawnBatchArgsSchema, toolArgs);
+        const normalizedToolArgs: Record<string, unknown> = { ...toolArgs };
+        const requestedMaxRetries = normalizedToolArgs.maxRetries;
+        if (
+          requestedMaxRetries !== undefined
+          && (typeof requestedMaxRetries !== 'number' || !Number.isFinite(requestedMaxRetries) || requestedMaxRetries < 0)
+        ) {
+          delete normalizedToolArgs.maxRetries;
+        }
+
+        const spawnValidation = validateSubAgentToolArgs('subagent_spawn_batch', subAgentSpawnBatchArgsSchema, normalizedToolArgs);
         if (!spawnValidation.ok) {
           return {
             content: spawnValidation.message,
@@ -522,7 +531,7 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
           };
         }
 
-        const rawAgents = Array.isArray(toolArgs.agents) ? toolArgs.agents : [];
+        const rawAgents = Array.isArray(normalizedToolArgs.agents) ? normalizedToolArgs.agents : [];
         if (rawAgents.length === 0) {
           return {
             content: 'Missing agents. Provide at least one sub-agent request.',
