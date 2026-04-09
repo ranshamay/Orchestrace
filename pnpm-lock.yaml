@@ -154,6 +154,9 @@ importers:
       '@orchestrace/context':
         specifier: workspace:*
         version: link:../context
+      '@orchestrace/core':
+        specifier: workspace:*
+        version: link:../core
       '@orchestrace/provider':
         specifier: workspace:*
         version: link:../provider
