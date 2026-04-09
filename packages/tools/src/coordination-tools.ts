@@ -160,6 +160,15 @@ interface SubAgentBatchRunResult {
   cacheHit?: boolean;
 }
 
+interface SubAgentPreflightFailure {
+  reason: 'provider_auth_failed' | 'provider_rate_limited';
+  errorType: 'auth' | 'rate_limit';
+  httpStatus: 401 | 403 | 429;
+  message: string;
+  actionRequired: string;
+}
+
+
 interface CoordinationState {
   updatedAt: string;
   todos: TodoItem[];
@@ -514,7 +523,12 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
           };
         }
 
-        const spawnValidation = validateSubAgentToolArgs('subagent_spawn_batch', subAgentSpawnBatchArgsSchema, toolArgs);
+                const validationArgs: Record<string, unknown> = { ...toolArgs };
+        if (validationArgs.maxRetries !== undefined && asNumber(validationArgs.maxRetries) === undefined) {
+          delete validationArgs.maxRetries;
+        }
+
+        const spawnValidation = validateSubAgentToolArgs('subagent_spawn_batch', subAgentSpawnBatchArgsSchema, validationArgs);
         if (!spawnValidation.ok) {
           return {
             content: spawnValidation.message,
@@ -522,7 +536,8 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
           };
         }
 
-        const rawAgents = Array.isArray(toolArgs.agents) ? toolArgs.agents : [];
+        const rawAgents = Array.isArray(validationArgs.agents) ? validationArgs.agents : [];
+
         if (rawAgents.length === 0) {
           return {
             content: 'Missing agents. Provide at least one sub-agent request.',
@@ -613,6 +628,66 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
           });
         });
 
+                        if (misses.length > 0) {
+          const preflightSource = misses[0]?.request;
+          const preflightRequest: SubAgentRequest = {
+            prompt: [
+              '[SubagentBatchPreflight]',
+              'Perform a minimal provider health/auth check only.',
+              'Respond with exactly: preflight_ok',
+            ].join('\n'),
+            provider: preflightSource?.provider,
+            model: preflightSource?.model,
+            reasoning: preflightSource?.reasoning,
+            systemPrompt: preflightSource?.systemPrompt,
+          };
+
+          try {
+            await options.runSubAgent?.(preflightRequest, signal);
+          } catch (error) {
+
+            const preflightFailure = classifySubAgentPreflightFailure(error);
+            if (preflightFailure) {
+              const failedNodeIds = misses.map(({ request }, index) => request.nodeId ?? `preflight-miss-${index + 1}`);
+              const summary = {
+                total: requests.length,
+                concurrency,
+                adaptiveConcurrency,
+                minConcurrency,
+                maxRetries,
+                status: 'failed' as const,
+                reason: preflightFailure.reason,
+                errorType: preflightFailure.errorType,
+                httpStatus: preflightFailure.httpStatus,
+                message: preflightFailure.message,
+                actionRequired: preflightFailure.actionRequired,
+                completed: cacheHits.size,
+                failed: misses.length,
+                failedNodeIds,
+                usage: { input: 0, output: 0, cost: 0 },
+                cacheHitCount: cacheHits.size,
+                cacheMissCount: misses.length,
+                cachedNodeIds: Array.from(cacheHits.values()).map((entry) => entry.record.nodeId ?? entry.record.id),
+                dispatchedNodeIds: [],
+                preflightAborted: true,
+                decomposition: {
+                  totalPromptChars: 0,
+                  averagePromptChars: 0,
+                  maxPromptChars: 0,
+                  promptSoftLimitChars: SUBAGENT_PROMPT_SOFT_LIMIT_CHARS,
+                  oversizedTasks: [] as string[],
+                },
+                runs: [] as SubAgentBatchRunResult[],
+              };
+
+              return {
+                content: JSON.stringify(summary, null, 2),
+                isError: true,
+              };
+            }
+          }
+        }
+
         const startIndex = state.subAgents.length;
         const allRecords = misses.map(({ request }, index) => ({
           id: `sub-${startIndex + index + 1}`,
@@ -624,6 +699,7 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
           reasoning: request.reasoning,
           startedAt: now(),
         }));
+
 
         if (allRecords.length > 0) {
           state.subAgents.push(...allRecords);
@@ -941,6 +1017,135 @@ function usageOrZero(usage: { input: number; output: number; cost: number } | un
     cost: usage?.cost ?? 0,
   };
 }
+
+function classifySubAgentPreflightFailure(error: unknown): SubAgentPreflightFailure | undefined {
+  const status = extractHttpStatus(error);
+  if (status !== 401 && status !== 403 && status !== 429) {
+    return undefined;
+  }
+
+  const message = error instanceof Error ? error.message : String(error);
+
+  if (status === 429) {
+    return {
+      reason: 'provider_rate_limited',
+      errorType: 'rate_limit',
+      httpStatus: 429,
+      message,
+      actionRequired: 'retry_with_backoff_or_wait_for_rate_limit_reset',
+    };
+  }
+
+  return {
+    reason: 'provider_auth_failed',
+    errorType: 'auth',
+    httpStatus: status,
+    message,
+    actionRequired: 'verify_provider_credentials_and_permissions',
+  };
+}
+
+function extractHttpStatus(error: unknown): number | undefined {
+  const visited = new Set<unknown>();
+
+  const queue: unknown[] = [error];
+  while (queue.length > 0) {
+    const current = queue.shift();
+    if (!current || visited.has(current)) {
+      continue;
+    }
+    visited.add(current);
+
+    if (typeof current === 'number') {
+      if (Number.isInteger(current) && current >= 100 && current <= 599) {
+        return current;
+      }
+      continue;
+    }
+
+    if (!isRecord(current)) {
+      continue;
+    }
+
+    const directKeys = ['status', 'statusCode', 'httpStatus', 'code'];
+    for (const key of directKeys) {
+      const numeric = parseHttpStatusCandidate(current[key]);
+      if (numeric !== undefined) {
+        return numeric;
+      }
+    }
+
+    const nestedKeys = ['response', 'cause', 'error'];
+    for (const key of nestedKeys) {
+      if (current[key] !== undefined) {
+        queue.push(current[key]);
+      }
+    }
+  }
+
+  const message = error instanceof Error ? error.message : String(error ?? '');
+  const fromMessage = parseHttpStatusFromText(message);
+  if (fromMessage !== undefined) {
+    return fromMessage;
+  }
+
+  return undefined;
+}
+
+function parseHttpStatusCandidate(value: unknown): number | undefined {
+  if (typeof value === 'number') {
+    if (Number.isInteger(value) && value >= 100 && value <= 599) {
+      return value;
+    }
+    return undefined;
+  }
+
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (/^\d{3}$/.test(trimmed)) {
+      const parsed = Number.parseInt(trimmed, 10);
+      if (parsed >= 100 && parsed <= 599) {
+        return parsed;
+      }
+    }
+
+    const mapped = parseHttpStatusFromText(trimmed);
+    if (mapped !== undefined) {
+      return mapped;
+    }
+  }
+
+  return undefined;
+}
+
+function parseHttpStatusFromText(text: string): number | undefined {
+  const normalized = text.toLowerCase();
+
+  if (/\b(401|403|429)\b/.test(normalized)) {
+    const match = normalized.match(/\b(401|403|429)\b/);
+    if (match) {
+      const parsed = Number.parseInt(match[1], 10);
+      if (parsed === 401 || parsed === 403 || parsed === 429) {
+        return parsed;
+      }
+    }
+  }
+
+  if (normalized.includes('unauthorized')) {
+    return 401;
+  }
+
+  if (normalized.includes('forbidden')) {
+    return 403;
+  }
+
+  if (normalized.includes('rate limit') || normalized.includes('rate-limit') || normalized.includes('too many requests')) {
+    return 429;
+  }
+
+  return undefined;
+}
+
 
 function validateSubAgentToolArgs(
   toolName: SubAgentToolName,

@@ -1427,7 +1427,119 @@ describe('subagent prompt enrichment', () => {
     expect(parsed.runs.some((entry) => entry.nodeId === 'n1' && entry.status === 'completed' && entry.usage?.input === 12)).toBe(true);
   });
 
+    it('subagent_spawn_batch fails fast on provider auth preflight failure without creating records', async () => {
+    const cwd = await makeWorkspace();
+    const runSubAgent = vi.fn(async () => {
+      throw new Error('HTTP 401 Unauthorized: invalid provider token');
+    });
+
+    const toolset = createAgentToolset({
+      cwd,
+      phase: 'planning',
+      taskType: 'code',
+      graphId: 'g1',
+      taskId: 't-preflight-auth-fail',
+      runSubAgent,
+    });
+
+    const result = await toolset.executeTool({
+      id: '1',
+      name: 'subagent_spawn_batch',
+      arguments: {
+        agents: [
+          { nodeId: 'n1', prompt: 'Inspect src/file.ts for exports' },
+          { nodeId: 'n2', prompt: 'Inspect src/file.ts for imports' },
+        ],
+      },
+    });
+
+        expect(result.isError).toBe(true);
+    expect(runSubAgent).toHaveBeenCalledTimes(1);
+
+
+    const parsed = JSON.parse(result.content) as {
+      status: string;
+      reason: string;
+      errorType: string;
+      httpStatus: number;
+      preflightAborted: boolean;
+      failed: number;
+      cacheMissCount: number;
+      runs: Array<unknown>;
+      dispatchedNodeIds: string[];
+    };
+
+    expect(parsed.status).toBe('failed');
+    expect(parsed.reason).toBe('provider_auth_failed');
+    expect(parsed.errorType).toBe('auth');
+    expect(parsed.httpStatus).toBe(401);
+    expect(parsed.preflightAborted).toBe(true);
+    expect(parsed.failed).toBe(2);
+    expect(parsed.cacheMissCount).toBe(2);
+    expect(parsed.runs).toEqual([]);
+    expect(parsed.dispatchedNodeIds).toEqual([]);
+
+    const listed = await toolset.executeTool({
+      id: '2',
+      name: 'subagent_list',
+      arguments: {},
+    });
+    expect(JSON.parse(listed.content)).toEqual([]);
+  });
+
+  it('subagent_spawn_batch fails fast on provider rate-limit preflight failure without creating records', async () => {
+    const cwd = await makeWorkspace();
+    const runSubAgent = vi.fn(async () => {
+      throw new Error('429 Too Many Requests: rate limit exceeded');
+    });
+
+    const toolset = createAgentToolset({
+      cwd,
+      phase: 'planning',
+      taskType: 'code',
+      graphId: 'g1',
+      taskId: 't-preflight-rate-limit-fail',
+      runSubAgent,
+    });
+
+    const result = await toolset.executeTool({
+      id: '1',
+      name: 'subagent_spawn_batch',
+      arguments: {
+        agents: [
+          { nodeId: 'n1', prompt: 'Inspect src/file.ts for exports' },
+          { nodeId: 'n2', prompt: 'Inspect src/file.ts for imports' },
+          { nodeId: 'n3', prompt: 'Inspect src/file.ts for side effects' },
+        ],
+      },
+    });
+
+        expect(result.isError).toBe(true);
+    expect(runSubAgent).toHaveBeenCalledTimes(1);
+
+
+    const parsed = JSON.parse(result.content) as {
+      reason: string;
+      errorType: string;
+      httpStatus: number;
+      preflightAborted: boolean;
+      failed: number;
+      runs: Array<unknown>;
+    };
+
+    expect(parsed.reason).toBe('provider_rate_limited');
+    expect(parsed.errorType).toBe('rate_limit');
+    expect(parsed.httpStatus).toBe(429);
+    expect(parsed.preflightAborted).toBe(true);
+    expect(parsed.failed).toBe(3);
+    expect(parsed.runs).toEqual([]);
+
+    const listed = await toolset.executeTool({ id: '2', name: 'subagent_list', arguments: {} });
+    expect(JSON.parse(listed.content)).toEqual([]);
+  });
+
   it('subagent_spawn_batch retries only failed nodeIds and merges retried success', async () => {
+
     const cwd = await makeWorkspace();
     const callCount = new Map<string, number>();
 
@@ -1468,7 +1580,7 @@ describe('subagent prompt enrichment', () => {
     });
 
     expect(result.isError).toBeFalsy();
-    expect(runSubAgent).toHaveBeenCalledTimes(3);
+    expect(runSubAgent).toHaveBeenCalledTimes(4);
     expect(callCount.get('n1')).toBe(1);
     expect(callCount.get('n2')).toBe(2);
 
@@ -1552,7 +1664,7 @@ describe('subagent prompt enrichment', () => {
     });
 
     expect(result.isError).toBe(true);
-    expect(runSubAgent).toHaveBeenCalledTimes(3);
+    expect(runSubAgent).toHaveBeenCalledTimes(4);
 
     const parsed = JSON.parse(result.content) as {
       maxRetries: number;
@@ -1595,7 +1707,7 @@ describe('subagent prompt enrichment', () => {
     });
 
     expect(result.isError).toBe(true);
-    expect(runSubAgent).toHaveBeenCalledTimes(3);
+    expect(runSubAgent).toHaveBeenCalledTimes(4);
 
     const parsed = JSON.parse(result.content) as {
       status?: string;
@@ -1687,7 +1799,7 @@ describe('subagent prompt enrichment', () => {
       },
     });
     expect(first.isError).toBeFalsy();
-    expect(runSubAgent).toHaveBeenCalledTimes(2);
+    expect(runSubAgent).toHaveBeenCalledTimes(3);
 
     runSubAgent.mockClear();
 
@@ -1750,7 +1862,7 @@ describe('subagent prompt enrichment', () => {
       },
     });
     expect(seed.isError).toBeFalsy();
-    expect(runSubAgent).toHaveBeenCalledTimes(1);
+    expect(runSubAgent).toHaveBeenCalledTimes(2);
 
     runSubAgent.mockClear();
 
@@ -1766,10 +1878,11 @@ describe('subagent prompt enrichment', () => {
       },
     });
 
-    expect(mixed.isError).toBeFalsy();
-    expect(runSubAgent).toHaveBeenCalledTimes(2);
-    expect(runSubAgent.mock.calls[0]?.[0]?.nodeId).toBe('fresh-node');
-    expect(runSubAgent.mock.calls[1]?.[0]?.nodeId).toBeUndefined();
+        expect(mixed.isError).toBeFalsy();
+    expect(runSubAgent).toHaveBeenCalledTimes(3);
+    expect(runSubAgent.mock.calls[1]?.[0]?.nodeId).toBe('fresh-node');
+    expect(runSubAgent.mock.calls[2]?.[0]?.nodeId).toBeUndefined();
+
 
     const parsed = JSON.parse(mixed.content) as {
       total: number;
