@@ -320,18 +320,32 @@ describe('executeWithOptionalTools', () => {
     consumeStreamMock.mockResolvedValueOnce(firstResponse as never);
     consumeStreamMock.mockResolvedValueOnce(finalResponse as never);
 
-    const failurePayload = JSON.stringify({
+    const failurePayloadAttempt1 = JSON.stringify({
       failedNodeIds: ['graph_cli_task_entrypoint', 'graph_runner_session_flow'],
       runs: [
-        { nodeId: 'graph_cli_task_entrypoint', status: 'failed', error: 'timeout' },
-        { nodeId: 'graph_runner_session_flow', status: 'failed', error: 'aborted' },
+        { nodeId: 'graph_cli_task_entrypoint', status: 'failed', error: 'timeout a' },
+        { nodeId: 'graph_runner_session_flow', status: 'failed', error: 'aborted a' },
+      ],
+    });
+    const failurePayloadAttempt2 = JSON.stringify({
+      failedNodeIds: ['graph_cli_task_entrypoint', 'graph_runner_session_flow'],
+      runs: [
+        { nodeId: 'graph_cli_task_entrypoint', status: 'failed', error: 'timeout b' },
+        { nodeId: 'graph_runner_session_flow', status: 'failed', error: 'aborted b' },
+      ],
+    });
+    const failurePayloadAttempt3 = JSON.stringify({
+      failedNodeIds: ['graph_cli_task_entrypoint', 'graph_runner_session_flow'],
+      runs: [
+        { nodeId: 'graph_cli_task_entrypoint', status: 'failed', error: 'timeout c' },
+        { nodeId: 'graph_runner_session_flow', status: 'failed', error: 'aborted c' },
       ],
     });
 
     const executeTool = vi.fn()
-      .mockResolvedValueOnce({ isError: true, content: failurePayload })
-      .mockResolvedValueOnce({ isError: true, content: failurePayload })
-      .mockResolvedValueOnce({ isError: true, content: failurePayload });
+      .mockResolvedValueOnce({ isError: true, content: failurePayloadAttempt1 })
+      .mockResolvedValueOnce({ isError: true, content: failurePayloadAttempt2 })
+      .mockResolvedValueOnce({ isError: true, content: failurePayloadAttempt3 });
 
     const context: TestContext = {
       messages: [],
@@ -508,18 +522,32 @@ describe('executeWithOptionalTools', () => {
     consumeStreamMock.mockResolvedValueOnce(firstResponse as never);
     consumeStreamMock.mockResolvedValueOnce(finalResponse as never);
 
-    const failurePayload = JSON.stringify({
+    const failurePayloadAttempt1 = JSON.stringify({
       failedNodeIds: ['research_source_scan', 'context_lookup'],
       runs: [
-        { nodeId: 'research_source_scan', status: 'failed', error: 'timeout' },
-        { nodeId: 'context_lookup', status: 'failed', error: 'aborted' },
+        { nodeId: 'research_source_scan', status: 'failed', error: 'timeout a' },
+        { nodeId: 'context_lookup', status: 'failed', error: 'aborted a' },
+      ],
+    });
+    const failurePayloadAttempt2 = JSON.stringify({
+      failedNodeIds: ['research_source_scan', 'context_lookup'],
+      runs: [
+        { nodeId: 'research_source_scan', status: 'failed', error: 'timeout b' },
+        { nodeId: 'context_lookup', status: 'failed', error: 'aborted b' },
+      ],
+    });
+    const failurePayloadAttempt3 = JSON.stringify({
+      failedNodeIds: ['research_source_scan', 'context_lookup'],
+      runs: [
+        { nodeId: 'research_source_scan', status: 'failed', error: 'timeout c' },
+        { nodeId: 'context_lookup', status: 'failed', error: 'aborted c' },
       ],
     });
 
     const executeTool = vi.fn()
-      .mockResolvedValueOnce({ isError: true, content: failurePayload })
-      .mockResolvedValueOnce({ isError: true, content: failurePayload })
-      .mockResolvedValueOnce({ isError: true, content: failurePayload });
+      .mockResolvedValueOnce({ isError: true, content: failurePayloadAttempt1 })
+      .mockResolvedValueOnce({ isError: true, content: failurePayloadAttempt2 })
+      .mockResolvedValueOnce({ isError: true, content: failurePayloadAttempt3 });
 
     const context: TestContext = {
       messages: [],
