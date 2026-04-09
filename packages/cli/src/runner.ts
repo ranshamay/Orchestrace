@@ -78,6 +78,10 @@ import {
 } from './runner-config-resolution.js';
 import { parseAndSanitizeVerifyCommands } from './verify-commands.js';
 import { formatMissingSourceDirsWarning, validateWorkspaceRuntime } from './workspace-runtime.js';
+import {
+  sanitizeToolPayload,
+  stringifySanitizedTracePayload,
+} from './runner/log-sanitizer.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -2138,24 +2142,11 @@ function formatGitHubApiError(response: GitHubApiResponse): string {
 }
 
 function previewToolPayload(value: string | undefined): string {
-  if (!value) {
-    return '(empty)';
-  }
-
-  const normalized = value.trim();
-  if (!normalized) {
-    return '(blank)';
-  }
-
-  if (normalized.length <= TOOL_EVENT_PREVIEW_MAX_CHARS) {
-    return normalized;
-  }
-
-  return `${normalized.slice(0, Math.max(0, TOOL_EVENT_PREVIEW_MAX_CHARS - 3))}...`;
+  return sanitizeToolPayload(value, { maxLength: TOOL_EVENT_PREVIEW_MAX_CHARS });
 }
 
 function stringifyTracePayload(value: string): string {
-  return JSON.stringify(value);
+  return stringifySanitizedTracePayload(value);
 }
 
 function resolvePositiveIntEnv(raw: string | undefined, fallback: number): number {
@@ -2190,8 +2181,9 @@ function logDagEventTrace(sessionId: string, event: DagEvent): void {
 
   if (event.type === 'task:stream-delta') {
     if (TRACE_LOG_STREAM_DELTAS) {
+      const deltaPreview = sanitizeToolPayload(event.delta, { maxLength: 180 });
       console.info(
-        `[trace:${sessionId}] stream task=${event.taskId} phase=${event.phase} delta=${stringifyTracePayload(event.delta)}`,
+        `[trace:${sessionId}] stream task=${event.taskId} phase=${event.phase} deltaPreview=${stringifyTracePayload(deltaPreview)}`,
       );
     }
     return;
@@ -2201,8 +2193,9 @@ function logDagEventTrace(sessionId: string, event: DagEvent): void {
     const direction = event.status === 'started' ? 'input' : 'output';
     const payload = event.status === 'started' ? event.input : event.output;
     const errorSuffix = event.isError ? ' [error]' : '';
+    const payloadPreview = sanitizeToolPayload(payload, { maxLength: 220 });
     console.info(
-      `[trace:${sessionId}] tool task=${event.taskId} name=${event.toolName} direction=${direction}${errorSuffix} payload=${stringifyTracePayload(payload ?? '')}`,
+      `[trace:${sessionId}] tool task=${event.taskId} name=${event.toolName} direction=${direction}${errorSuffix} payloadPreview=${stringifyTracePayload(payloadPreview)}`,
     );
     return;
   }

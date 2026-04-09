@@ -82,6 +82,7 @@ import type {
 } from '@orchestrace/store';
 import { ObserverDaemon, SessionObserver, BackendLogger, LogWatcher } from './observer/index.js';
 import type { RealtimeFinding } from './observer/index.js';
+import { sanitizeLogLine, sanitizeToolPayload } from './runner/log-sanitizer.js';
 
 const GITHUB_PROVIDER_ID = 'github';
 const GITHUB_API_BASE_URL = 'https://api.github.com';
@@ -4189,25 +4190,12 @@ function sanitizePersistedContentParts(parts: SessionChatContentPart[] | undefin
 }
 
 function sanitizePersistedText(text: string, maxChars: number): string {
-  const redacted = redactSensitiveText(asString(text));
+  const redacted = sanitizeLogLine(asString(text));
   if (redacted.length <= maxChars) {
     return redacted;
   }
 
   return `${redacted.slice(0, maxChars)}... [truncated]`;
-}
-
-function redactSensitiveText(text: string): string {
-  if (!text) {
-    return text;
-  }
-
-  return text
-    .replace(/\bgh[pousr]_[A-Za-z0-9]{30,}\b/g, '[REDACTED_GITHUB_TOKEN]')
-    .replace(/\bsk-[A-Za-z0-9_-]{16,}\b/g, '[REDACTED_API_KEY]')
-    .replace(/\b(?:api[_-]?key|token|secret|password)\s*[:=]\s*[^\s"',;]+/gi, '$1=[REDACTED]')
-    .replace(/\bBearer\s+[A-Za-z0-9._-]{16,}\b/gi, 'Bearer [REDACTED]')
-    .replace(/data:image\/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=\s]+/g, '[REDACTED_IMAGE_DATA]');
 }
 
 function toPersistedSession(session: WorkSession): PersistedWorkSession {
@@ -5379,20 +5367,7 @@ function toUiEvent(runId: string, event: DagEvent): UiDagEvent | undefined {
 }
 
 function previewToolLog(value: string | undefined, maxChars = TOOL_EVENT_PREVIEW_MAX_CHARS): string {
-  if (!value) {
-    return '(empty)';
-  }
-
-  const compact = redactSensitiveText(value).trim();
-  if (!compact) {
-    return '(blank)';
-  }
-
-  if (compact.length <= maxChars) {
-    return compact;
-  }
-
-  return `${compact.slice(0, Math.max(0, maxChars - 3))}...`;
+  return sanitizeToolPayload(value, { maxLength: maxChars });
 }
 
 function stringifyTracePayload(value: string): string {
