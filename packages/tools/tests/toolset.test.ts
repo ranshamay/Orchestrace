@@ -1265,6 +1265,37 @@ describe('subagent prompt enrichment', () => {
     expect(parsed.runs[1]).toMatchObject({ nodeId: 'n2', status: 'completed' });
   });
 
+  it('subagent_spawn_batch defaults maxRetries when argument is non-finite or non-number', async () => {
+    const invalidMaxRetries = [Number.NaN, Number.POSITIVE_INFINITY, '3'];
+
+    for (const maxRetries of invalidMaxRetries) {
+      const cwd = await makeWorkspace();
+      const runSubAgent = vi.fn(async () => ({ text: 'ok', usage: { input: 1, output: 1, cost: 0.001 } }));
+
+      const toolset = createAgentToolset({
+        cwd,
+        phase: 'planning',
+        taskType: 'code',
+        graphId: 'g1',
+        taskId: `t-retry-default-${String(maxRetries)}`,
+        runSubAgent,
+      });
+
+      const result = await toolset.executeTool({
+        id: '1',
+        name: 'subagent_spawn_batch',
+        arguments: {
+          agents: [{ nodeId: 'n1', prompt: 'Inspect src/file.ts.' }],
+          maxRetries,
+        },
+      });
+
+      expect(result.isError).toBeFalsy();
+      const parsed = JSON.parse(result.content) as { maxRetries: number };
+      expect(parsed.maxRetries).toBe(2);
+    }
+  });
+
   it('subagent_spawn_batch honors maxRetries cap for persistent failures', async () => {
     const cwd = await makeWorkspace();
     const runSubAgent = vi.fn(async (request: { nodeId?: string }) => {
