@@ -28,6 +28,9 @@ const SHELL_COMMAND_START = new RegExp(`^(${ALLOWED_SHELL_PROGRAMS.join('|')})(?
 const MARKDOWN_LIKE_PAYLOAD = /(^\s*\[[^\]]+\])|(^\s*#{1,6}\s+\S)|(```)|(^\s*(?:Category|Severity|Issue|Task):\s)/im;
 const FORBIDDEN_SHELL_META_CHARS = /[;&|<>`]/;
 const FORBIDDEN_SHELL_SUBSTITUTIONS = /(\$\(|\$\{|\$\(\()/;
+const FORBIDDEN_SHELL_CONTROL_CHARS = /[\u0000-\u001F\u007F]/;
+const FORBIDDEN_SHELL_LINE_BREAKS = /[\r\n]/;
+
 
 
 const RETRY_CONTINUATION_MARKER = 'Retry continuation context from previous attempt:';
@@ -243,12 +246,19 @@ export function validateShellInput(input: string): ShellExecutionValidation {
       reason: 'Route shell_command selected, but prompt was empty.',
     };
   }
-  if (normalized.includes('\n')) {
+    if (FORBIDDEN_SHELL_LINE_BREAKS.test(normalized)) {
     return {
       ok: false,
       reason: 'Rejected shell execution: prompt contains multiple lines and appears to be instructions/markdown, not a single command.',
     };
   }
+  if (FORBIDDEN_SHELL_CONTROL_CHARS.test(normalized)) {
+    return {
+      ok: false,
+      reason: 'Rejected shell execution: prompt contains control characters that are not allowed.',
+    };
+  }
+
   if (MARKDOWN_LIKE_PAYLOAD.test(normalized)) {
     return {
       ok: false,
@@ -314,7 +324,8 @@ export function stripRetryContinuationContext(prompt: string): string {
 
 export function extractShellCommand(prompt: string): string | undefined {
   const normalized = prompt.trim();
-  if (normalized.includes('\n') || normalized.length > 200) return undefined;
+    if (FORBIDDEN_SHELL_LINE_BREAKS.test(normalized) || FORBIDDEN_SHELL_CONTROL_CHARS.test(normalized) || normalized.length > 200) return undefined;
+
   const command = normalized
     .replace(/^\$\s*/, '')
     .replace(/^(run|execute|exec|shell|command|cmd)\s+/i, '')
@@ -406,12 +417,20 @@ export function parseShellCommandToArgv(command: string): ShellExecutionValidati
     return { ok: false, reason: 'Rejected shell execution: command is empty.' };
   }
 
+    if (FORBIDDEN_SHELL_LINE_BREAKS.test(normalized) || FORBIDDEN_SHELL_CONTROL_CHARS.test(normalized)) {
+    return {
+      ok: false,
+      reason: 'Rejected shell execution: control characters and line breaks are not allowed.',
+    };
+  }
+
   if (FORBIDDEN_SHELL_META_CHARS.test(normalized) || FORBIDDEN_SHELL_SUBSTITUTIONS.test(normalized)) {
     return {
       ok: false,
       reason: 'Rejected shell execution: shell operators, redirection, piping, or substitution syntax is not allowed.',
     };
   }
+
 
   const tokenized = tokenizeCommandPreservingQuotes(normalized);
   if (!tokenized.ok || !tokenized.tokens) {

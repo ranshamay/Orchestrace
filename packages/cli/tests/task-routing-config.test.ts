@@ -97,11 +97,24 @@ describe('task routing config', () => {
     expect(validation.reason).toContain('shell operators');
   });
 
-  it('rejects shell substitution syntax before execution', () => {
+    it('rejects shell substitution syntax before execution', () => {
     const validation = validateShellInput('echo $(whoami)');
     expect(validation.ok).toBe(false);
     expect(validation.reason).toContain('shell operators');
   });
+
+  it('rejects carriage-return line breaks before execution', () => {
+    const validation = validateShellInput('git status\rwhoami');
+    expect(validation.ok).toBe(false);
+    expect(validation.reason).toContain('multiple lines');
+  });
+
+  it('rejects control characters before execution', () => {
+    const validation = validateShellInput('git\u0000status');
+    expect(validation.ok).toBe(false);
+    expect(validation.reason).toContain('control characters');
+  });
+
 
   it('rejects commands outside the allowlist', () => {
     const validation = validateShellInput('sh -c "git status"');
@@ -109,11 +122,18 @@ describe('task routing config', () => {
     expect(validation.reason).toContain('no executable command was found');
   });
 
-  it('rejects disallowed executable when parsed directly', () => {
+    it('rejects disallowed executable when parsed directly', () => {
     const parsed = parseShellCommandToArgv('ruby -v');
     expect(parsed.ok).toBe(false);
     expect(parsed.reason).toContain('not in the allowed shell command list');
   });
+
+  it('rejects control characters when parsed directly', () => {
+    const parsed = parseShellCommandToArgv('git\u0000status');
+    expect(parsed.ok).toBe(false);
+    expect(parsed.reason).toContain('control characters');
+  });
+
 
   it('rejects markdown-like single-line payloads through canonical shell validator', () => {
 
