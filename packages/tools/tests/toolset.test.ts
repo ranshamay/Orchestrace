@@ -897,7 +897,8 @@ describe('subagent prompt enrichment', () => {
 
       expect(result.isError).toBe(true);
       expect(result.content).toContain('subagent_spawn_batch argument validation failed before spawn');
-      expect(result.content).toContain('agents.0.unexpected');
+      expect(result.content).toContain('agents.0');
+      expect(result.content).toContain('additional properties');
       expect(runSubAgent).not.toHaveBeenCalled();
       expect(warnSpy).toHaveBeenCalled();
     } finally {

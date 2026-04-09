@@ -899,7 +899,8 @@ function validateSubAgentToolArgs(
     );
     return { ok: true };
   } catch (error) {
-    const details = error instanceof Error ? error.message : String(error);
+    const details = (error instanceof Error ? error.message : String(error))
+      .replace(/\b([a-zA-Z0-9_]+(?:\/[a-zA-Z0-9_]+)+)\b/g, (match) => match.replace(/\//g, '.'));
     const message = `${toolName} argument validation failed before spawn: ${details}`;
     console.warn(`[coordination-tools] ${message}`);
     return { ok: false, message };
