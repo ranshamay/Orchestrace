@@ -11,7 +11,7 @@ import { DEFAULT_AGENT_TOOL_POLICY_VERSION, createAgentToolset } from '@orchestr
 import { createInterface } from 'node:readline/promises';
 import { promisify } from 'node:util';
 import { startUiServer } from './ui-server.js';
-import { enforceSafeShellDispatch, resolveTaskRoute, validateShellInput } from './task-routing.js';
+import { enforceSafeShellDispatch, resolveTaskRoute, validateShellExecutionPrompt } from './task-routing.js';
 import { WorkspaceManager } from './workspace-manager.js';
 import type { WorkspaceEntry } from './workspace-manager.js';
 import { parseAndSanitizeVerifyCommands } from './verify-commands.js';
@@ -615,7 +615,7 @@ export function buildSingleTaskGraph(prompt: string, routeCategory: TaskRouteCat
 }
 
 async function runShellCommandRoute(command: string, cwd: string): Promise<number> {
-    const validation = validateShellInput(command);
+        const validation = validateShellExecutionPrompt(command);
   if (!validation.ok || !validation.parsed) {
     console.error(`Shell command validation failed: ${validation.reason ?? 'input did not pass centralized validation'}`);
     return 1;

@@ -57,7 +57,7 @@ import {
   resolveTaskRouteForSource,
   stripRetryContinuationContext,
   type RoutingCoercionAudit,
-  validateShellInput,
+    validateShellExecutionPrompt,
 } from './task-routing.js';
 import {
   SessionLifecycle,
@@ -503,7 +503,7 @@ async function main(): Promise<void> {
     command: string,
     timeout: number,
   ): Promise<{ ok: boolean; stdout: string; stderr: string; error?: string }> {
-        const validation = validateShellInput(command);
+                const validation = validateShellExecutionPrompt(command);
     if (!validation.ok || !validation.parsed) {
       return {
         ok: false,
@@ -2599,7 +2599,7 @@ function buildSingleTaskGraph(id: string, prompt: string, routeCategory: TaskRou
 
 async function runShellCommandRoute(command: string, cwd: string): Promise<Map<string, TaskOutput>> {
   const startedAt = Date.now();
-    const validation = validateShellInput(command);
+        const validation = validateShellExecutionPrompt(command);
 
   if (!validation.ok || !validation.parsed) {
     return new Map([

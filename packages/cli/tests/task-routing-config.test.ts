@@ -1,5 +1,7 @@
+import { readFile } from 'node:fs/promises';
 import { describe, expect, it } from 'vitest';
 import {
+
   enforceSafeShellDispatch,
   extractShellCommand,
   parseShellCommandToArgv,
@@ -158,7 +160,7 @@ describe('task routing config', () => {
     expect(dispatch.shell.command).toBe('git status');
   });
 
-  it('demotes shell route when source is undefined at dispatch boundary', () => {
+    it('demotes shell route when source is undefined at dispatch boundary', () => {
     const prompt = 'git status';
     const resolved = resolveTaskRoute(prompt, 'shell_command').result;
     const dispatch = enforceSafeShellDispatch(prompt, resolved, undefined);
@@ -168,4 +170,18 @@ describe('task routing config', () => {
     expect(dispatch.route.category).toBe('code_change');
     expect(dispatch.route.reason).toContain('source guard');
   });
+
+  it('uses validateShellExecutionPrompt in runner and CLI shell execution entrypoints', async () => {
+    const [runnerSource, indexSource] = await Promise.all([
+      readFile(new URL('../src/runner.ts', import.meta.url), 'utf8'),
+      readFile(new URL('../src/index.ts', import.meta.url), 'utf8'),
+    ]);
+
+    expect(runnerSource).toContain('validateShellExecutionPrompt(command)');
+    expect(indexSource).toContain('validateShellExecutionPrompt(command)');
+    expect(runnerSource).toContain('async function runShellCommandWithTimeout(');
+    expect(runnerSource).toContain('async function runShellCommandRoute(command: string, cwd: string)');
+    expect(indexSource).toContain('async function runShellCommandRoute(command: string, cwd: string)');
+  });
 });
+

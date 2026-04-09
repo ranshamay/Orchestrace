@@ -174,7 +174,7 @@ export function enforceSafeShellDispatch(
     };
   }
 
-  const shell = validateShellInput(prompt);
+    const shell = validateShellExecutionPrompt(prompt);
   if (shell.ok) {
     return { route, shell };
   }
