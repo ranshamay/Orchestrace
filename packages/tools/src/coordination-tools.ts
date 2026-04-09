@@ -1,6 +1,6 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join, relative, resolve, sep } from 'node:path';
-import { Type, Value } from '@mariozechner/pi-ai';
+import { Type, validateToolCall } from '@mariozechner/pi-ai';
 import type {
   AgentToolPhase,
   AgentGraphNode,
@@ -892,22 +892,18 @@ function validateSubAgentToolArgs(
   schema: typeof subAgentSpawnArgsSchema | typeof subAgentSpawnBatchArgsSchema,
   args: Record<string, unknown>,
 ): { ok: true } | { ok: false; message: string } {
-  const errors = [...Value.Errors(schema, args)];
-  if (errors.length === 0) {
+  try {
+    validateToolCall(
+      [{ name: toolName, description: `${toolName} validation`, parameters: schema }],
+      { type: 'toolCall', id: `validate-${toolName}`, name: toolName, arguments: args },
+    );
     return { ok: true };
+  } catch (error) {
+    const details = error instanceof Error ? error.message : String(error);
+    const message = `${toolName} argument validation failed before spawn: ${details}`;
+    console.warn(`[coordination-tools] ${message}`);
+    return { ok: false, message };
   }
-
-  const issues = errors.slice(0, 8).map((error) => formatValidationIssue(error.path, error.message));
-  const message = `${toolName} argument validation failed before spawn: ${issues.join('; ')}`;
-  console.warn(`[coordination-tools] ${message}`);
-  return { ok: false, message };
-}
-
-function formatValidationIssue(path: string, message: string): string {
-  const normalizedPath = path
-    ? path.replace(/^\//, '').replace(/\//g, '.')
-    : '(root)';
-  return `${normalizedPath}: ${message}`;
 }
 
 async function buildSubAgentRequestFromToolArgs(
