@@ -172,7 +172,7 @@ function LogFindingItem({ finding, isExpanded, onToggle }: { finding: LogFinding
 
       {isExpanded && (
         <div className="ml-5 mt-1 space-y-1.5 pb-1">
-          <p className="text-[11px] text-slate-600 dark:text-slate-300">{finding.description}</p>
+          <p className="text-[11px] text-slate-600 dark:text-slate-300">{finding.issueSummary}</p>
           {finding.logSnippet && (
             <div className="rounded bg-slate-900 px-2 py-1.5 dark:bg-slate-800">
               <div className="mb-0.5 text-[9px] font-bold uppercase tracking-wide text-slate-400">Log Snippet</div>
@@ -180,9 +180,19 @@ function LogFindingItem({ finding, isExpanded, onToggle }: { finding: LogFinding
             </div>
           )}
           <div className="rounded bg-slate-50 px-2 py-1.5 dark:bg-slate-800">
-            <div className="mb-0.5 text-[9px] font-bold uppercase tracking-wide text-slate-400">Suggested Fix</div>
-            <p className="text-[11px] text-slate-700 dark:text-slate-200">{finding.suggestedFix}</p>
+            <div className="mb-0.5 text-[9px] font-bold uppercase tracking-wide text-slate-400">Evidence</div>
+            <ul className="list-disc space-y-0.5 pl-4">
+              {finding.evidence.map((item, idx) => (
+                <li key={`${finding.id}-e-${idx}`} className="text-[11px] text-slate-700 dark:text-slate-200">{item}</li>
+              ))}
+            </ul>
           </div>
+          {finding.severityRationale && (
+            <div className="rounded bg-slate-50 px-2 py-1.5 dark:bg-slate-800">
+              <div className="mb-0.5 text-[9px] font-bold uppercase tracking-wide text-slate-400">Severity Rationale</div>
+              <p className="text-[11px] text-slate-700 dark:text-slate-200">{finding.severityRationale}</p>
+            </div>
+          )}
           {finding.relevantFiles && finding.relevantFiles.length > 0 && (
             <div className="flex flex-wrap gap-1">
               {finding.relevantFiles.map((file) => (
