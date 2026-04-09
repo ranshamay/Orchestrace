@@ -1,3 +1,4 @@
+import { validateToolCall } from '@mariozechner/pi-ai';
 import type { LlmToolCall, LlmToolset } from '@orchestrace/provider';
 import type { AgentToolPermissions, AgentToolPhase, AgentToolsetOptions, RegisteredAgentTool } from './types.js';
 import { createFilesystemTools } from './fs-tools.js';
@@ -138,6 +139,12 @@ function resolveActiveMode(options: AgentToolsetOptions): AgentToolPhase {
   return options.modeController?.getMode() ?? options.phase ?? 'implementation';
 }
 
+function shouldPrevalidateToolCall(toolName: string): boolean {
+  return toolName !== 'mode_set'
+    && toolName !== 'subagent_spawn'
+    && toolName !== 'subagent_spawn_batch';
+}
+
 async function executeToolCall(
   byName: Map<string, RegisteredAgentTool>,
   call: LlmToolCall,
@@ -169,6 +176,34 @@ async function executeToolCall(
       content: `Task classified as read-only during planning; ${call.name} is not needed.`,
       isError: true,
     };
+  }
+
+  if (shouldPrevalidateToolCall(call.name)) {
+    try {
+      validateToolCall(
+        [{
+          name: tool.tool.name,
+          description: tool.tool.description,
+          parameters: tool.tool.parameters,
+        }],
+        {
+          type: 'toolCall',
+          id: call.id,
+          name: call.name,
+          arguments: call.arguments,
+        },
+      );
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      return {
+        content: `Malformed tool invocation for ${call.name}: ${detail}`,
+        isError: true,
+        details: {
+          malformedToolInvocation: true,
+          failureType: 'tool_schema',
+        },
+      };
+    }
   }
 
   return tool.execute(call.arguments, signal);

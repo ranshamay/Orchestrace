@@ -197,12 +197,23 @@ async function executeToolCalls(
           isError: toolResult.isError ?? false,
         });
       } catch (error) {
-        payload = {
-          content:
-            `Tool execution failed: ${toErrorMessage(error)}\n`
-            + 'Inspect the error, correct the arguments, and retry this tool call.',
-          isError: true,
-        };
+        const errorMessage = toErrorMessage(error);
+        const malformed = isMalformedToolInvocationFailure(errorMessage);
+        payload = malformed
+          ? {
+              content: `Malformed tool invocation for ${toolCall.name}: ${errorMessage}`,
+              isError: true,
+              details: {
+                malformedToolInvocation: true,
+                failureType: 'tool_schema',
+              },
+            }
+          : {
+              content:
+                `Tool execution failed: ${errorMessage}\n`
+                + 'Inspect the error, correct the arguments, and retry this tool call.',
+              isError: true,
+            };
 
         completionOptions?.onToolCall?.({
           type: 'result',
@@ -230,7 +241,7 @@ async function executeToolCalls(
       timestamp: Date.now(),
     });
 
-    if (payload.isError) {
+    if (payload.isError && !isMalformedToolInvocationError(payload)) {
       if (toolCall.name === 'subagent_spawn_batch') {
         retryPrompts.push(buildSubagentBatchRetryMessage(toolCall, payload.content));
       } else {
@@ -557,6 +568,28 @@ function buildSubagentBatchFallbackResult(
 function isNonCriticalResearchNode(nodeId: string): boolean {
   const normalized = nodeId.toLowerCase();
   return normalized.includes('research') || normalized.includes('investigat') || normalized.includes('context');
+}
+
+function isMalformedToolInvocationFailure(content: string): boolean {
+  const normalized = content.toLowerCase();
+  return normalized.includes('malformed tool invocation')
+    || normalized.includes('invalid tool call')
+    || normalized.includes('validation failed for tool')
+    || normalized.includes('validatetoolcall')
+    || normalized.includes('tool_schema')
+    || normalized.includes('argument validation failed');
+}
+
+function isMalformedToolInvocationError(payload: ToolExecutionPayload): boolean {
+  const details = payload.details;
+  if (details && typeof details === 'object') {
+    const record = details as Record<string, unknown>;
+    if (record.malformedToolInvocation === true || record.failureType === 'tool_schema') {
+      return true;
+    }
+  }
+
+  return isMalformedToolInvocationFailure(payload.content);
 }
 
 function buildToolCallRetryMessage(toolCall: ToolCall, errorContent: string): string {

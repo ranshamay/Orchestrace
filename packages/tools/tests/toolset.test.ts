@@ -102,6 +102,33 @@ describe('createAgentToolset phase policy', () => {
 });
 
 describe('batch filesystem tools', () => {
+  it('rejects malformed tool arguments before dispatch', async () => {
+    const cwd = await makeWorkspace();
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+
+    const result = await toolset.executeTool({
+      id: 'malformed-1',
+      name: 'read_files',
+      arguments: {
+        files: 'src/file.ts',
+      } as unknown as Record<string, unknown>,
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content).toContain('Malformed tool invocation for read_files');
+    expect(result.content).toContain('files');
+
+    const followUp = await toolset.executeTool({
+      id: 'verify-follow-up',
+      name: 'read_files',
+      arguments: {
+        files: [{ path: 'src/file.ts' }],
+      },
+    });
+    expect(followUp.isError).toBeFalsy();
+    expect(followUp.content).toContain('src/file.ts');
+  });
+
   it('read_files returns results per file and reports missing files as failures', async () => {
     const cwd = await makeWorkspace();
     await writeFile(join(cwd, 'src', 'second.ts'), 'export const second = 2;\n', 'utf-8');

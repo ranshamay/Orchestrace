@@ -109,6 +109,97 @@ describe('executeWithOptionalTools', () => {
     expect(toolEvents[3]).toMatchObject({ type: 'result', toolCallId: 'call-2', toolName: 'run_command', isError: true });
   });
 
+  it('does not inject retry prompt for malformed tool invocations', async () => {
+    const consumeStreamMock = vi.mocked(consumeStream);
+
+    const firstResponse = makeAssistantMessage([
+      { type: 'toolCall', id: 'call-malformed', name: 'search_files', arguments: { path: 123 } },
+    ], 'tool_calls');
+    const finalResponse = makeAssistantMessage([{ type: 'text', text: 'Acknowledged malformed call.' }]);
+
+    consumeStreamMock.mockResolvedValueOnce(firstResponse as never);
+    consumeStreamMock.mockResolvedValueOnce(finalResponse as never);
+
+    const context: TestContext = {
+      messages: [],
+      tools: [{ name: 'search_files', description: 'Search files', parameters: { type: 'object' } }],
+    };
+
+    await executeWithOptionalTools({
+      model: {} as never,
+      context,
+      options: {},
+      toolset: {
+        tools: [],
+        async executeTool() {
+          return {
+            content: 'Malformed tool invocation for search_files: expected path to be string',
+            isError: true,
+            details: {
+              malformedToolInvocation: true,
+              failureType: 'tool_schema',
+            },
+          };
+        },
+      },
+      onUsage: () => {},
+    });
+
+    const retryPrompts = context.messages.filter(
+      (message) => message.role === 'user' && String(message.content?.[0]?.text ?? '').includes('retry this tool call'),
+    );
+    expect(retryPrompts).toHaveLength(0);
+
+    const toolResultMessages = context.messages.filter((message) => message.role === 'toolResult');
+    expect(toolResultMessages).toHaveLength(1);
+    expect(String(toolResultMessages[0].content?.[0]?.text ?? '')).toContain('Malformed tool invocation for search_files');
+    expect(toolResultMessages[0].isError).toBe(true);
+  });
+
+  it('does not inject retry prompt for malformed tool invocations thrown during validation', async () => {
+    const consumeStreamMock = vi.mocked(consumeStream);
+
+    const firstResponse = makeAssistantMessage([
+      { type: 'toolCall', id: 'call-malformed-throw', name: 'search_files', arguments: { query: 42 } },
+    ], 'tool_calls');
+    const finalResponse = makeAssistantMessage([{ type: 'text', text: 'Validation failure captured.' }]);
+
+    consumeStreamMock.mockResolvedValueOnce(firstResponse as never);
+    consumeStreamMock.mockResolvedValueOnce(finalResponse as never);
+
+    const context: TestContext = {
+      messages: [],
+      tools: [{ name: 'search_files', description: 'Search files', parameters: { type: 'object' } }],
+    };
+
+    vi.mocked(validateToolCall).mockImplementationOnce(() => {
+      throw new Error('Validation failed for tool "search_files": query must be string');
+    });
+
+    await executeWithOptionalTools({
+      model: {} as never,
+      context,
+      options: {},
+      toolset: {
+        tools: [],
+        async executeTool() {
+          return { content: 'should not execute', isError: false };
+        },
+      },
+      onUsage: () => {},
+    });
+
+    const retryPrompts = context.messages.filter(
+      (message) => message.role === 'user' && String(message.content?.[0]?.text ?? '').includes('retry this tool call'),
+    );
+    expect(retryPrompts).toHaveLength(0);
+
+    const toolResultMessages = context.messages.filter((message) => message.role === 'toolResult');
+    expect(toolResultMessages).toHaveLength(1);
+    expect(String(toolResultMessages[0].content?.[0]?.text ?? '')).toContain('Malformed tool invocation for search_files');
+    expect(toolResultMessages[0].isError).toBe(true);
+  });
+
   it('does not inject retry prompt when tool call succeeds', async () => {
     const consumeStreamMock = vi.mocked(consumeStream);
 
