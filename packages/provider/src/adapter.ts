@@ -1,4 +1,5 @@
 import { getModel, type AssistantMessage } from '@mariozechner/pi-ai';
+
 import type {
   LlmAdapter,
   LlmAgent,
@@ -43,12 +44,19 @@ export class PiAiAdapter implements LlmAdapter {
         let hasUsage = false;
         let activeApiKey = request.apiKey;
                 let authRetryUsed = false;
-        const maxRetries = resolveEmptyResponseRetries();
+                const maxRetries = resolveEmptyResponseRetries();
         const transientRequestRetries = resolveTransientRequestRetries();
+        const missingToolCallRecoveryMaxAttempts = 1;
         const allowAuthRefreshRetry = request.allowAuthRefreshRetry === true;
+
         const authRefreshRetries = allowAuthRefreshRetry && request.refreshApiKey ? 1 : 0;
 
-        const maxAttempts = Math.max(maxRetries, transientRequestRetries, authRefreshRetries) + 1;
+                const maxAttempts = Math.max(
+          maxRetries,
+          transientRequestRetries + missingToolCallRecoveryMaxAttempts,
+          authRefreshRetries,
+        ) + 1;
+
         const requestSignal = signal ?? request.signal;
 
         const scheduleRetryDelay = async (attempt: number): Promise<number> => {
@@ -60,7 +68,10 @@ export class PiAiAdapter implements LlmAdapter {
           return delayMs;
         };
 
+                let missingToolCallRecoveryAttempts = 0;
+
         for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+
           const context = createContext(request, prompt);
           const options: Record<string, unknown> = {};
           if (request.reasoning && model.reasoning) {
@@ -96,6 +107,10 @@ export class PiAiAdapter implements LlmAdapter {
               && Boolean(request.refreshApiKey)
               && !authRetryUsed;
 
+                        const canRetryMissingToolCallMapping =
+              isMissingToolCallMappingFailureMessage(mapped.message)
+              && missingToolCallRecoveryAttempts < missingToolCallRecoveryMaxAttempts;
+
             const canRetryTransient =
               attempt <= transientRequestRetries
               && shouldRetryTransientRequestFailure({
@@ -103,7 +118,8 @@ export class PiAiAdapter implements LlmAdapter {
                 mappedMessage: mapped.message,
                 error,
               });
-            const shouldRetry = canRetryAuth || canRetryTransient;
+            const shouldRetry = canRetryAuth || canRetryTransient || canRetryMissingToolCallMapping;
+
             let retryDelayMs = 0;
 
             if (shouldRetry) {
@@ -138,9 +154,13 @@ export class PiAiAdapter implements LlmAdapter {
               continue;
             }
 
-            if (canRetryTransient) {
+                        if (canRetryTransient || canRetryMissingToolCallMapping) {
+              if (canRetryMissingToolCallMapping) {
+                missingToolCallRecoveryAttempts += 1;
+              }
               continue;
             }
+
 
             throw createLlmFailureError({
               provider: request.provider,
@@ -178,7 +198,13 @@ export class PiAiAdapter implements LlmAdapter {
               && Boolean(request.refreshApiKey)
               && !authRetryUsed;
 
-            const retryDelayMs = canRetryAuth ? await scheduleRetryDelay(attempt) : 0;
+                        const canRetryMissingToolCallMapping =
+              isMissingToolCallMappingFailureMessage(upstreamError)
+              && missingToolCallRecoveryAttempts < missingToolCallRecoveryMaxAttempts;
+            const retryDelayMs = (canRetryAuth || canRetryMissingToolCallMapping)
+              ? await scheduleRetryDelay(attempt)
+              : 0;
+
             logFailureDump({
               kind: 'stop-reason',
               failureType,
@@ -189,7 +215,8 @@ export class PiAiAdapter implements LlmAdapter {
               maxAttempts,
               timeoutMs,
               elapsedMs,
-              retryScheduled: canRetryAuth,
+                            retryScheduled: canRetryAuth || canRetryMissingToolCallMapping,
+
               retryDelayMs,
               stopReason: response.stopReason,
               errorMessage: upstreamError,
@@ -198,7 +225,7 @@ export class PiAiAdapter implements LlmAdapter {
               prompt: summarizePromptInput(prompt),
             });
 
-            if (canRetryAuth) {
+                        if (canRetryAuth) {
               authRetryUsed = true;
               try {
                 activeApiKey = await request.refreshApiKey?.();
@@ -209,7 +236,13 @@ export class PiAiAdapter implements LlmAdapter {
               continue;
             }
 
+            if (canRetryMissingToolCallMapping) {
+              missingToolCallRecoveryAttempts += 1;
+              continue;
+            }
+
             throw createLlmFailureError({
+
               provider: request.provider,
               model: request.model,
               failureType,
@@ -344,7 +377,7 @@ export class PiAiAdapter implements LlmAdapter {
     });
   }
 
-  getModelInfo(provider: string, model: string): LlmModelInfo {
+    getModelInfo(provider: string, model: string): LlmModelInfo {
     const resolved = normalizeModelEndpoint(getModel(provider as never, model as never));
     return {
       contextWindow: resolved.contextWindow ?? 128_000,
@@ -352,3 +385,14 @@ export class PiAiAdapter implements LlmAdapter {
     };
   }
 }
+
+const MISSING_TOOL_CALL_MAPPING_RE = /(no tool call found\s+for\s+function\s+call\s+output|function call output\s+with\s+call_id)/i;
+
+function isMissingToolCallMappingFailureMessage(message: string | undefined): boolean {
+  if (typeof message !== 'string') {
+    return false;
+  }
+
+  return MISSING_TOOL_CALL_MAPPING_RE.test(message);
+}
+

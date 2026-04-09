@@ -623,7 +623,7 @@ describe('executeWithOptionalTools', () => {
     expect(parsed.warning).toContain('Skipped non-critical research nodes');
   });
 
-  it('skips fallback tool calls after first successful call', async () => {
+    it('executes each tool call in multi-call responses to preserve call_id/result mapping', async () => {
     const consumeStreamMock = vi.mocked(consumeStream);
     const executeTool = vi.fn(async (call: { id: string }) => ({ content: `ok:${call.id}`, isError: false }));
 
@@ -653,23 +653,25 @@ describe('executeWithOptionalTools', () => {
       onUsage: () => {},
     });
 
-    expect(executeTool).toHaveBeenCalledTimes(1);
+    expect(executeTool).toHaveBeenCalledTimes(3);
 
     const toolResultMessages = context.messages.filter((message) => message.role === 'toolResult');
     expect(toolResultMessages).toHaveLength(3);
     expect(toolResultMessages[0].content?.[0]?.text).toBe('ok:call-1');
-    expect(String(toolResultMessages[1].content?.[0]?.text ?? '')).toContain('Skipped fallback tool call');
-    expect(String(toolResultMessages[2].content?.[0]?.text ?? '')).toContain('Skipped fallback tool call');
+    expect(toolResultMessages[1].content?.[0]?.text).toBe('ok:call-2');
+    expect(toolResultMessages[2].content?.[0]?.text).toBe('ok:call-3');
     expect(toolResultMessages[1].isError).toBe(false);
     expect(toolResultMessages[2].isError).toBe(false);
   });
 
-  it('executes next fallback when primary fails then stops after success', async () => {
+
+    it('executes remaining tool calls even after one succeeds', async () => {
     const consumeStreamMock = vi.mocked(consumeStream);
     const executeTool = vi
       .fn()
       .mockRejectedValueOnce(new Error('primary failed'))
-      .mockResolvedValueOnce({ content: 'fallback succeeded', isError: false });
+      .mockResolvedValueOnce({ content: 'fallback succeeded', isError: false })
+      .mockResolvedValueOnce({ content: 'final fallback succeeded', isError: false });
 
     const firstResponse = makeAssistantMessage([
       { type: 'toolCall', id: 'call-1', name: 'run_command', arguments: { command: 'echo hello world' } },
@@ -697,7 +699,7 @@ describe('executeWithOptionalTools', () => {
       onUsage: () => {},
     });
 
-    expect(executeTool).toHaveBeenCalledTimes(2);
+    expect(executeTool).toHaveBeenCalledTimes(3);
 
     const toolResultMessages = context.messages.filter((message) => message.role === 'toolResult');
     expect(toolResultMessages).toHaveLength(3);
@@ -705,7 +707,7 @@ describe('executeWithOptionalTools', () => {
     expect(toolResultMessages[0].isError).toBe(true);
     expect(toolResultMessages[1].content?.[0]?.text).toBe('fallback succeeded');
     expect(toolResultMessages[1].isError).toBe(false);
-    expect(String(toolResultMessages[2].content?.[0]?.text ?? '')).toContain('Skipped fallback tool call');
+    expect(toolResultMessages[2].content?.[0]?.text).toBe('final fallback succeeded');
 
     const retryPrompts = context.messages.filter(
       (message) => message.role === 'user' && String(message.content?.[0]?.text ?? '').includes('retry this tool call'),
@@ -714,7 +716,8 @@ describe('executeWithOptionalTools', () => {
     expect(String(retryPrompts[0].content?.[0]?.text ?? '')).toContain('run_command (call-1)');
   });
 
-  it('emits skipped marker for short-circuited fallback calls', async () => {
+
+      it('emits result event for each executed tool call without skipped markers', async () => {
     const consumeStreamMock = vi.mocked(consumeStream);
     const toolEvents: ToolEvent[] = [];
 
@@ -751,19 +754,66 @@ describe('executeWithOptionalTools', () => {
     const toolResultMessages = context.messages.filter((message) => message.role === 'toolResult');
     expect(toolResultMessages).toHaveLength(2);
     expect(toolResultMessages[1].isError).toBe(false);
-    expect(String(toolResultMessages[1].content?.[0]?.text ?? '')).toContain('Skipped fallback tool call');
-    expect(toolResultMessages[1]).toMatchObject({
-      details: { skipped: true, reason: 'prior_tool_call_succeeded' },
-    });
+    expect(String(toolResultMessages[1].content?.[0]?.text ?? '')).not.toContain('Skipped fallback tool call');
+    expect(toolResultMessages[1].content?.[0]?.text).toBe('hello world');
 
-    const skippedResultEvent = toolEvents.find(
+    const secondResultEvent = toolEvents.find(
       (event) => event.type === 'result' && event.toolCallId === 'call-2',
     );
-    expect(skippedResultEvent).toMatchObject({
+    expect(secondResultEvent).toMatchObject({
       type: 'result',
       toolCallId: 'call-2',
       toolName: 'run_command',
       isError: false,
     });
   });
+
+  it('injects a corrective retry prompt when provider stops with missing tool-call mapping after tool errors', async () => {
+    const consumeStreamMock = vi.mocked(consumeStream);
+
+    const firstResponse = makeAssistantMessage([
+      { type: 'toolCall', id: 'call-1', name: 'run_command', arguments: { command: 'bad command' } },
+    ], 'tool_calls');
+    const providerErrorResponse = {
+      role: 'assistant',
+      content: [],
+      stopReason: 'error',
+      errorMessage: 'No tool call found for function call output with call_id call_123.',
+      usage: { totalTokens: 10 },
+      timestamp: Date.now(),
+    };
+    const finalResponse = makeAssistantMessage([{ type: 'text', text: 'Recovered after corrective prompt.' }]);
+
+    consumeStreamMock.mockResolvedValueOnce(firstResponse as never);
+    consumeStreamMock.mockResolvedValueOnce(providerErrorResponse as never);
+    consumeStreamMock.mockResolvedValueOnce(finalResponse as never);
+
+    const context: TestContext = {
+      messages: [],
+      tools: [{ name: 'run_command', description: 'Run shell command', parameters: { type: 'object' } }],
+    };
+
+    const result = await executeWithOptionalTools({
+      model: {} as never,
+      context,
+      options: {},
+      toolset: {
+        tools: [],
+        async executeTool() {
+          throw new Error('command not found: python');
+        },
+      },
+      onUsage: () => {},
+    });
+
+    expect(result).toBe(finalResponse);
+    const correctivePrompt = context.messages.find(
+      (message) => message.role === 'user'
+        && String(message.content?.[0]?.text ?? '').includes('Tool execution failed in the previous turn.'),
+    );
+    expect(correctivePrompt).toBeDefined();
+    expect(String(correctivePrompt?.content?.[0]?.text ?? '')).toContain('No tool call found for function call output');
+  });
+
 });
+

@@ -22,9 +22,18 @@ describe('classifyLlmFailure', () => {
     expect(classifyLlmFailure({ message: 'Invalid tool call: missing required argument' })).toBe('tool_schema');
   });
 
-  it('classifies tool runtime errors', () => {
+    it('classifies tool runtime errors', () => {
     expect(classifyLlmFailure({ message: 'Tool execution failed: blocked command' })).toBe('tool_runtime');
   });
+
+  it('classifies missing tool call mapping provider errors as tool runtime', () => {
+    expect(
+      classifyLlmFailure({
+        message: 'No tool call found for function call output with call_id call_2kIxaBWFuWjxnygjhoOPNPqu.',
+      }),
+    ).toBe('tool_runtime');
+  });
+
 
   it('classifies empty responses by kind', () => {
     expect(classifyLlmFailure({ kind: 'empty-zero-token' })).toBe('empty_response');
