@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react';
 import { API_BASE, type AgentTodo, type ChatMessage, type SessionObserverFinding, type SessionObserverState, type WorkSession } from '../../lib/api';
 import type { NodeTokenStream } from '../types';
+import { sortSessionsByActivityAndRecency } from '../utils/sessionSort';
 
 type Params = {
   selectedSessionId: string;
@@ -46,9 +47,9 @@ export function useSessionStream({ selectedSessionId, setSessions, setChatMessag
             if (idx >= 0) {
               const next = [...prev];
               next[idx] = data.session;
-              return next;
+              return sortSessionsByActivityAndRecency(next);
             }
-            return [data.session, ...prev];
+            return sortSessionsByActivityAndRecency([data.session, ...prev]);
           });
         }
         if (data.messages) {
@@ -73,7 +74,7 @@ export function useSessionStream({ selectedSessionId, setSessions, setChatMessag
           if (idx >= 0) {
             const next = [...prev];
             next[idx] = data.session;
-            return next;
+            return sortSessionsByActivityAndRecency(next);
           }
           return prev;
         });
@@ -134,8 +135,10 @@ export function useSessionStream({ selectedSessionId, setSessions, setChatMessag
       try {
         const data = JSON.parse(ev.data) as { id: string; status: string; llmStatus?: WorkSession['llmStatus'] };
         setSessions((prev) =>
-          prev.map((s) =>
-            s.id === data.id ? { ...s, status: data.status, llmStatus: data.llmStatus ?? s.llmStatus } : s,
+          sortSessionsByActivityAndRecency(
+            prev.map((s) =>
+              s.id === data.id ? { ...s, status: data.status, llmStatus: data.llmStatus ?? s.llmStatus } : s,
+            ),
           ),
         );
       } catch {
@@ -147,10 +150,12 @@ export function useSessionStream({ selectedSessionId, setSessions, setChatMessag
       try {
         const data = JSON.parse(ev.data) as { id: string; error?: string; llmStatus?: WorkSession['llmStatus'] };
         setSessions((prev) =>
-          prev.map((s) =>
-            s.id === data.id
-              ? { ...s, status: 'failed', error: data.error, llmStatus: data.llmStatus ?? s.llmStatus }
-              : s,
+          sortSessionsByActivityAndRecency(
+            prev.map((s) =>
+              s.id === data.id
+                ? { ...s, status: 'failed', error: data.error, llmStatus: data.llmStatus ?? s.llmStatus }
+                : s,
+            ),
           ),
         );
       } catch {

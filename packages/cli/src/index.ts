@@ -11,7 +11,7 @@ import { DEFAULT_AGENT_TOOL_POLICY_VERSION, createAgentToolset } from '@orchestr
 import { createInterface } from 'node:readline/promises';
 import { promisify } from 'node:util';
 import { startUiServer } from './ui-server.js';
-import { resolveTaskRoute, validateShellCommandPrompt } from './task-routing.js';
+import { enforceSafeShellDispatch, resolveTaskRoute } from './task-routing.js';
 import { WorkspaceManager } from './workspace-manager.js';
 import type { WorkspaceEntry } from './workspace-manager.js';
 
@@ -21,6 +21,7 @@ const SUB_AGENT_READ_ONLY_TOOL_ALLOWLIST = [
   'search_files',
   'git_diff',
   'git_status',
+  'url_fetch',
 ];
 
 const GITHUB_PROVIDER_ID = 'github';
@@ -282,11 +283,17 @@ Environment variables:
       process.exit(1);
     }
 
-    const route = resolveTaskRoute(taskPrompt, process.env.ORCHESTRACE_TASK_ROUTE).result;
+    const resolvedRoute = resolveTaskRoute(taskPrompt, process.env.ORCHESTRACE_TASK_ROUTE).result;
+    const dispatch = enforceSafeShellDispatch(taskPrompt, resolvedRoute);
+    const route = dispatch.route;
     console.log(`[route] category=${route.category} strategy=${route.strategy} source=${route.source} confidence=${route.confidence.toFixed(2)} reason=${route.reason}`);
 
+    if (resolvedRoute.category === 'shell_command' && route.category !== 'shell_command') {
+      console.log(`[route] shell fallback applied: ${dispatch.shell.reason ?? 'prompt failed shell validation'}`);
+    }
+
     if (route.category === 'shell_command') {
-      const code = await runShellCommandRoute(taskPrompt, workspace.path);
+      const code = await runShellCommandRoute(dispatch.shell.command!, workspace.path);
       process.exit(code);
     }
 
@@ -602,16 +609,7 @@ export function buildSingleTaskGraph(prompt: string, routeCategory: TaskRouteCat
   };
 }
 
-async function runShellCommandRoute(prompt: string, cwd: string): Promise<number> {
-  const validation = validateShellCommandPrompt(prompt);
-
-  if (!validation.ok || !validation.command) {
-    console.error(validation.reason ?? 'Route shell_command selected, but prompt failed shell-execution safety checks.');
-    return 1;
-  }
-
-  const command = validation.command;
-
+async function runShellCommandRoute(command: string, cwd: string): Promise<number> {
   try {
     const { stdout, stderr } = await execFileAsync('sh', ['-lc', command], { cwd });
     if (stdout) {

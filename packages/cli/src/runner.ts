@@ -51,7 +51,11 @@ import {
   shouldResetThinkingCircuitBreakerOnEvent,
   updateThinkingCircuitBreaker,
 } from './thinking-circuit-breaker.js';
-import { coerceRouteForSessionSource, resolveTaskRoute, validateShellCommandPrompt } from './task-routing.js';
+import {
+  enforceSafeShellDispatch,
+  resolveTaskRouteForSource,
+  stripRetryContinuationContext,
+} from './task-routing.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -69,6 +73,9 @@ const TRACE_LOG_STREAM_DELTAS = resolveBooleanEnv(process.env.ORCHESTRACE_TRACE_
 const AUTO_CHECKPOINT_ENABLED = resolveBooleanEnv(process.env.ORCHESTRACE_AUTO_CHECKPOINT, true);
 const AUTO_CHECKPOINT_EVERY_N_EDITS = resolvePositiveIntEnv(process.env.ORCHESTRACE_AUTO_CHECKPOINT_EVERY_N_EDITS, 3);
 const AUTO_CHECKPOINT_GIT_TIMEOUT_MS = resolvePositiveIntEnv(process.env.ORCHESTRACE_AUTO_CHECKPOINT_GIT_TIMEOUT_MS, 15_000);
+const SESSION_DELIVERY_REQUIRED = resolveBooleanEnv(process.env.ORCHESTRACE_SESSION_DELIVERY_REQUIRED, true);
+const SESSION_DELIVERY_GIT_TIMEOUT_MS = resolvePositiveIntEnv(process.env.ORCHESTRACE_SESSION_DELIVERY_GIT_TIMEOUT_MS, 120_000);
+const SESSION_DELIVERY_API_TIMEOUT_MS = resolvePositiveIntEnv(process.env.ORCHESTRACE_SESSION_DELIVERY_API_TIMEOUT_MS, 20_000);
 const CHECKPOINT_STASH_PREFIX = 'orchestrace-checkpoint';
 const CHECKPOINT_METADATA_FILE = 'checkpoint.json';
 const execFileAsync = promisify(execFile);
@@ -92,6 +99,18 @@ interface CheckpointMetadata {
   hasUntrackedChanges?: boolean;
   dirtySummary?: string[];
   notes?: string;
+}
+
+interface PullRequestInfo {
+  number: number;
+  url: string;
+  created: boolean;
+}
+
+interface GitHubApiResponse {
+  ok: boolean;
+  status: number;
+  body: unknown;
 }
 
 // ---------------------------------------------------------------------------
@@ -168,10 +187,15 @@ async function main(): Promise<void> {
   // Local state for graph progress tracking
   const agentGraph: SessionAgentGraphNode[] = [];
   const pendingNodeIds = new Map<string, string[]>();
-  const resolvedRoute = resolveTaskRoute(config.prompt, process.env.ORCHESTRACE_TASK_ROUTE).result;
-  const route = coerceRouteForSessionSource(resolvedRoute, config.source);
-  const routeCoerced = route !== resolvedRoute;
-  const effortClassification = classifyTaskEffort(config.prompt);
+  const promptForRoutingAndEffort = stripRetryContinuationContext(config.prompt);
+  const resolvedRoute = resolveTaskRouteForSource(
+    promptForRoutingAndEffort,
+    config.source,
+    process.env.ORCHESTRACE_TASK_ROUTE,
+  ).result;
+  const dispatch = enforceSafeShellDispatch(promptForRoutingAndEffort, resolvedRoute);
+  const route = dispatch.route;
+  const effortClassification = classifyTaskEffort(promptForRoutingAndEffort);
   const taskEffort: TaskEffort = (process.env.ORCHESTRACE_TASK_EFFORT as TaskEffort) || effortClassification.effort;
   let successfulEditFileResultsSinceCheckpoint = 0;
   const todoDoneCheckpointed = new Set<string>();
@@ -217,7 +241,7 @@ async function main(): Promise<void> {
     },
   });
 
-  if (routeCoerced) {
+  if (resolvedRoute.category === 'shell_command' && route.category !== 'shell_command') {
     void emit({
       time: iso(),
       type: 'session:dag-event',
@@ -227,7 +251,7 @@ async function main(): Promise<void> {
           runId: sessionId,
           type: 'task:routing',
           taskId: 'task',
-          message: `Route coercion applied: source=${config.source ?? 'user'} prevented direct shell execution (from ${resolvedRoute.category} to ${route.category}).`,
+          message: `Shell route fallback applied: ${dispatch.shell.reason ?? 'prompt failed shell validation'}`,
         },
       },
     });
@@ -267,6 +291,25 @@ async function main(): Promise<void> {
       return { ok: false, stdout: '', stderr: '', error: errorMsg(err) };
     }
   }
+
+  async function runGitSafeWithTimeout(
+    args: string[],
+    timeout: number,
+  ): Promise<{ ok: boolean; stdout: string; stderr: string; error?: string }> {
+    try {
+      const { stdout, stderr } = await execFileAsync('git', args, {
+        cwd: config.workspacePath,
+        timeout,
+      });
+      return { ok: true, stdout, stderr };
+    } catch (err) {
+      return { ok: false, stdout: '', stderr: '', error: errorMsg(err) };
+    }
+  }
+
+  const sessionHeadAtStart = await getGitHeadSha();
+  let deliveryFinalized = false;
+  const committedCheckpointShas: string[] = [];
 
   async function maybeCheckpoint(reason: 'edit-threshold' | 'todo-completed' | 'terminal', opts?: {
     todoId?: string;
@@ -343,6 +386,14 @@ async function main(): Promise<void> {
         return;
       }
 
+      const fullHead = await runGitSafe(['rev-parse', 'HEAD']);
+      if (fullHead.ok) {
+        const fullSha = fullHead.stdout.trim();
+        if (fullSha) {
+          committedCheckpointShas.push(fullSha);
+        }
+      }
+
       const head = await runGitSafe(['rev-parse', '--short', 'HEAD']);
       await emit({
         time: iso(),
@@ -398,6 +449,242 @@ async function main(): Promise<void> {
       hasStagedChanges: stagedLines.length > 0,
       hasUntrackedChanges: untrackedLines.length > 0,
       dirtySummary: [...unstagedLines, ...stagedLines, ...untrackedLines.map((line) => `?? ${line}`)].slice(0, 200),
+    };
+  }
+
+  async function ensureRemoteDeliveryForCommittedSession(): Promise<void> {
+    if (deliveryFinalized) {
+      return;
+    }
+
+    const currentHead = await getGitHeadSha();
+    const fallbackHead = committedCheckpointShas.at(-1);
+    const targetHead = currentHead ?? fallbackHead;
+    if (!targetHead) {
+      return;
+    }
+
+    let commitCount = 0;
+    if (sessionHeadAtStart) {
+      const commitCountRes = await runGitSafeWithTimeout(
+        ['rev-list', '--count', `${sessionHeadAtStart}..${targetHead}`],
+        SESSION_DELIVERY_GIT_TIMEOUT_MS,
+      );
+      if (!commitCountRes.ok) {
+        if (committedCheckpointShas.length === 0) {
+          throw new Error(`Unable to determine session commit delta: ${(commitCountRes.error ?? commitCountRes.stderr) || 'git rev-list failed'}`);
+        }
+      } else {
+        const parsedCount = Number.parseInt(commitCountRes.stdout.trim(), 10);
+        if (Number.isFinite(parsedCount) && parsedCount > 0) {
+          commitCount = parsedCount;
+        }
+      }
+    }
+
+    if (commitCount <= 0 && committedCheckpointShas.length > 0) {
+      commitCount = committedCheckpointShas.length;
+    }
+
+    if (commitCount <= 0) {
+      return;
+    }
+
+    if (!SESSION_DELIVERY_REQUIRED) {
+      throw new Error(
+        'Session created committed code changes, but ORCHESTRACE_SESSION_DELIVERY_REQUIRED is disabled. Re-enable delivery to enforce mandatory PR creation.',
+      );
+    }
+
+    deliveryFinalized = true;
+
+    const baseBranch = await resolveBaseBranch();
+    const headBranch = await ensureDeliveryBranch(baseBranch, targetHead);
+
+    const pushRes = await runGitSafeWithTimeout(
+      ['push', '--set-upstream', 'origin', headBranch],
+      SESSION_DELIVERY_GIT_TIMEOUT_MS,
+    );
+    if (!pushRes.ok) {
+      throw new Error(`git push failed for ${headBranch}: ${(pushRes.error ?? pushRes.stderr) || 'unknown error'}`);
+    }
+
+    const remoteRes = await runGitSafeWithTimeout(['remote', 'get-url', 'origin'], SESSION_DELIVERY_GIT_TIMEOUT_MS);
+    if (!remoteRes.ok) {
+      throw new Error(`Unable to resolve origin remote URL: ${(remoteRes.error ?? remoteRes.stderr) || 'origin missing'}`);
+    }
+
+    const remote = parseGitHubRemote(remoteRes.stdout.trim());
+    if (!remote) {
+      throw new Error(`Origin remote is not a supported GitHub remote: ${remoteRes.stdout.trim()}`);
+    }
+
+    const token = await githubAuthManager.resolveApiKey('github').catch(() => undefined);
+    if (!token) {
+      throw new Error('GitHub auth is not configured. Connect GitHub in Settings before finishing a committed session.');
+    }
+
+    const pr = await ensurePullRequest({
+      host: remote.host,
+      owner: remote.owner,
+      repo: remote.repo,
+      headBranch,
+      baseBranch,
+      token,
+      title: `Session ${sessionId.slice(0, 8)}: ${compact(config.prompt, 72)}`,
+      body: [
+        `Automated delivery for session ${sessionId}.`,
+        '',
+        `- Source: ${config.source ?? 'user'}`,
+        `- Commits created in this session: ${commitCount}`,
+        `- Branch: ${headBranch}`,
+      ].join('\n'),
+    });
+
+    const deliveryMessage = pr.created
+      ? `Committed session changes were pushed to origin/${headBranch} and PR #${pr.number} was created: ${pr.url}`
+      : `Committed session changes were pushed to origin/${headBranch} and existing PR #${pr.number} was reused: ${pr.url}`;
+
+    await emit({
+      time: iso(),
+      type: 'session:chat-message',
+      payload: {
+        message: {
+          role: 'system',
+          content: deliveryMessage,
+          time: iso(),
+        },
+      },
+    });
+  }
+
+  async function resolveBaseBranch(): Promise<string> {
+    const remoteHead = await runGitSafeWithTimeout(['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'], SESSION_DELIVERY_GIT_TIMEOUT_MS);
+    if (remoteHead.ok) {
+      const ref = remoteHead.stdout.trim();
+      if (ref.startsWith('origin/')) {
+        const branch = ref.slice('origin/'.length).trim();
+        if (branch) {
+          return branch;
+        }
+      }
+    }
+
+    for (const candidate of ['main', 'master']) {
+      const head = await runGitSafeWithTimeout(['ls-remote', '--heads', 'origin', candidate], SESSION_DELIVERY_GIT_TIMEOUT_MS);
+      if (head.ok && head.stdout.trim()) {
+        return candidate;
+      }
+    }
+
+    return 'main';
+  }
+
+  async function ensureDeliveryBranch(baseBranch: string, targetHead?: string): Promise<string> {
+    const branchRes = await runGitSafeWithTimeout(['rev-parse', '--abbrev-ref', 'HEAD'], SESSION_DELIVERY_GIT_TIMEOUT_MS);
+    if (!branchRes.ok) {
+      throw new Error(`Unable to determine current branch: ${(branchRes.error ?? branchRes.stderr) || 'git rev-parse failed'}`);
+    }
+
+    const currentBranch = branchRes.stdout.trim();
+    const currentHead = await getGitHeadSha();
+    const currentHeadMatchesTarget = !targetHead || (currentHead === targetHead);
+    if (currentBranch && currentBranch !== 'HEAD' && currentBranch !== baseBranch && currentHeadMatchesTarget) {
+      return currentBranch;
+    }
+
+    const generatedBranch = `orchestrace/session-${sessionId.slice(0, 8)}-${Date.now().toString(36)}`;
+    const checkoutArgs = targetHead
+      ? ['checkout', '-B', generatedBranch, targetHead]
+      : ['checkout', '-b', generatedBranch];
+    const checkoutRes = await runGitSafeWithTimeout(checkoutArgs, SESSION_DELIVERY_GIT_TIMEOUT_MS);
+    if (!checkoutRes.ok) {
+      throw new Error(`Unable to create delivery branch ${generatedBranch}: ${(checkoutRes.error ?? checkoutRes.stderr) || 'git checkout failed'}`);
+    }
+
+    return generatedBranch;
+  }
+
+  async function ensurePullRequest(params: {
+    host: string;
+    owner: string;
+    repo: string;
+    headBranch: string;
+    baseBranch: string;
+    token: string;
+    title: string;
+    body: string;
+  }): Promise<PullRequestInfo> {
+    const createRes = await callGitHubApi(params, 'POST', `/repos/${params.owner}/${params.repo}/pulls`, {
+      title: params.title,
+      body: params.body,
+      head: params.headBranch,
+      base: params.baseBranch,
+      maintainer_can_modify: true,
+    });
+
+    if (createRes.ok) {
+      const created = createRes.body as { number?: unknown; html_url?: unknown };
+      const number = typeof created.number === 'number' ? created.number : undefined;
+      const url = typeof created.html_url === 'string' ? created.html_url : undefined;
+      if (!number || !url) {
+        throw new Error('GitHub create PR response was missing number or html_url.');
+      }
+      return { number, url, created: true };
+    }
+
+    if (createRes.status === 422) {
+      const headQuery = encodeURIComponent(`${params.owner}:${params.headBranch}`);
+      const existingRes = await callGitHubApi(
+        params,
+        'GET',
+        `/repos/${params.owner}/${params.repo}/pulls?state=open&head=${headQuery}&base=${encodeURIComponent(params.baseBranch)}`,
+      );
+      if (existingRes.ok && Array.isArray(existingRes.body) && existingRes.body.length > 0) {
+        const existing = existingRes.body[0] as { number?: unknown; html_url?: unknown };
+        const number = typeof existing.number === 'number' ? existing.number : undefined;
+        const url = typeof existing.html_url === 'string' ? existing.html_url : undefined;
+        if (number && url) {
+          return { number, url, created: false };
+        }
+      }
+    }
+
+    throw new Error(`Unable to create pull request: ${formatGitHubApiError(createRes)}`);
+  }
+
+  async function callGitHubApi(
+    params: { host: string; token: string },
+    method: 'GET' | 'POST',
+    path: string,
+    body?: Record<string, unknown>,
+  ): Promise<GitHubApiResponse> {
+    const apiBase = buildGitHubApiBaseUrl(params.host);
+    const response = await fetch(`${apiBase}${path}`, {
+      method,
+      headers: {
+        Accept: 'application/vnd.github+json',
+        Authorization: `Bearer ${params.token}`,
+        'Content-Type': 'application/json',
+        'User-Agent': 'orchestrace-runner',
+        'X-GitHub-Api-Version': '2022-11-28',
+      },
+      body: body ? JSON.stringify(body) : undefined,
+      signal: AbortSignal.timeout(SESSION_DELIVERY_API_TIMEOUT_MS),
+    });
+
+    const contentType = response.headers.get('content-type') ?? '';
+    let responseBody: unknown;
+    if (contentType.includes('application/json')) {
+      responseBody = await response.json().catch(() => undefined);
+    } else {
+      responseBody = await response.text().catch(() => undefined);
+    }
+
+    return {
+      ok: response.ok,
+      status: response.status,
+      body: responseBody,
     };
   }
 
@@ -566,13 +853,13 @@ async function main(): Promise<void> {
       enabled: config.enableTrivialTaskGate,
       maxPromptLength: config.trivialTaskMaxPromptLength,
     });
-    const trivialClassification = classifyTrivialTaskPrompt(config.prompt, trivialTaskGate);
+    const trivialClassification = classifyTrivialTaskPrompt(promptForRoutingAndEffort, trivialTaskGate);
     console.info(
       `[runner:${sessionId}] trivial-task-gate enabled=${trivialTaskGate.enabled} isTrivial=${trivialClassification.isTrivial} reasons=${trivialClassification.reasons.join(',')}`,
     );
 
     const trivialCommand = trivialClassification.isTrivial
-      ? extractSingleCommandFromPrompt(config.prompt)
+      ? extractSingleCommandFromPrompt(promptForRoutingAndEffort)
       : undefined;
 
     if (trivialClassification.isTrivial && trivialCommand) {
@@ -639,15 +926,33 @@ async function main(): Promise<void> {
         payload: { output: { text: outputText } },
       });
 
-      if (toolResult.isError) {
-        await emit({ time: iso(), type: 'session:error-change', payload: { error: outputText } });
-        const failedStatus = makeLlmStatus('failed', outputText, 'tool_runtime', 'task', 'implementation');
+      await maybeCheckpoint('terminal');
+      let deliveryError: string | undefined;
+      try {
+        await ensureRemoteDeliveryForCommittedSession();
+      } catch (error) {
+        deliveryError = errorMsg(error);
+      }
+
+      if (toolResult.isError || deliveryError) {
+        const errorLines = [toolResult.isError ? outputText : undefined, deliveryError ? `Remote delivery failed: ${deliveryError}` : undefined]
+          .filter((line): line is string => Boolean(line));
+        const errorText = errorLines.join('\n');
+        await emit({ time: iso(), type: 'session:error-change', payload: { error: errorText } });
+        const failedStatus = makeLlmStatus(
+          'failed',
+          errorText,
+          toolResult.isError ? 'tool_runtime' : 'delivery_failure',
+          'task',
+          'implementation',
+        );
         lastLlmStatusEmission = {
           key: llmStatusIdentityKey(failedStatus),
           emittedAt: parseTimestamp(failedStatus.updatedAt),
         };
         await emit({ time: iso(), type: 'session:llm-status-change', payload: { llmStatus: failedStatus } });
         await emit({ time: iso(), type: 'session:status-change', payload: { status: 'failed' } });
+        await finalizeCheckpoint('failed', iso());
         clearInterval(heartbeatInterval);
         process.exit(1);
       }
@@ -664,12 +969,13 @@ async function main(): Promise<void> {
         type: 'session:chat-message',
         payload: { message: { role: 'assistant', content: outputText, time: iso() } },
       });
+      await finalizeCheckpoint('completed', iso());
       clearInterval(heartbeatInterval);
       process.exit(0);
     }
 
     const outputs = route.category === 'shell_command'
-      ? await runShellCommandRoute(config.prompt, config.workspacePath)
+      ? await runShellCommandRoute(dispatch.shell.command!, config.workspacePath)
       : await orchestrate(graph, {
       llm,
       cwd: config.workspacePath,
@@ -905,13 +1211,26 @@ async function main(): Promise<void> {
     resetThinkingCircuitBreaker(thinkingCircuitBreaker);
     await emit({ time: t, type: 'session:output-set', payload: { output } });
     await maybeCheckpoint('terminal');
+    let deliveryError: string | undefined;
+    try {
+      await ensureRemoteDeliveryForCommittedSession();
+    } catch (error) {
+      deliveryError = errorMsg(error);
+    }
 
-    if (failed) {
-      const error = failedOutput?.error ?? 'Execution failed';
+    const terminalFailed = failed || Boolean(deliveryError);
+
+    if (terminalFailed) {
+      const error = [failedOutput?.error ?? (failed ? 'Execution failed' : undefined), deliveryError ? `Remote delivery failed: ${deliveryError}` : undefined]
+        .filter((line): line is string => Boolean(line))
+        .join('\n') || 'Execution failed';
+      const failureType = failedOutput?.failureType ?? (deliveryError ? 'delivery_failure' : undefined);
       await emit({ time: t, type: 'session:error-change', payload: { error } });
-      const llmStatus = makeLlmStatus('failed', failedOutput?.failureType
-        ? `${failedOutput.failureType}: ${failedOutput.error || 'Execution failed.'}`
-        : (failedOutput?.error || 'Execution failed.'), failedOutput?.failureType);
+      const llmStatus = makeLlmStatus(
+        'failed',
+        failureType ? `${failureType}: ${error}` : error,
+        failureType,
+      );
       lastLlmStatusEmission = {
         key: llmStatusIdentityKey(llmStatus),
         emittedAt: parseTimestamp(llmStatus.updatedAt),
@@ -928,7 +1247,7 @@ async function main(): Promise<void> {
       await emit({ time: t, type: 'session:status-change', payload: { status: 'completed' } });
     }
 
-    await finalizeCheckpoint(failed ? 'failed' : 'completed', t);
+    await finalizeCheckpoint(terminalFailed ? 'failed' : 'completed', t);
 
     // Write assistant response as chat message
     if (primaryOutput?.response) {
@@ -936,7 +1255,7 @@ async function main(): Promise<void> {
     }
 
     clearInterval(heartbeatInterval);
-    process.exit(failed ? 1 : 0);
+    process.exit(terminalFailed ? 1 : 0);
   } catch (error) {
     if (cancelled) {
       await markCheckpointInterrupted(iso(), 'Interrupted during cancellation path.');
@@ -947,9 +1266,18 @@ async function main(): Promise<void> {
     const t = iso();
     const errorText = errorMsg(error);
     resetThinkingCircuitBreaker(thinkingCircuitBreaker);
-    await emit({ time: t, type: 'session:error-change', payload: { error: errorText } });
     await maybeCheckpoint('terminal');
-    const llmStatus = makeLlmStatus('failed', errorText);
+    let deliveryError: string | undefined;
+    try {
+      await ensureRemoteDeliveryForCommittedSession();
+    } catch (deliveryFailure) {
+      deliveryError = errorMsg(deliveryFailure);
+    }
+    const finalError = deliveryError
+      ? `${errorText}\nRemote delivery failed: ${deliveryError}`
+      : errorText;
+    await emit({ time: t, type: 'session:error-change', payload: { error: finalError } });
+    const llmStatus = makeLlmStatus('failed', finalError, deliveryError ? 'delivery_failure' : undefined);
     lastLlmStatusEmission = {
       key: llmStatusIdentityKey(llmStatus),
       emittedAt: parseTimestamp(llmStatus.updatedAt),
@@ -1193,6 +1521,80 @@ function compact(text: string, maxChars: number): string {
   return c.length <= maxChars ? c : `${c.slice(0, Math.max(0, maxChars - 3))}...`;
 }
 
+interface ParsedGitHubRemote {
+  host: string;
+  owner: string;
+  repo: string;
+}
+
+function parseGitHubRemote(remoteUrl: string): ParsedGitHubRemote | undefined {
+  const trimmed = remoteUrl.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+
+  const sshMatch = trimmed.match(/^git@([^:]+):(.+)$/);
+  if (sshMatch) {
+    return normalizeGitHubRemote(sshMatch[1], sshMatch[2]);
+  }
+
+  const sshProtocolMatch = trimmed.match(/^ssh:\/\/git@([^/]+)\/(.+)$/);
+  if (sshProtocolMatch) {
+    return normalizeGitHubRemote(sshProtocolMatch[1], sshProtocolMatch[2]);
+  }
+
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol === 'https:' || parsed.protocol === 'http:') {
+      return normalizeGitHubRemote(parsed.hostname, parsed.pathname.replace(/^\/+/, ''));
+    }
+  } catch {
+    return undefined;
+  }
+
+  return undefined;
+}
+
+function normalizeGitHubRemote(host: string, path: string): ParsedGitHubRemote | undefined {
+  const cleanHost = host.trim().toLowerCase();
+  const cleanPath = path.trim().replace(/\.git$/, '').replace(/^\/+/, '');
+  const parts = cleanPath.split('/').filter(Boolean);
+  if (parts.length < 2) {
+    return undefined;
+  }
+
+  return {
+    host: cleanHost,
+    owner: parts[0],
+    repo: parts[1],
+  };
+}
+
+function buildGitHubApiBaseUrl(host: string): string {
+  const normalizedHost = host.trim().toLowerCase();
+  if (normalizedHost === 'github.com') {
+    return 'https://api.github.com';
+  }
+  return `https://${normalizedHost}/api/v3`;
+}
+
+function formatGitHubApiError(response: GitHubApiResponse): string {
+  const statusPart = `HTTP ${response.status}`;
+  if (response.body && typeof response.body === 'object' && !Array.isArray(response.body)) {
+    const body = response.body as Record<string, unknown>;
+    const message = typeof body.message === 'string' ? body.message : undefined;
+    if (message) {
+      return `${statusPart}: ${message}`;
+    }
+  }
+
+  if (typeof response.body === 'string' && response.body.trim()) {
+    return `${statusPart}: ${response.body.trim()}`;
+  }
+
+  return statusPart;
+}
+
 function previewToolPayload(value: string | undefined): string {
   if (!value) {
     return '(empty)';
@@ -1388,24 +1790,8 @@ function buildSingleTaskGraph(id: string, prompt: string, routeCategory: TaskRou
   };
 }
 
-async function runShellCommandRoute(prompt: string, cwd: string): Promise<Map<string, TaskOutput>> {
-  const validation = validateShellCommandPrompt(prompt);
+async function runShellCommandRoute(command: string, cwd: string): Promise<Map<string, TaskOutput>> {
   const startedAt = Date.now();
-
-  if (!validation.ok || !validation.command) {
-    return new Map([
-      ['task', {
-        taskId: 'task',
-        status: 'failed',
-        durationMs: Date.now() - startedAt,
-        retries: 0,
-        error: validation.reason ?? 'Route shell_command selected, but prompt failed shell-execution safety checks.',
-      }],
-    ]);
-  }
-
-  const command = validation.command;
-
   try {
     const { stdout, stderr } = await execFileAsync('sh', ['-lc', command], { cwd });
     const text = `${stdout ?? ''}${stderr ?? ''}`.trim();
@@ -1435,89 +1821,57 @@ async function runShellCommandRoute(prompt: string, cwd: string): Promise<Map<st
 }
 
 function buildSystemPrompt(config: SessionConfig, phase: 'planning' | 'implementation', effort: TaskEffort = 'high'): string {
-  const quickStartMode = config.quickStartMode
-    ?? resolveBooleanEnv(process.env.ORCHESTRACE_QUICK_START_MODE, false);
-  const quickStartMaxPreDelegationToolCalls = config.quickStartMaxPreDelegationToolCalls
-    ?? resolvePositiveIntEnv(process.env.ORCHESTRACE_QUICK_START_MAX_PRE_DELEGATION_TOOL_CALLS, 3);
-
   const isLowEffort = effort === 'trivial' || effort === 'low';
-  const isMediumEffort = effort === 'medium';
 
   const phaseRules = phase === 'planning'
-    ? isMediumEffort
-      ? [
-        'Produce a focused implementation plan proportional to the task scope.',
-        'Do not perform direct code edits in planning mode.',
-        'Each planned task must include explicit done criteria and a verification command.',
-        'Planning must produce todo_set and agent_graph_set state.',
-        'todo_set items must include numeric weight values and the total todo weight must sum to 100.',
-        'agent_graph_set nodes must include numeric weight values and the total node weight must sum to 100.',
-        'Sub-agent delegation is OPTIONAL for medium-effort tasks. Only use subagent_spawn if the task genuinely benefits from parallel research.',
-        'Prefer doing focused investigation yourself rather than spawning sub-agents for straightforward work.',
-        'Do not ask the user to continue after partial progress; continue autonomously until completion or a concrete blocker is reached.',
-      ]
-      : [
-        'Produce a concrete implementation plan with explicit staged execution and validation steps.',
-        'Do not perform direct code edits in planning mode.',
-        'Planning output must be highly granular and atomic: each task should represent one action and one completion outcome.',
-        'Split broad, multi-area, or multi-step tasks into smaller independent tasks before finalizing.',
-        'Each planned task must include explicit dependencies, concrete done criteria, and at least one verification command.',
-        'Planning must produce and maintain todo_set and agent_graph_set state.',
-        'todo_set items must include numeric weight values and the total todo weight must sum to 100.',
-        'agent_graph_set nodes must include numeric weight values and the total node weight must sum to 100.',
-        'Planning must use subagent_spawn or subagent_spawn_batch for focused parallel research and delegate only relevant context.',
-        'Quick-start mode for well-scoped tasks: keep parent pre-delegation orientation to at most 3-4 calls and delegate within the first 2-3 calls whenever possible.',
-        'Keep parent orientation lightweight and push detailed file reading/search into sub-agent scopes.',
-        'For independent nodes, use subagent_spawn_batch so work runs in parallel.',
-        'For multi-file inspection, use read_files with concurrency to reduce latency; avoid repeated single-file reads when possible.',
-        'Pass nodeId for each sub-agent request so graph status stays current.',
-        'Keep todo and dependency graph state synchronized.',
-        'Do not ask the user to continue after partial progress; continue autonomously until completion or a concrete blocker is reached.',
-        'For transient tool or sub-agent failures (timeouts, aborts, rate limits), retry automatically before surfacing a blocker.',
-        ...(quickStartMode
-          ? [
-            `Quick-start mode is enabled: delegate focused discovery to sub-agents within the first 2-3 tool calls and no later than ${quickStartMaxPreDelegationToolCalls} successful pre-delegation tool call(s).`,
-            'Limit parent orientation to 3-4 initial tool calls (e.g., root listing, manifest read, git status) before delegating.',
-            'Push detailed file reads/searches into sub-agent scopes unless a direct blocker requires immediate local inspection.',
-          ]
-          : []),
-      ]
-    : isLowEffort
-      ? [
-        'This is a low-effort, focused task. Implement directly without sub-agents.',
-        'Read relevant files before editing. Keep edits minimal and scoped.',
-        'If a tool call fails, read the error, adjust arguments, and retry.',
-        'Run verification commands when validation criteria exist.',
-        'After changes, commit and push if code was modified.',
-        'Do not spawn sub-agents or create complex coordination structures for simple tasks.',
-      ]
-      : isMediumEffort
-        ? [
-          'Execute the planned work with minimal, scoped edits and verify outcomes.',
-          'Read before editing, and use tool output to adapt after failures.',
-          'Follow the todo list if one was created during planning.',
-          'Sub-agent delegation is OPTIONAL. Only use subagent_spawn if the remaining work genuinely benefits from parallelism.',
-          'Prefer doing focused work yourself rather than spawning sub-agents for straightforward changes.',
-          'Use github_api for GitHub REST/GraphQL operations; do not use gh CLI.',
-          'Iterate until validation passes or a true blocker is reached.',
-          'Do not ask the user to continue after partial progress; continue autonomously until completion or a concrete blocker is reached.',
-        ]
+    ? [
+      'Create an implementation plan scaled to the task complexity.',
+      'Do not perform direct code edits in planning mode.',
+      'Each planned task must include explicit done criteria and a verification command.',
+      'Planning must produce todo_set and agent_graph_set state.',
+      'todo_set items must include numeric weight values and the total todo weight must sum to 100.',
+      'agent_graph_set nodes must include numeric weight values and the total node weight must sum to 100.',
+      '',
+      '## Sub-agent delegation (your choice)',
+      'subagent_spawn / subagent_spawn_batch are available for delegating focused research and investigation.',
+      'YOU decide whether and how many sub-agents to use based on the task scope:',
+      '- Simple tasks: skip sub-agents, do the investigation yourself',
+      '- Moderate tasks: 1-2 sub-agents for focused parallel research if it helps',
+      '- Complex tasks: spawn as many sub-agents as needed to cover independent investigation areas',
+      'When using sub-agents, prefer subagent_spawn_batch for independent parallel work.',
+      'When using sub-agents, pass nodeId referencing agent_graph_set nodes so progress tracking works.',
+      'Keep parent orientation lightweight and push detailed file reading/search into sub-agent scopes when you do delegate.',
+      '',
+      `Task effort: ${effort}. Scale planning depth accordingly.`,
+      'Do not ask the user to continue after partial progress; continue autonomously until completion or a concrete blocker is reached.',
+      'For transient tool or sub-agent failures (timeouts, aborts, rate limits), retry automatically before surfacing a blocker.',
+    ]
+    : [
+      'Execute approved work with minimal, scoped edits and verify outcomes.',
+      'Read before editing, and use tool output to adapt after failures.',
+      ...(isLowEffort
+        ? []
         : [
-          'Execute approved work with minimal, scoped edits and verify outcomes.',
-          'Read before editing, and use tool output to adapt after failures.',
           'Read todo_get and agent_graph_get before coding, then keep todo_update current while implementing.',
-          'Use subagent_spawn or subagent_spawn_batch to execute parallelizable slices with minimal relevant context per agent.',
-          'For independent nodes, use subagent_spawn_batch so work runs in parallel.',
-          'For multi-file inspection, use read_files with concurrency to reduce latency; avoid repeated single-file reads when possible.',
-          'Pass nodeId for each sub-agent request so graph status stays current.',
-          'Use github_api for GitHub REST/GraphQL operations; do not use gh CLI.',
-          'Iterate until validation passes or a true blocker is reached.',
-          'After each push or PR update, query remote CI/check status with github_api and keep fixing/re-pushing until checks pass or a true blocker is reached.',
-          'Do not stop at green checks alone: verify PR mergeability, required checks, and review state via github_api, then keep iterating until the PR is merge-ready or a true blocker is reached.',
-          'Always run `git fetch origin` before checking remote branch state, merge status, or pushing. Never trust local tracking refs without fetching first.',
-          'Do not ask the user to continue after partial progress; continue autonomously until completion or a concrete blocker is reached.',
-          'For transient tool or sub-agent failures (timeouts, aborts, rate limits), retry automatically before surfacing a blocker.',
-        ];
+        ]),
+      '',
+      '## Sub-agent delegation (your choice)',
+      'subagent_spawn / subagent_spawn_batch are available for parallel implementation.',
+      'YOU decide whether to use sub-agents based on the remaining work:',
+      '- Simple tasks: implement directly, no sub-agents needed',
+      '- Multi-file changes: spawn sub-agents to parallelize independent slices',
+      'When using sub-agents, prefer subagent_spawn_batch for independent parallel work.',
+      'When using sub-agents, pass nodeId so progress tracking stays current.',
+      'For multi-file inspection, use read_files with concurrency to reduce latency.',
+      '',
+      `Task effort: ${effort}. Scale coordination overhead accordingly.`,
+      'Use github_api for GitHub REST/GraphQL operations; do not use gh CLI.',
+      'Iterate until validation passes or a true blocker is reached.',
+      'After each push or PR update, query remote CI/check status with github_api and keep fixing/re-pushing until checks pass or a true blocker is reached.',
+      'Always run `git fetch origin` before checking remote branch state, merge status, or pushing.',
+      'Do not ask the user to continue after partial progress; continue autonomously until completion or a concrete blocker is reached.',
+      'For transient tool or sub-agent failures (timeouts, aborts, rate limits), retry automatically before surfacing a blocker.',
+    ];
 
   const phaseProvider = phase === 'planning'
     ? (config.planningProvider ?? config.provider)

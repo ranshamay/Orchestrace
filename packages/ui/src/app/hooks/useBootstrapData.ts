@@ -13,6 +13,7 @@ import {
 } from '../../lib/api';
 import type { SessionLlmControls } from '../types';
 import { readRunIdFromUrl, updateRunIdInUrl } from '../utils/runUrl';
+import { sortSessionsByActivityAndRecency } from '../utils/sessionSort';
 import { readTabFromUrl } from '../utils/viewRoute';
 
 type ProviderStatus = { provider: string; source: string };
@@ -93,13 +94,14 @@ export function useBootstrapData() {
         let sessionsState;
         if (sessionsResult.status === 'fulfilled') {
           sessionsState = sessionsResult.value;
-          setSessions(sessionsState.sessions);
+          const sortedSessions = sortSessionsByActivityAndRecency(sessionsState.sessions);
+          setSessions(sortedSessions);
 
           const runIdFromUrl = readRunIdFromUrl();
           const hasRunIdInResults = Boolean(
-            runIdFromUrl && sessionsState.sessions.some((session) => session.id === runIdFromUrl),
+            runIdFromUrl && sortedSessions.some((session) => session.id === runIdFromUrl),
           );
-          const initialSessionId = hasRunIdInResults ? runIdFromUrl : sessionsState.sessions[0]?.id ?? '';
+          const initialSessionId = hasRunIdInResults ? runIdFromUrl : sortedSessions[0]?.id ?? '';
 
           setSelectedSessionId(initialSessionId);
           updateRunIdInUrl(initialSessionId);
