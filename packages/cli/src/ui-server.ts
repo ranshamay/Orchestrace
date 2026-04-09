@@ -7,8 +7,12 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import { PromptSectionName, renderPromptSections } from '@orchestrace/core';
-import type { DagEvent, PromptSection } from '@orchestrace/core';
+import {
+  PromptSectionName,
+  renderPromptSections,
+  validateTaskPromptInput,
+} from '@orchestrace/core';
+import type { DagEvent, PromptSection, TaskPromptValidationErrorCode } from '@orchestrace/core';
 import { getModels } from '@mariozechner/pi-ai';
 import { PiAiAdapter, ProviderAuthManager, type LlmPromptInput, type LlmToolCallEvent } from '@orchestrace/provider';
 import {
@@ -1531,9 +1535,13 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       routeIntent: 'code_change';
       reason: string;
     };
-  }): Promise<{ id: string; warnings?: string[] } | { error: string; statusCode: number }> {
+  }): Promise<{ id: string; warnings?: string[] } | {
+    error: string;
+    statusCode: number;
+    code?: TaskPromptValidationErrorCode;
+    details?: Record<string, unknown>;
+  }> {
     const promptParts = cloneChatContentParts(request.promptParts ?? []);
-    const prompt = asString(request.prompt);
     const implementationProvider = asString(request.implementationProvider) || request.provider;
     const implementationModel = asString(request.implementationModel) || request.model;
     const planningProvider = asString(request.planningProvider) || implementationProvider;
@@ -1575,17 +1583,27 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       }
     }
 
+    const promptValidation = validateTaskPromptInput({
+      prompt: request.prompt,
+      fallbackPrompt: summarizeChatContentParts(promptParts),
+    });
+
+    if (!promptValidation.ok) {
+      return {
+        error: promptValidation.error,
+        statusCode: 400,
+        code: promptValidation.code,
+        details: promptValidation.details,
+      };
+    }
+
     const workspace = request.workspaceId
       ? await workspaceManager.selectWorkspace(request.workspaceId)
       : await workspaceManager.getActiveWorkspace();
 
-    if (!prompt && promptParts.length === 0) {
-      return { error: 'Missing prompt', statusCode: 400 };
-    }
-
     const normalizedPrompt = promptParts.length > 0
-      ? compactInlineImageMarkdown(prompt || summarizeChatContentParts(promptParts))
-      : (prompt || summarizeChatContentParts(promptParts));
+      ? compactInlineImageMarkdown(promptValidation.sanitizedPrompt)
+      : promptValidation.sanitizedPrompt;
 
     const id = randomUUID();
     const adaptiveConcurrency = request.adaptiveConcurrency ?? uiPreferences.adaptiveConcurrency;
