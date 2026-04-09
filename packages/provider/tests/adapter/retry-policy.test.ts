@@ -99,9 +99,12 @@ describe('PiAiAdapter retry policy', () => {
     });
 
     const completePromise = agent.complete('hello');
+    const rejectionExpectation = expect(completePromise).rejects.toMatchObject({
+      failureType: 'provider_unresponsive',
+    });
     await vi.advanceTimersByTimeAsync(10);
 
-    await expect(completePromise).rejects.toMatchObject({ failureType: 'provider_unresponsive' });
+    await rejectionExpectation;
     expect(executeMock).toHaveBeenCalledTimes(2);
   });
 
