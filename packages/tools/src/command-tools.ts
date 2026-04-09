@@ -815,12 +815,31 @@ function isRiskyLiteralCandidate(query: string): boolean {
     return true;
   }
 
+  if (looksLikeFunctionCallLiteral(normalized)) {
+    return true;
+  }
+
   if (/\s(?:--?[a-z][a-z0-9-]*)\b/.test(normalized)) {
     return true;
   }
 
   return false;
 }
+
+function looksLikeFunctionCallLiteral(query: string): boolean {
+  // Protect punctuation-heavy call snippets (e.g. execFileAsync('sh', ['-lc', ...))
+  // by forcing literal semantics unless regex intent is explicit.
+  if (/\b[a-z_$][a-z0-9_$]*\s*\(/i.test(query)) {
+    return true;
+  }
+
+  if (/[()[\]{}'"`,]/.test(query)) {
+    return true;
+  }
+
+  return false;
+}
+
 
 function validateSearchQuery(rawQuery: unknown): ValidationResult<string> {
 
@@ -921,9 +940,18 @@ async function normalizeRequestedSearchPath(rawPath: string): Promise<string> {
 }
 
 function hasRipgrepPathError(stderr: string): boolean {
-
-  return /\bNo such file or directory\b|\bos error 2\b/i.test(stderr);
+  return isDeterministicRipgrepPathError(stderr);
 }
+
+function isDeterministicRipgrepPathError(stderr: string): boolean {
+  const normalized = stderr.trim();
+  if (normalized.length === 0) {
+    return false;
+  }
+
+  return /\bNo such file or directory\b|\bos error 2\b|\bENOENT\b/i.test(normalized);
+}
+
 
 interface FallbackSearchInput {
   cwd: string;

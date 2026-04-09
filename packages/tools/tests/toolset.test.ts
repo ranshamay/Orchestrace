@@ -574,7 +574,7 @@ describe('search_files tool', () => {
     expect(result.content.toLowerCase()).not.toContain('no such file or directory');
   });
 
-  it('honors explicit regex mode even for shell-like query text', async () => {
+    it('honors explicit regex mode even for shell-like query text', async () => {
     const cwd = await makeWorkspace();
     await writeFile(
       join(cwd, 'src', 'shell-like-regex.txt'),
@@ -598,7 +598,80 @@ describe('search_files tool', () => {
     expect(result.content).toContain('shell-like-regex.txt:2:shh -c');
   });
 
-    it('skips invalid target paths without surfacing retriable ripgrep errors', async () => {
+  it('treats execFileAsync call snippets as plain literal query text by default', async () => {
+    const cwd = await makeWorkspace();
+    await writeFile(
+      join(cwd, 'src', 'exec-snippet.ts'),
+      "const cmd = execFileAsync('sh', ['-lc', 'echo hi']);\nconst x = 1;\n",
+      'utf-8',
+    );
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+
+    const result = await toolset.executeTool({
+      id: '1',
+      name: 'search_files',
+      arguments: {
+        query: "execFileAsync('sh', ['-lc',",
+        path: 'src',
+      },
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.content).toContain("exec-snippet.ts:1:const cmd = execFileAsync('sh', ['-lc', 'echo hi']);");
+    expect(result.content.toLowerCase()).not.toContain('no such file or directory');
+    expect(result.content.toLowerCase()).not.toContain('os error 2');
+  });
+
+  it('treats unmatched punctuation-heavy function call fragments as literal search text', async () => {
+    const cwd = await makeWorkspace();
+    await writeFile(
+      join(cwd, 'src', 'punctuation-fragments.ts'),
+      "execFileAsync('sh', ['-lc',\n",
+      'utf-8',
+    );
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+
+    const result = await toolset.executeTool({
+      id: '1',
+      name: 'search_files',
+      arguments: {
+        query: "execFileAsync('sh', ['-lc'",
+        path: 'src',
+      },
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.content).toContain("punctuation-fragments.ts:1:execFileAsync('sh', ['-lc',");
+    expect(result.content.toLowerCase()).not.toContain('no such file or directory');
+    expect(result.content.toLowerCase()).not.toContain('os error 2');
+  });
+
+  it('still supports explicit regex semantics for function-call-like snippets', async () => {
+    const cwd = await makeWorkspace();
+    await writeFile(
+      join(cwd, 'src', 'exec-regex.ts'),
+      "execFileAsync('sh', ['-lc', 'one']);\nexecFileAsync('shh', ['-lc', 'two']);\n",
+      'utf-8',
+    );
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+
+    const result = await toolset.executeTool({
+      id: '1',
+      name: 'search_files',
+      arguments: {
+        query: "execFileAsync\\('sh+',",
+        queryMode: 'regex',
+        path: 'src',
+      },
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.content).toContain("exec-regex.ts:1:execFileAsync('sh', ['-lc', 'one']);");
+    expect(result.content).toContain("exec-regex.ts:2:execFileAsync('shh', ['-lc', 'two']);");
+  });
+
+  it('skips invalid target paths without surfacing retriable ripgrep errors', async () => {
+
     const cwd = await makeWorkspace();
     const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
 
