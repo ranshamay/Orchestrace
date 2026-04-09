@@ -145,6 +145,46 @@ describe('executeWithOptionalTools', () => {
     expect(retryPrompt).toBeUndefined();
   });
 
+  it('uses deterministic remediation guidance for edit validation failures', async () => {
+    const consumeStreamMock = vi.mocked(consumeStream);
+
+    const firstResponse = makeAssistantMessage([
+      { type: 'toolCall', id: 'edit-1', name: 'edit_file', arguments: { path: 'src/file.ts', oldText: 'x', newText: '\n' } },
+    ], 'tool_calls');
+    const finalResponse = makeAssistantMessage([{ type: 'text', text: 'Handled.' }]);
+
+    consumeStreamMock.mockResolvedValueOnce(firstResponse as never);
+    consumeStreamMock.mockResolvedValueOnce(finalResponse as never);
+
+    const context: TestContext = {
+      messages: [],
+      tools: [{ name: 'edit_file', description: 'Edit file', parameters: { type: 'object' } }],
+    };
+
+    await executeWithOptionalTools({
+      model: {} as never,
+      context,
+      options: {},
+      toolset: {
+        tools: [],
+        async executeTool() {
+          return { content: 'Missing newText', isError: true };
+        },
+      },
+      onUsage: () => {},
+    });
+
+    const deterministicPrompt = context.messages.find(
+      (message) => message.role === 'user' && String(message.content?.[0]?.text ?? '').includes('This failure is deterministic.'),
+    );
+    expect(deterministicPrompt).toBeDefined();
+
+    const genericRetryPrompt = context.messages.find(
+      (message) => message.role === 'user' && String(message.content?.[0]?.text ?? '').includes('retry this tool call'),
+    );
+    expect(genericRetryPrompt).toBeUndefined();
+  });
+
   it('retries subagent_spawn_batch failures in a single reduced batch request', async () => {
     const consumeStreamMock = vi.mocked(consumeStream);
 

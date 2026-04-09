@@ -191,6 +191,109 @@ describe('batch filesystem tools', () => {
     expect(duplicateResult.content).toContain('Duplicate paths are not allowed');
   });
 
+  it('edit_file rejects newline-only newText and does not mutate file', async () => {
+    const cwd = await makeWorkspace();
+    const toolset = createAgentToolset({ cwd, phase: 'implementation', taskType: 'code' });
+
+    const failedEdit = await toolset.executeTool({
+      id: '1',
+      name: 'edit_file',
+      arguments: {
+        path: 'src/file.ts',
+        oldText: 'value = 1',
+        newText: '\n',
+      },
+    });
+
+    expect(failedEdit.isError).toBe(true);
+    expect(failedEdit.content).toContain('Missing newText');
+
+    const readBack = await toolset.executeTool({
+      id: '2',
+      name: 'read_file',
+      arguments: { path: 'src/file.ts' },
+    });
+
+    expect(readBack.isError).toBeFalsy();
+    expect(readBack.content).toContain('export const value = 1;');
+  });
+
+  it('edit_file rejects no-op replacement and does not mutate file', async () => {
+    const cwd = await makeWorkspace();
+    const toolset = createAgentToolset({ cwd, phase: 'implementation', taskType: 'code' });
+
+    const failedEdit = await toolset.executeTool({
+      id: '1',
+      name: 'edit_file',
+      arguments: {
+        path: 'src/file.ts',
+        oldText: 'value = 1',
+        newText: 'value = 1',
+      },
+    });
+
+    expect(failedEdit.isError).toBe(true);
+    expect(failedEdit.content).toContain('No-op edit is not allowed');
+
+    const readBack = await toolset.executeTool({
+      id: '2',
+      name: 'read_file',
+      arguments: { path: 'src/file.ts' },
+    });
+
+    expect(readBack.isError).toBeFalsy();
+    expect(readBack.content).toContain('export const value = 1;');
+  });
+
+  it('edit_files rejects invalid replacement payloads before writing', async () => {
+    const cwd = await makeWorkspace();
+    const toolset = createAgentToolset({ cwd, phase: 'implementation', taskType: 'code' });
+
+    const seed = await toolset.executeTool({
+      id: '1',
+      name: 'write_files',
+      arguments: {
+        files: [
+          { path: 'src/one.ts', content: 'export const value = 1;\n' },
+          { path: 'src/two.ts', content: 'export const value = 1;\n' },
+        ],
+      },
+    });
+    expect(seed.isError).toBeFalsy();
+
+    const invalidBatch = await toolset.executeTool({
+      id: '2',
+      name: 'edit_files',
+      arguments: {
+        files: [
+          { path: 'src/one.ts', oldText: 'value = 1', newText: '\n', replaceAll: false },
+          { path: 'src/two.ts', oldText: 'value = 1', newText: 'value = 1', replaceAll: true },
+        ],
+      },
+    });
+
+    expect(invalidBatch.isError).toBe(true);
+    expect(invalidBatch.content).toMatch(/Missing files\[0\]\.newText|No-op edit is not allowed/);
+
+    const verify = await toolset.executeTool({
+      id: '3',
+      name: 'read_files',
+      arguments: {
+        files: [
+          { path: 'src/one.ts' },
+          { path: 'src/two.ts' },
+        ],
+      },
+    });
+
+    expect(verify.isError).toBeFalsy();
+    const parsedVerify = JSON.parse(verify.content) as {
+      files: Array<{ path: string; ok: boolean; content?: string }>;
+    };
+    expect(parsedVerify.files[0].content).toContain('value = 1');
+    expect(parsedVerify.files[1].content).toContain('value = 1');
+  });
+
   it('edit_files applies replacements in parallel and reports partial failures', async () => {
     const cwd = await makeWorkspace();
     const toolset = createAgentToolset({ cwd, phase: 'implementation', taskType: 'code' });

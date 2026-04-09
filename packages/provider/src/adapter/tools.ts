@@ -661,11 +661,25 @@ async function sleepWithSignal(ms: number, signal?: AbortSignal): Promise<void> 
 }
 
 function buildToolCallRetryMessage(toolCall: ToolCall, errorContent: string): string {
+  const deterministicEditFailure = isDeterministicEditValidationFailure(toolCall.name, errorContent);
+  const remediationLine = deterministicEditFailure
+    ? 'This failure is deterministic. Revise the edit plan/arguments (or skip this edit) before issuing another edit tool call.'
+    : 'Correct the arguments using this error and retry this tool call.';
+
   return [
     `Tool call ${toolCall.name} (${toolCall.id}) failed.`,
     errorContent,
-    'Correct the arguments using this error and retry this tool call.',
+    remediationLine,
   ].join('\n');
+}
+
+function isDeterministicEditValidationFailure(toolName: string, errorContent: string): boolean {
+  if (toolName !== 'edit_file' && toolName !== 'edit_files') {
+    return false;
+  }
+
+  const normalized = errorContent.toLowerCase();
+  return normalized.includes('missing newtext') || normalized.includes('no-op edit is not allowed');
 }
 
 function getToolCalls(message: AssistantMessage): ToolCall[] {

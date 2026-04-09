@@ -406,7 +406,8 @@ export function createFilesystemTools(options: FilesystemToolOptions): Registere
         execute: async (toolArgs) => {
           const path = asRequiredString(toolArgs.path, 'path');
           const oldText = asRequiredString(toolArgs.oldText, 'oldText');
-          const newText = asRequiredString(toolArgs.newText, 'newText');
+          const newText = asRequiredReplacementText(toolArgs.newText, 'newText');
+          ensureMeaningfulEditTexts(oldText, newText, 'edit_file');
           const replaceAll = Boolean(toolArgs.replaceAll);
           const target = resolveWorkspacePath(options.cwd, path);
 
@@ -604,10 +605,14 @@ function asEditBatchRequests(value: unknown): EditBatchRequest[] {
       throw new Error(`Invalid files[${index}]`);
     }
 
+    const oldText = asRequiredString(entry.oldText, `files[${index}].oldText`);
+    const newText = asRequiredReplacementText(entry.newText, `files[${index}].newText`);
+    ensureMeaningfulEditTexts(oldText, newText, `files[${index}]`);
+
     return {
       path: asRequiredString(entry.path, `files[${index}].path`),
-      oldText: asRequiredString(entry.oldText, `files[${index}].oldText`),
-      newText: asRequiredString(entry.newText, `files[${index}].newText`),
+      oldText,
+      newText,
       replaceAll: Boolean(entry.replaceAll),
     };
   });
@@ -732,6 +737,20 @@ function asRequiredString(value: unknown, field: string): string {
   }
 
   return parsed;
+}
+
+function asRequiredReplacementText(value: unknown, field: string): string {
+  if (typeof value !== 'string' || value.trim().length === 0) {
+    throw new Error(`Missing ${field}`);
+  }
+
+  return value;
+}
+
+function ensureMeaningfulEditTexts(oldText: string, newText: string, field: string): void {
+  if (oldText === newText) {
+    throw new Error(`No-op edit is not allowed for ${field}: oldText and newText are identical.`);
+  }
 }
 
 function asString(value: unknown): string | undefined {
