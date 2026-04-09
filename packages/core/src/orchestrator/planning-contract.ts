@@ -279,10 +279,16 @@ function hasDependencyCycle(dependenciesById: Map<string, string[]>): boolean {
 
 function collectSubAgentNodeIds(toolCalls: ReplayToolCallRecord[]): Set<string> {
   const nodeIds = new Set<string>();
+  const successfulSubAgentCallIds = collectSuccessfulSubAgentToolCallIds(toolCalls);
 
   for (const call of toolCalls) {
-    // Accept both 'started' and 'result' events since result events may lack input
-    if (call.isError) {
+    // Use only successful sub-agent call ids so failed/malformed attempts
+    // cannot satisfy delegation mapping checks.
+    if (!successfulSubAgentCallIds.has(call.toolCallId)) {
+      continue;
+    }
+
+    if (call.status !== 'started') {
       continue;
     }
 
@@ -313,6 +319,25 @@ function collectSubAgentNodeIds(toolCalls: ReplayToolCallRecord[]): Set<string> 
 
   return nodeIds;
 }
+
+function collectSuccessfulSubAgentToolCallIds(toolCalls: ReplayToolCallRecord[]): Set<string> {
+  const successfulCallIds = new Set<string>();
+
+  for (const call of toolCalls) {
+    if (call.status !== 'result' || call.isError) {
+      continue;
+    }
+
+    if (call.toolName !== 'subagent_spawn' && call.toolName !== 'subagent_spawn_batch') {
+      continue;
+    }
+
+    successfulCallIds.add(call.toolCallId);
+  }
+
+  return successfulCallIds;
+}
+
 
 function parseToolCallInput(input: string | undefined): Record<string, unknown> | undefined {
   if (!input) {
