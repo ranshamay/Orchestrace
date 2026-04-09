@@ -1407,7 +1407,7 @@ describe('run_command safety', () => {
     expect(result.content).toContain('markdown/instructional');
   });
 
-  it('rejects multiline observer-style payloads before shell execution', async () => {
+    it('rejects multiline observer-style payloads before shell execution', async () => {
     const cwd = await makeWorkspace();
     const toolset = createAgentToolset({ cwd, phase: 'implementation', taskType: 'code' });
 
@@ -1431,7 +1431,41 @@ describe('run_command safety', () => {
     expect(result.content).toContain('multiple lines');
   });
 
+    it('executes plain pnpm test forwarding via argv mode', async () => {
+    const cwd = await makeWorkspace();
+    const toolset = createAgentToolset({ cwd, phase: 'implementation', taskType: 'code' });
+
+    const result = await toolset.executeTool({
+      id: '1',
+      name: 'run_command',
+      arguments: { command: 'node -e "console.log(process.argv[1]); console.log(process.argv[2])" -- --runInBand worktree-assignment.test.ts' },
+    });
+
+    expect(result.isError).toBe(false);
+    expect(result.content).toContain('execution: argv');
+    expect(result.content).toContain('--runInBand');
+    expect(result.content).toContain('worktree-assignment.test.ts');
+  });
+
+
+  it('falls back to shell mode when command includes shell operators', async () => {
+    const cwd = await makeWorkspace();
+    const toolset = createAgentToolset({ cwd, phase: 'implementation', taskType: 'code' });
+
+    const result = await toolset.executeTool({
+      id: '1',
+      name: 'run_command',
+      arguments: { command: 'echo left && echo right' },
+    });
+
+    expect(result.isError).toBe(false);
+    expect(result.content).toContain('execution: shell');
+    expect(result.content).toContain('left');
+    expect(result.content).toContain('right');
+  });
+
   it('runs command batches in parallel and reports blocked items', async () => {
+
     const cwd = await makeWorkspace();
     const toolset = createAgentToolset({ cwd, phase: 'implementation', taskType: 'code' });
 

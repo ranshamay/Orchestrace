@@ -13,9 +13,16 @@ describe('verify command sanitization', () => {
     expect(sanitizeVerifyCommand('pnpm test --testNamePattern "name"')).toBe('pnpm test -- --testNamePattern "name"');
   });
 
-  it('keeps already-forwarded pnpm test filter args unchanged', () => {
+    it('keeps already-forwarded pnpm test filter args unchanged', () => {
     expect(sanitizeVerifyCommand('pnpm test -- -t "name"')).toBe('pnpm test -- -t "name"');
   });
+
+  it('keeps already-forwarded pnpm test double-dash payload unchanged', () => {
+    expect(sanitizeVerifyCommand('pnpm test -- --runInBand worktree-assignment.test.ts')).toBe(
+      'pnpm test -- --runInBand worktree-assignment.test.ts',
+    );
+  });
+
 
   it('keeps non-vitest/non-filter commands unchanged', () => {
     expect(sanitizeVerifyCommand('pnpm test --runInBand')).toBe('pnpm test --runInBand');

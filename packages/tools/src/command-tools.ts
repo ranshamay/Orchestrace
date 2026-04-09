@@ -10,8 +10,11 @@ import {
   asString,
   looksDestructive,
   matchesAllowedPrefix,
+  parseCommandToArgv,
+  shouldUseShellExecution,
   validateShellCommandPayload,
 } from './command-tools/guards.js';
+
 
 const GITHUB_API_BASE_URL = 'https://api.github.com';
 const PLAYWRIGHT_ALLOWED_COMMANDS = new Set([
@@ -487,14 +490,23 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
             };
           }
 
-          const result = await runCommand(shellExecutable, ['-lc', command], {
-            cwd,
-            timeoutMs: options.commandTimeoutMs ?? 120000,
-            signal,
-          });
+                    const parsed = parseCommandToArgv(command);
+          const useShell = shouldUseShellExecution(command) || !parsed;
+          const result = useShell
+            ? await runCommand(shellExecutable, ['-lc', command], {
+                cwd,
+                timeoutMs: options.commandTimeoutMs ?? 120000,
+                signal,
+              })
+            : await runCommand(parsed.program, parsed.args, {
+                cwd,
+                timeoutMs: options.commandTimeoutMs ?? 120000,
+                signal,
+              });
 
           const output = formatCommandOutput(result, options.maxOutputChars ?? 24000);
-          const header = `cwd: ${toWorkspaceRelative(options.cwd, cwd)}\nexitCode: ${result.exitCode}`;
+          const header = `cwd: ${toWorkspaceRelative(options.cwd, cwd)}\nexecution: ${useShell ? 'shell' : 'argv'}\nexitCode: ${result.exitCode}`;
+
 
           return {
             content: `${header}\n${output}`,
@@ -579,11 +591,19 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
               };
             }
 
-            const result = await runCommand(shellExecutable, ['-lc', entry.command], {
-              cwd,
-              timeoutMs: options.commandTimeoutMs ?? 120000,
-              signal,
-            });
+                        const parsed = parseCommandToArgv(entry.command);
+            const useShell = shouldUseShellExecution(entry.command) || !parsed;
+            const result = useShell
+              ? await runCommand(shellExecutable, ['-lc', entry.command], {
+                  cwd,
+                  timeoutMs: options.commandTimeoutMs ?? 120000,
+                  signal,
+                })
+              : await runCommand(parsed.program, parsed.args, {
+                  cwd,
+                  timeoutMs: options.commandTimeoutMs ?? 120000,
+                  signal,
+                });
 
             return {
               index,
@@ -592,8 +612,9 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
               ok: result.exitCode === 0,
               blocked: false,
               exitCode: result.exitCode,
-              output: formatCommandOutput(result, maxCharsPerCommand),
+              output: `execution: ${useShell ? 'shell' : 'argv'}\n${formatCommandOutput(result, maxCharsPerCommand)}`,
             };
+
           };
 
           const batchRun = adaptiveConcurrency
