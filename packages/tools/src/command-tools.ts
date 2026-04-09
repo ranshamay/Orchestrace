@@ -169,14 +169,13 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
         }
 
 
-        const args = ['-n', '--no-heading', '--color', 'never', '-e', query];
-        if (!useRegex) {
-          args.push('--fixed-strings');
-        }
-        if (globValidation.value) {
-          args.push('--glob', globValidation.value);
-        }
-        args.push('--', relTarget);
+                const args = buildRipgrepSearchArgs({
+          query,
+          useRegex,
+          glob: globValidation.value,
+          relTarget,
+        });
+
 
         const result = await runCommand('rg', args, {
           cwd: resolvedCwd.cwd,
@@ -1074,7 +1073,34 @@ function validateQueryMode(rawMode: string | undefined): ValidationResult<'regex
   return { ok: true, value: rawMode };
 }
 
+function buildRipgrepSearchArgs(input: {
+  query: string;
+  useRegex: boolean;
+  glob?: string;
+  relTarget: string;
+}): string[] {
+  const args = ['-n', '--no-heading', '--color', 'never'];
+
+  // Pattern is always supplied via -e so leading dashes/punctuation in query
+  // cannot be interpreted as positional paths or command options.
+  args.push('-e', input.query);
+
+  if (!input.useRegex) {
+    args.push('--fixed-strings');
+  }
+
+  if (input.glob) {
+    args.push('--glob', input.glob);
+  }
+
+  // Delimit all flags/patterns from filesystem paths explicitly.
+  args.push('--', input.relTarget);
+
+  return args;
+}
+
 // Intentionally no regex auto-repair helpers: invalid regex input should remain deterministic.
+
 
 
 

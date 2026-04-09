@@ -965,7 +965,7 @@ describe('search_files tool', () => {
     expect(result.content.toLowerCase()).not.toContain('os error 2');
   });
 
-  it('still supports explicit regex semantics for function-call-like snippets', async () => {
+    it('still supports explicit regex semantics for function-call-like snippets', async () => {
     const cwd = await makeWorkspace();
     await writeFile(
       join(cwd, 'src', 'exec-regex.ts'),
@@ -989,7 +989,32 @@ describe('search_files tool', () => {
     expect(result.content).toContain("exec-regex.ts:2:execFileAsync('shh', ['-lc', 'two']);");
   });
 
+  it('treats option-like query text as literal search content', async () => {
+    const cwd = await makeWorkspace();
+    await writeFile(
+      join(cwd, 'src', 'option-like-query.txt'),
+      '--heading\n--glob\n',
+      'utf-8',
+    );
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+
+    const result = await toolset.executeTool({
+      id: 'option-like-query',
+      name: 'search_files',
+      arguments: {
+        query: '--heading',
+        path: 'src',
+      },
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.content).toContain('option-like-query.txt:1:--heading');
+    expect(result.content.toLowerCase()).not.toContain('no such file or directory');
+    expect(result.content.toLowerCase()).not.toContain('os error 2');
+  });
+
   it('skips invalid target paths without surfacing retriable ripgrep errors', async () => {
+
 
     const cwd = await makeWorkspace();
     const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
