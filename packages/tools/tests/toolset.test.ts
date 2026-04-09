@@ -1248,6 +1248,99 @@ describe('subagent prompt enrichment', () => {
     expect(parsed.runs[0]).toMatchObject({ nodeId: 'n-fail', status: 'failed' });
   });
 
+  it('subagent_spawn_batch trips circuit breaker on third identical failure wave', async () => {
+    const cwd = await makeWorkspace();
+    const runSubAgent = vi.fn(async () => {
+      throw new Error('provider timeout');
+    });
+
+    const toolset = createAgentToolset({
+      cwd,
+      phase: 'planning',
+      taskType: 'code',
+      graphId: 'g1',
+      taskId: 't-retry-breaker',
+      runSubAgent,
+    });
+
+    const result = await toolset.executeTool({
+      id: '1',
+      name: 'subagent_spawn_batch',
+      arguments: {
+        agents: [{ nodeId: 'n-fail', prompt: 'Inspect src/file.ts and fail.' }],
+        maxRetries: 5,
+      },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(runSubAgent).toHaveBeenCalledTimes(3);
+
+    const parsed = JSON.parse(result.content) as {
+      status?: string;
+      reason?: string;
+      consecutiveIdenticalFailures?: number;
+      failedNodeIds: string[];
+      runs: Array<{ nodeId?: string; status: 'completed' | 'failed'; error?: string }>;
+    };
+
+    expect(parsed.status).toBe('escalated_error');
+    expect(parsed.reason).toBe('identical_subagent_batch_failures_repeated');
+    expect(parsed.consecutiveIdenticalFailures).toBe(3);
+    expect(parsed.failedNodeIds).toEqual(['n-fail']);
+    expect(parsed.runs[0]?.error).toContain('Circuit breaker tripped');
+  });
+
+  it('subagent_spawn_batch does not trip breaker when failed node set changes', async () => {
+    const cwd = await makeWorkspace();
+    const callCount = new Map<string, number>();
+    const runSubAgent = vi.fn(async (request: { nodeId?: string }) => {
+      const nodeId = request.nodeId ?? 'none';
+      const count = (callCount.get(nodeId) ?? 0) + 1;
+      callCount.set(nodeId, count);
+
+      if (nodeId === 'n1' && count === 1) {
+        throw new Error('n1 first-wave failure');
+      }
+      if (nodeId === 'n2' && count === 1) {
+        throw new Error('n2 second-wave failure');
+      }
+
+      return { text: 'ok', usage: { input: 1, output: 1, cost: 0.001 } };
+    });
+
+    const toolset = createAgentToolset({
+      cwd,
+      phase: 'planning',
+      taskType: 'code',
+      graphId: 'g1',
+      taskId: 't-retry-changing',
+      runSubAgent,
+    });
+
+    const result = await toolset.executeTool({
+      id: '1',
+      name: 'subagent_spawn_batch',
+      arguments: {
+        agents: [
+          { nodeId: 'n1', prompt: 'task n1' },
+          { nodeId: 'n2', prompt: 'task n2' },
+        ],
+        maxRetries: 3,
+      },
+    });
+
+    expect(result.isError).toBeFalsy();
+    const parsed = JSON.parse(result.content) as {
+      status?: string;
+      completed: number;
+      failed: number;
+    };
+
+    expect(parsed.status).toBeUndefined();
+    expect(parsed.completed).toBe(2);
+    expect(parsed.failed).toBe(0);
+  });
+
   it('subagent_spawn_batch reuses cached completed results when all nodeIds are cache hits', async () => {
     const cwd = await makeWorkspace();
     const runSubAgent = vi.fn(async () => ({ text: 'unexpected dispatch' }));

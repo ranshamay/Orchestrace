@@ -47,6 +47,7 @@ const SUBAGENT_SNIPPET_READ_CONCURRENCY = 8;
 const SUBAGENT_BATCH_DEFAULT_CONCURRENCY = 8;
 const SUBAGENT_BATCH_MAX_CONCURRENCY = 64;
 const SUBAGENT_BATCH_MIN_CONCURRENCY = 1;
+const SUBAGENT_BATCH_IDENTICAL_FAILURE_CAP = 2;
 const SUBAGENT_PROMPT_SOFT_LIMIT_CHARS = 2200;
 const SUBAGENT_PROMPT_PREVIEW_MAX_CHARS = 220;
 const SUBAGENT_OUTPUT_PREVIEW_MAX_CHARS = 900;
@@ -642,6 +643,9 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
         const dispatchedNodeIds: string[] = [];
         let finalConcurrency = allRecords.length > 0 ? concurrency : 0;
         let windows = 0;
+        let previousFailureSignature: string | undefined;
+        let consecutiveIdenticalFailures = 0;
+        let breakerTripped = false;
 
         for (let attempt = 0; pending.length > 0 && attempt <= maxRetries; attempt += 1) {
           const mapper = async (
@@ -693,6 +697,10 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
           windows += batchRun.windows;
 
           const nextPending: typeof pending = [];
+          const failedPendingEntries: Array<{
+            pendingEntry: typeof pending[number];
+            result: SubAgentBatchRunResult;
+          }> = [];
           batchRun.results.forEach((result, pendingIndex) => {
             const pendingEntry = pending[pendingIndex];
             dispatchedNodeIds.push(
@@ -705,6 +713,7 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
               return;
             }
 
+            failedPendingEntries.push({ pendingEntry, result });
             if (attempt < maxRetries) {
               nextPending.push(pendingEntry);
             } else {
@@ -713,6 +722,45 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
           });
 
           pending = nextPending;
+
+          if (failedPendingEntries.length > 0) {
+            const failureSignature = JSON.stringify({
+              failedNodeIds: failedPendingEntries
+                .map(({ pendingEntry }) => pendingEntry.request.nodeId ?? pendingEntry.record.id)
+                .sort(),
+              errors: failedPendingEntries
+                .map(({ result }) => `${result.nodeId ?? result.id}:${(result.error ?? 'unknown-error').replace(/\s+/g, ' ').trim()}`)
+                .sort(),
+            });
+
+            if (failureSignature === previousFailureSignature) {
+              consecutiveIdenticalFailures += 1;
+            } else {
+              previousFailureSignature = failureSignature;
+              consecutiveIdenticalFailures = 1;
+            }
+
+            if (consecutiveIdenticalFailures > SUBAGENT_BATCH_IDENTICAL_FAILURE_CAP) {
+              breakerTripped = true;
+              for (const { pendingEntry, result } of failedPendingEntries) {
+                settledByRequestIndex.set(pendingEntry.requestIndex, {
+                  id: result.id,
+                  nodeId: result.nodeId,
+                  status: 'failed',
+                  promptChars: result.promptChars,
+                  promptPreview: result.promptPreview,
+                  error: [
+                    'Circuit breaker tripped: identical subagent batch failures repeated more than twice consecutively.',
+                    'Manual intervention or explicit backoff is required before retrying this batch.',
+                    `failedNodeId=${result.nodeId ?? result.id}`,
+                  ].join(' '),
+                  cacheHit: false,
+                });
+              }
+              pending = [];
+              break;
+            }
+          }
 
           if (pending.length > 0 && attempt < maxRetries) {
             await sleepWithSignal(200 * (2 ** attempt), signal);
@@ -798,6 +846,11 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
           adaptiveConcurrency,
           minConcurrency,
           maxRetries,
+          status: breakerTripped ? 'escalated_error' : undefined,
+          reason: breakerTripped ? 'identical_subagent_batch_failures_repeated' : undefined,
+          identicalFailureCap: breakerTripped ? SUBAGENT_BATCH_IDENTICAL_FAILURE_CAP : undefined,
+          consecutiveIdenticalFailures: breakerTripped ? consecutiveIdenticalFailures : undefined,
+          actionRequired: breakerTripped ? 'manual_intervention_or_backoff_before_retry' : undefined,
           finalConcurrency,
           windows,
           completed: settled.length - failedCount,
