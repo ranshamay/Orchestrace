@@ -72,7 +72,7 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
             Type.Literal('regex'),
             Type.Literal('literal'),
           ], {
-            description: 'How to interpret query: regex (default) or literal fixed-string search.',
+                        description: 'How to interpret query: regex or literal fixed-string search. Defaults to literal when omitted.',
           })),
         }),
       },
