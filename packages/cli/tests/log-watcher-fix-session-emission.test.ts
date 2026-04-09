@@ -257,4 +257,62 @@ describe('log watcher fix-session emission', () => {
       await rm(orchestraceDir, { recursive: true, force: true });
     }
   });
+
+  it('suppresses simultaneous duplicate fix task dispatch for the same finding', async () => {
+    const orchestraceDir = await mkdtemp(join(tmpdir(), 'orchestrace-observer-'));
+
+    try {
+      const gate = Promise.withResolvers<void>();
+      const startSession = vi.fn(async () => {
+        await gate.promise;
+        return { id: `fix-${String(startSession.mock.calls.length)}` };
+      });
+
+      const daemon = new ObserverDaemon({
+        orchestraceDir,
+        eventStore: createEventStoreStub(),
+        llm: { complete: vi.fn() } as unknown as any,
+        startSession,
+        resolveApiKey: async () => undefined,
+      });
+
+      await daemon.updateConfig({ enabled: true, maxConcurrentFixSessions: 0 });
+
+      const finding = {
+        category: 'architecture' as const,
+        severity: 'high' as const,
+        title: 'Duplicate observer dispatch race',
+        description: 'Two concurrent ingestion paths can try to spawn the same fix session.',
+        suggestedFix: 'Claim finding atomically before spawn and release claim on failure.',
+      };
+
+      const firstIngest = daemon.ingestSessionObserverFindings('session-a', [finding]);
+      const secondIngest = daemon.ingestSessionObserverFindings('session-b', [finding]);
+
+      await vi.waitFor(() => {
+        expect(startSession).toHaveBeenCalledTimes(1);
+      });
+
+      gate.resolve();
+
+      const [firstResult, secondResult] = await Promise.all([firstIngest, secondIngest]);
+
+      expect(startSession).toHaveBeenCalledTimes(1);
+      expect(firstResult.registered + secondResult.registered).toBe(1);
+      expect(firstResult.spawned + secondResult.spawned).toBe(1);
+
+      const records = daemon.getFindings().filter((f) => f.title === finding.title);
+      expect(records).toHaveLength(1);
+      expect(records[0]?.fixStatus).toBe('spawned');
+      expect(records[0]?.observedInSessions).toHaveLength(1);
+      expect(records[0]?.additionalSessions).toHaveLength(1);
+      const allSessionIds = [
+        ...(records[0]?.observedInSessions ?? []),
+        ...(records[0]?.additionalSessions ?? []),
+      ].sort();
+      expect(allSessionIds).toEqual(['session-a', 'session-b']);
+    } finally {
+      await rm(orchestraceDir, { recursive: true, force: true });
+    }
+  });
 });
