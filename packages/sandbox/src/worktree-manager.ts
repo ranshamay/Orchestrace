@@ -1,8 +1,8 @@
 import { execFile } from 'node:child_process';
 import type { Dirent } from 'node:fs';
-import { access, mkdir, readFile, readdir, rm } from 'node:fs/promises';
+import { access, mkdir, readFile, readdir, realpath, rm } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { dirname, isAbsolute, join, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
@@ -235,7 +235,14 @@ async function isWorktreeProperlySetUp(repoPath: string, worktreePath: string): 
   }
 
   const registeredWorktrees = await listWorktrees(repoPath);
-  return registeredWorktrees.some((entry) => resolve(entry.path) === resolve(worktreePath));
+  const targetPath = await resolveComparablePath(worktreePath);
+  for (const entry of registeredWorktrees) {
+    if ((await resolveComparablePath(entry.path)) === targetPath) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 async function comprehensiveWorktreeCleanup(repoPath: string, worktreePath: string): Promise<void> {
@@ -267,7 +274,7 @@ async function findWorktreeAdminName(commonDir: string, worktreePath: string): P
     throw error;
   }
 
-  const targetPath = resolve(worktreePath);
+  const targetPath = await resolveComparablePath(worktreePath);
   for (const entry of entries) {
     if (!entry.isDirectory()) {
       continue;
@@ -286,7 +293,7 @@ async function findWorktreeAdminName(commonDir: string, worktreePath: string): P
     const resolvedGitdir = isAbsolute(rawGitdir)
       ? rawGitdir
       : resolve(join(metadataRoot, entry.name), rawGitdir);
-    const candidatePath = resolve(dirname(resolvedGitdir));
+    const candidatePath = await resolveComparablePath(dirname(resolvedGitdir));
     if (candidatePath === targetPath) {
       return entry.name;
     }
@@ -334,6 +341,20 @@ async function pathExists(path: string): Promise<boolean> {
     return true;
   } catch {
     return false;
+  }
+}
+
+async function resolveComparablePath(path: string): Promise<string> {
+  const resolvedPath = resolve(path);
+  try {
+    return await realpath(resolvedPath);
+  } catch {
+    const parent = dirname(resolvedPath);
+    try {
+      return join(await realpath(parent), basename(resolvedPath));
+    } catch {
+      return resolvedPath;
+    }
   }
 }
 
