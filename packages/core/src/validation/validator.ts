@@ -1,7 +1,8 @@
-import { exec } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { access } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { TaskOutput, ValidationConfig, ValidationResult } from '../dag/types.js';
+import { parseShellCommandToArgv } from './shell-command-parser.js';
 
 /**
  * Run validation commands against a task's output.
@@ -109,13 +110,25 @@ async function pathExists(path: string): Promise<boolean> {
 }
 
 function runCommand(command: string, cwd: string): Promise<string> {
+  const parsed = parseShellCommandToArgv(command);
+  if (!parsed.ok || !parsed.parsed) {
+    throw new Error(`${command} failed:\n${parsed.reason ?? 'unable to parse command safely'}`);
+  }
+
+  const { program, args } = parsed.parsed;
+
   return new Promise((resolve, reject) => {
-    exec(command, { cwd, timeout: 120_000, maxBuffer: 10 * 1024 * 1024 }, (error, stdout, stderr) => {
-      if (error) {
-        reject(new Error(`${command} failed:\n${stderr || stdout || error.message}`));
-      } else {
-        resolve(stdout);
-      }
-    });
+    execFile(
+      program,
+      args,
+      { cwd, timeout: 120_000, maxBuffer: 10 * 1024 * 1024 },
+      (error, stdout, stderr) => {
+        if (error) {
+          reject(new Error(`${command} failed:\n${stderr || stdout || error.message}`));
+        } else {
+          resolve(stdout);
+        }
+      },
+    );
   });
 }

@@ -1,12 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { execMock, accessMock } = vi.hoisted(() => ({
-  execMock: vi.fn(),
+const { execFileMock, accessMock } = vi.hoisted(() => ({
+  execFileMock: vi.fn(),
   accessMock: vi.fn(),
 }));
 
 vi.mock('node:child_process', () => ({
-  exec: execMock,
+  execFile: execFileMock,
 }));
 
 vi.mock('node:fs/promises', () => ({
@@ -26,13 +26,20 @@ function makeOutput(): TaskOutput {
   };
 }
 
-function mockExecSequence(steps: Array<{ err?: Error | null; stdout?: string; stderr?: string }>) {
+function mockExecFileSequence(steps: Array<{ err?: Error | null; stdout?: string; stderr?: string }>) {
   let index = 0;
-  execMock.mockImplementation((command: string, _options: unknown, callback: (err: Error | null, stdout: string, stderr: string) => void) => {
-    const step = steps[index++] ?? { err: null, stdout: '', stderr: '' };
-    callback(step.err ?? null, step.stdout ?? '', step.stderr ?? '');
-    return {};
-  });
+  execFileMock.mockImplementation(
+    (
+      _file: string,
+      _args: string[],
+      _options: unknown,
+      callback: (err: Error | null, stdout: string, stderr: string) => void,
+    ) => {
+      const step = steps[index++] ?? { err: null, stdout: '', stderr: '' };
+      callback(step.err ?? null, step.stdout ?? '', step.stderr ?? '');
+      return {};
+    },
+  );
 }
 
 describe('validate dependency guard', () => {
@@ -48,7 +55,7 @@ describe('validate dependency guard', () => {
       throw new Error('missing');
     });
 
-    mockExecSequence([
+    mockExecFileSequence([
       { err: null, stdout: 'installed\n' },
       { err: null, stdout: 'lint ok\n' },
     ]);
@@ -58,15 +65,17 @@ describe('validate dependency guard', () => {
 
     expect(results).toHaveLength(1);
     expect(results[0]?.passed).toBe(true);
-    expect(execMock).toHaveBeenNthCalledWith(
+    expect(execFileMock).toHaveBeenNthCalledWith(
       1,
-      'pnpm install --frozen-lockfile',
+      'pnpm',
+      ['install', '--frozen-lockfile'],
       expect.objectContaining({ cwd: '/tmp/repo' }),
       expect.any(Function),
     );
-    expect(execMock).toHaveBeenNthCalledWith(
+    expect(execFileMock).toHaveBeenNthCalledWith(
       2,
-      'pnpm lint',
+      'pnpm',
+      ['lint'],
       expect.objectContaining({ cwd: '/tmp/repo' }),
       expect.any(Function),
     );
@@ -74,16 +83,17 @@ describe('validate dependency guard', () => {
 
   it('skips pnpm install when node_modules exists', async () => {
     accessMock.mockResolvedValue(undefined);
-    mockExecSequence([{ err: null, stdout: 'test ok\n' }]);
+    mockExecFileSequence([{ err: null, stdout: 'test ok\n' }]);
 
     const config: ValidationConfig = { commands: ['pnpm test'] };
     const results = await validate(makeOutput(), config, '/tmp/repo');
 
     expect(results).toHaveLength(1);
     expect(results[0]?.passed).toBe(true);
-    expect(execMock).toHaveBeenCalledTimes(1);
-    expect(execMock).toHaveBeenCalledWith(
-      'pnpm test',
+    expect(execFileMock).toHaveBeenCalledTimes(1);
+    expect(execFileMock).toHaveBeenCalledWith(
+      'pnpm',
+      ['test'],
       expect.objectContaining({ cwd: '/tmp/repo' }),
       expect.any(Function),
     );
@@ -97,7 +107,7 @@ describe('validate dependency guard', () => {
       throw new Error('missing');
     });
 
-    mockExecSequence([
+    mockExecFileSequence([
       { err: new Error('install failed'), stdout: '', stderr: 'ERR_PNPM_RECURSIVE_EXEC_FIRST_FAIL' },
     ]);
 
@@ -107,14 +117,14 @@ describe('validate dependency guard', () => {
     expect(results).toHaveLength(2);
     expect(results.every((result) => !result.passed)).toBe(true);
     expect(results[0]?.output).toContain('pnpm install --frozen-lockfile failed');
-    expect(execMock).toHaveBeenCalledTimes(1);
+    expect(execFileMock).toHaveBeenCalledTimes(1);
   });
 
   it('preserves retry-once behavior for validation commands', async () => {
     accessMock.mockImplementation(async () => {
       throw new Error('missing');
     });
-    mockExecSequence([
+    mockExecFileSequence([
       { err: new Error('fail'), stdout: '', stderr: 'flake' },
       { err: null, stdout: 'lint ok\n' },
     ]);
@@ -124,18 +134,34 @@ describe('validate dependency guard', () => {
 
     expect(results).toHaveLength(1);
     expect(results[0]?.passed).toBe(true);
-    expect(execMock).toHaveBeenCalledTimes(2);
-    expect(execMock).toHaveBeenNthCalledWith(
+    expect(execFileMock).toHaveBeenCalledTimes(2);
+    expect(execFileMock).toHaveBeenNthCalledWith(
       1,
-      'pnpm lint',
+      'pnpm',
+      ['lint'],
       expect.objectContaining({ cwd: '/tmp/repo-no-lockfile' }),
       expect.any(Function),
     );
-    expect(execMock).toHaveBeenNthCalledWith(
+    expect(execFileMock).toHaveBeenNthCalledWith(
       2,
-      'pnpm lint',
+      'pnpm',
+      ['lint'],
       expect.objectContaining({ cwd: '/tmp/repo-no-lockfile' }),
       expect.any(Function),
     );
+  });
+
+  it('fails safely when command parsing rejects shell meta syntax', async () => {
+    accessMock.mockImplementation(async () => {
+      throw new Error('missing');
+    });
+
+    const config: ValidationConfig = { commands: ['pnpm lint; rm -rf /'] };
+    const results = await validate(makeOutput(), config, '/tmp/repo-no-lockfile');
+
+    expect(results).toHaveLength(1);
+    expect(results[0]?.passed).toBe(false);
+    expect(results[0]?.output).toContain('Rejected shell execution');
+    expect(execFileMock).not.toHaveBeenCalled();
   });
 });
