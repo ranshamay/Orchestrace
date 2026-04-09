@@ -270,17 +270,26 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
           return { content: '(no matches)' };
         }
 
-        const output = formatCommandOutput(result, options.maxOutputChars ?? 16000);
-
+  const output = formatCommandOutput(result, options.maxOutputChars ?? 16000);
         if (result.exitCode > 1) {
-          return createSearchFilesErrorResult({
-            errorType: 'command_failed',
-            message: output,
-            stderr,
-            exitCode: result.exitCode,
-            command: 'rg',
-            path: relTarget,
-          });
+          // ripgrep can return a non-zero code while still emitting valid matches.
+          // Preserve payload output semantics when matches exist and only escalate
+          // as an error when there is no successful match output.
+          if (result.stdout.trim().length === 0) {
+            return createSearchFilesErrorResult({
+              errorType: 'command_failed',
+              message: output,
+              stderr,
+              exitCode: result.exitCode,
+              command: 'rg',
+              path: relTarget,
+            });
+          }
+
+          return {
+            content: output,
+            isError: false,
+          };
         }
 
         return {
