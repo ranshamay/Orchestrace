@@ -28,10 +28,12 @@ export interface ObserverFinding {
   severity: FindingSeverity;
   /** One-line title of the finding. */
   title: string;
-  /** Detailed description of the issue. */
-  description: string;
-  /** Concrete fix suggestion the observer will use as a session prompt. */
-  suggestedFix: string;
+  /** One-sentence issue summary (descriptive only, no fix instructions). */
+  issueSummary: string;
+  /** Concrete evidence from real events/logs (2-3 items). */
+  evidence: string[];
+  /** Optional rationale explaining why severity is justified. */
+  severityRationale?: string;
   /** File paths relevant to this finding (if any). */
   relevantFiles?: string[];
   /** Session IDs where this issue was observed. */
@@ -126,8 +128,9 @@ export interface AnalysisResult {
     category: FindingCategory;
     severity: FindingSeverity;
     title: string;
-    description: string;
-    suggestedFix: string;
+    issueSummary: string;
+    evidence: string[];
+    severityRationale?: string;
     relevantFiles?: string[];
   }>;
 }
