@@ -5,6 +5,8 @@ import { Type } from '@mariozechner/pi-ai';
 import type { AgentToolsetOptions, RegisteredAgentTool } from './types.js';
 import { resolveWorkspacePath, toWorkspaceRelative } from './path-utils.js';
 import { formatCommandOutput, runCommand } from './command-tools/command-runner.js';
+import { runSafeRipgrep } from './command-tools/safe-ripgrep.js';
+
 import {
   asRequiredString,
   asString,
@@ -169,20 +171,16 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
         }
 
 
-        const args = ['-n', '--no-heading', '--color', 'never', '-e', query];
-        if (!useRegex) {
-          args.push('--fixed-strings');
-        }
-        if (globValidation.value) {
-          args.push('--glob', globValidation.value);
-        }
-        args.push('--', relTarget);
-
-        const result = await runCommand('rg', args, {
+                const result = await runSafeRipgrep({
           cwd: resolvedCwd.cwd,
+          query,
+          relTarget,
+          useRegex,
+          glob: globValidation.value,
           timeoutMs: options.commandTimeoutMs ?? 20000,
           signal,
         });
+
 
         const stderr = result.stderr.trim();
 
@@ -222,18 +220,20 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
           }
         }
 
-                const output = formatCommandOutput(result, options.maxOutputChars ?? 16000);
-        const hasMatches = result.stdout.trim().length > 0;
+                        const output = formatCommandOutput(result, options.maxOutputChars ?? 16000);
+        const stdoutOnly = result.stdout.trim();
+        const hasMatches = stdoutOnly.length > 0;
 
-        // Prefer successful match output when available. ripgrep may emit stderr
-        // diagnostics in mixed-result scenarios; only escalate error behavior
-        // when there are no matches to return.
+        // Prefer successful match output when available. ripgrep can emit stderr
+        // diagnostics in mixed-result scenarios; returning stdout-only avoids
+        // surfacing misleading path-noise while preserving valid matches.
         if (hasMatches) {
           return {
-            content: output,
+            content: stdoutOnly,
             isError: false,
           };
         }
+
 
         if (result.exitCode === 2 && useRegex) {
           return createSearchFilesErrorResult({
@@ -246,7 +246,8 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
           });
         }
 
-        const hasPathError = hasRipgrepPathError(stderr);
+                const hasPathError = result.isPathError;
+
 
 
                 if (result.exitCode === 1 && result.stdout.trim().length === 0) {

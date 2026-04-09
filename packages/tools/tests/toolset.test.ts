@@ -631,10 +631,11 @@ describe('search_files tool', () => {
       },
     });
 
-    expect(result.isError).toBeFalsy();
+        expect(result.isError).toBeFalsy();
     expect(result.content).toContain('src/match.ts:1:validateShellCommandPrompt();');
-    expect(result.content).toContain('stderr:\nrg warning: simulated warning without blocking matches');
+    expect(result.content).not.toContain('stderr:\nrg warning: simulated warning without blocking matches');
     expect(result.details).toBeUndefined();
+
 
     runCommandSpy.mockRestore();
   });
@@ -659,16 +660,62 @@ describe('search_files tool', () => {
       },
     });
 
-    expect(result.isError).toBeFalsy();
+        expect(result.isError).toBeFalsy();
     expect(result.content).toContain('src/coordination-tools.ts:1:async function mapWithAdaptiveConcurrency() {}');
-    expect(result.content).toContain('No such file or directory (os error 2)');
+    expect(result.content).not.toContain('No such file or directory (os error 2)');
     expect(result.details).toBeUndefined();
+
 
     runCommandSpy.mockRestore();
   });
 
 
+  
+
+  it('builds canonical rg argv with query as content expression and target after --', async () => {
+    const cwd = await makeWorkspace();
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+
+    const runCommandSpy = vi.spyOn(commandRunner, 'runCommand').mockResolvedValueOnce({
+      exitCode: 1,
+      stdout: '',
+      stderr: '',
+    });
+
+    const result = await toolset.executeTool({
+      id: 'argv-shape',
+      name: 'search_files',
+      arguments: {
+        query: 'subagent_spawn_batch',
+        path: 'src',
+        glob: '*.ts',
+      },
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.content).toBe('(no matches)');
+
+    expect(runCommandSpy).toHaveBeenCalledTimes(1);
+    const [, args] = runCommandSpy.mock.calls[0] ?? [];
+    expect(args).toEqual([
+      '-n',
+      '--no-heading',
+      '--color',
+      'never',
+      '-e',
+      'subagent_spawn_batch',
+      '--fixed-strings',
+      '--glob',
+      '*.ts',
+      '--',
+      'src',
+    ]);
+
+    runCommandSpy.mockRestore();
+  });
+
   it('marks search_files as error for genuine command failures without match output', async () => {
+
     const cwd = await makeWorkspace();
     const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
 
