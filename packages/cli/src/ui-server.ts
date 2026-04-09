@@ -3100,18 +3100,20 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         const continuationPhase = resolveSessionToolMode(session);
         const previousSessionStatus = session.status;
         const chatStartedAt = now();
-        session.status = 'running';
+                        session.status = 'running';
         session.updatedAt = chatStartedAt;
         session.llmStatus = createLlmStatus('analyzing', chatStartedAt, {
           detail: 'Processing follow-up prompt.',
           phase: continuationPhase === 'planning' || continuationPhase === 'implementation'
             ? continuationPhase
             : undefined,
-        });
+                });
         uiStatePersistence.schedule();
+        broadcastSessionStatusUpsert(session);
 
         // Dual-write: session status + llm status change for chat follow-up
         emitSessionEvent(id, {
+
           time: chatStartedAt,
           type: 'session:status-change',
           payload: { status: 'running' },
@@ -3405,13 +3407,15 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
             trimThreadMessages(thread);
             const completedAt = now();
             thread.updatedAt = completedAt;
-            applyFollowUpCompletionState(
+                        applyFollowUpCompletionState(
               session,
               sessionTodos.get(session.id) ?? [],
               continuationPhase,
               completedAt,
             );
             uiStatePersistence.schedule();
+            broadcastSessionStatusUpsert(session);
+
 
             // Dual-write: chat assistant message + follow-up state
             emitSessionEvent(session.id, {
@@ -3451,7 +3455,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
             streamState.updatedAt = now();
 
             const failedAt = now();
-            applyFollowUpFailureState(
+                        applyFollowUpFailureState(
               session,
               sessionTodos.get(session.id) ?? [],
               continuationPhase,
@@ -3460,6 +3464,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
               failedAt,
             );
             uiStatePersistence.schedule();
+            broadcastSessionStatusUpsert(session);
+
 
             // Dual-write: streaming chat failure state
             emitSessionEvent(session.id, { time: failedAt, type: 'session:status-change', payload: { status: session.status } });
@@ -3525,7 +3531,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         const continuationPhase = resolveSessionToolMode(session);
         const previousSessionStatus = session.status;
         const chatStartedAt = now();
-        thread.updatedAt = chatStartedAt;
+                thread.updatedAt = chatStartedAt;
         session.status = 'running';
         session.updatedAt = chatStartedAt;
         session.llmStatus = createLlmStatus('analyzing', chatStartedAt, {
@@ -3535,11 +3541,13 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
             : undefined,
         });
         uiStatePersistence.schedule();
+        broadcastSessionStatusUpsert(session);
 
         // Dual-write: sync chat user message + status
         emitSessionEvent(id, { time: chatStartedAt, type: 'session:chat-message', payload: { message: userMessage } });
         emitSessionEvent(id, { time: chatStartedAt, type: 'session:status-change', payload: { status: 'running' } });
         emitSessionEvent(id, { time: chatStartedAt, type: 'session:llm-status-change', payload: { llmStatus: session.llmStatus } });
+
 
         try {
           const systemPrompt = continuationPhase === 'planning'
@@ -3733,13 +3741,15 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           trimThreadMessages(thread);
           const completedAt = now();
           thread.updatedAt = completedAt;
-          applyFollowUpCompletionState(
+                    applyFollowUpCompletionState(
             session,
             sessionTodos.get(session.id) ?? [],
             continuationPhase,
             completedAt,
           );
           uiStatePersistence.schedule();
+          broadcastSessionStatusUpsert(session);
+
 
           // Dual-write: sync chat assistant message + follow-up state
           emitSessionEvent(session.id, { time: completedAt, type: 'session:chat-message', payload: { message: assistantMessage } });
@@ -3755,7 +3765,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         } catch (error) {
           const failedAt = now();
           const detail = toErrorMessage(error);
-          applyFollowUpFailureState(
+                    applyFollowUpFailureState(
             session,
             sessionTodos.get(session.id) ?? [],
             continuationPhase,
@@ -3764,6 +3774,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
             failedAt,
           );
           uiStatePersistence.schedule();
+          broadcastSessionStatusUpsert(session);
+
 
           // Dual-write: sync chat failure state
           emitSessionEvent(session.id, { time: failedAt, type: 'session:status-change', payload: { status: session.status } });
