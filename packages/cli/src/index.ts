@@ -293,10 +293,16 @@ Environment variables:
       console.log(`[route] shell fallback applied: ${dispatch.shell.reason ?? 'prompt failed shell validation'}`);
     }
 
-    if (route.category === 'shell_command') {
-      const code = await runShellCommandRoute(dispatch.shell.command!, workspace.path);
+        if (route.category === 'shell_command') {
+      const shellCommand = dispatch.shell.command;
+      if (!shellCommand) {
+        console.error(`Shell command validation failed: ${dispatch.shell.reason ?? 'input did not pass centralized validation'}`);
+        process.exit(1);
+      }
+      const code = await runShellCommandRoute(shellCommand, workspace.path);
       process.exit(code);
     }
+
 
     const graph = buildSingleTaskGraph(taskPrompt, route.category);
     const code = await runGraph(graph, {

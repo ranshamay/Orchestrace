@@ -1683,9 +1683,26 @@ async function main(): Promise<void> {
 
     await enterLifecyclePhase('EXECUTING');
 
-    const outputs = route.category === 'shell_command'
-      ? await runShellCommandRoute(dispatch.shell.command!, config.workspacePath)
-      : await orchestrate(graph, {
+        let outputs: Map<string, TaskOutput>;
+    if (route.category === 'shell_command') {
+      const shellCommand = dispatch.shell.command;
+      if (!shellCommand) {
+        outputs = new Map([
+          ['task', {
+            taskId: 'task',
+            status: 'failed',
+            response: dispatch.shell.reason ?? 'Shell dispatch selected but no safe command was resolved.',
+            durationMs: 0,
+            retries: 0,
+            error: 'shell_input_validation_failed',
+          }],
+        ]);
+      } else {
+        outputs = await runShellCommandRoute(shellCommand, config.workspacePath);
+      }
+    } else {
+      outputs = await orchestrate(graph, {
+
       llm,
       cwd: config.workspacePath,
       planOutputDir: join(config.workspacePath, '.orchestrace', 'plans'),
@@ -1917,10 +1934,12 @@ async function main(): Promise<void> {
         if ('taskId' in event && event.type !== 'task:tool-call') {
           void emit({ time: t, type: 'session:task-status-change', payload: { taskId: event.taskId, taskStatus: event.type } });
         }
-      },
+            },
     });
+    }
 
     if (cancelled) {
+
       await finalizeCheckpoint('cancelled', iso());
       await lifecycle.cleanup();
       await lifecycle.complete('CANCELLED');
