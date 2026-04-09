@@ -10,6 +10,7 @@ import {
   asString,
   looksDestructive,
   matchesAllowedPrefix,
+  validateShellCommandPayload,
 } from './command-tools/guards.js';
 
 const GITHUB_API_BASE_URL = 'https://api.github.com';
@@ -369,10 +370,18 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
             };
           }
 
-          if (!matchesAllowedPrefix(command, options.runCommandAllowPrefixes)) {
+                    if (!matchesAllowedPrefix(command, options.runCommandAllowPrefixes)) {
             const allowed = options.runCommandAllowPrefixes?.join(', ') ?? '(none configured)';
             return {
               content: `Blocked command outside allowlist: ${command}\nAllowed prefixes: ${allowed}`,
+              isError: true,
+            };
+          }
+
+          const payloadValidation = validateShellCommandPayload(command);
+          if (!payloadValidation.ok) {
+            return {
+              content: `${payloadValidation.reason ?? 'Blocked non-command payload.'} Payload: ${command}`,
               isError: true,
             };
           }
@@ -443,7 +452,7 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
               };
             }
 
-            if (!matchesAllowedPrefix(entry.command, options.runCommandAllowPrefixes)) {
+                        if (!matchesAllowedPrefix(entry.command, options.runCommandAllowPrefixes)) {
               const allowed = options.runCommandAllowPrefixes?.join(', ') ?? '(none configured)';
               return {
                 index,
@@ -453,6 +462,19 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
                 blocked: true,
                 exitCode: -1,
                 output: `Blocked command outside allowlist: ${entry.command}\nAllowed prefixes: ${allowed}`,
+              };
+            }
+
+            const payloadValidation = validateShellCommandPayload(entry.command);
+            if (!payloadValidation.ok) {
+              return {
+                index,
+                command: entry.command,
+                cwd: relativeCwd,
+                ok: false,
+                blocked: true,
+                exitCode: -1,
+                output: `${payloadValidation.reason ?? 'Blocked non-command payload.'} Payload: ${entry.command}`,
               };
             }
 
