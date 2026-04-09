@@ -68,6 +68,11 @@ import {
   formatLifecyclePhaseFailure,
 } from './runner-lifecycle-diagnostics.js';
 import {
+  classifySubAgentFailure,
+  isRetryableSubAgentFailure,
+  type SubAgentFailureType,
+} from './runner-subagent-failure.js';
+import {
   resolveRunnerPolicy,
   type ResolutionConflict,
 } from './runner-config-resolution.js';
@@ -127,6 +132,8 @@ interface GitHubApiResponse {
   status: number;
   body: unknown;
 }
+
+// sub-agent failure types are imported from runner-subagent-failure.ts
 
 // ---------------------------------------------------------------------------
 // Main
@@ -1571,10 +1578,15 @@ async function main(): Promise<void> {
 
             return structured;
           } catch (error) {
+            const message = errorMsg(error);
+            const classifiedFailure = classifySubAgentFailure(error);
+
             emitSubAgentEvent(task.id, subPhase, toolCallId, 'failed', {
               provider: subProvider, model: subModel, reasoning: request.reasoning ?? reasoning,
               nodeId: request.nodeId, prompt: request.prompt,
-              error: errorMsg(error),
+              error: message,
+              failureType: classifiedFailure.failureType,
+              recoverable: classifiedFailure.recoverable,
             });
 
             // Update graph node status directly (bypasses truncated DagEvent output)
@@ -1583,6 +1595,18 @@ async function main(): Promise<void> {
                 void emit({ time: iso(), type: 'session:agent-graph-set', payload: { graph: agentGraph } });
               }
             }
+
+            if (classifiedFailure.recoverable) {
+              return {
+                text: '',
+                summary: `Recoverable sub-agent failure (${classifiedFailure.failureType}): ${message}`,
+                risks: [
+                  `Sub-agent execution ended with recoverable ${classifiedFailure.failureType} failure.`,
+                  message,
+                ],
+              };
+            }
+
             throw error;
           }
         },
@@ -1800,6 +1824,8 @@ async function main(): Promise<void> {
       nodeId?: string; prompt: string;
       outputText?: string; usage?: { input: number; output: number; cost: number };
       error?: string;
+      failureType?: SubAgentFailureType;
+      recoverable?: boolean;
     },
   ): void {
     const inputPayload = {
@@ -1824,6 +1850,8 @@ async function main(): Promise<void> {
         usageReported: Boolean(opts.usage),
         outputPreview: opts.outputText ? compact(opts.outputText, SUBAGENT_WORKER_OUTPUT_PREVIEW_MAX_CHARS) : undefined,
         error: opts.error,
+        failureType: opts.failureType,
+        recoverable: opts.recoverable,
       }),
       isError: status === 'failed',
     };
@@ -2464,10 +2492,7 @@ async function completeWithRetry(
 }
 
 function isRetryable(err: unknown): boolean {
-  const msg = errorMsg(err).toLowerCase();
-  return msg.includes('aborted') || msg.includes('timeout') || msg.includes('timed out')
-    || msg.includes('rate limit') || msg.includes('429') || msg.includes('temporar')
-    || msg.includes('econnreset') || msg.includes('etimedout') || msg.includes('network');
+  return isRetryableSubAgentFailure(err);
 }
 
 function buildStructuredResult(result: { text: string; usage?: { input: number; output: number; cost: number } }): SubAgentResult {

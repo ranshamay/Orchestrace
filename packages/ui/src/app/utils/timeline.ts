@@ -164,10 +164,22 @@ function summarizeSubAgentWorkerOutput(payload: string, isError: boolean): strin
   const usage = parsed.usage && typeof parsed.usage === 'object' ? parsed.usage as Record<string, unknown> : undefined;
   const usageInput = asNumber(usage?.input);
   const usageOutput = asNumber(usage?.output);
+  const failureType = normalizeFailureType(typeof parsed.failureType === 'string' ? parsed.failureType : undefined);
+  const recoverable = parsed.recoverable === true;
 
   const prefix = nodeId ? `Sub-agent ${nodeId}` : 'Sub-agent';
   if (isError || status === 'failed') {
-    return `${prefix} failed`;
+    const failureBits: string[] = [];
+    if (failureType) {
+      failureBits.push(failureType.replace(/_/g, ' '));
+    }
+    if (recoverable) {
+      failureBits.push('recoverable');
+    }
+
+    return failureBits.length > 0
+      ? `${prefix} failed • ${failureBits.join(', ')}`
+      : `${prefix} failed`;
   }
 
   if (typeof usageInput === 'number' || typeof usageOutput === 'number') {

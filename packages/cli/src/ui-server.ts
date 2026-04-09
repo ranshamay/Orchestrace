@@ -63,6 +63,8 @@ import type {
   WorkState,
   LlmSessionState,
   SessionCreationReason,
+  SessionWorkspaceAssignmentProvenance,
+  SessionWorktreePathSessionIdRelation,
 } from './ui-server/types.js';
 import { WorkspaceManager } from './workspace-manager.js';
 import { FileEventStore } from '@orchestrace/store';
@@ -101,6 +103,7 @@ const PERSIST_EVENT_MESSAGE_MAX_CHARS = 1_200;
 const PERSIST_CHAT_MESSAGE_MAX_CHARS = 2_400;
 const SESSION_EVENT_HISTORY_LIMIT = 2_000;
 const TOOL_EVENT_PREVIEW_MAX_CHARS = parsePositiveSetting(process.env.ORCHESTRACE_TOOL_EVENT_PREVIEW_MAX_CHARS) ?? 200_000;
+const WORK_DIFF_MAX_CHARS = 300_000;
 const PHASE_PROGRESS_PLAN_WEIGHT_DEFAULT = 30;
 const PHASE_PROGRESS_IMPLEMENTATION_WEIGHT_DEFAULT = 70;
 const STARTUP_RECOVERY_MODE_ENV = 'ORCHESTRACE_RECOVERY_MODE';
@@ -241,6 +244,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
   const sessionContextEngines = new Map<string, ContextEngine>();
   const sessionContextStates = new Map<string, SessionContextState>();
   const pendingSubagentNodeIdsBySession = new Map<string, Map<string, string[]>>();
+  const worktreePathLocks = new Map<string, string>();
   const sessionObservers = new Map<string, SessionObserver>();
   const chatStreams = new Map<string, ChatTokenStream>();
   let uiPreferences = resolveUiPreferencesDefaults();
@@ -333,6 +337,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         if (!materialized) continue;
 
         const c = materialized.config;
+        const legacyConfig = c as unknown as Record<string, unknown>;
         const session: WorkSession = {
           id: c.id,
           workspaceId: c.workspaceId,
@@ -358,6 +363,18 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           trivialTaskMaxPromptLength: c.trivialTaskMaxPromptLength ?? resolveTrivialTaskMaxPromptLengthDefault(),
           worktreePath: c.worktreePath,
           worktreeBranch: c.worktreeBranch,
+          workspaceAssignment: isRecord(legacyConfig.workspaceAssignment)
+            ? {
+              assignmentSource: normalizeWorkspaceAssignmentSource(legacyConfig.workspaceAssignment.assignmentSource) ?? 'workspace-root',
+              reusedExistingWorktree: parseBooleanSetting(legacyConfig.workspaceAssignment.reusedExistingWorktree) ?? undefined,
+              cleanupApplied: parseBooleanSetting(legacyConfig.workspaceAssignment.cleanupApplied) ?? undefined,
+              cleanupDefaultBranch: asString(legacyConfig.workspaceAssignment.cleanupDefaultBranch) || undefined,
+              workspacePathSessionIdRelation: normalizeWorkspacePathSessionIdRelation(
+                legacyConfig.workspaceAssignment.workspacePathSessionIdRelation,
+              ),
+              workspacePathSessionId: asString(legacyConfig.workspaceAssignment.workspacePathSessionId) || undefined,
+            }
+            : undefined,
           creationReason: c.creationReason,
           sourceSessionId: c.sourceSessionId,
           source: c.source,
@@ -2490,6 +2507,31 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       if (req.method === 'GET' && pathname === '/api/work') {
         const sessions = serializeSessionsSnapshot();
         sendJson(res, 200, { sessions });
+        return;
+      }
+
+      if (req.method === 'GET' && pathname === '/api/work/diff') {
+        const id = asString(url.searchParams.get('id'));
+        if (!id) {
+          sendJson(res, 400, { error: 'Missing id' });
+          return;
+        }
+
+        const session = workSessions.get(id);
+        if (!session) {
+          sendJson(res, 404, { error: 'Unknown work session' });
+          return;
+        }
+
+        try {
+          const diff = await resolveSessionWorkDiff(session);
+          sendJson(res, 200, {
+            id,
+            ...diff,
+          });
+        } catch (error) {
+          sendJson(res, 500, { error: toErrorMessage(error) });
+        }
         return;
       }
 
@@ -5002,6 +5044,33 @@ function normalizePlanningNoToolGuardMode(value: unknown): 'enforce' | 'warn' | 
   return undefined;
 }
 
+function normalizeWorkspaceAssignmentSource(
+  value: unknown,
+): SessionWorkspaceAssignmentProvenance['assignmentSource'] | undefined {
+  const normalized = asString(value).toLowerCase();
+  if (
+    normalized === 'workspace-root'
+    || normalized === 'selected-worktree'
+    || normalized === 'fallback-worktree'
+    || normalized === 'auto-created-worktree'
+  ) {
+    return normalized;
+  }
+
+  return undefined;
+}
+
+function normalizeWorkspacePathSessionIdRelation(
+  value: unknown,
+): SessionWorktreePathSessionIdRelation | undefined {
+  const normalized = asString(value).toLowerCase();
+  if (normalized === 'match' || normalized === 'mismatch' || normalized === 'none') {
+    return normalized;
+  }
+
+  return undefined;
+}
+
 function normalizeUiTab(value: unknown): 'graph' | 'settings' | undefined {
   const normalized = asString(value).toLowerCase();
   if (normalized === 'graph' || normalized === 'settings') {
@@ -6822,6 +6891,124 @@ function parseGitBranchLine(line: string | undefined): { branch?: string; head?:
   const dotIdx = payload.indexOf('...');
   const branch = (dotIdx >= 0 ? payload.slice(0, dotIdx) : payload).trim();
   return { branch: branch || undefined, detached: false };
+}
+
+async function resolveSessionWorkDiff(session: WorkSession): Promise<{
+  baseBranch: string;
+  comparedPath: string;
+  hasChanges: boolean;
+  files: Array<{ path: string; status: 'added' | 'modified' | 'deleted' | 'renamed' | 'copied' | 'unmerged' | 'unknown'; previousPath?: string }>;
+  stats: { files: number; additions: number; deletions: number };
+  diff: string;
+  generatedAt: string;
+  truncated: boolean;
+}> {
+  const comparedPath = session.worktreePath ?? session.workspacePath;
+  const baseBranch = await resolveDefaultBranch(comparedPath);
+  const nameStatusRaw = await gitExec(comparedPath, ['diff', '--name-status', '--find-renames=60%', baseBranch]);
+  const numStatRaw = await gitExec(comparedPath, ['diff', '--numstat', '--find-renames=60%', baseBranch]);
+  const diffRaw = await gitExec(comparedPath, ['diff', '--no-color', '--find-renames=60%', '--unified=3', baseBranch]);
+
+  const files = parseDiffNameStatus(nameStatusRaw);
+  const stats = parseDiffNumStat(numStatRaw);
+  const trimmedDiff = diffRaw.trimEnd();
+  const truncated = trimmedDiff.length > WORK_DIFF_MAX_CHARS;
+  const diff = truncated
+    ? `${trimmedDiff.slice(0, WORK_DIFF_MAX_CHARS)}\n\n# Diff output truncated at ${WORK_DIFF_MAX_CHARS.toLocaleString()} characters.`
+    : trimmedDiff;
+
+  return {
+    baseBranch,
+    comparedPath,
+    hasChanges: files.length > 0,
+    files,
+    stats,
+    diff,
+    generatedAt: now(),
+    truncated,
+  };
+}
+
+function parseDiffNameStatus(raw: string): Array<{
+  path: string;
+  status: 'added' | 'modified' | 'deleted' | 'renamed' | 'copied' | 'unmerged' | 'unknown';
+  previousPath?: string;
+}> {
+  const lines = raw.split('\n').map((line) => line.trim()).filter(Boolean);
+  const files: Array<{
+    path: string;
+    status: 'added' | 'modified' | 'deleted' | 'renamed' | 'copied' | 'unmerged' | 'unknown';
+    previousPath?: string;
+  }> = [];
+
+  for (const line of lines) {
+    const fields = line.split('\t').filter(Boolean);
+    if (fields.length < 2) {
+      continue;
+    }
+
+    const code = fields[0].trim().toUpperCase();
+    const primaryCode = code[0] ?? '';
+
+    if (primaryCode === 'R' || primaryCode === 'C') {
+      if (fields.length < 3) {
+        continue;
+      }
+
+      files.push({
+        path: fields[2],
+        previousPath: fields[1],
+        status: primaryCode === 'R' ? 'renamed' : 'copied',
+      });
+      continue;
+    }
+
+    files.push({
+      path: fields[1],
+      status: mapDiffStatus(primaryCode),
+    });
+  }
+
+  return files;
+}
+
+function mapDiffStatus(code: string): 'added' | 'modified' | 'deleted' | 'renamed' | 'copied' | 'unmerged' | 'unknown' {
+  if (code === 'A') return 'added';
+  if (code === 'M') return 'modified';
+  if (code === 'D') return 'deleted';
+  if (code === 'R') return 'renamed';
+  if (code === 'C') return 'copied';
+  if (code === 'U') return 'unmerged';
+  return 'unknown';
+}
+
+function parseDiffNumStat(raw: string): { files: number; additions: number; deletions: number } {
+  let files = 0;
+  let additions = 0;
+  let deletions = 0;
+
+  const lines = raw.split('\n').map((line) => line.trim()).filter(Boolean);
+  for (const line of lines) {
+    const fields = line.split('\t');
+    if (fields.length < 3) {
+      continue;
+    }
+
+    files += 1;
+    const addRaw = fields[0];
+    const delRaw = fields[1];
+    const add = addRaw === '-' ? 0 : Number.parseInt(addRaw, 10);
+    const del = delRaw === '-' ? 0 : Number.parseInt(delRaw, 10);
+
+    if (Number.isFinite(add)) {
+      additions += add;
+    }
+    if (Number.isFinite(del)) {
+      deletions += del;
+    }
+  }
+
+  return { files, additions, deletions };
 }
 
 async function ensureSessionWorkspaceReady(
