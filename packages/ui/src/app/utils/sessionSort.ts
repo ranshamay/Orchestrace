@@ -12,7 +12,7 @@ function compareByRecencyDesc(a: WorkSession, b: WorkSession): number {
 
 export function isActiveSession(session: WorkSession): boolean {
   const status = normalizeSessionStatus(session.status);
-  return status !== 'completed' && status !== 'failed' && status !== 'cancelled';
+    return status !== 'completed' && status !== 'failed' && status !== 'cancelled' && status !== 'merged';
 }
 
 export function sortSessionsByActivityAndRecency(sessions: WorkSession[]): WorkSession[] {
