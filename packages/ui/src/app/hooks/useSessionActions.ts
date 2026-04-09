@@ -46,18 +46,34 @@ export function useSessionActions(params: SessionActionsParams) {
   } = params;
   const composerActionInFlightRef = useRef(false);
 
-  const hasComposerContent = composerText.trim().length > 0 || composerImages.length > 0;
+      const hasComposerContent = composerText.trim().length > 0 || composerImages.length > 0;
 
   const handleSendChat = useCallback(async () => {
     if (!hasComposerContent || composerActionInFlightRef.current) return;
     composerActionInFlightRef.current = true;
     setErrorMessage('');
+
+    const draftText = composerText;
+    const draftImages = composerImages;
+    const previousChatMessages = chatMessages;
+    const previousSessions = sessions;
+
     try {
-      const payload = composePrompt(composerText, composerImages);
-      const contentParts = toComposerContentParts(composerText, composerImages);
+      const payload = composePrompt(draftText, draftImages);
+      const contentParts = toComposerContentParts(draftText, draftImages);
+      const hasImages = draftImages.length > 0;
+
+      // Optimistic UI updates for instant feedback.
+      setComposerText('');
+      setComposerImages([]);
 
       if (!selectedSessionId) {
-        if (!workProvider || !workModel || !workWorkspaceId) return;
+        if (!workProvider || !workModel || !workWorkspaceId) {
+          setComposerText(draftText);
+          setComposerImages(draftImages);
+          return;
+        }
+
         const runPrompt = selectedSession ? composeRunPromptWithContext(selectedSession.prompt, payload) : payload;
         const result = await startWork({
           workspaceId: workWorkspaceId,
@@ -87,24 +103,53 @@ export function useSessionActions(params: SessionActionsParams) {
           adaptiveConcurrency,
           batchConcurrency,
           batchMinConcurrency,
-          promptParts: composerImages.length > 0 ? contentParts : undefined,
+          promptParts: hasImages ? contentParts : undefined,
         });
         await refreshSessionsOnly({ setSessions });
         setSelectedSessionId(result.id);
       } else {
+        const optimisticAt = new Date().toISOString();
+        setChatMessages([
+          ...chatMessages,
+          {
+            role: 'user',
+            content: payload,
+            contentParts: hasImages ? contentParts : undefined,
+            time: optimisticAt,
+          },
+        ]);
+        setSessions(
+          sessions.map((session) => (session.id === selectedSessionId
+            ? {
+              ...session,
+              status: 'running',
+              updatedAt: optimisticAt,
+              llmStatus: {
+                state: 'analyzing',
+                label: 'Analyzing',
+                detail: 'Processing follow-up prompt.',
+                updatedAt: optimisticAt,
+              },
+            }
+            : session)),
+        );
+
         await sendChatMessage(selectedSessionId, {
           message: payload,
-          messageParts: composerImages.length > 0 ? contentParts : undefined,
+          messageParts: hasImages ? contentParts : undefined,
         });
         await refreshSessionsOnly({ setSessions });
         const agentState = await fetchWorkAgent(selectedSessionId);
         setChatMessages(agentState.messages);
         setTodos(agentState.todos);
       }
-
-      setComposerText('');
-      setComposerImages([]);
     } catch (error) {
+      setComposerText(draftText);
+      setComposerImages(draftImages);
+      if (selectedSessionId) {
+        setChatMessages(previousChatMessages);
+        setSessions(previousSessions);
+      }
       setErrorMessage(toErrorMessage(error));
     } finally {
       composerActionInFlightRef.current = false;
@@ -113,12 +158,14 @@ export function useSessionActions(params: SessionActionsParams) {
     autoApprove,
     batchConcurrency,
     batchMinConcurrency,
+    chatMessages,
     composerImages,
     composerText,
     adaptiveConcurrency,
     hasComposerContent,
     selectedSession,
     selectedSessionId,
+    sessions,
     setChatMessages,
     setComposerImages,
     setComposerText,
