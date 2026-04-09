@@ -2,11 +2,13 @@ import { describe, expect, it } from 'vitest';
 import {
   enforceSafeShellDispatch,
   extractShellCommand,
+  parseShellCommandToArgv,
   parseTaskRouteOverride,
   resolveTaskRoute,
   validateShellExecutionPrompt,
   validateShellInput,
 } from '../src/task-routing.js';
+
 
 describe('task routing config', () => {
   it('parses valid override values', () => {
@@ -76,13 +78,45 @@ describe('task routing config', () => {
     expect(validation.reason).toContain('Rejected shell execution');
   });
 
-  it('accepts single-line executable commands at shell execution boundary', () => {
+    it('accepts single-line executable commands at shell execution boundary', () => {
     const validation = validateShellExecutionPrompt('run git status');
     expect(validation.ok).toBe(true);
     expect(validation.command).toBe('git status');
+    expect(validation.parsed).toEqual({ program: 'git', args: ['status'] });
   });
 
-    it('rejects markdown-like single-line payloads through canonical shell validator', () => {
+  it('parses quoted argv safely for direct process execution', () => {
+    const parsed = parseShellCommandToArgv('echo "hello world"');
+    expect(parsed.ok).toBe(true);
+    expect(parsed.parsed).toEqual({ program: 'echo', args: ['hello world'] });
+  });
+
+  it('rejects shell operator injection patterns before execution', () => {
+    const validation = validateShellInput('git status; rm -rf /');
+    expect(validation.ok).toBe(false);
+    expect(validation.reason).toContain('shell operators');
+  });
+
+  it('rejects shell substitution syntax before execution', () => {
+    const validation = validateShellInput('echo $(whoami)');
+    expect(validation.ok).toBe(false);
+    expect(validation.reason).toContain('shell operators');
+  });
+
+  it('rejects commands outside the allowlist', () => {
+    const validation = validateShellInput('sh -c "git status"');
+    expect(validation.ok).toBe(false);
+    expect(validation.reason).toContain('no executable command was found');
+  });
+
+  it('rejects disallowed executable when parsed directly', () => {
+    const parsed = parseShellCommandToArgv('ruby -v');
+    expect(parsed.ok).toBe(false);
+    expect(parsed.reason).toContain('not in the allowed shell command list');
+  });
+
+  it('rejects markdown-like single-line payloads through canonical shell validator', () => {
+
     const validation = validateShellInput('## Task: run git status');
     expect(validation.ok).toBe(false);
     expect(validation.reason).toContain('markdown/instructional');
