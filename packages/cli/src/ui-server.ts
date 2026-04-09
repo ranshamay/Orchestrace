@@ -1429,16 +1429,16 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         llm,
         config: observerDaemon.getConfig(),
         resolveApiKey: (provider) => resolveProviderApiKey(provider),
-        emit: (evt) => {
+                emit: (evt) => {
           emitSessionEvent(id, {
             time: new Date().toISOString(),
-            type: evt.type as 'session:observer-status-change' | 'session:observer-finding',
-            payload: evt.payload as Record<string, unknown>,
+            type: evt.type,
+            payload: evt.payload,
           });
 
           if (evt.type === 'session:observer-finding') {
-            const finding = (evt.payload as { finding?: RealtimeFinding }).finding;
-            if (finding) {
+            const finding = evt.payload.finding;
+            if (isRealtimeFinding(finding)) {
               void observerDaemon.ingestSessionObserverFindings(id, [finding]).catch((error) => {
                 console.error(
                   `[orchestrace][observer] Failed to ingest session observer finding for ${id}:`,
@@ -4977,6 +4977,20 @@ function parseGithubScopes(scopes: string | undefined): string[] {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
+}
+
+function isRealtimeFinding(value: unknown): value is RealtimeFinding {
+  if (!isRecord(value)) {
+    return false;
+  }
+
+  return (
+    typeof value.category === 'string' &&
+    typeof value.severity === 'string' &&
+    typeof value.title === 'string' &&
+    typeof value.description === 'string' &&
+    typeof value.suggestedFix === 'string'
+  );
 }
 
 function resolveDefaultModelFromEnv(): string | undefined {
