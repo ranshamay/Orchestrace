@@ -223,22 +223,31 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
           });
         }
 
-                        const hasMatches = result.stdout.trim().length > 0;
-
+        const output = formatCommandOutput(result, options.maxOutputChars ?? 16000);
+        const hasMatches = result.stdout.trim().length > 0;
         const hasPathError = hasRipgrepPathError(stderr);
 
         // Prefer successful match output when available. ripgrep may emit stderr
         // diagnostics in mixed-result scenarios; only escalate path-missing behavior
         // when there are no matches to return.
         if (hasMatches) {
-          const output = formatCommandOutput(result, options.maxOutputChars ?? 16000);
           return {
             content: output,
             isError: false,
           };
         }
 
+        if (result.exitCode === 1 && result.stdout.trim().length === 0) {
+          return { content: '(no matches)' };
+        }
         if (hasPathError) {
+          const targetKindAfterSearch = await getPathKind(canonicalTarget ?? target);
+          if (targetKindAfterSearch === 'missing') {
+            return {
+              content: `(skipped invalid search path: ${relTarget})`,
+            };
+          }
+
           try {
             const fallback = await fallbackSearchFromFs({
               cwd: resolvedCwd.cwd,
@@ -259,37 +268,25 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
               };
             }
 
-            return {
-              content: error instanceof Error ? error.message : String(error),
-              isError: true,
-            };
-          }
-        }
-
-        if (result.exitCode === 1) {
-          return { content: '(no matches)' };
-        }
-
-  const output = formatCommandOutput(result, options.maxOutputChars ?? 16000);
-        if (result.exitCode > 1) {
-          // ripgrep can return a non-zero code while still emitting valid matches.
-          // Preserve payload output semantics when matches exist and only escalate
-          // as an error when there is no successful match output.
-          if (result.stdout.trim().length === 0) {
             return createSearchFilesErrorResult({
-              errorType: 'command_failed',
-              message: output,
+              errorType: 'filesystem_fallback_failed',
+              message: error instanceof Error ? error.message : String(error),
               stderr,
               exitCode: result.exitCode,
               command: 'rg',
               path: relTarget,
             });
           }
-
-          return {
-            content: output,
-            isError: false,
-          };
+        }
+        if (result.exitCode > 1) {
+          return createSearchFilesErrorResult({
+            errorType: 'command_failed',
+            message: output,
+            stderr,
+            exitCode: result.exitCode,
+            command: 'rg',
+            path: relTarget,
+          });
         }
 
         return {

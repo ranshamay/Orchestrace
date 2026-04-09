@@ -1050,7 +1050,7 @@ describe('search_files tool', () => {
 
   });
 
-  it('accepts absolute search path inside workspace and returns normalized matches', async () => {
+    it('accepts absolute search path inside workspace and returns normalized matches', async () => {
     const cwd = await makeWorkspace();
     await writeFile(join(cwd, 'src', 'coordination.ts'), 'interface CoordinationState { ok: true }\n', 'utf-8');
     const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
@@ -1067,6 +1067,53 @@ describe('search_files tool', () => {
     expect(result.isError).toBeFalsy();
     expect(result.content).toContain('src/coordination.ts:1:interface CoordinationState { ok: true }');
     expect(result.content.toLowerCase()).not.toContain('no such file or directory');
+  });
+
+  it('finds runner.ts identifiers without surfacing no-such-file noise', async () => {
+    const cwd = await makeWorkspace();
+    await writeFile(
+      join(cwd, 'src', 'runner.ts'),
+      [
+        'function extractShellCommand() {}',
+        'function resolveTaskRoute() {}',
+        'function runShellCommandRoute() {}',
+      ].join('\n') + '\n',
+      'utf-8',
+    );
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+
+    const result = await toolset.executeTool({
+      id: '1',
+      name: 'search_files',
+      arguments: {
+        query: 'extractShellCommand',
+        path: 'src/runner.ts',
+      },
+    });
+
+        expect(result.isError).toBeFalsy();
+    expect(result.content).toContain('1:function extractShellCommand() {}');
+    expect(result.details).toBeUndefined();
+    expect(result.content.toLowerCase()).not.toContain('no such file or directory');
+    expect(result.content.toLowerCase()).not.toContain('os error 2');
+  });
+
+  it('keeps missing file path handling deterministic and non-error', async () => {
+    const cwd = await makeWorkspace();
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+
+    const result = await toolset.executeTool({
+      id: '1',
+      name: 'search_files',
+      arguments: {
+        query: 'extractShellCommand',
+        path: 'src/runner.ts',
+      },
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.content).toBe('(skipped invalid search path: src/runner.ts)');
+    expect(result.details).toBeUndefined();
   });
 });
 
