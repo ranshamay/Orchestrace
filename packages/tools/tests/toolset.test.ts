@@ -639,7 +639,7 @@ describe('search_files tool', () => {
     runCommandSpy.mockRestore();
   });
 
-  it('treats ENOENT-like stderr as non-fatal when stdout already contains valid matches', async () => {
+    it('suppresses ENOENT-like stderr noise when stdout already contains valid matches', async () => {
     const cwd = await makeWorkspace();
     await writeFile(join(cwd, 'src', 'coordination-tools.ts'), 'async function mapWithAdaptiveConcurrency() {}\n', 'utf-8');
     const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
@@ -661,11 +661,13 @@ describe('search_files tool', () => {
 
     expect(result.isError).toBeFalsy();
     expect(result.content).toContain('src/coordination-tools.ts:1:async function mapWithAdaptiveConcurrency() {}');
-    expect(result.content).toContain('No such file or directory (os error 2)');
+    expect(result.content.toLowerCase()).not.toContain('no such file or directory');
+    expect(result.content.toLowerCase()).not.toContain('os error 2');
     expect(result.details).toBeUndefined();
 
     runCommandSpy.mockRestore();
   });
+
 
 
   it('marks search_files as error for genuine command failures without match output', async () => {
@@ -724,7 +726,7 @@ describe('search_files tool', () => {
     expect(result.content.toLowerCase()).not.toContain('no such file or directory');
   });
 
-  it('handles observer-reported identifier queries as plain search terms', async () => {
+    it('handles observer-reported identifier queries as plain search terms', async () => {
     const cwd = await makeWorkspace();
     await writeFile(
       join(cwd, 'src', 'observer-identifiers.ts'),
@@ -761,6 +763,39 @@ describe('search_files tool', () => {
       expect(result.content.toLowerCase()).not.toContain('os error 2');
     }
   });
+
+  it('invokes ripgrep with explicit -e query and -- path separator', async () => {
+    const cwd = await makeWorkspace();
+    await writeFile(join(cwd, 'src', 'args-contract.ts'), 'subagent_spawn_batch();\n', 'utf-8');
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+
+    const runCommandSpy = vi.spyOn(commandRunner, 'runCommand');
+
+    const result = await toolset.executeTool({
+      id: 'args-contract',
+      name: 'search_files',
+      arguments: {
+        query: 'subagent_spawn_batch',
+        path: 'src',
+      },
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(runCommandSpy).toHaveBeenCalled();
+
+    const [command, args] = runCommandSpy.mock.calls[0] ?? [];
+    expect(command).toBe('rg');
+    expect(args).toContain('-e');
+    expect(args).toContain('subagent_spawn_batch');
+
+    const separatorIndex = args.indexOf('--');
+    expect(separatorIndex).toBeGreaterThan(-1);
+    expect(separatorIndex).toBe(args.length - 2);
+    expect(args.at(-1)).toBe('src');
+
+    runCommandSpy.mockRestore();
+  });
+
 
   it('rejects multiline query payloads before invoking ripgrep', async () => {
     const cwd = await makeWorkspace();

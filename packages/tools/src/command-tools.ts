@@ -222,18 +222,24 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
           }
         }
 
-                const output = formatCommandOutput(result, options.maxOutputChars ?? 16000);
+                        const output = formatCommandOutput(result, options.maxOutputChars ?? 16000);
         const hasMatches = result.stdout.trim().length > 0;
 
         // Prefer successful match output when available. ripgrep may emit stderr
         // diagnostics in mixed-result scenarios; only escalate error behavior
         // when there are no matches to return.
         if (hasMatches) {
+          const hasDeterministicPathNoise = isDeterministicRipgrepPathError(stderr);
+          const successfulContent = hasDeterministicPathNoise
+            ? result.stdout.trim()
+            : output;
+
           return {
-            content: output,
+            content: successfulContent,
             isError: false,
           };
         }
+
 
         if (result.exitCode === 2 && useRegex) {
           return createSearchFilesErrorResult({
