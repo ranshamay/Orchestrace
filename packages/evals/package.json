@@ -13,7 +13,7 @@
     "test": "vitest run",
     "run": "tsx src/run-evals.ts",
     "clean": "rm -rf dist"
-  }
+  },
   "dependencies": {
     "@orchestrace/core": "workspace:*"
   },

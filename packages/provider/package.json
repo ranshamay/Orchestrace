@@ -12,7 +12,7 @@
     "pretest": "pnpm --filter @orchestrace/provider... build",
     "test": "vitest run",
     "clean": "rm -rf dist"
-  }
+  },
   "dependencies": {
     "@mariozechner/pi-ai": "^0.64.0"
   },
