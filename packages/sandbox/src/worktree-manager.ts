@@ -20,6 +20,7 @@ export interface EnsureWorktreeOptions {
   worktreePath: string;
   baseRef?: string;
   bootstrapDependencies?: boolean;
+  requiredPaths?: readonly string[];
 }
 
 export interface CleanupWorktreeOptions {
@@ -52,7 +53,8 @@ export async function ensureWorktreeExists(options: EnsureWorktreeOptions): Prom
   return withWorktreeCreationLock(worktreePath, async () => {
     const trackingRef = await resolvePreferredTrackingRef(repoPath);
     const baseRef = shouldUseAutoTrackingBase(requestedBaseRef) ? (trackingRef ?? requestedBaseRef) : requestedBaseRef;
-    if (await isWorktreeProperlySetUp(repoPath, worktreePath)) {
+        const setupStatus = await getWorktreeSetupStatus(repoPath, worktreePath, options.requiredPaths);
+    if (setupStatus.ready) {
       if (options.bootstrapDependencies !== false) {
         await ensureWorktreeDependenciesInstalled(worktreePath);
       }
@@ -238,20 +240,41 @@ async function addWorktree(options: {
   }
 }
 
-async function isWorktreeProperlySetUp(repoPath: string, worktreePath: string): Promise<boolean> {
+async function getWorktreeSetupStatus(
+  repoPath: string,
+  worktreePath: string,
+  requiredPaths: readonly string[] | undefined,
+): Promise<{ ready: boolean; missingRequiredPaths: string[] }> {
   if (!(await pathExists(worktreePath))) {
-    return false;
+    return { ready: false, missingRequiredPaths: [] };
   }
 
   const registeredWorktrees = await listWorktrees(repoPath);
   const targetPath = await resolveComparablePath(worktreePath);
+  let registered = false;
   for (const entry of registeredWorktrees) {
     if ((await resolveComparablePath(entry.path)) === targetPath) {
-      return true;
+      registered = true;
+      break;
     }
   }
 
-  return false;
+  if (!registered) {
+    return { ready: false, missingRequiredPaths: [] };
+  }
+
+  const missingRequiredPaths: string[] = [];
+  for (const requiredPath of requiredPaths ?? []) {
+    if (!(await pathExists(join(worktreePath, requiredPath)))) {
+      missingRequiredPaths.push(requiredPath);
+    }
+  }
+
+  if (missingRequiredPaths.length > 0) {
+    return { ready: false, missingRequiredPaths };
+  }
+
+  return { ready: true, missingRequiredPaths: [] };
 }
 
 async function comprehensiveWorktreeCleanup(repoPath: string, worktreePath: string): Promise<void> {
