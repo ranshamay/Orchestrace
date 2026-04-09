@@ -1006,6 +1006,8 @@ async function main(): Promise<void> {
         deliveryError = errorMsg(error);
       }
 
+      await enterLifecyclePhase('COMPLETING');
+
       if (toolResult.isError || deliveryError) {
         const errorLines = [toolResult.isError ? outputText : undefined, deliveryError ? `Remote delivery failed: ${deliveryError}` : undefined]
           .filter((line): line is string => Boolean(line));
@@ -1025,6 +1027,9 @@ async function main(): Promise<void> {
         await emit({ time: iso(), type: 'session:llm-status-change', payload: { llmStatus: failedStatus } });
         await emit({ time: iso(), type: 'session:status-change', payload: { status: 'failed' } });
         await finalizeCheckpoint('failed', iso());
+        await lifecycle.cleanup();
+        await lifecycle.complete('FAILED');
+        await emitLifecyclePhaseChange('FAILED');
         clearInterval(heartbeatInterval);
         process.exit(1);
       }
@@ -1042,9 +1047,26 @@ async function main(): Promise<void> {
         payload: { message: { role: 'assistant', content: outputText, time: iso() } },
       });
       await finalizeCheckpoint('completed', iso());
+      await lifecycle.cleanup();
+      await lifecycle.complete('COMPLETED');
+      await emitLifecyclePhaseChange('COMPLETED');
       clearInterval(heartbeatInterval);
       process.exit(0);
     }
+
+    await enterLifecyclePhase('DISPATCHING', {
+      precondition: () => {
+        if (route.category === 'shell_command') {
+          return Boolean(dispatch.shell.ok && dispatch.shell.command);
+        }
+        return Boolean(config.provider && config.model);
+      },
+      preconditionMessage: route.category === 'shell_command'
+        ? 'Shell dispatch selected but no safe command was resolved.'
+        : 'LLM dispatch requires provider/model configuration.',
+    });
+
+    await enterLifecyclePhase('EXECUTING');
 
     const outputs = route.category === 'shell_command'
       ? await runShellCommandRoute(dispatch.shell.command!, config.workspacePath)
@@ -1263,9 +1285,14 @@ async function main(): Promise<void> {
 
     if (cancelled) {
       await finalizeCheckpoint('cancelled', iso());
+      await lifecycle.cleanup();
+      await lifecycle.complete('CANCELLED');
+      await emitLifecyclePhaseChange('CANCELLED');
       clearInterval(heartbeatInterval);
       process.exit(130);
     }
+
+    await enterLifecyclePhase('COMPLETING');
 
     // Completion
     const allOutputs = [...outputs.values()];
