@@ -178,10 +178,12 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
           signal,
         });
 
+                
         const stderr = result.stderr.trim();
 
-        if (result.exitCode === -1) {
+        if (shouldUseFilesystemFallbackForRipgrepResult(result)) {
           try {
+
             const fallback = await fallbackSearchFromFs({
               cwd: resolvedCwd.cwd,
               target: canonicalTarget ?? target,
@@ -209,11 +211,12 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
               command: 'rg',
               path: relTarget,
             });
-          }
+                    }
         }
 
         if (result.exitCode === 2 && useRegex) {
           return createSearchFilesErrorResult({
+
             errorType: 'invalid_regex',
             message: 'Invalid regex query.',
             stderr,
@@ -922,18 +925,26 @@ function sanitizeSearchQueryAndMode(input: SanitizedSearchQueryAndModeInput): Va
     return queryModeValidation;
   }
 
+      
   const hasExplicitRegexIntent = queryModeValidation.value === 'regex' || input.regex === true;
-  let useRegex = queryModeValidation.value !== undefined
-    ? queryModeValidation.value === 'regex'
-    : input.regex ?? false;
+  const hasExplicitLiteralIntent = queryModeValidation.value === 'literal' || input.regex === false;
 
-  // Prefer literal semantics for shell-like query text unless regex intent is explicit.
+  let useRegex = false;
+
+  if (hasExplicitRegexIntent) {
+    useRegex = true;
+  } else if (hasExplicitLiteralIntent) {
+    useRegex = false;
+  }
+
+    // Prefer literal semantics for shell-like query text unless regex intent is explicit.
   if (!hasExplicitRegexIntent && isRiskyLiteralCandidate(queryValidation.value)) {
     useRegex = false;
   }
 
   let sanitizedQuery = queryValidation.value;
   if (useRegex) {
+
     sanitizedQuery = sanitizeMalformedRegexQuery(sanitizedQuery);
   }
 
@@ -1248,7 +1259,7 @@ function validateSearchGlob(rawGlob: unknown): ValidationResult<string | undefin
 
 async function normalizeRequestedSearchPath(rawPath: string): Promise<string> {
   const trimmed = rawPath.trim();
-  if (trimmed.length === 0) {
+    if (trimmed.length === 0) {
     return '.';
   }
 
@@ -1256,7 +1267,23 @@ async function normalizeRequestedSearchPath(rawPath: string): Promise<string> {
     throw new Error('Invalid search path: null bytes are not allowed.');
   }
 
-    return trimmed;
+  return trimmed;
+}
+
+function shouldUseFilesystemFallbackForRipgrepResult(result: { exitCode: number; stderr: string }): boolean {
+
+  if (result.exitCode === -1) {
+    return true;
+  }
+
+  const normalizedStderr = result.stderr.trim();
+  if (normalizedStderr.length === 0) {
+    return false;
+  }
+
+  // Treat deterministic executable-not-found/spawn failures as recoverable and
+  // serve a filesystem-backed result instead of escalating a false command error.
+  return /\b(?:rg|ripgrep)\b[^\n]*\bnot found\b|\bcommand not found\b|\bspawn\s+rg\b/i.test(normalizedStderr);
 }
 
 function hasRipgrepPathError(stderr: string): boolean {
@@ -1265,6 +1292,7 @@ function hasRipgrepPathError(stderr: string): boolean {
 
 function isDeterministicRipgrepPathError(stderr: string): boolean {
   const normalized = stderr.trim();
+
   if (normalized.length === 0) {
     return false;
   }

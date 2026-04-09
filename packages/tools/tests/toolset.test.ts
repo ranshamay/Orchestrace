@@ -173,7 +173,9 @@ describe('batch filesystem tools', () => {
       },
     });
 
+    
     expect(result.isError).toBeFalsy();
+
 
     const parsed = JSON.parse(result.content) as {
       total: number;
@@ -572,8 +574,11 @@ describe('search_files tool', () => {
     expect(result.content).not.toContain('literal.txt:2:callXvalue');
   });
 
+    
+  
   it('supports regex mode when regex=true', async () => {
     const cwd = await makeWorkspace();
+
     await writeFile(join(cwd, 'src', 'regex.txt'), 'call(value)\ncallvalue\n', 'utf-8');
     const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
 
@@ -592,8 +597,34 @@ describe('search_files tool', () => {
     expect(result.content).not.toContain('regex.txt:1:call(value)');
   });
 
-    it('returns (no matches) when nothing matches', async () => {
+  it('prefers explicit regex=true over conflicting queryMode=literal', async () => {
     const cwd = await makeWorkspace();
+    await writeFile(join(cwd, 'src', 'regex-precedence.txt'), 'call(value)\ncallvalue\n', 'utf-8');
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+
+    const result = await toolset.executeTool({
+      id: 'regex-precedence',
+      name: 'search_files',
+      arguments: {
+        query: 'call(value)',
+        regex: true,
+        queryMode: 'literal',
+        path: 'src',
+      },
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.content).toContain('regex-precedence.txt:2:callvalue');
+    expect(result.content).not.toContain('regex-precedence.txt:1:call(value)');
+  });
+
+
+    
+
+  
+  it('returns (no matches) when nothing matches', async () => {
+    const cwd = await makeWorkspace();
+
     const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
 
     const result = await toolset.executeTool({
@@ -605,13 +636,14 @@ describe('search_files tool', () => {
       },
     });
 
-        expect(result.isError).toBeFalsy();
+        
+    expect(result.isError).toBeFalsy();
     expect(result.content).toBe('(no matches)');
     expect(result.details).toBeUndefined();
-
   });
 
   it('keeps successful match payload non-error when ripgrep returns non-zero with stdout matches', async () => {
+
     const cwd = await makeWorkspace();
     await writeFile(join(cwd, 'src', 'match.ts'), 'validateShellCommandPrompt();\n', 'utf-8');
     const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
@@ -634,6 +666,35 @@ describe('search_files tool', () => {
     expect(result.isError).toBeFalsy();
     expect(result.content).toContain('src/match.ts:1:validateShellCommandPrompt();');
     expect(result.content).toContain('stderr:\nrg warning: simulated warning without blocking matches');
+
+    runCommandSpy.mockRestore();
+  });
+
+    
+  
+  it('falls back to filesystem search when ripgrep executable is unavailable', async () => {
+    const cwd = await makeWorkspace();
+
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+
+    const runCommandSpy = vi.spyOn(commandRunner, 'runCommand').mockResolvedValueOnce({
+      exitCode: 127,
+      stdout: '',
+      stderr: 'sh: rg: command not found',
+    });
+
+    const result = await toolset.executeTool({
+      id: 'rg-unavailable-fallback',
+      name: 'search_files',
+      arguments: {
+        query: 'definitely-not-present',
+        path: 'src',
+      },
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.content).toBe('(no matches)');
+    expect(result.details).toBeUndefined();
 
     runCommandSpy.mockRestore();
   });
@@ -671,8 +732,13 @@ describe('search_files tool', () => {
   });
 
 
-    it('treats regression tokens as query text, not file paths', async () => {
+
+    
+
+  
+  it('treats regression tokens as query text, not file paths', async () => {
     const cwd = await makeWorkspace();
+
     await writeFile(
       join(cwd, 'src', 'tokens.txt'),
       'retry\nsubagent_spawn_batch\ngithub-copilot\n',
