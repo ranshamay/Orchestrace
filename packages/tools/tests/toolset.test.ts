@@ -668,7 +668,7 @@ describe('search_files tool', () => {
   });
 
 
-  it('marks search_files as error for genuine command failures without match output', async () => {
+    it('marks search_files as error for genuine command failures without match output', async () => {
     const cwd = await makeWorkspace();
     const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
 
@@ -700,8 +700,39 @@ describe('search_files tool', () => {
     runCommandSpy.mockRestore();
   });
 
+  it('does not misclassify unstructured ENOENT-like stderr as a deterministic path error', async () => {
+    const cwd = await makeWorkspace();
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+
+    const runCommandSpy = vi.spyOn(commandRunner, 'runCommand').mockResolvedValueOnce({
+      exitCode: 2,
+      stdout: '',
+      stderr: 'No such file or directory (os error 2): sh -lc',
+    });
+
+    const result = await toolset.executeTool({
+      id: 'unstructured-enoent',
+      name: 'search_files',
+      arguments: {
+        query: 'sh -lc',
+        path: 'src',
+      },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.details).toMatchObject({
+      errorType: 'command_failed',
+      toolName: 'search_files',
+      exitCode: 2,
+      path: 'src',
+    });
+
+    runCommandSpy.mockRestore();
+  });
+
 
     it('treats regression tokens as query text, not file paths', async () => {
+
     const cwd = await makeWorkspace();
     await writeFile(
       join(cwd, 'src', 'tokens.txt'),
@@ -724,7 +755,7 @@ describe('search_files tool', () => {
     expect(result.content.toLowerCase()).not.toContain('no such file or directory');
   });
 
-  it('handles observer-reported identifier queries as plain search terms', async () => {
+    it('handles observer-reported identifier queries as plain search terms', async () => {
     const cwd = await makeWorkspace();
     await writeFile(
       join(cwd, 'src', 'observer-identifiers.ts'),
@@ -761,6 +792,37 @@ describe('search_files tool', () => {
       expect(result.content.toLowerCase()).not.toContain('os error 2');
     }
   });
+
+  it('treats dispatch and initialize observer tokens as literal query text', async () => {
+    const cwd = await makeWorkspace();
+    await writeFile(
+      join(cwd, 'src', 'observer-keywords.ts'),
+      [
+        'export function dispatch() {}',
+        'export function initialize() {}',
+        'const x = dispatch;',
+      ].join('\n') + '\n',
+      'utf-8',
+    );
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+
+    for (const query of ['dispatch', 'initialize']) {
+      const result = await toolset.executeTool({
+        id: `keyword-${query}`,
+        name: 'search_files',
+        arguments: {
+          query,
+          path: 'src',
+        },
+      });
+
+      expect(result.isError).toBeFalsy();
+      expect(result.content).toContain(query);
+      expect(result.content.toLowerCase()).not.toContain('no such file or directory');
+      expect(result.content.toLowerCase()).not.toContain('os error 2');
+    }
+  });
+
 
   it('rejects multiline query payloads before invoking ripgrep', async () => {
     const cwd = await makeWorkspace();
@@ -1034,7 +1096,7 @@ describe('search_files tool', () => {
 
   });
 
-  it('returns a clear validation error for control characters in query text', async () => {
+    it('returns a clear validation error for control characters in query text', async () => {
     const cwd = await makeWorkspace();
     const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
 
@@ -1058,8 +1120,31 @@ describe('search_files tool', () => {
     expect(result.content.toLowerCase()).not.toContain('no such file or directory');
   });
 
+  it('returns a clear validation error for overly long query text', async () => {
+    const cwd = await makeWorkspace();
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+
+    const result = await toolset.executeTool({
+      id: 'invalid-query-too-long',
+      name: 'search_files',
+      arguments: {
+        query: 'a'.repeat(4097),
+        path: 'src',
+      },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content).toBe('Invalid query: query is too long (max 4096 characters).');
+    expect(result.details).toMatchObject({
+      errorType: 'invalid_arguments',
+      toolName: 'search_files',
+      path: 'src',
+    });
+  });
+
 
         it('returns a clear invalid_regex error for malformed explicit regex input', async () => {
+
     const cwd = await makeWorkspace();
     await writeFile(
       join(cwd, 'src', 'routes.ts'),
