@@ -79,11 +79,35 @@ export class PiAiAdapter implements LlmAdapter {
           } catch (error) {
             const mapped = mapTimeoutError(error, timeoutMs);
             const failureType = classifyLlmFailure({ message: mapped.message });
+            const elapsedMs = Date.now() - attemptStartedAt;
+            const canRetryAuth = failureType === 'auth' && Boolean(request.refreshApiKey) && !authRetryUsed;
+            let retryDelayMs = 0;
 
-            if (failureType === 'auth' && request.refreshApiKey && !authRetryUsed) {
+            if (canRetryAuth) {
+              retryDelayMs = await scheduleRetryDelay(attempt);
+            }
+
+            logFailureDump({
+              kind: 'request-error',
+              failureType,
+              provider: request.provider,
+              model: request.model,
+              baseUrl: model.baseUrl,
+              attempt,
+              maxAttempts,
+              timeoutMs,
+              elapsedMs,
+              retryScheduled: canRetryAuth,
+              retryDelayMs,
+              errorMessage: mapped.message,
+              prompt: summarizePromptInput(prompt),
+              ...summarizeErrorContext(error),
+            });
+
+            if (canRetryAuth) {
               authRetryUsed = true;
               try {
-                activeApiKey = await request.refreshApiKey();
+                activeApiKey = await request.refreshApiKey?.();
               } catch {
                 // Ignore refresh errors and retry once with the current key path.
               }
@@ -110,6 +134,7 @@ export class PiAiAdapter implements LlmAdapter {
           const upstreamError = response.errorMessage?.trim();
           const totalTokens = response.usage?.totalTokens ?? 0;
           const blockTypes = response.content.map((block) => block.type).join(', ') || 'none';
+          const elapsedMs = Date.now() - attemptStartedAt;
 
           if (response.stopReason === 'error' || response.stopReason === 'aborted') {
             const failureType = classifyLlmFailure({
@@ -120,6 +145,8 @@ export class PiAiAdapter implements LlmAdapter {
             const reason = upstreamError
               ? `Provider error: ${upstreamError}`
               : `Model stopped with reason "${response.stopReason}" before producing a usable response.`;
+            const canRetryAuth = failureType === 'auth' && Boolean(request.refreshApiKey) && !authRetryUsed;
+            const retryDelayMs = canRetryAuth ? await scheduleRetryDelay(attempt) : 0;
             logFailureDump({
               kind: 'stop-reason',
               failureType,
@@ -128,6 +155,10 @@ export class PiAiAdapter implements LlmAdapter {
               baseUrl: model.baseUrl,
               attempt,
               maxAttempts,
+              timeoutMs,
+              elapsedMs,
+              retryScheduled: canRetryAuth,
+              retryDelayMs,
               stopReason: response.stopReason,
               errorMessage: upstreamError,
               totalTokens,
@@ -135,10 +166,10 @@ export class PiAiAdapter implements LlmAdapter {
               prompt: summarizePromptInput(prompt),
             });
 
-            if (failureType === 'auth' && request.refreshApiKey && !authRetryUsed) {
+            if (canRetryAuth) {
               authRetryUsed = true;
               try {
-                activeApiKey = await request.refreshApiKey();
+                activeApiKey = await request.refreshApiKey?.();
               } catch {
                 // Ignore refresh errors and fall through to throw.
               }
