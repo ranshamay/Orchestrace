@@ -527,7 +527,7 @@ describe('search_files tool', () => {
     expect(result.content.toLowerCase()).not.toContain('no such file or directory');
   });
 
-  it('treats colon tokens as plain query text', async () => {
+      it('treats colon tokens as plain query text', async () => {
     const cwd = await makeWorkspace();
     await writeFile(
       join(cwd, 'src', 'tokens-colon.txt'),
@@ -550,7 +550,55 @@ describe('search_files tool', () => {
     expect(result.content.toLowerCase()).not.toContain('no such file or directory');
   });
 
-  it('skips invalid target paths without surfacing retriable ripgrep errors', async () => {
+  it('treats shell-like query text such as sh -c as a literal search by default', async () => {
+    const cwd = await makeWorkspace();
+    await writeFile(
+      join(cwd, 'src', 'shell-like.txt'),
+      'sh -c\nshh -c\n',
+      'utf-8',
+    );
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+
+    const result = await toolset.executeTool({
+      id: '1',
+      name: 'search_files',
+      arguments: {
+        query: 'sh -c',
+        path: 'src',
+      },
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.content).toContain('shell-like.txt:1:sh -c');
+    expect(result.content).not.toContain('shell-like.txt:2:shh -c');
+    expect(result.content.toLowerCase()).not.toContain('no such file or directory');
+  });
+
+  it('honors explicit regex mode even for shell-like query text', async () => {
+    const cwd = await makeWorkspace();
+    await writeFile(
+      join(cwd, 'src', 'shell-like-regex.txt'),
+      'sh -c\nshh -c\n',
+      'utf-8',
+    );
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+
+    const result = await toolset.executeTool({
+      id: '1',
+      name: 'search_files',
+      arguments: {
+        query: 'sh+ -c',
+        queryMode: 'regex',
+        path: 'src',
+      },
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.content).toContain('shell-like-regex.txt:1:sh -c');
+    expect(result.content).toContain('shell-like-regex.txt:2:shh -c');
+  });
+
+    it('skips invalid target paths without surfacing retriable ripgrep errors', async () => {
     const cwd = await makeWorkspace();
     const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
 
