@@ -11,7 +11,7 @@ import type { FindingRegistry } from './registry.js';
 /** The subset of startWorkSession that the observer needs. */
 export type StartSessionFn = (request: {
   workspaceId?: string;
-  prompt: string;
+  prompt: unknown;
   provider: string;
   model: string;
   autoApprove: boolean;
@@ -30,7 +30,10 @@ export type StartSessionFn = (request: {
     routeIntent: 'code_change';
     reason: string;
   };
-}) => Promise<{ id: string } | { error: string; statusCode: number }>;
+}) => Promise<
+  { id: string }
+  | { error: string; statusCode: number; code?: string; details?: Record<string, unknown> }
+>;
 
 /**
  * Spawn fix sessions for all pending findings, respecting maxConcurrentFixSessions.
