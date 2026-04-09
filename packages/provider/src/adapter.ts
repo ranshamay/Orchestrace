@@ -67,7 +67,7 @@ export class PiAiAdapter implements LlmAdapter {
               options,
               completionOptions,
               toolset: request.toolset,
-              signal: signal ?? request.signal,
+              signal: completionSignal,
               timeoutMs,
               onUsage: (value) => {
                 hasUsage = true;
@@ -89,11 +89,37 @@ export class PiAiAdapter implements LlmAdapter {
               continue;
             }
 
+            if (isFutileRetryFailure(failureType)) {
+              throw createLlmFailureError({
+                provider: request.provider,
+                model: request.model,
+                failureType,
+                message: mapped.message,
+                cause: error,
+              });
+            }
+
+            const shouldRetryTransient = isRetryableTransientFailure(failureType)
+              && attempt <= transientRetries;
+            if (shouldRetryTransient) {
+              const delayMs = computeRetryDelayMs(attempt);
+              await sleepWithSignal(delayMs, completionSignal);
+              continue;
+            }
+
+            const terminalFailureType =
+              (failureType === 'timeout' || failureType === 'unknown') && attempt > transientRetries
+                ? 'provider_unresponsive'
+                : failureType;
+            const terminalMessage = terminalFailureType === 'provider_unresponsive'
+              ? `Model ${request.provider}/${request.model} remained unresponsive after ${attempt} attempt(s). Last error: ${mapped.message}`
+              : mapped.message;
+
             throw createLlmFailureError({
               provider: request.provider,
               model: request.model,
-              failureType,
-              message: mapped.message,
+              failureType: terminalFailureType,
+              message: terminalMessage,
               cause: error,
             });
           }
@@ -144,11 +170,36 @@ export class PiAiAdapter implements LlmAdapter {
               continue;
             }
 
+            if (isFutileRetryFailure(failureType)) {
+              throw createLlmFailureError({
+                provider: request.provider,
+                model: request.model,
+                failureType,
+                message: `Model ${request.provider}/${request.model} failed. ${reason}`,
+              });
+            }
+
+            const shouldRetryTransient = isRetryableTransientFailure(failureType)
+              && attempt <= transientRetries;
+            if (shouldRetryTransient) {
+              const delayMs = computeRetryDelayMs(attempt);
+              await sleepWithSignal(delayMs, completionSignal);
+              continue;
+            }
+
+            const terminalFailureType =
+              (failureType === 'timeout' || failureType === 'unknown') && attempt > transientRetries
+                ? 'provider_unresponsive'
+                : failureType;
+            const terminalMessage = terminalFailureType === 'provider_unresponsive'
+              ? `Model ${request.provider}/${request.model} remained unresponsive after ${attempt} attempt(s). ${reason}`
+              : `Model ${request.provider}/${request.model} failed. ${reason}`;
+
             throw createLlmFailureError({
               provider: request.provider,
               model: request.model,
-              failureType,
-              message: `Model ${request.provider}/${request.model} failed. ${reason}`,
+              failureType: terminalFailureType,
+              message: terminalMessage,
             });
           }
 
