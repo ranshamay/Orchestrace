@@ -299,6 +299,14 @@ export function validateShellExecutionPrompt(prompt: string): ShellExecutionVali
 }
 
 /**
+ * Legacy compatibility alias retained for older CLI integrations.
+ */
+export function validateShellCommandPrompt(prompt: string): ShellExecutionValidation {
+  return validateShellInput(prompt);
+}
+
+
+/**
  * Removes retry-context scaffolding from retry execution prompts so routing/effort
  * classifiers evaluate user intent instead of serialized continuation metadata.
  */

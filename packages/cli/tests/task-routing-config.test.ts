@@ -5,9 +5,11 @@ import {
   parseShellCommandToArgv,
   parseTaskRouteOverride,
   resolveTaskRoute,
+    validateShellCommandPrompt,
   validateShellExecutionPrompt,
   validateShellInput,
 } from '../src/task-routing.js';
+
 
 
 describe('task routing config', () => {
@@ -149,11 +151,18 @@ describe('task routing config', () => {
   });
 
 
-  it('keeps validateShellExecutionPrompt aligned with canonical validator', () => {
+    it('keeps validateShellExecutionPrompt aligned with canonical validator', () => {
     const canonical = validateShellInput('run pnpm test');
     const alias = validateShellExecutionPrompt('run pnpm test');
     expect(alias).toEqual(canonical);
   });
+
+  it('keeps legacy validateShellCommandPrompt alias aligned with canonical validator', () => {
+    const canonical = validateShellInput('run pnpm test');
+    const alias = validateShellCommandPrompt('run pnpm test');
+    expect(alias).toEqual(canonical);
+  });
+
 
   it('demotes override-forced shell route to code_change when prompt is prose', () => {
     const prompt = 'we want to make sure we will use git worktrees natively (probably by using git tool) each new session when impl starts';

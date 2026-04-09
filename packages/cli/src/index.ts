@@ -1,4 +1,4 @@
-import { execFile } from 'node:child_process';
+import { execFile, type ExecFileException } from 'node:child_process';
 import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { resolve } from 'node:path';
@@ -725,6 +725,23 @@ const defaultShellRouteDependencies: ShellRouteDependencies = {
   logError: (message) => console.error(message),
 };
 
+function formatShellExecutionFailure(error: unknown, parsed: { program: string; args: string[] }, cwd: string): string {
+  const typed = error as ExecFileException;
+  const code = typeof typed.code === 'string' ? typed.code : undefined;
+
+  if (code === 'ENOENT') {
+    return `Shell command failed: executable '${parsed.program}' was not found or cwd '${cwd}' does not exist (code: ENOENT).`;
+  }
+
+  if (code === 'EACCES') {
+    return `Shell command failed: executable '${parsed.program}' is not executable due to permissions (code: EACCES).`;
+  }
+
+  const details = error instanceof Error ? error.message : String(error);
+  return `Shell command failed: ${details}`;
+}
+
+
 export async function runShellCommandRouteWithDeps(
   command: string,
   cwd: string,
@@ -746,12 +763,12 @@ export async function runShellCommandRouteWithDeps(
       deps.stderrWrite(stderr);
     }
     return 0;
-  } catch (error) {
-    const details = error instanceof Error ? error.message : String(error);
-    deps.logError(`Shell command failed: ${details}`);
+    } catch (error) {
+    deps.logError(formatShellExecutionFailure(error, validation.parsed, cwd));
     return 1;
   }
 }
+
 
 async function runShellCommandRoute(command: string, cwd: string): Promise<number> {
   return runShellCommandRouteWithDeps(command, cwd, defaultShellRouteDependencies);

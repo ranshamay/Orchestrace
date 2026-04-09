@@ -2283,6 +2283,26 @@ function errorMsg(err: unknown): string {
   return String(err);
 }
 
+function formatRunnerShellExecutionFailure(
+  error: unknown,
+  parsed: { program: string; args: string[] },
+  cwd: string,
+): string {
+  const typed = error as ExecFileException;
+  const code = typeof typed.code === 'string' ? typed.code : undefined;
+
+  if (code === 'ENOENT') {
+    return `Shell command failed: executable '${parsed.program}' was not found or cwd '${cwd}' does not exist (code: ENOENT).`;
+  }
+
+  if (code === 'EACCES') {
+    return `Shell command failed: executable '${parsed.program}' is not executable due to permissions (code: EACCES).`;
+  }
+
+  return errorMsg(error);
+}
+
+
 function str(value: unknown): string {
   if (typeof value === 'string') return value;
   return '';
@@ -2633,16 +2653,17 @@ export async function runShellCommandWithTimeoutWithDeps(
       maxBuffer: 5 * 1024 * 1024,
     });
     return { ok: true, stdout, stderr };
-  } catch (err) {
+    } catch (err) {
     const typed = err as ExecFileException;
     return {
       ok: false,
       stdout: typeof typed.stdout === 'string' ? typed.stdout : '',
       stderr: typeof typed.stderr === 'string' ? typed.stderr : '',
-      error: errorMsg(err),
+      error: formatRunnerShellExecutionFailure(err, validation.parsed, cwd),
     };
   }
 }
+
 
 export async function runShellCommandRouteWithDeps(
   command: string,
@@ -2678,7 +2699,7 @@ export async function runShellCommandRouteWithDeps(
         retries: 0,
       }],
     ]);
-  } catch (error) {
+    } catch (error) {
     const err = error as ExecFileException;
     const details = `${err.stdout ?? ''}${err.stderr ?? ''}`.trim();
     return new Map([
@@ -2688,11 +2709,12 @@ export async function runShellCommandRouteWithDeps(
         response: details || undefined,
         durationMs: Date.now() - startedAt,
         retries: 0,
-        error: err.message,
+        error: formatRunnerShellExecutionFailure(error, validation.parsed, cwd),
       }],
     ]);
   }
 }
+
 
 async function runShellCommandRoute(command: string, cwd: string): Promise<Map<string, TaskOutput>> {
   return runShellCommandRouteWithDeps(command, cwd, defaultRunnerShellExecutionDependencies);
