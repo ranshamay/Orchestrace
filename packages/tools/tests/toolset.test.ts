@@ -671,7 +671,7 @@ describe('search_files tool', () => {
   });
 
 
-  it('treats regression tokens as query text, not file paths', async () => {
+    it('treats regression tokens as query text, not file paths', async () => {
     const cwd = await makeWorkspace();
     await writeFile(
       join(cwd, 'src', 'tokens.txt'),
@@ -693,6 +693,91 @@ describe('search_files tool', () => {
     expect(result.content).toContain('tokens.txt:2:subagent_spawn_batch');
     expect(result.content.toLowerCase()).not.toContain('no such file or directory');
   });
+
+  it('handles observer-reported identifier queries as plain search terms', async () => {
+    const cwd = await makeWorkspace();
+    await writeFile(
+      join(cwd, 'src', 'observer-identifiers.ts'),
+      [
+        'function checkTokenTTL() {}',
+        'function ensureGithubCopilotTokenTTL() {}',
+        'const copilot = true;',
+        'subagent_spawn_batch([]);',
+      ].join('\n') + '\n',
+      'utf-8',
+    );
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+
+    const queries = [
+      'checkTokenTTL',
+      'ensureGithubCopilotTokenTTL',
+      'copilot',
+      'subagent_spawn_batch',
+    ];
+
+    for (const query of queries) {
+      const result = await toolset.executeTool({
+        id: `observer-${query}`,
+        name: 'search_files',
+        arguments: {
+          query,
+          path: 'src',
+        },
+      });
+
+      expect(result.isError).toBeFalsy();
+      expect(result.content).toContain(query);
+      expect(result.content.toLowerCase()).not.toContain('no such file or directory');
+      expect(result.content.toLowerCase()).not.toContain('os error 2');
+    }
+  });
+
+  it('rejects multiline query payloads before invoking ripgrep', async () => {
+    const cwd = await makeWorkspace();
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+
+    const result = await toolset.executeTool({
+      id: 'invalid-query-multiline',
+      name: 'search_files',
+      arguments: {
+        query: 'copilot\ncheckTokenTTL',
+        path: 'src',
+      },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content).toBe('Invalid query: query must be a single-line string.');
+    expect(result.details).toMatchObject({
+      errorType: 'invalid_arguments',
+      toolName: 'search_files',
+      path: 'src',
+    });
+    expect(result.content.toLowerCase()).not.toContain('no such file or directory');
+  });
+
+  it('rejects query payloads that look like ripgrep path/filter fragments', async () => {
+    const cwd = await makeWorkspace();
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+
+    const result = await toolset.executeTool({
+      id: 'invalid-query-fragment',
+      name: 'search_files',
+      arguments: {
+        query: '--glob src/**/*.ts',
+        path: 'src',
+      },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content).toBe('Invalid query: query appears to be a ripgrep path/filter fragment. Provide search text in query and file scope in path/glob.');
+    expect(result.details).toMatchObject({
+      errorType: 'invalid_arguments',
+      toolName: 'search_files',
+      path: 'src',
+    });
+    expect(result.content.toLowerCase()).not.toContain('no such file or directory');
+  });
+
 
       it('treats colon tokens as plain query text', async () => {
     const cwd = await makeWorkspace();
@@ -893,7 +978,7 @@ describe('search_files tool', () => {
     expect(result.content.toLowerCase()).not.toContain('no such file or directory');
   });
 
-  it('returns a clear validation error for empty query text', async () => {
+    it('returns a clear validation error for empty query text', async () => {
     const cwd = await makeWorkspace();
     const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
 
@@ -917,6 +1002,31 @@ describe('search_files tool', () => {
     expect(result.content.toLowerCase()).not.toContain('no such file or directory');
 
   });
+
+  it('returns a clear validation error for control characters in query text', async () => {
+    const cwd = await makeWorkspace();
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+
+    const result = await toolset.executeTool({
+      id: '1',
+      name: 'search_files',
+      arguments: {
+        query: `copilot${String.fromCharCode(1)}token`,
+        path: 'src',
+      },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content).toBe('Invalid query: control characters are not allowed.');
+    expect(result.details).toMatchObject({
+      errorType: 'invalid_arguments',
+      message: 'Invalid query: control characters are not allowed.',
+      toolName: 'search_files',
+      path: 'src',
+    });
+    expect(result.content.toLowerCase()).not.toContain('no such file or directory');
+  });
+
 
     it('auto-escapes unbalanced parentheses for explicit regex queries', async () => {
     const cwd = await makeWorkspace();
