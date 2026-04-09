@@ -1503,7 +1503,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
 
   async function startWorkSession(request: {
     workspaceId?: string;
-    prompt: string;
+    prompt: unknown;
     promptParts?: SessionChatContentPart[];
     provider: string;
     model: string;
@@ -1583,9 +1583,9 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       }
     }
 
-    const promptValidation = validateTaskPromptInput({
+    const promptValidation = validateAndNormalizeSessionPromptInput({
       prompt: request.prompt,
-      fallbackPrompt: summarizeChatContentParts(promptParts),
+      promptParts,
     });
 
     if (!promptValidation.ok) {
@@ -1601,9 +1601,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       ? await workspaceManager.selectWorkspace(request.workspaceId)
       : await workspaceManager.getActiveWorkspace();
 
-    const normalizedPrompt = promptParts.length > 0
-      ? compactInlineImageMarkdown(promptValidation.sanitizedPrompt)
-      : promptValidation.sanitizedPrompt;
+    const normalizedPrompt = promptValidation.normalizedPrompt;
 
     const id = randomUUID();
     const adaptiveConcurrency = request.adaptiveConcurrency ?? uiPreferences.adaptiveConcurrency;
@@ -6719,6 +6717,35 @@ export function isSimpleSessionTaskPrompt(prompt: string): boolean {
     || normalized.includes('single file')
     || normalized.includes('small')
     || normalized.includes('one file');
+}
+
+export function validateAndNormalizeSessionPromptInput(params: {
+  prompt: unknown;
+  promptParts?: SessionChatContentPart[];
+}):
+  | { ok: true; normalizedPrompt: string }
+  | { ok: false; error: string; code: TaskPromptValidationErrorCode; details?: Record<string, unknown> } {
+  const promptParts = cloneChatContentParts(params.promptParts ?? []);
+  const promptValidation = validateTaskPromptInput({
+    prompt: params.prompt,
+    fallbackPrompt: summarizeChatContentParts(promptParts),
+  });
+
+  if (!promptValidation.ok) {
+    return {
+      ok: false,
+      error: promptValidation.error,
+      code: promptValidation.code,
+      details: promptValidation.details,
+    };
+  }
+
+  return {
+    ok: true,
+    normalizedPrompt: promptParts.length > 0
+      ? compactInlineImageMarkdown(promptValidation.sanitizedPrompt)
+      : promptValidation.sanitizedPrompt,
+  };
 }
 
 function isWriteToolCallEvent(toolEvent: LlmToolCallEvent): boolean {
