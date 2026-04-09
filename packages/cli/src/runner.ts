@@ -103,6 +103,10 @@ const AUTO_CHECKPOINT_GIT_TIMEOUT_MS = resolvePositiveIntEnv(process.env.ORCHEST
 const SESSION_DELIVERY_REQUIRED = resolveBooleanEnv(process.env.ORCHESTRACE_SESSION_DELIVERY_REQUIRED, true);
 const SESSION_DELIVERY_GIT_TIMEOUT_MS = resolvePositiveIntEnv(process.env.ORCHESTRACE_SESSION_DELIVERY_GIT_TIMEOUT_MS, 120_000);
 const SESSION_DELIVERY_API_TIMEOUT_MS = resolvePositiveIntEnv(process.env.ORCHESTRACE_SESSION_DELIVERY_API_TIMEOUT_MS, 20_000);
+const SESSION_DELIVERY_VERIFY_TIMEOUT_MS = resolvePositiveIntEnv(process.env.ORCHESTRACE_SESSION_DELIVERY_VERIFY_TIMEOUT_MS, 15 * 60_000);
+const SESSION_DELIVERY_GH_TIMEOUT_MS = resolvePositiveIntEnv(process.env.ORCHESTRACE_SESSION_DELIVERY_GH_TIMEOUT_MS, 20_000);
+const SESSION_DELIVERY_CI_TIMEOUT_MS = resolvePositiveIntEnv(process.env.ORCHESTRACE_SESSION_DELIVERY_CI_TIMEOUT_MS, 30 * 60_000);
+const SESSION_DELIVERY_CI_POLL_INTERVAL_MS = resolvePositiveIntEnv(process.env.ORCHESTRACE_SESSION_DELIVERY_CI_POLL_INTERVAL_MS, 15_000);
 const CHECKPOINT_STASH_PREFIX = 'orchestrace-checkpoint';
 const CHECKPOINT_METADATA_FILE = 'checkpoint.json';
 const execFileAsync = promisify(execFile);
@@ -481,6 +485,113 @@ async function main(): Promise<void> {
       return { ok: true, stdout, stderr };
     } catch (err) {
       return { ok: false, stdout: '', stderr: '', error: errorMsg(err) };
+    }
+  }
+
+  async function runShellCommandWithTimeout(
+    command: string,
+    timeout: number,
+  ): Promise<{ ok: boolean; stdout: string; stderr: string; error?: string }> {
+    try {
+      const { stdout, stderr } = await execFileAsync('sh', ['-lc', command], {
+        cwd: config.workspacePath,
+        timeout,
+        maxBuffer: 5 * 1024 * 1024,
+      });
+      return { ok: true, stdout, stderr };
+    } catch (err) {
+      const typed = err as ExecFileException;
+      return {
+        ok: false,
+        stdout: typeof typed.stdout === 'string' ? typed.stdout : '',
+        stderr: typeof typed.stderr === 'string' ? typed.stderr : '',
+        error: errorMsg(err),
+      };
+    }
+  }
+
+  async function runRequiredValidationBeforeDelivery(): Promise<void> {
+    const verifyCommands = parseAndSanitizeVerifyCommands(process.env.ORCHESTRACE_VERIFY_COMMANDS);
+    if (verifyCommands.length === 0) {
+      throw new Error('Remote delivery requires validation, but no verification commands are configured. Set ORCHESTRACE_VERIFY_COMMANDS.');
+    }
+
+    for (const command of verifyCommands) {
+      const validationResult = await runShellCommandWithTimeout(command, SESSION_DELIVERY_VERIFY_TIMEOUT_MS);
+      if (!validationResult.ok) {
+        const details = [validationResult.stdout, validationResult.stderr, validationResult.error]
+          .map((line) => (line ?? '').trim())
+          .filter(Boolean)
+          .join('\n');
+        throw new Error(`Validation command failed before push: ${command}${details ? `\n${compact(details, 2000)}` : ''}`);
+      }
+    }
+  }
+
+  async function runGhJson<T extends Record<string, unknown>>(args: string[]): Promise<T> {
+    try {
+      const { stdout } = await execFileAsync('gh', args, {
+        cwd: config.workspacePath,
+        timeout: SESSION_DELIVERY_GH_TIMEOUT_MS,
+        env: {
+          ...process.env,
+          GH_PAGER: 'cat',
+        },
+      });
+      return JSON.parse(stdout) as T;
+    } catch (error) {
+      throw new Error(`gh command failed (${args.join(' ')}): ${errorMsg(error)}`);
+    }
+  }
+
+  async function waitForGitHubCiChecks(params: {
+    owner: string;
+    repo: string;
+    prNumber: number;
+    prUrl: string;
+  }): Promise<void> {
+    const startedAt = Date.now();
+    let observedChecks = false;
+
+    while (true) {
+      const prView = await runGhJson<{
+        statusCheckRollup?: unknown;
+      }>([
+        'pr',
+        'view',
+        String(params.prNumber),
+        '--repo',
+        `${params.owner}/${params.repo}`,
+        '--json',
+        'statusCheckRollup',
+      ]);
+
+      const summary = assessGitHubStatusCheckRollup(prView.statusCheckRollup);
+      if (summary.total > 0) {
+        observedChecks = true;
+      }
+
+      if (summary.failing > 0) {
+        throw new Error(`GitHub CI checks failed for PR #${params.prNumber}: ${params.prUrl}`);
+      }
+
+      if (observedChecks && summary.pending === 0) {
+        return;
+      }
+
+      const elapsed = Date.now() - startedAt;
+      if (elapsed >= SESSION_DELIVERY_CI_TIMEOUT_MS) {
+        if (!observedChecks) {
+          throw new Error(`Timed out waiting for GitHub CI checks to appear for PR #${params.prNumber}: ${params.prUrl}`);
+        }
+        throw new Error(
+          `Timed out waiting for GitHub CI checks to pass for PR #${params.prNumber}: ${summary.pending} pending out of ${summary.total}`,
+        );
+      }
+
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, SESSION_DELIVERY_CI_POLL_INTERVAL_MS);
+      });
     }
   }
 

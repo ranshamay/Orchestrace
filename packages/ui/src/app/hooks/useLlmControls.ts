@@ -133,19 +133,7 @@ export function useLlmControls(params: Params) {
 
   useEffect(() => {
     if (!selectedSessionId) {
-      const draftControls: SessionLlmControls = {
-        planningProvider: defaultLlmControls.planningProvider || workPlanningProvider,
-        planningModel: defaultLlmControls.planningModel || workPlanningModel,
-        implementationProvider: defaultLlmControls.implementationProvider || workProvider,
-        implementationModel: defaultLlmControls.implementationModel || workModel,
-        planningNoToolGuardMode: defaultLlmControls.planningNoToolGuardMode,
-        workspaceId: defaultLlmControls.workspaceId || workWorkspaceId,
-        autoApprove: defaultLlmControls.autoApprove,
-        adaptiveConcurrency: defaultLlmControls.adaptiveConcurrency,
-        batchConcurrency: defaultLlmControls.batchConcurrency,
-        batchMinConcurrency: defaultLlmControls.batchMinConcurrency,
-      };
-      applyWorkingControls(draftControls);
+      applyWorkingControls(defaultLlmControls);
       return;
     }
 
@@ -158,17 +146,17 @@ export function useLlmControls(params: Params) {
     if (!selectedSession) return;
 
     const sessionControls: SessionLlmControls = {
-      planningProvider: selectedSession.planningProvider
-        || defaultLlmControls.planningProvider
+      planningProvider: defaultLlmControls.planningProvider
+        || selectedSession.planningProvider
         || selectedSession.provider,
-      planningModel: selectedSession.planningModel
-        || defaultLlmControls.planningModel
+      planningModel: defaultLlmControls.planningModel
+        || selectedSession.planningModel
         || selectedSession.model,
-      implementationProvider: selectedSession.implementationProvider
-        || defaultLlmControls.implementationProvider
+      implementationProvider: defaultLlmControls.implementationProvider
+        || selectedSession.implementationProvider
         || selectedSession.provider,
-      implementationModel: selectedSession.implementationModel
-        || defaultLlmControls.implementationModel
+      implementationModel: defaultLlmControls.implementationModel
+        || selectedSession.implementationModel
         || selectedSession.model,
       planningNoToolGuardMode: selectedSession.planningNoToolGuardMode ?? defaultLlmControls.planningNoToolGuardMode,
       workspaceId: selectedSession.workspaceId || defaultLlmControls.workspaceId,

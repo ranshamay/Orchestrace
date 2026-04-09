@@ -6942,10 +6942,11 @@ async function resolveSessionWorkDiff(session: WorkSession): Promise<{
   truncated: boolean;
 }> {
   const comparedPath = session.worktreePath ?? session.workspacePath;
-  const baseBranch = await resolveDefaultBranch(comparedPath);
-  const nameStatusRaw = await gitExec(comparedPath, ['diff', '--name-status', '--find-renames=60%', baseBranch]);
-  const numStatRaw = await gitExec(comparedPath, ['diff', '--numstat', '--find-renames=60%', baseBranch]);
-  const diffRaw = await gitExec(comparedPath, ['diff', '--no-color', '--find-renames=60%', '--unified=3', baseBranch]);
+  const baseBranch = 'main';
+  const baseRef = await resolveMainComparisonRef(comparedPath);
+  const nameStatusRaw = await gitExec(comparedPath, ['diff', '--name-status', '--find-renames=60%', baseRef]);
+  const numStatRaw = await gitExec(comparedPath, ['diff', '--numstat', '--find-renames=60%', baseRef]);
+  const diffRaw = await gitExec(comparedPath, ['diff', '--no-color', '--find-renames=60%', '--unified=3', baseRef]);
 
   const files = parseDiffNameStatus(nameStatusRaw);
   const stats = parseDiffNumStat(numStatRaw);
@@ -6965,6 +6966,19 @@ async function resolveSessionWorkDiff(session: WorkSession): Promise<{
     generatedAt: now(),
     truncated,
   };
+}
+
+async function resolveMainComparisonRef(repoRoot: string): Promise<'main' | 'origin/main'> {
+  for (const candidate of ['main', 'origin/main'] as const) {
+    try {
+      await gitExec(repoRoot, ['rev-parse', '--verify', candidate]);
+      return candidate;
+    } catch {
+      // Try next candidate.
+    }
+  }
+
+  throw new Error('Unable to resolve main branch reference (expected main or origin/main).');
 }
 
 function parseDiffNameStatus(raw: string): Array<{

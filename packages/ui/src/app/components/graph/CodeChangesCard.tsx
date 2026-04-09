@@ -15,10 +15,12 @@ export function CodeChangesCard({ selectedSession, selectedSessionRunning }: Pro
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [refreshTick, setRefreshTick] = useState(0);
+  const implementationStarted = selectedSession ? hasImplementationStarted(selectedSession) : false;
+  const canShowDiff = Boolean(selectedSession?.worktreePath) && implementationStarted;
 
   useEffect(() => {
     const sessionId = selectedSession?.id;
-    if (!sessionId) {
+    if (!sessionId || !canShowDiff) {
       setSnapshot(null);
       setError(null);
       setIsLoading(false);
@@ -61,7 +63,7 @@ export function CodeChangesCard({ selectedSession, selectedSessionRunning }: Pro
         window.clearInterval(intervalId);
       }
     };
-  }, [selectedSession?.id, selectedSessionRunning, refreshTick]);
+  }, [canShowDiff, selectedSession?.id, selectedSessionRunning, refreshTick]);
 
   const sortedFiles = useMemo(() => {
     if (!snapshot?.files) {
@@ -78,11 +80,11 @@ export function CodeChangesCard({ selectedSession, selectedSessionRunning }: Pro
       <div className="flex items-center justify-between gap-2 border-b border-slate-200 px-3 py-2 dark:border-slate-800">
         <div>
           <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">Code Changes</h3>
-          <p className="text-[11px] text-slate-500 dark:text-slate-400">Diff of selected session worktree vs base branch.</p>
+          <p className="text-[11px] text-slate-500 dark:text-slate-400">Diff of selected session worktree changes vs main.</p>
         </div>
         <button
           className="inline-flex items-center gap-1 rounded border border-slate-300 px-2 py-1 text-[11px] font-medium text-slate-700 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
-          disabled={!canRefresh || isLoading}
+          disabled={!canRefresh || !canShowDiff || isLoading}
           onClick={() => setRefreshTick((current) => current + 1)}
           type="button"
         >
@@ -97,13 +99,19 @@ export function CodeChangesCard({ selectedSession, selectedSessionRunning }: Pro
         </div>
       )}
 
-      {selectedSession && !selectedSession.worktreePath && (
+      {selectedSession && !implementationStarted && (
+        <div className="px-3 py-4 text-xs text-slate-500 dark:text-slate-400">
+          Code changes are shown after implementation starts for this session.
+        </div>
+      )}
+
+      {selectedSession && implementationStarted && !selectedSession.worktreePath && (
         <div className="px-3 py-4 text-xs text-slate-500 dark:text-slate-400">
           This session has no managed worktree path, so no per-session diff is available.
         </div>
       )}
 
-      {selectedSession && selectedSession.worktreePath && (
+      {selectedSession && canShowDiff && (
         <div className="space-y-3 px-3 py-3">
           {snapshot && (
             <div className="grid grid-cols-2 gap-2 rounded border border-slate-200 bg-slate-50 px-2.5 py-2 text-[11px] text-slate-600 dark:border-slate-800 dark:bg-slate-950 dark:text-slate-300">
@@ -167,4 +175,22 @@ function fileStatusBadgeClass(status: WorkSessionDiffFileStatus): string {
   if (status === 'copied') return 'bg-cyan-100 text-cyan-700 dark:bg-cyan-900/40 dark:text-cyan-300';
   if (status === 'unmerged') return 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300';
   return 'bg-slate-200 text-slate-700 dark:bg-slate-800 dark:text-slate-300';
+}
+
+function hasImplementationStarted(session: WorkSession): boolean {
+  if (session.llmStatus?.phase === 'implementation') {
+    return true;
+  }
+
+  const llmState = (session.llmStatus?.state ?? '').trim().toLowerCase();
+  if (llmState === 'implementing' || llmState === 'using-tools' || llmState === 'validating' || llmState === 'retrying') {
+    return true;
+  }
+
+  const implementationPercent = session.progress?.implementationPercent ?? 0;
+  if (implementationPercent > 0) {
+    return true;
+  }
+
+  return session.events.some((event) => event.type.toLowerCase().includes('implementation'));
 }
