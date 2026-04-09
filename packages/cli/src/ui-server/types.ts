@@ -51,6 +51,9 @@ export interface UiDagEvent {
   type: DagEvent['type'];
   taskId?: string;
   failureType?: string;
+  attempt?: number;
+  maxRetries?: number;
+  totalDurationMs?: number;
   message: string;
 }
 

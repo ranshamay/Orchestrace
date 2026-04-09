@@ -2189,17 +2189,44 @@ function deriveLlmStatus(event: DagEvent, t: string): SessionLlmStatus | undefin
       return makeLlmStatus('completed', 'Run completed successfully.', undefined, 'taskId' in event ? event.taskId : undefined, 'implementation');
     case 'task:failed':
     case 'graph:failed':
-      return makeLlmStatus('failed',
-        event.type === 'task:failed' && event.failureType ? `${event.failureType}: ${event.error}` : event.error,
+      return makeLlmStatus(
+        'failed',
+        event.type === 'task:failed'
+          ? `${event.failureType ? `${event.failureType}: ` : ''}${event.error} (attempt ${event.attempt}/${event.maxRetries + 1}, ${event.totalDurationMs}ms elapsed)`
+          : event.error,
         event.type === 'task:failed' ? event.failureType : undefined,
-        'taskId' in event ? event.taskId : undefined);
+        'taskId' in event ? event.taskId : undefined,
+      );
     default:
       return undefined;
   }
 }
 
-function toUiEvent(runId: string, event: DagEvent, t: string): { time: string; runId: string; type: string; taskId?: string; failureType?: string; message: string } | undefined {
-  const base = { time: t, runId, type: event.type, taskId: 'taskId' in event ? event.taskId : undefined, failureType: event.type === 'task:failed' ? event.failureType : undefined };
+function toUiEvent(
+  runId: string,
+  event: DagEvent,
+  t: string,
+): {
+  time: string;
+  runId: string;
+  type: string;
+  taskId?: string;
+  failureType?: string;
+  attempt?: number;
+  maxRetries?: number;
+  totalDurationMs?: number;
+  message: string;
+} | undefined {
+  const base = {
+    time: t,
+    runId,
+    type: event.type,
+    taskId: 'taskId' in event ? event.taskId : undefined,
+    failureType: event.type === 'task:failed' ? event.failureType : undefined,
+    attempt: event.type === 'task:failed' ? event.attempt : undefined,
+    maxRetries: event.type === 'task:failed' ? event.maxRetries : undefined,
+    totalDurationMs: event.type === 'task:failed' ? event.totalDurationMs : undefined,
+  };
   const tag = (msg: string) => `[run:${runId}] ${msg}`;
 
   switch (event.type) {
@@ -2220,7 +2247,12 @@ function toUiEvent(runId: string, event: DagEvent, t: string): { time: string; r
     case 'task:started': return { ...base, message: tag(`${event.taskId}: started`) };
     case 'task:validating': return { ...base, message: tag(`${event.taskId}: validating`) };
     case 'task:completed': return { ...base, message: tag(`${event.taskId}: completed`) };
-    case 'task:failed': return { ...base, message: tag(`${event.taskId}: failed${event.failureType ? ` [${event.failureType}]` : ''} (${event.error})`) };
+    case 'task:failed': return {
+      ...base,
+      message: tag(
+        `${event.taskId}: failed${event.failureType ? ` [${event.failureType}]` : ''} (${event.error}) attempt ${event.attempt}/${event.maxRetries + 1}, elapsed ${event.totalDurationMs}ms`,
+      ),
+    };
     case 'graph:completed': return { ...base, message: tag(`graph completed (${event.outputs.size} outputs)`) };
     case 'graph:failed': return { ...base, message: tag(`graph failed (${event.error})`) };
     case 'task:retrying': return { ...base, message: tag(`${event.taskId}: retrying ${event.attempt}/${event.maxRetries}`) };

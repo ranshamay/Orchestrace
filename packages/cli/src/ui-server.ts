@@ -5183,6 +5183,9 @@ function toUiEvent(runId: string, event: DagEvent): UiDagEvent | undefined {
     type: event.type,
     taskId: 'taskId' in event ? event.taskId : undefined,
     failureType: event.type === 'task:failed' ? event.failureType : undefined,
+    attempt: event.type === 'task:failed' ? event.attempt : undefined,
+    maxRetries: event.type === 'task:failed' ? event.maxRetries : undefined,
+    totalDurationMs: event.type === 'task:failed' ? event.totalDurationMs : undefined,
   };
 
   const tagged = (message: string): string => `[run:${runId}] ${message}`;
@@ -5230,7 +5233,7 @@ function toUiEvent(runId: string, event: DagEvent): UiDagEvent | undefined {
       return {
         ...base,
         message: tagged(
-          `${event.taskId}: failed${event.failureType ? ` [${event.failureType}]` : ''} (${event.error})`,
+          `${event.taskId}: failed${event.failureType ? ` [${event.failureType}]` : ''} (${event.error}) attempt ${event.attempt}/${event.maxRetries + 1}, elapsed ${event.totalDurationMs}ms`,
         ),
       };
     case 'graph:completed':

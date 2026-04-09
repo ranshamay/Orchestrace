@@ -53,6 +53,9 @@ export interface UiDagEvent {
   type: string; // DagEvent['type'] — kept as string to avoid core dep
   taskId?: string;
   failureType?: string;
+  attempt?: number;
+  maxRetries?: number;
+  totalDurationMs?: number;
   message: string;
 }
 
