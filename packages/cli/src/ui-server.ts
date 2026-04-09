@@ -28,6 +28,7 @@ import {
   type ModelInfo,
 } from '@orchestrace/context';
 import { now } from './ui-server/clock.js';
+import { cleanupSessionWorktree, ensureSessionWorktree } from './session-worktree.js';
 import {
   buildChatContinuationInput,
   cloneChatContentParts,
@@ -62,10 +63,7 @@ import type {
   WorkSession,
   WorkState,
   LlmSessionState,
-  ExecutionContext,
   SessionCreationReason,
-  SessionWorkspaceAssignmentProvenance,
-  SessionWorktreePathSessionIdRelation,
 } from './ui-server/types.js';
 import { WorkspaceManager } from './workspace-manager.js';
 import { FileEventStore } from '@orchestrace/store';
@@ -120,12 +118,6 @@ type SessionCheckpointMetadata = {
   stashRef?: string;
   stashMessage?: string;
   checkpointName?: string;
-};
-
-type NativeGitWorktree = {
-  path: string;
-  branch?: string;
-  detached: boolean;
 };
 
 type WorkStartModelResolutionFailureCode =
@@ -233,7 +225,6 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
   });
 
   const workSessions = new Map<string, WorkSession>();
-  const worktreePathLocks = new Map<string, string>();
   const authSessions = new Map<string, AuthSession>();
   const githubDeviceAuthSessions = new Map<string, GithubDeviceAuthSession>();
   const sessionChats = new Map<string, SessionChatThread>();
@@ -353,9 +344,6 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
             ?? resolvePlanningNoToolGuardModeDefault(),
           quickStartMode: c.quickStartMode,
           quickStartMaxPreDelegationToolCalls: c.quickStartMaxPreDelegationToolCalls,
-          executionContext: c.executionContext ?? 'workspace',
-          selectedWorktreePath: c.selectedWorktreePath,
-          useWorktree: c.useWorktree ?? c.executionContext === 'git-worktree',
           adaptiveConcurrency: c.adaptiveConcurrency,
           batchConcurrency: c.batchConcurrency,
           batchMinConcurrency: c.batchMinConcurrency,
@@ -601,15 +589,11 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
               planningNoToolGuardMode: session.planningNoToolGuardMode,
               quickStartMode: session.quickStartMode,
               quickStartMaxPreDelegationToolCalls: session.quickStartMaxPreDelegationToolCalls,
-              executionContext: session.executionContext,
-              selectedWorktreePath: session.selectedWorktreePath,
-              useWorktree: session.useWorktree,
               adaptiveConcurrency: session.adaptiveConcurrency,
               batchConcurrency: session.batchConcurrency,
               batchMinConcurrency: session.batchMinConcurrency,
               worktreePath: session.worktreePath,
               worktreeBranch: session.worktreeBranch,
-              workspaceAssignment: session.workspaceAssignment,
               creationReason: session.creationReason,
               sourceSessionId: session.sourceSessionId,
             },
