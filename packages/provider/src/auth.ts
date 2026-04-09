@@ -38,6 +38,19 @@ export interface ProviderInfo {
   envVars: string[];
 }
 
+const GITHUB_COPILOT_PROVIDER_ID = 'github-copilot';
+const COPILOT_TOKEN_REFRESH_SKEW_SECONDS = 120;
+const COPILOT_TOKEN_NEAR_EXPIRY_WARNING_SECONDS = 10 * 60;
+
+export interface ProviderTokenTtlStatus {
+  provider: string;
+  expiresAt?: string;
+  expiresInSeconds?: number;
+  isExpired: boolean;
+  isNearExpiry: boolean;
+  refreshRecommended: boolean;
+}
+
 export interface ProviderAuthStatus {
   provider: string;
   authType: ProviderInfo['authType'];
@@ -45,6 +58,7 @@ export interface ProviderAuthStatus {
   oauthConfigured: boolean;
   storedApiKeyConfigured: boolean;
   source: 'store' | 'env' | 'oauth' | 'none';
+  tokenTtl?: ProviderTokenTtlStatus;
 }
 
 export interface ProviderAuthManagerOptions {
@@ -87,7 +101,7 @@ export class ProviderAuthManager {
         const envVars = getEnvVarCandidates(id);
 
         let authType: ProviderInfo['authType'] = 'api-key';
-        if (id === 'github-copilot') {
+        if (id === GITHUB_COPILOT_PROVIDER_ID) {
           authType = 'oauth';
         } else if (oauth && envVars.length > 0) {
           authType = 'mixed';
@@ -108,7 +122,7 @@ export class ProviderAuthManager {
     let credentials: OAuthCredentials;
 
     // GitHub Copilot must use device/mobile code OAuth flow.
-    if (providerId === 'github-copilot') {
+    if (providerId === GITHUB_COPILOT_PROVIDER_ID) {
       credentials = await loginGitHubCopilot({
         onAuth: (url, instructions) => callbacks.onAuth({ url, instructions }),
         onPrompt: callbacks.onPrompt,
@@ -172,8 +186,28 @@ export class ProviderAuthManager {
       return storedApiKey;
     }
 
-    if (store.oauth[providerId]) {
+    const oauthCredentials = store.oauth[providerId];
+    if (oauthCredentials) {
       try {
+        if (providerId === GITHUB_COPILOT_PROVIDER_ID) {
+          const ttl = computeTokenTtlStatus(providerId, oauthCredentials);
+          if (!ttl || ttl.refreshRecommended) {
+            const result = await getOAuthApiKey(providerId as OAuthProviderId, store.oauth);
+            if (!result) {
+              return undefined;
+            }
+
+            store.oauth[providerId] = result.newCredentials;
+            await this.saveStore(store);
+            return result.apiKey;
+          }
+
+          const apiKey = oauthCredentials.access?.trim();
+          if (apiKey) {
+            return apiKey;
+          }
+        }
+
         const result = await getOAuthApiKey(providerId as OAuthProviderId, store.oauth);
         if (!result) {
           return undefined;
@@ -189,7 +223,7 @@ export class ProviderAuthManager {
 
     // Optional fallback for users who still prefer environment variables.
     // GitHub Copilot intentionally does not use this fallback to enforce device OAuth.
-    if (providerId === 'github-copilot') {
+    if (providerId === GITHUB_COPILOT_PROVIDER_ID) {
       return undefined;
     }
 
@@ -221,7 +255,13 @@ export class ProviderAuthManager {
       oauthConfigured,
       storedApiKeyConfigured,
       source: storedApiKeyConfigured ? 'store' : oauthConfigured ? 'oauth' : envConfigured ? 'env' : 'none',
+      tokenTtl: computeTokenTtlStatus(providerId, store.oauth[providerId]),
     };
+  }
+
+  async getTokenTtlStatus(providerId: string): Promise<ProviderTokenTtlStatus | undefined> {
+    const store = await this.loadStore();
+    return computeTokenTtlStatus(providerId, store.oauth[providerId]);
   }
 
   async getAllStatus(): Promise<ProviderAuthStatus[]> {
@@ -314,6 +354,49 @@ function looksLikeOAuthCredentials(value: unknown): value is OAuthCredentials {
   return typeof value.access === 'string'
     && typeof value.refresh === 'string'
     && typeof value.expires === 'number';
+}
+
+function computeTokenTtlStatus(
+  providerId: string,
+  credentials: OAuthCredentials | undefined,
+): ProviderTokenTtlStatus | undefined {
+  if (!credentials || providerId !== GITHUB_COPILOT_PROVIDER_ID) {
+    return undefined;
+  }
+
+  const expiresAtMs = normalizeExpiresToEpochMs(credentials.expires);
+  if (!Number.isFinite(expiresAtMs)) {
+    return {
+      provider: providerId,
+      isExpired: false,
+      isNearExpiry: false,
+      refreshRecommended: true,
+    };
+  }
+
+  const nowMs = Date.now();
+  const expiresInSeconds = Math.floor((expiresAtMs - nowMs) / 1000);
+  const isExpired = expiresInSeconds <= 0;
+  const isNearExpiry = expiresInSeconds <= COPILOT_TOKEN_NEAR_EXPIRY_WARNING_SECONDS;
+  const refreshRecommended = expiresInSeconds <= COPILOT_TOKEN_REFRESH_SKEW_SECONDS;
+
+  return {
+    provider: providerId,
+    expiresAt: new Date(expiresAtMs).toISOString(),
+    expiresInSeconds,
+    isExpired,
+    isNearExpiry,
+    refreshRecommended,
+  };
+}
+
+function normalizeExpiresToEpochMs(rawExpires: number): number {
+  if (!Number.isFinite(rawExpires) || rawExpires <= 0) {
+    return Number.NaN;
+  }
+
+  // OAuth libraries frequently serialize `exp` in seconds; legacy stores may keep milliseconds.
+  return rawExpires > 1_000_000_000_000 ? rawExpires : rawExpires * 1000;
 }
 
 function findWorkspaceRoot(startDir: string): string {

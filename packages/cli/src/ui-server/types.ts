@@ -62,6 +62,9 @@ export interface UiDagEvent {
   type: DagEvent['type'];
   taskId?: string;
   failureType?: string;
+  attempt?: number;
+  maxRetries?: number;
+  totalDurationMs?: number;
   message: string;
 }
 
@@ -179,9 +182,9 @@ export interface WorkSession {
   planningNoToolGuardMode: 'enforce' | 'warn';
   quickStartMode?: boolean;
   quickStartMaxPreDelegationToolCalls?: number;
-  executionContext: ExecutionContext;
+  executionContext?: ExecutionContext;
   selectedWorktreePath?: string;
-  useWorktree: boolean;
+  useWorktree?: boolean;
   adaptiveConcurrency: boolean;
   batchConcurrency: number;
   batchMinConcurrency: number;
@@ -262,9 +265,6 @@ export interface UiPreferences {
   defaultImplementationProvider: string;
   defaultImplementationModel: string;
   planningNoToolGuardMode: 'enforce' | 'warn';
-  executionContext: ExecutionContext;
-  selectedWorktreePath?: string;
-  useWorktree: boolean;
   adaptiveConcurrency: boolean;
   batchConcurrency: number;
   batchMinConcurrency: number;
@@ -282,9 +282,6 @@ export interface PersistedUiPreferences {
   defaultImplementationProvider?: string;
   defaultImplementationModel?: string;
   planningNoToolGuardMode?: 'enforce' | 'warn';
-  executionContext?: ExecutionContext;
-  selectedWorktreePath?: string;
-  useWorktree?: boolean;
   adaptiveConcurrency?: boolean;
   batchConcurrency?: number;
   batchMinConcurrency?: number;

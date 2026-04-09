@@ -23,6 +23,24 @@ export interface SafeDispatchResolution {
   shell: ShellExecutionValidation;
 }
 
+export interface ShellDispatchSourceValidation {
+  ok: boolean;
+  reason?: string;
+}
+
+export type RoutingCoercionType =
+  | 'route_mismatch'
+  | 'shell_source_guard_demotion'
+  | 'shell_prompt_validation_demotion';
+
+export interface RoutingCoercionAudit {
+  coercionType: RoutingCoercionType;
+  originalRoute: TaskRouteCategory;
+  finalRoute: TaskRouteCategory;
+  reason: string;
+  risk: 'high' | 'medium';
+}
+
 export function parseTaskRouteOverride(raw: string | undefined): TaskRouteCategory | undefined {
   if (!raw) return undefined;
   const normalized = raw.trim().toLowerCase();
@@ -63,14 +81,62 @@ export function resolveTaskRoute(prompt: string, overrideRaw?: string): Resolved
 
 /**
  * Enforces the final dispatch contract shared by runner + CLI entrypoints.
- * Shell dispatch is only allowed when route selects shell_command AND prompt
- * passes command extraction validation; otherwise dispatch is demoted to code_change.
+ * Shell dispatch is only allowed when:
+ * 1) route selects shell_command,
+ * 2) source guard explicitly allows shell execution,
+ * 3) prompt passes command extraction validation.
+ *
+ * Any guard failure deterministically demotes dispatch to code_change.
  */
-export function enforceSafeShellDispatch(prompt: string, route: TaskRouteResult): SafeDispatchResolution {
+export function deriveRoutingCoercionAudit(
+  resolvedRoute: TaskRouteResult,
+  dispatch: SafeDispatchResolution,
+): RoutingCoercionAudit | undefined {
+  const finalRoute = dispatch.route;
+  if (resolvedRoute.category === finalRoute.category) {
+    return undefined;
+  }
+
+  const reason = finalRoute.reason ?? dispatch.shell.reason ?? 'Route was coerced to satisfy dispatch safety constraints.';
+  const sourceGuardDemotion = resolvedRoute.category === 'shell_command'
+    && finalRoute.category !== 'shell_command'
+    && dispatch.shell.reason?.includes('source')
+    ? true
+    : false;
+  const shellValidationDemotion = resolvedRoute.category === 'shell_command'
+    && finalRoute.category !== 'shell_command'
+    && !sourceGuardDemotion;
+
+  return {
+    coercionType: sourceGuardDemotion
+      ? 'shell_source_guard_demotion'
+      : shellValidationDemotion
+        ? 'shell_prompt_validation_demotion'
+        : 'route_mismatch',
+    originalRoute: resolvedRoute.category,
+    finalRoute: finalRoute.category,
+    reason,
+    risk: resolvedRoute.category === 'shell_command' || finalRoute.category === 'shell_command' ? 'high' : 'medium',
+  };
+}
+
+export function enforceSafeShellDispatch(
+  prompt: string,
+  route: TaskRouteResult,
+  source: 'user' | 'observer' | undefined,
+): SafeDispatchResolution {
   if (route.category !== 'shell_command') {
     return {
       route,
       shell: { ok: false, reason: 'Route is not shell_command.' },
+    };
+  }
+
+  const sourceValidation = validateShellDispatchSource(source);
+  if (!sourceValidation.ok) {
+    return {
+      route: fallbackToCodeChangeRoute(route, `Shell dispatch blocked by source guard: ${sourceValidation.reason}`),
+      shell: { ok: false, reason: sourceValidation.reason },
     };
   }
 
@@ -87,6 +153,28 @@ export function enforceSafeShellDispatch(prompt: string, route: TaskRouteResult)
   return {
     route: demotedRoute,
     shell,
+  };
+}
+
+/**
+ * Source-aware shell gate used as defense-in-depth at dispatch boundary.
+ * Only explicit user-originated sessions may execute shell routes.
+ */
+export function validateShellDispatchSource(
+  source: 'user' | 'observer' | undefined,
+): ShellDispatchSourceValidation {
+  if (source === 'user') {
+    return { ok: true };
+  }
+  if (source === 'observer') {
+    return {
+      ok: false,
+      reason: 'Rejected shell execution for source observer; observer prompts must route through planning pipeline.',
+    };
+  }
+  return {
+    ok: false,
+    reason: 'Rejected shell execution because source is undefined; only source user is allowed.',
   };
 }
 

@@ -53,6 +53,16 @@ describe('log watcher fix-session emission', () => {
       expect(startSession).toHaveBeenCalledTimes(1);
       expect(startSession.mock.calls[0]?.[0].source).toBe('observer');
       expect(startSession.mock.calls[0]?.[0].prompt).toContain('[Observer Fix] Unsafe cross-session mutable state');
+      const sessionRequest = startSession.mock.calls[0]?.[0];
+      expect(sessionRequest?.routingAuditContext).toEqual(expect.objectContaining({
+        eventType: 'observer_fix_prompt_conversion',
+        findingTitle: 'Unsafe cross-session mutable state',
+        findingCategory: 'architecture',
+        findingSeverity: 'high',
+        routeIntent: 'code_change',
+      }));
+      expect(sessionRequest?.routingAuditContext?.reason).toContain('Observer finding converted');
+      expect(sessionRequest?.routingAuditContext?.promptCharLength).toBeGreaterThan(0);
 
       const duplicate = await daemon.ingestSessionObserverFindings('session-123', [
         {
@@ -100,8 +110,16 @@ describe('log watcher fix-session emission', () => {
       expect(first).toEqual({ registered: 1, spawned: 1 });
       expect(startSession).toHaveBeenCalledTimes(1);
       expect(startSession.mock.calls[0]?.[0].source).toBe('observer');
-      const firstPrompt = startSession.mock.calls[0]?.[0].prompt ?? '';
+      const firstRequest = startSession.mock.calls[0]?.[0];
+      const firstPrompt = firstRequest?.prompt ?? '';
       expect(firstPrompt).toContain('[Observer Fix] Crash loop in API handler');
+      expect(firstRequest?.routingAuditContext).toEqual(expect.objectContaining({
+        eventType: 'observer_fix_prompt_conversion',
+        findingTitle: 'Crash loop in API handler',
+        findingCategory: 'code-quality',
+        findingSeverity: 'high',
+        routeIntent: 'code_change',
+      }));
       expect(firstPrompt).toContain('## Issue');
       expect(firstPrompt).toContain('\n## Task\n');
       const shellValidation = validateShellExecutionPrompt(firstPrompt);

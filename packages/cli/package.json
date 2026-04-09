@@ -8,8 +8,10 @@
   },
   "scripts": {
     "build": "tsc",
+    "pretypecheck": "pnpm --filter @orchestrace/cli... build",
     "typecheck": "tsc --noEmit",
     "dev": "tsx src/index.ts",
+    "test": "vitest run",
     "clean": "rm -rf dist"
   },
   "dependencies": {
@@ -24,6 +26,7 @@
   },
   "devDependencies": {
     "tsx": "^4.0.0",
-    "typescript": "^5.6.0"
+    "typescript": "^5.6.0",
+    "vitest": "^2.0.0"
   }
 }

@@ -256,6 +256,8 @@ type ParsedSubagentBatchFailure = {
 const SUBAGENT_RETRY_CONTEXT_LINE_PREFIX = 'Retry context:';
 const SUBAGENT_RETRY_CONTEXT_MAX_ERROR_CHARS = 240;
 const SUBAGENT_RETRY_CONTEXT_MAX_LINE_CHARS = 360;
+const SUBAGENT_BATCH_IDENTICAL_FAILURE_CAP = 2;
+const SUBAGENT_BATCH_RETRY_BASE_DELAY_MS = 200;
 
 async function executeToolWithSubagentBatchRetry(params: {
   toolset: LlmToolset;
@@ -285,11 +287,21 @@ async function executeToolWithSubagentBatchRetry(params: {
 
   let attempt = 0;
   let latest = first;
+  let previousFailureSignature = buildSubagentBatchFailureSignature(parseSubagentBatchFailure(latest.content));
+  let consecutiveIdenticalFailures = 1;
 
   while (attempt < SUBAGENT_BATCH_RETRY_MAX_ATTEMPTS) {
     const parsedFailure = parseSubagentBatchFailure(latest.content);
     if (parsedFailure.failedNodeIds.length === 0) {
       return latest;
+    }
+
+    if (consecutiveIdenticalFailures > SUBAGENT_BATCH_IDENTICAL_FAILURE_CAP) {
+      return buildSubagentBatchCircuitBreakerResult({
+        latestFailure: latest,
+        parsedFailure,
+        consecutiveIdenticalFailures,
+      });
     }
 
     const retryAgents = buildFailedSubagentRetryAgents(
@@ -306,6 +318,7 @@ async function executeToolWithSubagentBatchRetry(params: {
       agents: retryAgents,
     };
 
+    await sleepWithSignal(SUBAGENT_BATCH_RETRY_BASE_DELAY_MS * (2 ** attempt), signal);
     attempt += 1;
     latest = await toolset.executeTool(
       {
@@ -318,6 +331,23 @@ async function executeToolWithSubagentBatchRetry(params: {
 
     if (!(latest.isError ?? false)) {
       return latest;
+    }
+
+    const nextParsedFailure = parseSubagentBatchFailure(latest.content);
+    const nextFailureSignature = buildSubagentBatchFailureSignature(nextParsedFailure);
+    if (nextFailureSignature === previousFailureSignature) {
+      consecutiveIdenticalFailures += 1;
+    } else {
+      previousFailureSignature = nextFailureSignature;
+      consecutiveIdenticalFailures = 1;
+    }
+
+    if (consecutiveIdenticalFailures > SUBAGENT_BATCH_IDENTICAL_FAILURE_CAP) {
+      return buildSubagentBatchCircuitBreakerResult({
+        latestFailure: latest,
+        parsedFailure: nextParsedFailure,
+        consecutiveIdenticalFailures,
+      });
     }
   }
 
@@ -375,6 +405,20 @@ function normalizeStringArray(value: unknown): string[] {
 
 function dedupeStrings(values: string[]): string[] {
   return [...new Set(values)];
+}
+
+function buildSubagentBatchFailureSignature(parsedFailure: ParsedSubagentBatchFailure): string {
+  const failedNodeIds = [...parsedFailure.failedNodeIds].sort();
+  const failedRunErrors = parsedFailure.runs
+    .filter((run) => run.status === 'failed')
+    .map((run) => {
+      const nodeRef = run.nodeId ?? run.id ?? 'unknown-node';
+      const normalizedError = sanitizeInline(run.error, SUBAGENT_RETRY_CONTEXT_MAX_ERROR_CHARS) ?? 'unknown-error';
+      return `${nodeRef}:${normalizedError}`;
+    })
+    .sort();
+
+  return JSON.stringify({ failedNodeIds, failedRunErrors });
 }
 
 function buildFailedSubagentRetryAgents(
@@ -504,6 +548,37 @@ function buildSubagentBatchRetryMessage(toolCall: ToolCall, errorContent: string
   ].join('\n');
 }
 
+function buildSubagentBatchCircuitBreakerResult(params: {
+  latestFailure: ToolExecutionPayload;
+  parsedFailure: ParsedSubagentBatchFailure;
+  consecutiveIdenticalFailures: number;
+}): ToolExecutionPayload {
+  const failedNodeIds = params.parsedFailure.failedNodeIds;
+  const payload = {
+    status: 'escalated_error',
+    reason: 'identical_subagent_batch_failures_repeated',
+    retryCap: SUBAGENT_BATCH_RETRY_MAX_ATTEMPTS,
+    identicalFailureCap: SUBAGENT_BATCH_IDENTICAL_FAILURE_CAP,
+    consecutiveIdenticalFailures: params.consecutiveIdenticalFailures,
+    failedNodeIds,
+    actionRequired: 'manual_intervention_or_backoff_before_retry',
+    message: 'Circuit breaker tripped: identical subagent batch failures repeated more than twice consecutively. Halting further automatic batch retries.',
+    lastFailure: params.latestFailure.content,
+  };
+
+  return {
+    content: JSON.stringify(payload, null, 2),
+    isError: true,
+    details: {
+      circuitBreaker: true,
+      reason: payload.reason,
+      failedNodeIds,
+      consecutiveIdenticalFailures: params.consecutiveIdenticalFailures,
+      identicalFailureCap: SUBAGENT_BATCH_IDENTICAL_FAILURE_CAP,
+    },
+  };
+}
+
 function buildSubagentBatchFallbackResult(
   latestFailure: ToolExecutionPayload,
   originalAgents: Array<Record<string, unknown>>,
@@ -559,12 +634,52 @@ function isNonCriticalResearchNode(nodeId: string): boolean {
   return normalized.includes('research') || normalized.includes('investigat') || normalized.includes('context');
 }
 
+async function sleepWithSignal(ms: number, signal?: AbortSignal): Promise<void> {
+  if (ms <= 0) {
+    return;
+  }
+
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+
+    const onAbort = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+      reject(new Error('Operation aborted while waiting to retry subagent batch.'));
+    };
+
+    if (signal?.aborted) {
+      onAbort();
+      return;
+    }
+
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
 function buildToolCallRetryMessage(toolCall: ToolCall, errorContent: string): string {
+  const deterministicEditFailure = isDeterministicEditValidationFailure(toolCall.name, errorContent);
+  const remediationLine = deterministicEditFailure
+    ? 'This failure is deterministic. Revise the edit plan/arguments (or skip this edit) before issuing another edit tool call.'
+    : 'Correct the arguments using this error and retry this tool call.';
+
   return [
     `Tool call ${toolCall.name} (${toolCall.id}) failed.`,
     errorContent,
-    'Correct the arguments using this error and retry this tool call.',
+    remediationLine,
   ].join('\n');
+}
+
+function isDeterministicEditValidationFailure(toolName: string, errorContent: string): boolean {
+  if (toolName !== 'edit_file' && toolName !== 'edit_files') {
+    return false;
+  }
+
+  const normalized = errorContent.toLowerCase();
+  return normalized.includes('missing newtext') || normalized.includes('no-op edit is not allowed');
 }
 
 function getToolCalls(message: AssistantMessage): ToolCall[] {

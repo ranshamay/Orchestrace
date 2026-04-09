@@ -52,9 +52,11 @@ import {
   updateThinkingCircuitBreaker,
 } from './thinking-circuit-breaker.js';
 import {
+  deriveRoutingCoercionAudit,
   enforceSafeShellDispatch,
   resolveTaskRouteForSource,
   stripRetryContinuationContext,
+  type RoutingCoercionAudit,
 } from './task-routing.js';
 import {
   SessionLifecycle,
@@ -70,6 +72,11 @@ import {
   isRetryableSubAgentFailure,
   type SubAgentFailureType,
 } from './runner-subagent-failure.js';
+import {
+  resolveRunnerPolicy,
+  type ResolutionConflict,
+} from './runner-config-resolution.js';
+import { parseAndSanitizeVerifyCommands } from './verify-commands.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -93,7 +100,6 @@ const SESSION_DELIVERY_API_TIMEOUT_MS = resolvePositiveIntEnv(process.env.ORCHES
 const CHECKPOINT_STASH_PREFIX = 'orchestrace-checkpoint';
 const CHECKPOINT_METADATA_FILE = 'checkpoint.json';
 const execFileAsync = promisify(execFile);
-type PlanningNoToolGuardMode = 'enforce' | 'warn';
 
 type CheckpointLifecycleState = 'idle' | 'active' | 'completed' | 'failed' | 'cancelled' | 'interrupted';
 
@@ -210,7 +216,7 @@ async function main(): Promise<void> {
     config.source,
     process.env.ORCHESTRACE_TASK_ROUTE,
   ).result;
-  const dispatch = enforceSafeShellDispatch(promptForRoutingAndEffort, resolvedRoute);
+  const dispatch = enforceSafeShellDispatch(promptForRoutingAndEffort, resolvedRoute, config.source);
   const route = dispatch.route;
   const effortClassification = classifyTaskEffort(promptForRoutingAndEffort);
   const taskEffort: TaskEffort = (process.env.ORCHESTRACE_TASK_EFFORT as TaskEffort) || effortClassification.effort;
@@ -220,13 +226,24 @@ async function main(): Promise<void> {
 
   // Build single-task graph
   const graph = buildSingleTaskGraph(sessionId, config.prompt, route.category);
-  const quickStartMode = config.quickStartMode
-    ?? resolveBooleanEnv(process.env.ORCHESTRACE_QUICK_START_MODE, false);
-  const quickStartMaxPreDelegationToolCalls = config.quickStartMaxPreDelegationToolCalls
-    ?? resolvePositiveIntEnv(process.env.ORCHESTRACE_QUICK_START_MAX_PRE_DELEGATION_TOOL_CALLS, 3);
-  const planningNoToolGuardMode = normalizePlanningNoToolGuardMode(config.planningNoToolGuardMode)
-    ?? normalizePlanningNoToolGuardMode(process.env.ORCHESTRACE_PLANNING_NO_TOOL_GUARD_MODE)
-    ?? 'enforce';
+
+  /**
+   * Standardized precedence for runner policy settings:
+   * config (if valid) > env (if valid) > default.
+   *
+   * When config and env are both valid but differ, config wins and we emit warnings.
+   */
+  const runnerPolicy = resolveRunnerPolicy({
+    configQuickStartMode: config.quickStartMode,
+    envQuickStartMode: process.env.ORCHESTRACE_QUICK_START_MODE,
+    configQuickStartMaxPreDelegationToolCalls: config.quickStartMaxPreDelegationToolCalls,
+    envQuickStartMaxPreDelegationToolCalls: process.env.ORCHESTRACE_QUICK_START_MAX_PRE_DELEGATION_TOOL_CALLS,
+    configPlanningNoToolGuardMode: config.planningNoToolGuardMode,
+    envPlanningNoToolGuardMode: process.env.ORCHESTRACE_PLANNING_NO_TOOL_GUARD_MODE,
+  });
+  const quickStartMode = runnerPolicy.quickStartMode.value;
+  const quickStartMaxPreDelegationToolCalls = runnerPolicy.quickStartMaxPreDelegationToolCalls.value;
+  const planningNoToolGuardMode = runnerPolicy.planningNoToolGuardMode.value;
   const checkpointFilePath = join(workspaceRoot, '.orchestrace', 'sessions', sessionId, CHECKPOINT_METADATA_FILE);
   const checkpointName = `${CHECKPOINT_STASH_PREFIX}:${sessionId}:${Date.now()}`;
   const checkpointState = {
@@ -242,6 +259,25 @@ async function main(): Promise<void> {
     } catch (err) {
       console.error(`[runner] Failed to emit event:`, err);
     }
+  }
+
+  function emitRoutingCoercionAudit(input: RoutingCoercionAudit & {
+    source?: 'user' | 'observer';
+  }): void {
+    const source = input.source ?? 'undefined';
+    void emit({
+      time: iso(),
+      type: 'session:dag-event',
+      payload: {
+        event: {
+          time: iso(),
+          runId: sessionId,
+          type: 'task:routing',
+          taskId: 'task',
+          message: `Routing coercion audit: type=${input.coercionType}; originalRoute=${input.originalRoute}; finalRoute=${input.finalRoute}; source=${source}; risk=${input.risk}; reason=${input.reason}`,
+        },
+      },
+    });
   }
 
   const lifecycle = new SessionLifecycle('VALIDATING');
@@ -329,19 +365,11 @@ async function main(): Promise<void> {
     },
   });
 
-  if (resolvedRoute.category === 'shell_command' && route.category !== 'shell_command') {
-    void emit({
-      time: iso(),
-      type: 'session:dag-event',
-      payload: {
-        event: {
-          time: iso(),
-          runId: sessionId,
-          type: 'task:routing',
-          taskId: 'task',
-          message: `Shell route fallback applied: ${dispatch.shell.reason ?? 'prompt failed shell validation'}`,
-        },
-      },
+  const routingCoercionAudit = deriveRoutingCoercionAudit(resolvedRoute, dispatch);
+  if (routingCoercionAudit) {
+    emitRoutingCoercionAudit({
+      ...routingCoercionAudit,
+      source: config.source,
     });
   }
 
@@ -358,6 +386,46 @@ async function main(): Promise<void> {
       },
     },
   });
+
+  function formatRunnerPolicyConflictWarning(conflict: ResolutionConflict<unknown>): string {
+    return [
+      `Configuration conflict for ${conflict.settingKey}:`,
+      `config value (${String(conflict.configValue)}) differs from`,
+      `${conflict.envVarName} (${String(conflict.envValue)}).`,
+      'Using config value per precedence policy: config > env > default.',
+    ].join(' ');
+  }
+
+  async function emitRunnerPolicyConflictWarnings(): Promise<void> {
+    const conflicts = [
+      runnerPolicy.quickStartMode.conflict,
+      runnerPolicy.quickStartMaxPreDelegationToolCalls.conflict,
+      runnerPolicy.planningNoToolGuardMode.conflict,
+    ];
+
+    for (const conflict of conflicts) {
+      if (!conflict) {
+        continue;
+      }
+      const warning = formatRunnerPolicyConflictWarning(conflict);
+      console.warn(`[runner] ${warning}`);
+      await emit({
+        time: iso(),
+        type: 'session:dag-event',
+        payload: {
+          event: {
+            time: iso(),
+            runId: sessionId,
+            type: 'task:routing',
+            taskId: 'task',
+            message: warning,
+          },
+        },
+      });
+    }
+  }
+
+  await emitRunnerPolicyConflictWarnings();
 
   async function runGit(args: string[]): Promise<string> {
     const { stdout } = await execFileAsync('git', args, {
@@ -663,6 +731,11 @@ async function main(): Promise<void> {
       ].join('\n')
       : '';
 
+    const isObserverSession = config.source === 'observer';
+    const observerPrefixNote = isObserverSession
+      ? '- IMPORTANT: Prepend "[Observer fix] " to the prTitle (e.g., "[Observer fix] feat: fix linting issue"). This marks the PR as auto-generated by the observer.'
+      : '';
+
     const metadataPrompt = [
       'You are generating metadata for a pull request. Respond ONLY with a valid JSON object, no markdown fences, no extra text.',
       '',
@@ -680,7 +753,7 @@ async function main(): Promise<void> {
       '## Instructions',
       'Generate a JSON object with these exact keys:',
       '- "branchName": a short kebab-case git branch name (no spaces, max 60 chars, no special chars except hyphens). Prefix with "feat/", "fix/", "refactor/", or "chore/" as appropriate.',
-      '- "prTitle": a concise, descriptive PR title (max 80 chars). Use conventional commit style (e.g., "feat: add user auth flow").',
+      `- "prTitle": a concise, descriptive PR title (max 80 chars). Use conventional commit style (e.g., "feat: add user auth flow"). ${observerPrefixNote}`,
       '- "prDescription": a detailed markdown PR description covering: what changed, why, and key implementation details. Include a brief summary and a bullet list of notable changes.',
       ...(context.taskRanges.length > 0
         ? [
@@ -705,7 +778,7 @@ async function main(): Promise<void> {
       });
 
       const result = await agent.complete(metadataPrompt);
-      const parsed = parsePrMetadataResponse(result.text, context.taskRanges);
+      const parsed = parsePrMetadataResponse(result.text, context.taskRanges, isObserverSession);
       if (parsed) return parsed;
     } catch (err) {
       console.warn(`[runner] LLM PR metadata generation failed: ${errorMsg(err)}. Using fallback.`);
@@ -721,9 +794,14 @@ async function main(): Promise<void> {
       .join('-')
       .slice(0, 50);
 
+    const fallbackPrTitle = compact(config.prompt, 80);
+    const prTitle = isObserverSession && !fallbackPrTitle.startsWith('[Observer fix]')
+      ? `[Observer fix] ${fallbackPrTitle}`.slice(0, 80)
+      : fallbackPrTitle;
+
     return {
       branchName: `feat/${slug || `session-${sessionId.slice(0, 8)}`}`,
-      prTitle: compact(config.prompt, 80),
+      prTitle,
       prDescription: [
         `## Summary`,
         compact(config.prompt, 200),
@@ -1362,6 +1440,8 @@ async function main(): Promise<void> {
 
     await enterLifecyclePhase('DISPATCHING', {
       precondition: () => {
+        // Defense-in-depth: shell execution is only reachable when both the
+        // source-aware guard and prompt command validation already succeeded.
         if (route.category === 'shell_command') {
           return Boolean(dispatch.shell.ok && dispatch.shell.command);
         }
@@ -2086,19 +2166,6 @@ function resolveBooleanEnv(raw: string | undefined, fallback: boolean): boolean 
   return fallback;
 }
 
-function normalizePlanningNoToolGuardMode(value: unknown): PlanningNoToolGuardMode | undefined {
-  if (typeof value !== 'string') {
-    return undefined;
-  }
-
-  const normalized = value.trim().toLowerCase();
-  if (normalized === 'enforce' || normalized === 'warn') {
-    return normalized;
-  }
-
-  return undefined;
-}
-
 function logDagEventTrace(sessionId: string, event: DagEvent): void {
   const taskId = 'taskId' in event ? event.taskId : undefined;
   const phase = 'phase' in event ? event.phase : undefined;
@@ -2174,17 +2241,44 @@ function deriveLlmStatus(event: DagEvent, t: string): SessionLlmStatus | undefin
       return makeLlmStatus('completed', 'Run completed successfully.', undefined, 'taskId' in event ? event.taskId : undefined, 'implementation');
     case 'task:failed':
     case 'graph:failed':
-      return makeLlmStatus('failed',
-        event.type === 'task:failed' && event.failureType ? `${event.failureType}: ${event.error}` : event.error,
+      return makeLlmStatus(
+        'failed',
+        event.type === 'task:failed'
+          ? `${event.failureType ? `${event.failureType}: ` : ''}${event.error} (attempt ${event.attempt}/${event.maxRetries + 1}, ${event.totalDurationMs}ms elapsed)`
+          : event.error,
         event.type === 'task:failed' ? event.failureType : undefined,
-        'taskId' in event ? event.taskId : undefined);
+        'taskId' in event ? event.taskId : undefined,
+      );
     default:
       return undefined;
   }
 }
 
-function toUiEvent(runId: string, event: DagEvent, t: string): { time: string; runId: string; type: string; taskId?: string; failureType?: string; message: string } | undefined {
-  const base = { time: t, runId, type: event.type, taskId: 'taskId' in event ? event.taskId : undefined, failureType: event.type === 'task:failed' ? event.failureType : undefined };
+function toUiEvent(
+  runId: string,
+  event: DagEvent,
+  t: string,
+): {
+  time: string;
+  runId: string;
+  type: string;
+  taskId?: string;
+  failureType?: string;
+  attempt?: number;
+  maxRetries?: number;
+  totalDurationMs?: number;
+  message: string;
+} | undefined {
+  const base = {
+    time: t,
+    runId,
+    type: event.type,
+    taskId: 'taskId' in event ? event.taskId : undefined,
+    failureType: event.type === 'task:failed' ? event.failureType : undefined,
+    attempt: event.type === 'task:failed' ? event.attempt : undefined,
+    maxRetries: event.type === 'task:failed' ? event.maxRetries : undefined,
+    totalDurationMs: event.type === 'task:failed' ? event.totalDurationMs : undefined,
+  };
   const tag = (msg: string) => `[run:${runId}] ${msg}`;
 
   switch (event.type) {
@@ -2205,7 +2299,12 @@ function toUiEvent(runId: string, event: DagEvent, t: string): { time: string; r
     case 'task:started': return { ...base, message: tag(`${event.taskId}: started`) };
     case 'task:validating': return { ...base, message: tag(`${event.taskId}: validating`) };
     case 'task:completed': return { ...base, message: tag(`${event.taskId}: completed`) };
-    case 'task:failed': return { ...base, message: tag(`${event.taskId}: failed${event.failureType ? ` [${event.failureType}]` : ''} (${event.error})`) };
+    case 'task:failed': return {
+      ...base,
+      message: tag(
+        `${event.taskId}: failed${event.failureType ? ` [${event.failureType}]` : ''} (${event.error}) attempt ${event.attempt}/${event.maxRetries + 1}, elapsed ${event.totalDurationMs}ms`,
+      ),
+    };
     case 'graph:completed': return { ...base, message: tag(`graph completed (${event.outputs.size} outputs)`) };
     case 'graph:failed': return { ...base, message: tag(`graph failed (${event.error})`) };
     case 'task:retrying': return { ...base, message: tag(`${event.taskId}: retrying ${event.attempt}/${event.maxRetries}`) };
@@ -2214,10 +2313,7 @@ function toUiEvent(runId: string, event: DagEvent, t: string): { time: string; r
 }
 
 function buildSingleTaskGraph(id: string, prompt: string, routeCategory: TaskRouteCategory = 'code_change'): TaskGraph {
-  const raw = process.env.ORCHESTRACE_VERIFY_COMMANDS;
-  const commands = raw
-    ? raw.split(';').map((s) => s.trim()).filter(Boolean)
-    : ['pnpm typecheck', 'pnpm test'];
+  const commands = parseAndSanitizeVerifyCommands(process.env.ORCHESTRACE_VERIFY_COMMANDS);
   const nodeType = routeCategory === 'refactor' ? 'refactor' : 'code';
   const validationCommands = routeCategory === 'investigation' ? [] : commands;
 
@@ -2428,9 +2524,10 @@ function parseResultJson(text: string): Record<string, unknown> | undefined {
   return undefined;
 }
 
-function parsePrMetadataResponse(
+export function parsePrMetadataResponse(
   text: string,
   taskRanges: Array<{ todoId: string; todoTitle: string }>,
+  isObserverSession?: boolean,
 ): {
   branchName: string;
   prTitle: string;
@@ -2442,7 +2539,7 @@ function parsePrMetadataResponse(
   if (!parsed) return undefined;
 
   const branchName = typeof parsed.branchName === 'string' ? parsed.branchName.trim() : '';
-  const prTitle = typeof parsed.prTitle === 'string' ? parsed.prTitle.trim() : '';
+  let prTitle = typeof parsed.prTitle === 'string' ? parsed.prTitle.trim() : '';
   const prDescription = typeof parsed.prDescription === 'string' ? parsed.prDescription.trim() : '';
   const fallbackCommitMessage = typeof parsed.fallbackCommitMessage === 'string'
     ? parsed.fallbackCommitMessage.trim()
@@ -2452,6 +2549,11 @@ function parsePrMetadataResponse(
 
   // Sanitize branch name: only allow alphanumeric, hyphens, slashes, dots
   const safeBranch = branchName.replace(/[^a-zA-Z0-9/._-]/g, '-').replace(/-{2,}/g, '-').slice(0, 60);
+
+  // Add [Observer fix] prefix if this is an observer session and the prefix is not already present
+  if (isObserverSession && !prTitle.startsWith('[Observer fix]')) {
+    prTitle = `[Observer fix] ${prTitle}`.slice(0, 80);
+  }
 
   // Parse per-task commit messages
   const rawTaskMessages = Array.isArray(parsed.taskCommitMessages) ? parsed.taskCommitMessages : [];
@@ -2571,9 +2673,10 @@ function normalizeTodoStatus(value: unknown): 'todo' | 'in_progress' | 'done' | 
 // Run
 // ---------------------------------------------------------------------------
 
-void main().catch((err) => {
-  console.error('[runner] Fatal error:', err);
-  process.exit(1);
-});
-
-// test utils moved to runner-subagent-failure.ts
+// Only run main if this is the actual CLI entry point, not when imported as a module (e.g., for testing)
+if (process.argv[2] && process.argv[3]) {
+  void main().catch((err) => {
+    console.error('[runner] Fatal error:', err);
+    process.exit(1);
+  });
+}

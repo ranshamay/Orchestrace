@@ -191,6 +191,109 @@ describe('batch filesystem tools', () => {
     expect(duplicateResult.content).toContain('Duplicate paths are not allowed');
   });
 
+  it('edit_file rejects newline-only newText and does not mutate file', async () => {
+    const cwd = await makeWorkspace();
+    const toolset = createAgentToolset({ cwd, phase: 'implementation', taskType: 'code' });
+
+    const failedEdit = await toolset.executeTool({
+      id: '1',
+      name: 'edit_file',
+      arguments: {
+        path: 'src/file.ts',
+        oldText: 'value = 1',
+        newText: '\n',
+      },
+    });
+
+    expect(failedEdit.isError).toBe(true);
+    expect(failedEdit.content).toContain('Missing newText');
+
+    const readBack = await toolset.executeTool({
+      id: '2',
+      name: 'read_file',
+      arguments: { path: 'src/file.ts' },
+    });
+
+    expect(readBack.isError).toBeFalsy();
+    expect(readBack.content).toContain('export const value = 1;');
+  });
+
+  it('edit_file rejects no-op replacement and does not mutate file', async () => {
+    const cwd = await makeWorkspace();
+    const toolset = createAgentToolset({ cwd, phase: 'implementation', taskType: 'code' });
+
+    const failedEdit = await toolset.executeTool({
+      id: '1',
+      name: 'edit_file',
+      arguments: {
+        path: 'src/file.ts',
+        oldText: 'value = 1',
+        newText: 'value = 1',
+      },
+    });
+
+    expect(failedEdit.isError).toBe(true);
+    expect(failedEdit.content).toContain('No-op edit is not allowed');
+
+    const readBack = await toolset.executeTool({
+      id: '2',
+      name: 'read_file',
+      arguments: { path: 'src/file.ts' },
+    });
+
+    expect(readBack.isError).toBeFalsy();
+    expect(readBack.content).toContain('export const value = 1;');
+  });
+
+  it('edit_files rejects invalid replacement payloads before writing', async () => {
+    const cwd = await makeWorkspace();
+    const toolset = createAgentToolset({ cwd, phase: 'implementation', taskType: 'code' });
+
+    const seed = await toolset.executeTool({
+      id: '1',
+      name: 'write_files',
+      arguments: {
+        files: [
+          { path: 'src/one.ts', content: 'export const value = 1;\n' },
+          { path: 'src/two.ts', content: 'export const value = 1;\n' },
+        ],
+      },
+    });
+    expect(seed.isError).toBeFalsy();
+
+    const invalidBatch = await toolset.executeTool({
+      id: '2',
+      name: 'edit_files',
+      arguments: {
+        files: [
+          { path: 'src/one.ts', oldText: 'value = 1', newText: '\n', replaceAll: false },
+          { path: 'src/two.ts', oldText: 'value = 1', newText: 'value = 1', replaceAll: true },
+        ],
+      },
+    });
+
+    expect(invalidBatch.isError).toBe(true);
+    expect(invalidBatch.content).toMatch(/Missing files\[0\]\.newText|No-op edit is not allowed/);
+
+    const verify = await toolset.executeTool({
+      id: '3',
+      name: 'read_files',
+      arguments: {
+        files: [
+          { path: 'src/one.ts' },
+          { path: 'src/two.ts' },
+        ],
+      },
+    });
+
+    expect(verify.isError).toBeFalsy();
+    const parsedVerify = JSON.parse(verify.content) as {
+      files: Array<{ path: string; ok: boolean; content?: string }>;
+    };
+    expect(parsedVerify.files[0].content).toContain('value = 1');
+    expect(parsedVerify.files[1].content).toContain('value = 1');
+  });
+
   it('edit_files applies replacements in parallel and reports partial failures', async () => {
     const cwd = await makeWorkspace();
     const toolset = createAgentToolset({ cwd, phase: 'implementation', taskType: 'code' });
@@ -462,6 +565,82 @@ describe('search_files tool', () => {
 
     expect(result.isError).toBeFalsy();
     expect(result.content).toBe('(skipped invalid search path: src/missing-directory)');
+    expect(result.content.toLowerCase()).not.toContain('no such file or directory');
+  });
+
+  it('returns a clear validation error for empty query text', async () => {
+    const cwd = await makeWorkspace();
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+
+    const result = await toolset.executeTool({
+      id: '1',
+      name: 'search_files',
+      arguments: {
+        query: '   ',
+        path: 'src',
+      },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content).toBe('Invalid query: query must not be empty.');
+    expect(result.content.toLowerCase()).not.toContain('no such file or directory');
+  });
+
+  it('returns a clear validation error for invalid regex query syntax', async () => {
+    const cwd = await makeWorkspace();
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+
+    const result = await toolset.executeTool({
+      id: '1',
+      name: 'search_files',
+      arguments: {
+        query: '[unterminated',
+        queryMode: 'regex',
+        path: 'src',
+      },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content).toBe('Invalid regex query.');
+    expect(result.content.toLowerCase()).not.toContain('no such file or directory');
+  });
+
+  it('returns a clear validation error for empty glob text', async () => {
+    const cwd = await makeWorkspace();
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+
+    const result = await toolset.executeTool({
+      id: '1',
+      name: 'search_files',
+      arguments: {
+        query: 'value',
+        path: 'src',
+        glob: '   ',
+      },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content).toBe('Invalid glob: expected a non-empty string when provided.');
+    expect(result.content.toLowerCase()).not.toContain('no such file or directory');
+  });
+
+  it('returns a clear validation error when glob is used with a file path', async () => {
+    const cwd = await makeWorkspace();
+    await writeFile(join(cwd, 'src', 'file-only.txt'), 'value\n', 'utf-8');
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+
+    const result = await toolset.executeTool({
+      id: '1',
+      name: 'search_files',
+      arguments: {
+        query: 'value',
+        path: 'src/file-only.txt',
+        glob: '*.txt',
+      },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content).toBe('Invalid glob usage: glob can only be used when path points to a directory.');
     expect(result.content.toLowerCase()).not.toContain('no such file or directory');
   });
 });
@@ -1265,6 +1444,37 @@ describe('subagent prompt enrichment', () => {
     expect(parsed.runs[1]).toMatchObject({ nodeId: 'n2', status: 'completed' });
   });
 
+  it('subagent_spawn_batch defaults maxRetries when argument is non-finite or non-number', async () => {
+    const invalidMaxRetries = [Number.NaN, Number.POSITIVE_INFINITY, '3'];
+
+    for (const maxRetries of invalidMaxRetries) {
+      const cwd = await makeWorkspace();
+      const runSubAgent = vi.fn(async () => ({ text: 'ok', usage: { input: 1, output: 1, cost: 0.001 } }));
+
+      const toolset = createAgentToolset({
+        cwd,
+        phase: 'planning',
+        taskType: 'code',
+        graphId: 'g1',
+        taskId: `t-retry-default-${String(maxRetries)}`,
+        runSubAgent,
+      });
+
+      const result = await toolset.executeTool({
+        id: '1',
+        name: 'subagent_spawn_batch',
+        arguments: {
+          agents: [{ nodeId: 'n1', prompt: 'Inspect src/file.ts.' }],
+          maxRetries,
+        },
+      });
+
+      expect(result.isError).toBeFalsy();
+      const parsed = JSON.parse(result.content) as { maxRetries: number };
+      expect(parsed.maxRetries).toBe(2);
+    }
+  });
+
   it('subagent_spawn_batch honors maxRetries cap for persistent failures', async () => {
     const cwd = await makeWorkspace();
     const runSubAgent = vi.fn(async (request: { nodeId?: string }) => {
@@ -1310,6 +1520,99 @@ describe('subagent prompt enrichment', () => {
     expect(parsed.failedNodeIds).toEqual(['n-fail']);
     expect(parsed.runs).toHaveLength(1);
     expect(parsed.runs[0]).toMatchObject({ nodeId: 'n-fail', status: 'failed' });
+  });
+
+  it('subagent_spawn_batch trips circuit breaker on third identical failure wave', async () => {
+    const cwd = await makeWorkspace();
+    const runSubAgent = vi.fn(async () => {
+      throw new Error('provider timeout');
+    });
+
+    const toolset = createAgentToolset({
+      cwd,
+      phase: 'planning',
+      taskType: 'code',
+      graphId: 'g1',
+      taskId: 't-retry-breaker',
+      runSubAgent,
+    });
+
+    const result = await toolset.executeTool({
+      id: '1',
+      name: 'subagent_spawn_batch',
+      arguments: {
+        agents: [{ nodeId: 'n-fail', prompt: 'Inspect src/file.ts and fail.' }],
+        maxRetries: 5,
+      },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(runSubAgent).toHaveBeenCalledTimes(3);
+
+    const parsed = JSON.parse(result.content) as {
+      status?: string;
+      reason?: string;
+      consecutiveIdenticalFailures?: number;
+      failedNodeIds: string[];
+      runs: Array<{ nodeId?: string; status: 'completed' | 'failed'; error?: string }>;
+    };
+
+    expect(parsed.status).toBe('escalated_error');
+    expect(parsed.reason).toBe('identical_subagent_batch_failures_repeated');
+    expect(parsed.consecutiveIdenticalFailures).toBe(3);
+    expect(parsed.failedNodeIds).toEqual(['n-fail']);
+    expect(parsed.runs[0]?.error).toContain('Circuit breaker tripped');
+  });
+
+  it('subagent_spawn_batch does not trip breaker when failed node set changes', async () => {
+    const cwd = await makeWorkspace();
+    const callCount = new Map<string, number>();
+    const runSubAgent = vi.fn(async (request: { nodeId?: string }) => {
+      const nodeId = request.nodeId ?? 'none';
+      const count = (callCount.get(nodeId) ?? 0) + 1;
+      callCount.set(nodeId, count);
+
+      if (nodeId === 'n1' && count === 1) {
+        throw new Error('n1 first-wave failure');
+      }
+      if (nodeId === 'n2' && count === 1) {
+        throw new Error('n2 second-wave failure');
+      }
+
+      return { text: 'ok', usage: { input: 1, output: 1, cost: 0.001 } };
+    });
+
+    const toolset = createAgentToolset({
+      cwd,
+      phase: 'planning',
+      taskType: 'code',
+      graphId: 'g1',
+      taskId: 't-retry-changing',
+      runSubAgent,
+    });
+
+    const result = await toolset.executeTool({
+      id: '1',
+      name: 'subagent_spawn_batch',
+      arguments: {
+        agents: [
+          { nodeId: 'n1', prompt: 'task n1' },
+          { nodeId: 'n2', prompt: 'task n2' },
+        ],
+        maxRetries: 3,
+      },
+    });
+
+    expect(result.isError).toBeFalsy();
+    const parsed = JSON.parse(result.content) as {
+      status?: string;
+      completed: number;
+      failed: number;
+    };
+
+    expect(parsed.status).toBeUndefined();
+    expect(parsed.completed).toBe(2);
+    expect(parsed.failed).toBe(0);
   });
 
   it('subagent_spawn_batch reuses cached completed results when all nodeIds are cache hits', async () => {

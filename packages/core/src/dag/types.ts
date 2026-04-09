@@ -56,8 +56,6 @@ export interface TaskNode {
   model?: ModelConfig;
   /** Validation/retry configuration. */
   validation?: ValidationConfig;
-  /** If true, spawn in an isolated sub-agent (separate worktree). */
-  isolated?: boolean;
   /** Arbitrary metadata. */
   meta?: Record<string, unknown>;
 }
@@ -200,7 +198,16 @@ export type DagEvent =
   | { type: 'task:started'; taskId: string }
   | { type: 'task:validating'; taskId: string }
   | { type: 'task:completed'; taskId: string; output: TaskOutput }
-  | { type: 'task:failed'; taskId: string; error: string; retries: number; failureType?: ReplayFailureType }
+  | {
+      type: 'task:failed';
+      taskId: string;
+      error: string;
+      retries: number;
+      attempt: number;
+      maxRetries: number;
+      totalDurationMs: number;
+      failureType?: ReplayFailureType;
+    }
   | { type: 'task:retrying'; taskId: string; attempt: number; maxRetries: number }
   | { type: 'graph:completed'; outputs: Map<string, TaskOutput> }
   | { type: 'graph:failed'; error: string; completedTasks: string[]; failedTasks: string[] };
