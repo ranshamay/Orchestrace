@@ -52,23 +52,28 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
       execute: async (toolArgs, signal) => {
         const query = asRequiredString(toolArgs.query, 'query');
         const path = asString(toolArgs.path) ?? '.';
-        const regex = typeof toolArgs.regex === 'boolean' ? toolArgs.regex : false;
+        const regexFlag = typeof toolArgs.regex === 'boolean' ? toolArgs.regex : undefined;
         const glob = asString(toolArgs.glob);
-        const queryModeRaw = asString(toolArgs.queryMode) ?? 'regex';
-        if (queryModeRaw !== 'regex' && queryModeRaw !== 'literal') {
+        const queryModeRaw = asString(toolArgs.queryMode);
+
+        if (queryModeRaw !== undefined && queryModeRaw !== 'regex' && queryModeRaw !== 'literal') {
           return {
             content: "Invalid queryMode. Expected 'regex' or 'literal'.",
             isError: true,
           };
         }
+
+        const useRegex = queryModeRaw !== undefined
+          ? queryModeRaw === 'regex'
+          : regexFlag ?? false;
+
         const target = resolveWorkspacePath(options.cwd, path);
         const relTarget = toWorkspaceRelative(options.cwd, target);
 
         const args = ['-n', '--no-heading', '--color', 'never'];
-        if (!regex) {
+        if (!useRegex) {
           args.push('--fixed-strings');
         }
-        args.push(query, relTarget);
         if (glob) {
           args.push('--glob', glob);
         }
@@ -87,14 +92,17 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
           };
         }
 
-        if (result.exitCode === 1 && result.stdout.trim().length === 0) {
+        const stderr = result.stderr.trim();
+        const hasPathError = /\bNo such file or directory\b|\bos error 2\b/i.test(stderr);
+
+        if (result.exitCode === 1 && result.stdout.trim().length === 0 && !hasPathError) {
           return { content: '(no matches)' };
         }
 
         const output = formatCommandOutput(result, options.maxOutputChars ?? 16000);
         return {
           content: output,
-          isError: result.exitCode > 1,
+          isError: result.exitCode > 1 || hasPathError,
         };
       },
     },
