@@ -15,6 +15,7 @@ import { randomUUID } from 'node:crypto';
 import { execFile, type ExecFileException } from 'node:child_process';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { resolveGitHubAuthFilePath } from './home-path.js';
 import { promisify } from 'node:util';
 import {
   orchestrate,
@@ -197,8 +198,16 @@ async function main(): Promise<void> {
   const authManager = new ProviderAuthManager({
     authFilePath: join(workspaceRoot, 'auth.json'),
   });
+    let githubAuthPath: string;
+  try {
+    githubAuthPath = resolveGitHubAuthFilePath();
+  } catch (error) {
+    console.error(`[runner] ${errorMsg(error)}`);
+    process.exit(1);
+  }
+
   const githubAuthManager = new ProviderAuthManager({
-    authFilePath: join(process.env.HOME ?? '~', '.orchestrace', 'github-auth.json'),
+    authFilePath: githubAuthPath,
   });
   const llm = new PiAiAdapter();
 
