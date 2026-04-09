@@ -424,7 +424,30 @@ describe('search_files tool', () => {
     expect(result.content.toLowerCase()).not.toContain('no such file or directory');
   });
 
-  it('returns an explicit error when target path is missing', async () => {
+  it('treats colon tokens as plain query text', async () => {
+    const cwd = await makeWorkspace();
+    await writeFile(
+      join(cwd, 'src', 'tokens-colon.txt'),
+      'task:tool-call\nrunSubAgent\n',
+      'utf-8',
+    );
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+
+    const result = await toolset.executeTool({
+      id: '1',
+      name: 'search_files',
+      arguments: {
+        query: 'task:tool-call',
+        path: 'src',
+      },
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.content).toContain('tokens-colon.txt:1:task:tool-call');
+    expect(result.content.toLowerCase()).not.toContain('no such file or directory');
+  });
+
+  it('skips invalid target paths without surfacing retriable ripgrep errors', async () => {
     const cwd = await makeWorkspace();
     const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
 
@@ -437,9 +460,9 @@ describe('search_files tool', () => {
       },
     });
 
-    expect(result.isError).toBe(true);
-    expect(result.content.toLowerCase()).toContain('no such file or directory');
-    expect(result.content).not.toBe('(no matches)');
+    expect(result.isError).toBeFalsy();
+    expect(result.content).toBe('(skipped invalid search path: src/missing-directory)');
+    expect(result.content.toLowerCase()).not.toContain('no such file or directory');
   });
 });
 

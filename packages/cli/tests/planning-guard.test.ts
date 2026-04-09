@@ -19,8 +19,6 @@ function createSession(overrides: Partial<WorkSession> = {}): WorkSession {
     provider: 'github-copilot',
     model: 'gpt-5',
     autoApprove: false,
-    executionContext: 'workspace',
-    useWorktree: false,
     adaptiveConcurrency: false,
     batchConcurrency: 4,
     batchMinConcurrency: 1,
