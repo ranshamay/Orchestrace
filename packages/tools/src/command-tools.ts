@@ -169,14 +169,14 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
         }
 
 
-                const args = ['-n', '--no-heading', '--color', 'never', '--', '-e', query];
+                        const args = ['-n', '--no-heading', '--color', 'never'];
         if (!useRegex) {
           args.push('--fixed-strings');
         }
         if (globValidation.value) {
           args.push('--glob', globValidation.value);
         }
-        args.push('--', relTarget);
+        args.push('--', query, relTarget);
 
         const result = await runCommand('rg', args, {
           cwd: resolvedCwd.cwd,

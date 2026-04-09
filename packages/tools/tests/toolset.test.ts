@@ -700,7 +700,7 @@ describe('search_files tool', () => {
     runCommandSpy.mockRestore();
   });
 
-  it('passes -- before pattern arguments so option-like queries stay as query text', async () => {
+    it('passes -- before pattern arguments so option-like queries stay as query text', async () => {
     const cwd = await makeWorkspace();
     const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
     const runCommandSpy = vi.spyOn(commandRunner, 'runCommand').mockResolvedValueOnce({
@@ -722,19 +722,15 @@ describe('search_files tool', () => {
     expect(runCommandSpy).toHaveBeenCalledOnce();
 
     const args = runCommandSpy.mock.calls[0]?.[1] as string[];
-    expect(args).toEqual(expect.arrayContaining(['--', '-e', '-foo', '--fixed-strings', 'src']));
+    expect(args).toEqual(expect.arrayContaining(['--fixed-strings', '--', '-foo', 'src']));
 
-    const firstSeparatorIndex = args.indexOf('--');
-    const patternFlagIndex = args.indexOf('-e');
+    const separatorIndex = args.indexOf('--');
     const patternValueIndex = args.indexOf('-foo');
-    const lastSeparatorIndex = args.lastIndexOf('--');
     const pathIndex = args.indexOf('src');
 
-    expect(firstSeparatorIndex).toBeGreaterThanOrEqual(0);
-    expect(patternFlagIndex).toBe(firstSeparatorIndex + 1);
-    expect(patternValueIndex).toBe(patternFlagIndex + 1);
-    expect(lastSeparatorIndex).toBeGreaterThan(patternValueIndex);
-    expect(pathIndex).toBe(lastSeparatorIndex + 1);
+    expect(separatorIndex).toBeGreaterThanOrEqual(0);
+    expect(patternValueIndex).toBe(separatorIndex + 1);
+    expect(pathIndex).toBe(patternValueIndex + 1);
 
     runCommandSpy.mockRestore();
   });
