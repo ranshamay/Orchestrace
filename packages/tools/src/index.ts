@@ -171,5 +171,12 @@ async function executeToolCall(
     };
   }
 
-  return tool.execute(call.arguments, signal);
+      try {
+    return await tool.execute(call.arguments, signal);
+  } catch (error) {
+    return {
+      content: error instanceof Error ? error.message : String(error),
+      isError: true,
+    };
+  }
 }

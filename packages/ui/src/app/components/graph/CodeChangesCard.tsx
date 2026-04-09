@@ -1,12 +1,36 @@
 import { useEffect, useMemo, useState } from 'react';
 import { RefreshCw } from 'lucide-react';
-import type { WorkSession, WorkSessionDiffFileStatus, WorkSessionDiffResponse } from '../../../lib/api';
+import type { WorkSession, WorkSessionDiffFile, WorkSessionDiffFileStatus, WorkSessionDiffResponse } from '../../../lib/api';
 import { fetchWorkDiff } from '../../../lib/api';
 
 type Props = {
   selectedSession?: WorkSession;
   selectedSessionRunning: boolean;
 };
+
+type StatusFilter = 'all' | WorkSessionDiffFileStatus;
+
+type DiffFileSection = {
+  path: string;
+  status: WorkSessionDiffFileStatus;
+  previousPath?: string;
+  lines: string[];
+  additions: number;
+  deletions: number;
+  hunks: number;
+};
+
+type DiffLineKind = 'added' | 'removed' | 'hunk' | 'meta' | 'context';
+
+type DirectoryImpact = {
+  directory: string;
+  additions: number;
+  deletions: number;
+  files: number;
+  total: number;
+};
+
+const STATUS_FILTERS: StatusFilter[] = ['all', 'added', 'modified', 'deleted', 'renamed', 'copied', 'unmerged', 'unknown'];
 
 const REFRESH_INTERVAL_MS = 8_000;
 
@@ -15,8 +39,10 @@ export function CodeChangesCard({ selectedSession, selectedSessionRunning }: Pro
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [refreshTick, setRefreshTick] = useState(0);
+  const [activeFilePath, setActiveFilePath] = useState('');
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
   const implementationStarted = selectedSession ? hasImplementationStarted(selectedSession) : false;
-  const canShowDiff = Boolean(selectedSession?.worktreePath) && implementationStarted;
+  const canShowDiff = Boolean(selectedSession?.worktreePath);
 
   useEffect(() => {
     const sessionId = selectedSession?.id;
@@ -65,15 +91,73 @@ export function CodeChangesCard({ selectedSession, selectedSessionRunning }: Pro
     };
   }, [canShowDiff, selectedSession?.id, selectedSessionRunning, refreshTick]);
 
-  const sortedFiles = useMemo(() => {
-    if (!snapshot?.files) {
+  useEffect(() => {
+    setStatusFilter('all');
+    setActiveFilePath('');
+  }, [selectedSession?.id]);
+
+  const fileSections = useMemo(() => {
+    if (!snapshot) {
       return [];
     }
+    return parseDiffSections(snapshot.diff, snapshot.files);
+  }, [snapshot]);
 
-    return [...snapshot.files].sort((a, b) => a.path.localeCompare(b.path));
-  }, [snapshot?.files]);
+  const statusCounts = useMemo(() => {
+    const counts: Record<StatusFilter, number> = {
+      all: fileSections.length,
+      added: 0,
+      modified: 0,
+      deleted: 0,
+      renamed: 0,
+      copied: 0,
+      unmerged: 0,
+      unknown: 0,
+    };
+
+    for (const section of fileSections) {
+      counts[section.status] += 1;
+    }
+
+    return counts;
+  }, [fileSections]);
+
+  const visibleSections = useMemo(() => {
+    if (statusFilter === 'all') {
+      return fileSections;
+    }
+    return fileSections.filter((section) => section.status === statusFilter);
+  }, [fileSections, statusFilter]);
+
+  const directoryImpacts = useMemo(() => summarizeDirectoryImpacts(fileSections), [fileSections]);
+  const maxDirectoryTotal = directoryImpacts[0]?.total ?? 0;
+
+  const activeSection = useMemo(() => {
+    if (visibleSections.length === 0) {
+      return undefined;
+    }
+    return visibleSections.find((section) => section.path === activeFilePath) ?? visibleSections[0];
+  }, [activeFilePath, visibleSections]);
+
+  useEffect(() => {
+    if (!activeSection) {
+      if (activeFilePath) {
+        setActiveFilePath('');
+      }
+      return;
+    }
+
+    if (activeSection.path !== activeFilePath) {
+      setActiveFilePath(activeSection.path);
+    }
+  }, [activeFilePath, activeSection]);
 
   const canRefresh = Boolean(selectedSession?.id);
+  const totalTouchedLines = (snapshot?.stats.additions ?? 0) + (snapshot?.stats.deletions ?? 0);
+  const additionsPercent = totalTouchedLines > 0
+    ? Math.round(((snapshot?.stats.additions ?? 0) / totalTouchedLines) * 100)
+    : 0;
+  const deletionsPercent = totalTouchedLines > 0 ? 100 - additionsPercent : 0;
 
   return (
     <section className="mt-4 rounded-lg border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900">
@@ -99,13 +183,13 @@ export function CodeChangesCard({ selectedSession, selectedSessionRunning }: Pro
         </div>
       )}
 
-      {selectedSession && !implementationStarted && (
+      {selectedSession && selectedSession.worktreePath && !implementationStarted && (
         <div className="px-3 py-4 text-xs text-slate-500 dark:text-slate-400">
-          Code changes are shown after implementation starts for this session.
+          Implementation has not started yet; showing the current worktree diff against main.
         </div>
       )}
 
-      {selectedSession && implementationStarted && !selectedSession.worktreePath && (
+      {selectedSession && !selectedSession.worktreePath && (
         <div className="px-3 py-4 text-xs text-slate-500 dark:text-slate-400">
           This session has no managed worktree path, so no per-session diff is available.
         </div>
@@ -128,32 +212,133 @@ export function CodeChangesCard({ selectedSession, selectedSessionRunning }: Pro
             </div>
           )}
 
-          {snapshot && sortedFiles.length > 0 && (
-            <div className="flex max-h-28 flex-wrap gap-1 overflow-auto rounded border border-slate-200 bg-slate-50 p-2 dark:border-slate-800 dark:bg-slate-950">
-              {sortedFiles.map((file) => (
-                <span
-                  key={`${file.path}:${file.status}:${file.previousPath ?? ''}`}
-                  className={`rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${fileStatusBadgeClass(file.status)}`}
-                  title={file.previousPath ? `${file.previousPath} -> ${file.path}` : file.path}
-                >
-                  {file.status} {file.path}
-                </span>
-              ))}
-            </div>
-          )}
-
           {snapshot && !snapshot.hasChanges && !isLoading && !error && (
             <div className="rounded border border-emerald-200 bg-emerald-50 px-2.5 py-2 text-xs text-emerald-700 dark:border-emerald-900/60 dark:bg-emerald-950/30 dark:text-emerald-300">
               No code changes against {snapshot.baseBranch}.
             </div>
           )}
 
-          {(isLoading || (snapshot && snapshot.hasChanges)) && (
-            <div className="overflow-auto rounded border border-slate-200 bg-slate-950 p-2 dark:border-slate-800">
-              <pre className="min-h-24 whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-slate-100">
-                {isLoading && !snapshot ? 'Loading diff...' : snapshot?.diff || ''}
-              </pre>
-            </div>
+          {snapshot && snapshot.hasChanges && (
+            <>
+              <div className="rounded-xl border border-slate-200 bg-slate-50 p-2.5 dark:border-slate-800 dark:bg-slate-950/70">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="text-[11px] font-semibold text-slate-700 dark:text-slate-200">Change Story</div>
+                  <div className="flex items-center gap-2 text-[10px] font-mono">
+                    <span className="rounded bg-emerald-100 px-1.5 py-0.5 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300">+{snapshot.stats.additions}</span>
+                    <span className="rounded bg-red-100 px-1.5 py-0.5 text-red-700 dark:bg-red-900/40 dark:text-red-300">-{snapshot.stats.deletions}</span>
+                    <span className="rounded bg-slate-200 px-1.5 py-0.5 text-slate-600 dark:bg-slate-800 dark:text-slate-300">{snapshot.stats.files} files</span>
+                  </div>
+                </div>
+                <div className="mt-2 flex h-2 overflow-hidden rounded-full bg-slate-200 dark:bg-slate-800">
+                  <div className="bg-emerald-500" style={{ width: `${additionsPercent}%` }} />
+                  <div className="bg-rose-500" style={{ width: `${deletionsPercent}%` }} />
+                </div>
+                <div className="mt-2 grid gap-2 md:grid-cols-2">
+                  <StoryBlock label="Why" text={summarizeSessionIntent(selectedSession)} />
+                  <StoryBlock label="What changed" text={summarizeSnapshotChange(snapshot)} />
+                </div>
+                {directoryImpacts.length > 0 && (
+                  <div className="mt-2 rounded border border-slate-200 bg-white px-2 py-1.5 dark:border-slate-800 dark:bg-slate-900">
+                    <div className="text-[10px] font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">Hotspots by directory</div>
+                    <div className="mt-1.5 space-y-1.5">
+                      {directoryImpacts.slice(0, 5).map((impact) => (
+                        <div key={impact.directory} className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
+                          <div className="min-w-0">
+                            <div className="flex items-center justify-between gap-2 text-[10px] text-slate-600 dark:text-slate-300">
+                              <span className="truncate font-mono">{impact.directory}</span>
+                              <span className="font-mono">+{impact.additions} -{impact.deletions}</span>
+                            </div>
+                            <div className="mt-1 flex h-1.5 overflow-hidden rounded-full bg-slate-200 dark:bg-slate-800">
+                              <div className="bg-cyan-500" style={{ width: `${toPercent(impact.total, maxDirectoryTotal)}%` }} />
+                            </div>
+                          </div>
+                          <span className="rounded bg-slate-200 px-1.5 py-0.5 font-mono text-[10px] text-slate-600 dark:bg-slate-800 dark:text-slate-300">{impact.files} files</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              <div className="flex flex-wrap gap-1">
+                {STATUS_FILTERS.filter((filter) => filter === 'all' || statusCounts[filter] > 0).map((filter) => {
+                  const selected = statusFilter === filter;
+                  const count = statusCounts[filter];
+                  return (
+                    <button
+                      key={filter}
+                      className={`inline-flex items-center gap-1 rounded border px-2 py-1 text-[10px] font-semibold uppercase tracking-wide transition ${selected
+                        ? 'border-cyan-300 bg-cyan-50 text-cyan-700 dark:border-cyan-700/70 dark:bg-cyan-900/25 dark:text-cyan-300'
+                        : 'border-slate-300 bg-white text-slate-600 hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300 dark:hover:bg-slate-800'}`}
+                      onClick={() => setStatusFilter(filter)}
+                      type="button"
+                    >
+                      {statusFilterLabel(filter)}
+                      <span className="rounded bg-black/5 px-1 py-0.5 font-mono text-[10px] dark:bg-white/10">{count}</span>
+                    </button>
+                  );
+                })}
+              </div>
+
+              <div className="grid gap-3 xl:grid-cols-[280px_minmax(0,1fr)]">
+                <div className="max-h-80 space-y-1.5 overflow-auto pr-1">
+                  {visibleSections.map((section) => {
+                    const isActive = activeSection?.path === section.path;
+                    return (
+                      <button
+                        key={`${section.path}:${section.status}:${section.previousPath ?? ''}`}
+                        className={`w-full rounded-lg border p-2 text-left transition ${isActive
+                          ? 'border-cyan-300 bg-cyan-50/60 shadow-sm dark:border-cyan-700/60 dark:bg-cyan-900/20'
+                          : 'border-slate-200 bg-white hover:bg-slate-50 dark:border-slate-800 dark:bg-slate-950 dark:hover:bg-slate-900'}`}
+                        onClick={() => setActiveFilePath(section.path)}
+                        type="button"
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <span className={`rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${fileStatusBadgeClass(section.status)}`}>
+                            {section.status}
+                          </span>
+                          <span className="font-mono text-[10px] text-slate-500 dark:text-slate-400">+{section.additions} -{section.deletions}</span>
+                        </div>
+                        <div className="mt-1 truncate font-mono text-[11px] text-slate-700 dark:text-slate-200">{section.path}</div>
+                        {section.previousPath && (
+                          <div className="mt-0.5 truncate text-[10px] text-slate-500 dark:text-slate-400">from {section.previousPath}</div>
+                        )}
+                        <div className="mt-1 text-[10px] text-slate-500 dark:text-slate-400">{section.hunks} hunks · {section.lines.length} lines</div>
+                      </button>
+                    );
+                  })}
+                </div>
+
+                <div className="overflow-hidden rounded-lg border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-950">
+                  {activeSection ? (
+                    <>
+                      <div className="border-b border-slate-200 bg-slate-50 px-2.5 py-2 dark:border-slate-800 dark:bg-slate-950/80">
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="truncate font-mono text-[11px] text-slate-700 dark:text-slate-200">{activeSection.path}</div>
+                          <span className={`rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${fileStatusBadgeClass(activeSection.status)}`}>
+                            {activeSection.status}
+                          </span>
+                        </div>
+                        <p className="mt-1 text-[10px] text-slate-500 dark:text-slate-400">{describeSectionNarrative(activeSection)}</p>
+                        <div className="mt-1.5 flex flex-wrap items-center gap-2 text-[10px] text-slate-500 dark:text-slate-400">
+                          <LegendDot kind="added" label="Added line" />
+                          <LegendDot kind="removed" label="Removed line" />
+                          <LegendDot kind="hunk" label="Hunk context" />
+                          <LegendDot kind="meta" label="File metadata" />
+                        </div>
+                      </div>
+                      <div className="max-h-80 overflow-auto p-2">
+                        <ColoredDiffLines lines={activeSection.lines} />
+                      </div>
+                    </>
+                  ) : (
+                    <div className="px-3 py-4 text-xs text-slate-500 dark:text-slate-400">
+                      No files match this filter.
+                    </div>
+                  )}
+                </div>
+              </div>
+            </>
           )}
 
           {snapshot?.truncated && (
@@ -193,4 +378,307 @@ function hasImplementationStarted(session: WorkSession): boolean {
   }
 
   return session.events.some((event) => event.type.toLowerCase().includes('implementation'));
+}
+
+function StoryBlock({ label, text }: { label: string; text: string }) {
+  return (
+    <div className="rounded border border-slate-200 bg-white px-2 py-1.5 dark:border-slate-800 dark:bg-slate-900">
+      <div className="text-[10px] font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">{label}</div>
+      <div className="mt-1 text-xs text-slate-700 dark:text-slate-200">{text}</div>
+    </div>
+  );
+}
+
+function LegendDot({ kind, label }: { kind: DiffLineKind; label: string }) {
+  return (
+    <span className="inline-flex items-center gap-1">
+      <span className={`h-1.5 w-1.5 rounded-full ${diffDotClass(kind)}`} />
+      {label}
+    </span>
+  );
+}
+
+function ColoredDiffLines({ lines }: { lines: string[] }) {
+  if (lines.length === 0) {
+    return <div className="text-xs text-slate-500 dark:text-slate-400">No patch lines available.</div>;
+  }
+
+  return (
+    <div className="font-mono text-[11px] leading-relaxed">
+      {lines.map((line, i) => {
+        const kind = classifyDiffLine(line);
+        return (
+          <div key={`${i}:${line.slice(0, 32)}`} className={`grid grid-cols-[14px_auto_1fr] items-start gap-2 px-1.5 -mx-1.5 ${diffLineClass(kind)}`}>
+            <span className={`mt-[5px] h-1.5 w-1.5 rounded-full ${diffDotClass(kind)}`} />
+            <span className="select-none text-[10px] text-slate-400 dark:text-slate-500">{String(i + 1).padStart(3, '0')}</span>
+            <span className="whitespace-pre-wrap break-words">{line === '' ? ' ' : line}</span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function parseDiffSections(diff: string, files: WorkSessionDiffFile[]): DiffFileSection[] {
+  const normalized = diff.trim();
+  if (!normalized) {
+    return files.map((file) => ({
+      path: file.path,
+      status: file.status,
+      previousPath: file.previousPath,
+      lines: [`diff --git a/${file.previousPath ?? file.path} b/${file.path}`, '# No textual patch available.'],
+      additions: 0,
+      deletions: 0,
+      hunks: 0,
+    }));
+  }
+
+  const fileIndex = new Map(files.map((file) => [file.path, file]));
+  const sections: DiffFileSection[] = [];
+  let current: DiffFileSection | undefined;
+
+  const flushCurrent = () => {
+    if (!current) {
+      return;
+    }
+    sections.push(current);
+    current = undefined;
+  };
+
+  for (const line of normalized.split('\n')) {
+    if (line.startsWith('diff --git ')) {
+      flushCurrent();
+      const parsedPath = parsePathFromDiffHeader(line);
+      const mapped = parsedPath ? fileIndex.get(parsedPath) : undefined;
+      current = {
+        path: parsedPath ?? mapped?.path ?? 'unknown',
+        status: mapped?.status ?? 'unknown',
+        previousPath: mapped?.previousPath,
+        lines: [line],
+        additions: 0,
+        deletions: 0,
+        hunks: 0,
+      };
+      continue;
+    }
+
+    if (!current) {
+      const fallback = files[0];
+      current = {
+        path: fallback?.path ?? 'changes',
+        status: fallback?.status ?? 'unknown',
+        previousPath: fallback?.previousPath,
+        lines: [],
+        additions: 0,
+        deletions: 0,
+        hunks: 0,
+      };
+    }
+
+    current.lines.push(line);
+
+    if (line.startsWith('+++ b/')) {
+      const nextPath = line.slice('+++ b/'.length).trim();
+      if (nextPath && nextPath !== '/dev/null') {
+        current.path = nextPath;
+        const mapped = fileIndex.get(nextPath);
+        if (mapped) {
+          current.status = mapped.status;
+          current.previousPath = mapped.previousPath;
+        }
+      }
+    }
+
+    if (line.startsWith('--- a/') && !current.previousPath) {
+      const previousPath = line.slice('--- a/'.length).trim();
+      if (previousPath && previousPath !== '/dev/null') {
+        current.previousPath = previousPath;
+      }
+    }
+
+    if (line.startsWith('+') && !line.startsWith('+++')) {
+      current.additions += 1;
+      continue;
+    }
+    if (line.startsWith('-') && !line.startsWith('---')) {
+      current.deletions += 1;
+      continue;
+    }
+    if (line.startsWith('@@')) {
+      current.hunks += 1;
+    }
+  }
+
+  flushCurrent();
+
+  if (sections.length === 0) {
+    return files.map((file) => ({
+      path: file.path,
+      status: file.status,
+      previousPath: file.previousPath,
+      lines: [`diff --git a/${file.previousPath ?? file.path} b/${file.path}`],
+      additions: 0,
+      deletions: 0,
+      hunks: 0,
+    }));
+  }
+
+  return sections;
+}
+
+function parsePathFromDiffHeader(line: string): string | undefined {
+  const match = line.match(/^diff --git a\/(.+?) b\/(.+)$/);
+  if (!match) {
+    return undefined;
+  }
+  const path = match[2]?.trim();
+  return path || undefined;
+}
+
+function summarizeSessionIntent(session?: WorkSession): string {
+  const outputText = session?.output?.text?.trim();
+  if (outputText) {
+    return trimText(outputText, 190);
+  }
+  const promptText = session?.prompt?.trim();
+  if (promptText) {
+    return trimText(promptText, 190);
+  }
+  return 'Session intent is not available yet.';
+}
+
+function summarizeSnapshotChange(snapshot: WorkSessionDiffResponse): string {
+  return `${snapshot.stats.files} files changed, with +${snapshot.stats.additions} additions and -${snapshot.stats.deletions} deletions against ${snapshot.baseBranch}.`;
+}
+
+function trimText(text: string, maxLength: number): string {
+  const compact = text.replace(/\s+/g, ' ').trim();
+  if (compact.length <= maxLength) {
+    return compact;
+  }
+  return `${compact.slice(0, maxLength - 1)}…`;
+}
+
+function statusFilterLabel(filter: StatusFilter): string {
+  if (filter === 'all') {
+    return 'all';
+  }
+  return filter;
+}
+
+function describeSectionNarrative(section: DiffFileSection): string {
+  if (section.status === 'added') {
+    return 'New file introduced in this session, likely implementing new behavior.';
+  }
+  if (section.status === 'deleted') {
+    return 'File removed as part of cleanup or replacement.';
+  }
+  if (section.status === 'renamed') {
+    return 'File moved or renamed, possibly alongside content updates.';
+  }
+  if (section.status === 'copied') {
+    return 'File copied from another location and adjusted.';
+  }
+  if (section.additions > section.deletions * 2) {
+    return 'Primarily additive edits, suggesting feature expansion.';
+  }
+  if (section.deletions > section.additions * 2) {
+    return 'Primarily reductive edits, suggesting simplification or removal.';
+  }
+  return 'Balanced update with both additions and removals.';
+}
+
+function classifyDiffLine(line: string): DiffLineKind {
+  if (line.startsWith('+') && !line.startsWith('+++')) {
+    return 'added';
+  }
+  if (line.startsWith('-') && !line.startsWith('---')) {
+    return 'removed';
+  }
+  if (line.startsWith('@@')) {
+    return 'hunk';
+  }
+  if (line.startsWith('diff --git') || line.startsWith('index ') || line.startsWith('--- ') || line.startsWith('+++ ')) {
+    return 'meta';
+  }
+  return 'context';
+}
+
+function diffLineClass(kind: DiffLineKind): string {
+  if (kind === 'added') {
+    return 'bg-emerald-50 text-emerald-800 dark:bg-emerald-500/15 dark:text-emerald-200';
+  }
+  if (kind === 'removed') {
+    return 'bg-red-50 text-red-800 dark:bg-red-500/15 dark:text-red-200';
+  }
+  if (kind === 'hunk') {
+    return 'bg-cyan-50 text-cyan-800 dark:bg-cyan-500/15 dark:text-cyan-200';
+  }
+  if (kind === 'meta') {
+    return 'bg-slate-100 text-slate-700 dark:bg-slate-800/70 dark:text-slate-200';
+  }
+  return 'text-slate-500 dark:text-slate-400';
+}
+
+function diffDotClass(kind: DiffLineKind): string {
+  if (kind === 'added') {
+    return 'bg-emerald-500';
+  }
+  if (kind === 'removed') {
+    return 'bg-red-500';
+  }
+  if (kind === 'hunk') {
+    return 'bg-cyan-500';
+  }
+  if (kind === 'meta') {
+    return 'bg-slate-500';
+  }
+  return 'bg-slate-300 dark:bg-slate-600';
+}
+
+function summarizeDirectoryImpacts(sections: DiffFileSection[]): DirectoryImpact[] {
+  const map = new Map<string, DirectoryImpact>();
+
+  for (const section of sections) {
+    const directory = toDisplayDirectory(section.path);
+    const next = map.get(directory) ?? {
+      directory,
+      additions: 0,
+      deletions: 0,
+      files: 0,
+      total: 0,
+    };
+
+    next.additions += section.additions;
+    next.deletions += section.deletions;
+    next.files += 1;
+    next.total += section.additions + section.deletions;
+    map.set(directory, next);
+  }
+
+  return [...map.values()].sort((a, b) => {
+    if (b.total !== a.total) {
+      return b.total - a.total;
+    }
+    if (b.files !== a.files) {
+      return b.files - a.files;
+    }
+    return a.directory.localeCompare(b.directory);
+  });
+}
+
+function toDisplayDirectory(path: string): string {
+  const parts = path.split('/').filter(Boolean);
+  if (parts.length <= 1) {
+    return '(root)';
+  }
+
+  return parts.slice(0, Math.min(2, parts.length - 1)).join('/');
+}
+
+function toPercent(value: number, max: number): number {
+  if (max <= 0) {
+    return 0;
+  }
+  return Math.max(6, Math.round((value / max) * 100));
 }

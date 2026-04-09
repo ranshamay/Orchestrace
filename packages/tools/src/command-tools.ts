@@ -28,12 +28,18 @@ const MAX_COMMAND_BATCH_ITEMS = 200;
 const DEFAULT_COMMAND_BATCH_MAX_CHARS_PER_COMMAND = 8000;
 const DEFAULT_COMMAND_BATCH_MIN_CONCURRENCY = 1;
 
+function resolveShellExecutable(): string {
+  const envShell = process.env.SHELL?.trim();
+  return envShell && envShell.length > 0 ? envShell : 'sh';
+}
+
 interface CommandToolOptions extends AgentToolsetOptions {
   includeRunCommandTool: boolean;
   runCommandAllowPrefixes?: string[];
 }
 
 export function createCommandTools(options: CommandToolOptions): RegisteredAgentTool[] {
+  const shellExecutable = resolveShellExecutable();
   const tools: RegisteredAgentTool[] = [
     {
       tool: {
@@ -356,7 +362,7 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
             };
           }
 
-          const result = await runCommand('zsh', ['-lc', command], {
+          const result = await runCommand(shellExecutable, ['-lc', command], {
             cwd,
             timeoutMs: options.commandTimeoutMs ?? 120000,
             signal,
@@ -435,7 +441,7 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
               };
             }
 
-            const result = await runCommand('zsh', ['-lc', entry.command], {
+            const result = await runCommand(shellExecutable, ['-lc', entry.command], {
               cwd,
               timeoutMs: options.commandTimeoutMs ?? 120000,
               signal,
