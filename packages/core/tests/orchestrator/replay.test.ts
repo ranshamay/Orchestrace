@@ -865,19 +865,60 @@ describe('orchestrate replay capture', () => {
     }
   });
 
-  it('injects explicit retry directive into implementation retry prompts', async () => {
+  it('injects explicit retry directive and prior tool failure context into implementation retry prompts', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'orchestrace-replay-retry-directive-'));
     const capturedImplementationPrompts: string[] = [];
 
     try {
       const outputs = await orchestrate(makeSingleNodeGraph(), {
         llm: createAdapter({
-          failImplementationOnceWithType: 'timeout',
           onPrompt: (phase, prompt) => {
             if (phase !== 'implementation' || typeof prompt !== 'string') {
               return;
             }
             capturedImplementationPrompts.push(prompt);
+          },
+          implementationBehavior: async ({ options, implementationCall }) => {
+            if (implementationCall === 1) {
+              options?.onToolCall?.({
+                type: 'started',
+                toolCallId: 'impl-sub-1',
+                toolName: 'subagent_spawn',
+                arguments: '{"nodeId":"a1","prompt":"Investigate flaky retry"}',
+              });
+              options?.onToolCall?.({
+                type: 'result',
+                toolCallId: 'impl-sub-1',
+                toolName: 'subagent_spawn',
+                result: 'subagent timeout while collecting context',
+                isError: true,
+              });
+
+              const error = new Error('LLM request timed out after 120000ms') as Error & { failureType?: string };
+              error.failureType = 'timeout';
+              throw error;
+            }
+
+            options?.onToolCall?.({
+              type: 'started',
+              toolCallId: 'impl-1',
+              toolName: 'write_file',
+              arguments: '{"path":"src/a.ts"}',
+            });
+            options?.onToolCall?.({
+              type: 'result',
+              toolCallId: 'impl-1',
+              toolName: 'write_file',
+              result: 'wrote file',
+              isError: false,
+            });
+
+            return {
+              text: 'Implemented successfully.',
+              filesChanged: ['src/a.ts'],
+              usage: { input: 20, output: 8, cost: 0 },
+              metadata: { stopReason: 'end_turn', endpoint: 'https://example.test' },
+            };
           },
         }),
         cwd,
@@ -890,8 +931,17 @@ describe('orchestrate replay capture', () => {
       const output = outputs.get('task-1');
       expect(output?.status).toBe('completed');
       expect(capturedImplementationPrompts.length).toBeGreaterThanOrEqual(2);
+      const firstPrompt = capturedImplementationPrompts[0] ?? '';
       const retryPrompt = capturedImplementationPrompts[1] ?? '';
       expect(retryPrompt).toContain('You must now call a tool. Start by running: pwd');
+      expect(retryPrompt).toContain('Previous attempt failure type:');
+      expect(retryPrompt).toContain('timeout');
+      expect(retryPrompt).toContain('Task-specific retry state snapshot:');
+      expect(retryPrompt).toContain('Prior failed tool/sub-agent calls from previous implementation attempt:');
+      expect(retryPrompt).toContain('Sub-agent failure via subagent_spawn');
+      expect(retryPrompt).toContain('"nodeId":"a1"');
+      expect(retryPrompt).toContain('subagent timeout while collecting context');
+      expect(retryPrompt).not.toEqual(firstPrompt);
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }
