@@ -41,10 +41,12 @@ describe('createAgentToolset phase policy', () => {
       'read_files',
       'search_files',
       'subagent_list',
-      'todo_add',
+            'todo_add',
       'todo_get',
+      'todo_replan',
       'todo_set',
       'todo_update',
+
       'url_fetch',
     ]);
   });
@@ -63,10 +65,12 @@ describe('createAgentToolset phase policy', () => {
       'read_files',
       'search_files',
       'subagent_list',
-      'todo_add',
+            'todo_add',
       'todo_get',
+      'todo_replan',
       'todo_set',
       'todo_update',
+
       'url_fetch',
     ]);
   });
@@ -90,10 +94,12 @@ describe('createAgentToolset phase policy', () => {
       'run_command_batch',
       'search_files',
       'subagent_list',
-      'todo_add',
+            'todo_add',
       'todo_get',
+      'todo_replan',
       'todo_set',
       'todo_update',
+
       'url_fetch',
       'write_file',
       'write_files',
@@ -1447,7 +1453,154 @@ describe('mode tools smoke test', () => {
   });
 });
 
+describe('coordination plan lock and replan controls', () => {
+  it('normalizes missing plan lock fields and exposes default state behavior', async () => {
+    const cwd = await makeWorkspace();
+    const graphId = 'g-normalize';
+    const taskId = 't-normalize';
+    const stateDir = join(cwd, '.orchestrace', 'coordination', graphId, taskId);
+    await mkdir(stateDir, { recursive: true });
+    await writeFile(
+      join(stateDir, 'state.json'),
+      JSON.stringify({
+        updatedAt: '2020-01-01T00:00:00.000Z',
+        todos: [{ id: 'a', title: 'A', status: 'todo' }],
+        agentGraph: { nodes: [] },
+        subAgents: [],
+      }, null, 2),
+      'utf-8',
+    );
+
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code', graphId, taskId });
+
+    const replan = await toolset.executeTool({
+      id: '1',
+      name: 'todo_replan',
+      arguments: {
+        items: [{ id: 'b', title: 'B', status: 'todo' }],
+      },
+    });
+
+    expect(replan.isError).toBeFalsy();
+    expect(replan.content).toContain('Replan count is now 1/3');
+  });
+
+  it('rejects todo_set and agent_graph_set when plan is locked', async () => {
+    const cwd = await makeWorkspace();
+    const graphId = 'g-locked';
+    const taskId = 't-locked';
+    const stateDir = join(cwd, '.orchestrace', 'coordination', graphId, taskId);
+    await mkdir(stateDir, { recursive: true });
+    await writeFile(
+      join(stateDir, 'state.json'),
+      JSON.stringify({
+        updatedAt: '2020-01-01T00:00:00.000Z',
+        todos: [],
+        agentGraph: { nodes: [] },
+        subAgents: [],
+        planLocked: true,
+        replanCount: 0,
+      }, null, 2),
+      'utf-8',
+    );
+
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code', graphId, taskId });
+
+    const todoSet = await toolset.executeTool({
+      id: '1',
+      name: 'todo_set',
+      arguments: {
+        items: [{ id: 'x', title: 'X', status: 'todo' }],
+      },
+    });
+    expect(todoSet.isError).toBe(true);
+    expect(todoSet.content).toContain('Cannot run todo_set: plan is locked (planLocked=true).');
+
+    const graphSet = await toolset.executeTool({
+      id: '2',
+      name: 'agent_graph_set',
+      arguments: {
+        nodes: [{ id: 'n1', prompt: 'Do the thing' }],
+      },
+    });
+    expect(graphSet.isError).toBe(true);
+    expect(graphSet.content).toContain('Cannot run agent_graph_set: plan is locked (planLocked=true).');
+  });
+
+  it('increments replan count on success and enforces cap with clear error', async () => {
+    const cwd = await makeWorkspace();
+    const graphId = 'g-replan-cap';
+    const taskId = 't-replan-cap';
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code', graphId, taskId });
+
+    for (let index = 1; index <= 3; index += 1) {
+      const result = await toolset.executeTool({
+        id: `ok-${index}`,
+        name: 'todo_replan',
+        arguments: {
+          items: [{ id: `todo-${index}`, title: `Todo ${index}`, status: 'todo' }],
+        },
+      });
+
+      expect(result.isError).toBeFalsy();
+      expect(result.content).toContain(`Replan count is now ${index}/3`);
+    }
+
+    const capped = await toolset.executeTool({
+      id: 'capped',
+      name: 'todo_replan',
+      arguments: {
+        items: [{ id: 'todo-4', title: 'Todo 4', status: 'todo' }],
+      },
+    });
+
+    expect(capped.isError).toBe(true);
+    expect(capped.content).toContain('Cannot run todo_replan: replan limit reached (current=3, max=3).');
+  });
+
+  it('locks plan when mode_set switches to implementation, then blocks replanning', async () => {
+    const cwd = await makeWorkspace();
+    const graphId = 'g-mode-lock';
+    const taskId = 't-mode-lock';
+    let mode: 'planning' | 'implementation' | 'chat' = 'planning';
+
+    const toolset = createAgentToolset({
+      cwd,
+      phase: 'planning',
+      taskType: 'code',
+      graphId,
+      taskId,
+      modeController: {
+        getMode: () => mode,
+        setMode: async (nextMode) => {
+          const changed = mode !== nextMode;
+          mode = nextMode;
+          return { mode, changed };
+        },
+      },
+    });
+
+    const switchResult = await toolset.executeTool({
+      id: '1',
+      name: 'mode_set',
+      arguments: { mode: 'implementation' },
+    });
+    expect(switchResult.isError).toBeFalsy();
+
+    const blocked = await toolset.executeTool({
+      id: '2',
+      name: 'todo_set',
+      arguments: {
+        items: [{ id: 'x', title: 'X', status: 'todo' }],
+      },
+    });
+    expect(blocked.isError).toBe(true);
+    expect(blocked.content).toContain('Cannot run todo_set: plan is locked (planLocked=true).');
+  });
+});
+
 describe('subagent prompt enrichment', () => {
+
   it('subagent_spawn validates args synchronously and skips sub-agent invocation on malformed payload', async () => {
     const cwd = await makeWorkspace();
     const runSubAgent = vi.fn(async () => ({ text: 'unexpected dispatch' }));
