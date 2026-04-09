@@ -18,6 +18,18 @@ export type StartSessionFn = (request: {
   creationReason?: 'start' | 'retry';
   sourceSessionId?: string;
   source?: 'user' | 'observer';
+  routingAuditContext?: {
+    eventType: 'observer_fix_prompt_conversion';
+    findingFingerprint: string;
+    findingTitle: string;
+    findingCategory: string;
+    findingSeverity: string;
+    observedSessionCount: number;
+    relevantFileCount: number;
+    promptCharLength: number;
+    routeIntent: 'code_change';
+    reason: string;
+  };
 }) => Promise<{ id: string } | { error: string; statusCode: number }>;
 
 /**
@@ -72,6 +84,18 @@ async function spawnFixSession(
       autoApprove: config.fixAutoApprove,
       creationReason: 'start',
       source: 'observer',
+      routingAuditContext: {
+        eventType: 'observer_fix_prompt_conversion',
+        findingFingerprint: finding.fingerprint,
+        findingTitle: finding.title,
+        findingCategory: finding.category,
+        findingSeverity: finding.severity,
+        observedSessionCount: finding.observedInSessions.length + finding.additionalSessions.length,
+        relevantFileCount: finding.relevantFiles?.length ?? 0,
+        promptCharLength: prompt.length,
+        routeIntent: 'code_change',
+        reason: 'Observer finding converted into implementation prompt; forcing observer source and planning pipeline intent.',
+      },
     });
 
     if ('error' in result) {

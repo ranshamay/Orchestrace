@@ -14,6 +14,7 @@ import { startUiServer } from './ui-server.js';
 import { enforceSafeShellDispatch, resolveTaskRoute } from './task-routing.js';
 import { WorkspaceManager } from './workspace-manager.js';
 import type { WorkspaceEntry } from './workspace-manager.js';
+import { parseAndSanitizeVerifyCommands } from './verify-commands.js';
 
 const SUB_AGENT_READ_ONLY_TOOL_ALLOWLIST = [
   'list_directory',
@@ -627,15 +628,7 @@ async function runShellCommandRoute(command: string, cwd: string): Promise<numbe
 }
 
 function parseVerifyCommands(): string[] {
-  const raw = process.env.ORCHESTRACE_VERIFY_COMMANDS;
-  if (!raw) {
-    return ['pnpm typecheck', 'pnpm test'];
-  }
-
-  return raw
-    .split(';')
-    .map((part) => part.trim())
-    .filter((part) => part.length > 0);
+  return parseAndSanitizeVerifyCommands(process.env.ORCHESTRACE_VERIFY_COMMANDS);
 }
 
 function getBooleanFlag(args: string[], flag: string, fallback: boolean): boolean {

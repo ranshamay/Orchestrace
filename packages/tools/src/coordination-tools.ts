@@ -14,6 +14,8 @@ import type {
   TodoItem,
 } from './types.js';
 import { sanitizeForPathSegment } from './path-utils.js';
+import type { SessionFileReadCache } from './file-read-cache.js';
+import { readFullFileWithCache } from './file-read-cache.js';
 
 const todoStatusSchema = Type.Union([
   Type.Literal('todo'),
@@ -1686,7 +1688,21 @@ async function collectFileSnippets(
 
     const relativePath = toPosixPath(relative(cwd, absolutePath));
     try {
-      const cached = options?.fileReadCache?.get({
+      const cache = options?.fileReadCache;
+      if (isSessionFileReadCache(cache)) {
+        const fullContent = await readFullFileWithCache(absolutePath, { cache });
+        if (fullContent.includes('\u0000')) {
+          return undefined;
+        }
+
+        return {
+          index: candidate.index,
+          path: relativePath,
+          content: trimText(fullContent.trim(), SUBAGENT_CONTEXT_MAX_CHARS_PER_FILE),
+        };
+      }
+
+      const cached = cache?.get({
         path: absolutePath,
         revision,
         startLine: 1,
@@ -1700,7 +1716,7 @@ async function collectFileSnippets(
 
       const trimmedContent = trimText(content.trim(), SUBAGENT_CONTEXT_MAX_CHARS_PER_FILE);
       if (!cached) {
-        options?.fileReadCache?.set({
+        cache?.set({
           path: absolutePath,
           revision,
           startLine: 1,
@@ -1724,6 +1740,10 @@ async function collectFileSnippets(
     .sort((a, b) => a.index - b.index)
     .slice(0, SUBAGENT_CONTEXT_MAX_FILES)
     .map((entry) => ({ path: entry.path, content: entry.content }));
+}
+
+function isSessionFileReadCache(cache: AgentToolsetOptions['fileReadCache'] | undefined): cache is SessionFileReadCache {
+  return cache instanceof Map;
 }
 
 function normalizePromptPath(path: unknown): string | undefined {
