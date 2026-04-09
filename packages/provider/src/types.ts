@@ -6,6 +6,8 @@ export type LlmFailureType =
   | 'tool_runtime'
   | 'validation'
   | 'empty_response'
+  | 'prompt_too_large'
+  | 'provider_unresponsive'
   | 'unknown';
 
 export interface LlmResultMetadata {

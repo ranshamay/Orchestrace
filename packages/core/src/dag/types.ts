@@ -22,6 +22,8 @@ export type ReplayFailureType =
   | 'tool_runtime'
   | 'validation'
   | 'empty_response'
+  | 'prompt_too_large'
+  | 'provider_unresponsive'
   | 'unknown';
 
 /** Per-task model override. */
