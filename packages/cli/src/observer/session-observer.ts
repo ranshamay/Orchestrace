@@ -24,8 +24,9 @@ export interface RealtimeFinding {
   category: FindingCategory;
   severity: FindingSeverity;
   title: string;
-  description: string;
-  suggestedFix: string;
+  issueSummary: string;
+  evidence: string[];
+  severityRationale?: string;
   relevantFiles?: string[];
   phase: string;
   detectedAt: string;

@@ -105,7 +105,6 @@ function parseAnalysisResponse(text: string, allowedCategories: FindingCategory[
       return { findings: [] };
     }
 
-    // Validate and sanitize each finding
     const validCategories: FindingCategory[] = [...ALL_FINDING_CATEGORIES];
     const validSeverities: FindingSeverity[] = ['low', 'medium', 'high', 'critical'];
 
@@ -138,7 +137,14 @@ function parseAnalysisResponse(text: string, allowedCategories: FindingCategory[
       }));
 
     const findings: AnalysisResult['findings'] = mappedFindings.filter((finding) =>
-      allowedCategories.includes(finding.category),
+      allowedCategories.includes(finding.category) &&
+      isSingleSentence(finding.issueSummary) &&
+      finding.evidence.length >= 2 &&
+      finding.evidence.length <= 3 &&
+      !containsRecommendationLanguage(
+        [finding.issueSummary, ...finding.evidence, finding.severityRationale ?? ''].join(' '),
+      ) &&
+      (!['high', 'critical'].includes(finding.severity) || !!finding.severityRationale),
     );
 
     return { findings };
@@ -146,4 +152,15 @@ function parseAnalysisResponse(text: string, allowedCategories: FindingCategory[
     console.error('[orchestrace][observer] Failed to parse LLM analysis response');
     return { findings: [] };
   }
+}
+
+function isSingleSentence(text: string): boolean {
+  const normalized = text.trim();
+  if (!normalized) return false;
+  const sentenceEndings = (normalized.match(/[.!?](?:\s|$)/g) ?? []).length;
+  return sentenceEndings <= 1;
+}
+
+function containsRecommendationLanguage(text: string): boolean {
+  return /(should\s+|recommend|fix\s+by|to\s+fix|implement\s+|change\s+the\s+code|add\s+this|remove\s+this|update\s+to)/i.test(text);
 }
