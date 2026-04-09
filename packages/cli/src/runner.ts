@@ -2459,6 +2459,7 @@ function parseResultJson(text: string): Record<string, unknown> | undefined {
 function parsePrMetadataResponse(
   text: string,
   taskRanges: Array<{ todoId: string; todoTitle: string }>,
+  isObserverSession?: boolean,
 ): {
   branchName: string;
   prTitle: string;
@@ -2470,7 +2471,7 @@ function parsePrMetadataResponse(
   if (!parsed) return undefined;
 
   const branchName = typeof parsed.branchName === 'string' ? parsed.branchName.trim() : '';
-  const prTitle = typeof parsed.prTitle === 'string' ? parsed.prTitle.trim() : '';
+  let prTitle = typeof parsed.prTitle === 'string' ? parsed.prTitle.trim() : '';
   const prDescription = typeof parsed.prDescription === 'string' ? parsed.prDescription.trim() : '';
   const fallbackCommitMessage = typeof parsed.fallbackCommitMessage === 'string'
     ? parsed.fallbackCommitMessage.trim()
@@ -2480,6 +2481,11 @@ function parsePrMetadataResponse(
 
   // Sanitize branch name: only allow alphanumeric, hyphens, slashes, dots
   const safeBranch = branchName.replace(/[^a-zA-Z0-9/._-]/g, '-').replace(/-{2,}/g, '-').slice(0, 60);
+
+  // Add [Observer fix] prefix if this is an observer session and the prefix is not already present
+  if (isObserverSession && !prTitle.startsWith('[Observer fix]')) {
+    prTitle = `[Observer fix] ${prTitle}`.slice(0, 80);
+  }
 
   // Parse per-task commit messages
   const rawTaskMessages = Array.isArray(parsed.taskCommitMessages) ? parsed.taskCommitMessages : [];
