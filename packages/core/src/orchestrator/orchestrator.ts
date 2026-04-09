@@ -106,6 +106,10 @@ const PLANNING_PRE_FIRST_TOOL_TOKEN_NUDGE_BUDGET = 2_000;
 const PLANNING_PRE_FIRST_TOOL_TOKEN_ABORT_BUDGET = 3_000;
 const PLANNING_FIRST_TOOL_RETRY_DIRECTIVE =
   'You must now call a tool. Start by running: pwd (or an equivalent workspace-inspection tool), then continue the task.';
+const PLANNING_NO_TOOL_STAGNATION_ABORT_ATTEMPTS = 2;
+const PLANNING_CONTRACT_STAGNATION_ABORT_ATTEMPTS = 2;
+const PLANNING_CONTRACT_STAGNATION_ERROR_PREFIX =
+  'Planning stagnated across attempts with no phase advancement.';
 
 /**
  * High-level orchestrator that wires the DAG scheduler to the LLM provider
@@ -265,6 +269,9 @@ export async function orchestrate(
       emit({ type: 'task:planning', taskId: node.id });
 
       let planningToolCalls: ReplayToolCallRecord[] = [];
+      let consecutiveNoToolStagnationAttempts = 0;
+      let previousPlanningContractSignature: string | undefined;
+      let consecutivePlanningContractStagnationAttempts = 0;
 
       for (let planningAttempt = 1; planningAttempt <= MAX_PLANNING_ATTEMPTS; planningAttempt++) {
         const planningPrompt = buildPlanningPrompt(node, context.depOutputs, planningAttempt, effort);
@@ -421,6 +428,26 @@ export async function orchestrate(
             ? planningNoToolAbortReason
               || `Planning made no tool progress for ${Math.ceil(noProgressTimeoutMs / 1000)}s. ${PLANNING_NO_TOOL_PROGRESS_NUDGE}`
             : error instanceof Error ? error.message : String(error);
+
+          if (wasPlanningNoProgressAbort && planningToolCalls.length === 0) {
+            consecutiveNoToolStagnationAttempts += 1;
+          } else {
+            consecutiveNoToolStagnationAttempts = 0;
+          }
+          if (planningToolCalls.length > 0) {
+            consecutivePlanningContractStagnationAttempts = 0;
+            previousPlanningContractSignature = undefined;
+          }
+
+          const shouldAbortForNoToolStagnation =
+            resolvedPlanningNoToolGuardMode === 'enforce'
+            && consecutiveNoToolStagnationAttempts >= PLANNING_NO_TOOL_STAGNATION_ABORT_ATTEMPTS;
+          const noToolStagnationError = shouldAbortForNoToolStagnation
+            ? `Planning stagnated across attempts with no tool calls (${consecutiveNoToolStagnationAttempts} consecutive attempts). Aborting to prevent infinite planning loop. Last failure: ${planningError}`
+            : undefined;
+          const effectivePlanningError = noToolStagnationError ?? planningError;
+          const effectiveFailureType = noToolStagnationError ? 'validation' : failureType;
+
           const failedPlanningAttempt: ReplayAttemptRecord = {
             phase: 'planning',
             attempt: planningAttempt,
@@ -429,8 +456,8 @@ export async function orchestrate(
             provider: planningModel.provider,
             model: planningModel.model,
             reasoning: planningModel.reasoning,
-            error: planningError,
-            failureType,
+            error: effectivePlanningError,
+            failureType: effectiveFailureType,
             toolCalls: planningToolCalls,
           };
           replay.attempts.push(failedPlanningAttempt);
@@ -442,13 +469,17 @@ export async function orchestrate(
             record: failedPlanningAttempt,
           });
 
-          if (planningAttempt < MAX_PLANNING_ATTEMPTS && shouldRetryAfterCompletionFailure(failureType)) {
+          if (
+            !noToolStagnationError
+            && planningAttempt < MAX_PLANNING_ATTEMPTS
+            && shouldRetryAfterCompletionFailure(effectiveFailureType)
+          ) {
             const delayMs = PLANNING_RETRY_BASE_DELAY_MS * (2 ** (planningAttempt - 1));
             emit({
               type: 'task:verification-failed',
               taskId: node.id,
               attempt: planningAttempt,
-              error: `Planning attempt ${planningAttempt} failed (${failureType}), retrying in ${delayMs}ms: ${planningError}`,
+              error: `Planning attempt ${planningAttempt} failed (${effectiveFailureType}), retrying in ${delayMs}ms: ${effectivePlanningError}`,
             });
             await delay(delayMs);
             continue;
@@ -458,8 +489,8 @@ export async function orchestrate(
             taskId: node.id,
             status: 'failed',
             tokenDumpDir: taskTokenDumpDir,
-            error: planningError,
-            failureType,
+            error: effectivePlanningError,
+            failureType: effectiveFailureType,
             durationMs: Date.now() - start,
             retries: planningAttempt - 1,
             usage,
@@ -515,7 +546,20 @@ export async function orchestrate(
             completedPlanningAttempt.failureType = 'validation';
             completedPlanningAttempt.error = planningContractError;
 
-            if (planningAttempt < MAX_PLANNING_ATTEMPTS) {
+            const planningContractSignature = createPlanningContractFailureSignature(planningContractError);
+            if (planningContractSignature === previousPlanningContractSignature) {
+              consecutivePlanningContractStagnationAttempts += 1;
+            } else {
+              previousPlanningContractSignature = planningContractSignature;
+              consecutivePlanningContractStagnationAttempts = 1;
+            }
+
+            const contractStagnationError =
+              consecutivePlanningContractStagnationAttempts >= PLANNING_CONTRACT_STAGNATION_ABORT_ATTEMPTS
+                ? `${PLANNING_CONTRACT_STAGNATION_ERROR_PREFIX} Repeated planning contract failure signature "${planningContractSignature}" for ${consecutivePlanningContractStagnationAttempts} consecutive attempts. Last error: ${planningContractError}`
+                : undefined;
+
+            if (!contractStagnationError && planningAttempt < MAX_PLANNING_ATTEMPTS) {
               const delayMs = PLANNING_RETRY_BASE_DELAY_MS * (2 ** (planningAttempt - 1));
               emit({
                 type: 'task:verification-failed',
@@ -526,17 +570,19 @@ export async function orchestrate(
               await delay(delayMs);
               continue;
             }
+
+            const finalPlanningContractError = contractStagnationError ?? planningContractError;
             emit({
               type: 'task:verification-failed',
               taskId: node.id,
               attempt: planningAttempt,
-              error: planningContractError,
+              error: finalPlanningContractError,
             });
             return {
               taskId: node.id,
               status: 'failed',
               tokenDumpDir: taskTokenDumpDir,
-              error: planningContractError,
+              error: finalPlanningContractError,
               failureType: 'validation',
               durationMs: Date.now() - start,
               retries: planningAttempt - 1,
@@ -544,6 +590,10 @@ export async function orchestrate(
               replay,
             };
           }
+
+          consecutiveNoToolStagnationAttempts = 0;
+          consecutivePlanningContractStagnationAttempts = 0;
+          previousPlanningContractSignature = undefined;
         }
 
         // Planning succeeded — break out of retry loop
@@ -1306,6 +1356,14 @@ function createPlanningNoProgressAbortError(): Error {
   const error = new Error(PLANNING_NO_PROGRESS_ABORT_SENTINEL);
   (error as Error & { failureType?: ReplayFailureType }).failureType = 'empty_response';
   return error;
+}
+
+function createPlanningContractFailureSignature(error: string): string {
+  return error
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .replace(/attempt\s+\d+/g, 'attempt')
+    .trim();
 }
 
 function normalizePlanningNoToolGuardMode(value: unknown): PlanningNoToolGuardMode {
