@@ -1,4 +1,4 @@
-import { readdir, readFile } from 'node:fs/promises';
+import { readdir, readFile, stat } from 'node:fs/promises';
 import { extname, join } from 'node:path';
 import { Type } from '@mariozechner/pi-ai';
 import type { AgentToolsetOptions, RegisteredAgentTool } from './types.js';
@@ -655,15 +655,16 @@ type PathKind = 'missing' | 'file' | 'directory';
 
 async function getPathKind(path: string): Promise<PathKind> {
   try {
-    const entries = await readdir(path, { withFileTypes: true });
-    return entries ? 'directory' : 'directory';
-  } catch {
-    try {
-      await readFile(path, 'utf-8');
-      return 'file';
-    } catch {
-      return 'missing';
+    const info = await stat(path);
+    if (info.isDirectory()) {
+      return 'directory';
     }
+    if (info.isFile()) {
+      return 'file';
+    }
+    return 'missing';
+  } catch {
+    return 'missing';
   }
 }
 
@@ -722,7 +723,13 @@ function createLineMatcher(query: string, useRegex: boolean): (line: string) => 
     return (line) => line.includes(query);
   }
 
-  const pattern = new RegExp(query);
+  let pattern: RegExp;
+  try {
+    pattern = new RegExp(query);
+  } catch {
+    throw new Error('Invalid regex query.');
+  }
+
   return (line) => pattern.test(line);
 }
 
