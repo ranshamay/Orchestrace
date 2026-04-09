@@ -372,7 +372,7 @@ describe('materializeSession', () => {
     });
   });
 
-  it('materializes failed session', () => {
+    it('materializes failed session', () => {
     const t = now();
     const config = makeConfig();
     const events = [
@@ -393,6 +393,21 @@ describe('materializeSession', () => {
     expect(session.error).toBe('Boom');
     expect(session.llmStatus.state).toBe('failed');
   });
+
+  it('materializes merged session state transition', () => {
+    const t = now();
+    const config = makeConfig();
+    const events = [
+      { seq: 1, time: t, type: 'session:created' as const, payload: { config } },
+      { seq: 2, time: t, type: 'session:status-change' as const, payload: { status: 'completed' as const } },
+      { seq: 3, time: t, type: 'session:status-change' as const, payload: { status: 'merged' as const } },
+    ];
+
+    const session = materializeSession(events)!;
+    expect(session.status).toBe('merged');
+    expect(session.lastSeq).toBe(3);
+  });
+
 
   it('materializes agent graph', () => {
     const t = now();
