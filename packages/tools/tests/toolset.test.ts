@@ -400,6 +400,47 @@ describe('search_files tool', () => {
     expect(result.isError).toBeFalsy();
     expect(result.content).toBe('(no matches)');
   });
+
+  it('treats regression tokens as query text, not file paths', async () => {
+    const cwd = await makeWorkspace();
+    await writeFile(
+      join(cwd, 'src', 'tokens.txt'),
+      'retry\nsubagent_spawn_batch\ngithub-copilot\n',
+      'utf-8',
+    );
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+
+    const result = await toolset.executeTool({
+      id: '1',
+      name: 'search_files',
+      arguments: {
+        query: 'subagent_spawn_batch',
+        path: 'src',
+      },
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.content).toContain('tokens.txt:2:subagent_spawn_batch');
+    expect(result.content.toLowerCase()).not.toContain('no such file or directory');
+  });
+
+  it('returns an explicit error when target path is missing', async () => {
+    const cwd = await makeWorkspace();
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+
+    const result = await toolset.executeTool({
+      id: '1',
+      name: 'search_files',
+      arguments: {
+        query: 'value',
+        path: 'src/missing-directory',
+      },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content.toLowerCase()).toContain('no such file or directory');
+    expect(result.content).not.toBe('(no matches)');
+  });
 });
 
 describe('git_status and git_diff session gating', () => {
