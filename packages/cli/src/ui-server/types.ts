@@ -183,6 +183,12 @@ export interface WorkSession {
   trivialTaskMaxPromptLength: number;
   worktreePath?: string;
   worktreeBranch?: string;
+  executionContext?: ExecutionContext;
+  selectedWorktreePath?: string;
+  useWorktree?: boolean;
+  executionContext: ExecutionContext;
+  selectedWorktreePath?: string;
+  useWorktree: boolean;
   creationReason: SessionCreationReason;
   sourceSessionId?: string;
   source?: 'user' | 'observer';

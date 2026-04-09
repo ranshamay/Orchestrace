@@ -64,6 +64,9 @@ import type {
   WorkState,
   LlmSessionState,
   SessionCreationReason,
+  ExecutionContext,
+  SessionWorkspaceAssignmentProvenance,
+  SessionWorktreePathSessionIdRelation,
 } from './ui-server/types.js';
 import { WorkspaceManager } from './workspace-manager.js';
 import { FileEventStore } from '@orchestrace/store';
@@ -717,7 +720,6 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
   uiPreferences = normalizeUiPreferences(restoredUiPreferences, resolveUiPreferencesDefaults());
 
   await detectStartupPartialChangesAndRecover();
-  registerRestoredWorkspacePathLocks();
 
   for (const [sessionId, restoredSession] of workSessions.entries()) {
     sessionSharedContextStores.set(sessionId, new InMemorySharedContextStore());
@@ -786,67 +788,6 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       modelInfo,
       compactionDelegate: createCompactionDelegate(provider, model),
     });
-  }
-
-  function normalizeWorkspacePathForLock(path: string | undefined): string | undefined {
-    const value = asString(path).trim();
-    if (!value) {
-      return undefined;
-    }
-    return resolve(value);
-  }
-
-  function acquireWorkspacePathLock(path: string | undefined, sessionId: string): { ok: true } | { ok: false; ownerSessionId: string } {
-    const lockKey = normalizeWorkspacePathForLock(path);
-    if (!lockKey) {
-      return { ok: true };
-    }
-
-    const ownerSessionId = worktreePathLocks.get(lockKey);
-    if (ownerSessionId && ownerSessionId !== sessionId) {
-      const ownerSession = workSessions.get(ownerSessionId);
-      if (!ownerSession || ownerSession.status !== 'running') {
-        worktreePathLocks.delete(lockKey);
-      } else {
-        return { ok: false, ownerSessionId };
-      }
-    }
-
-    const refreshedOwnerSessionId = worktreePathLocks.get(lockKey);
-    if (refreshedOwnerSessionId && refreshedOwnerSessionId !== sessionId) {
-      return { ok: false, ownerSessionId: refreshedOwnerSessionId };
-    }
-
-    worktreePathLocks.set(lockKey, sessionId);
-    return { ok: true };
-  }
-
-  function releaseWorkspacePathLock(path: string | undefined, sessionId: string): void {
-    const lockKey = normalizeWorkspacePathForLock(path);
-    if (!lockKey) {
-      return;
-    }
-
-    const ownerSessionId = worktreePathLocks.get(lockKey);
-    if (ownerSessionId === sessionId) {
-      worktreePathLocks.delete(lockKey);
-    }
-  }
-
-  function registerRestoredWorkspacePathLocks(): void {
-    for (const [sessionId, session] of workSessions.entries()) {
-      // Only lock paths for sessions that are still running — completed/failed/cancelled
-      // sessions no longer need to hold their workspace path lock.
-      if (session.status === 'completed' || session.status === 'failed' || session.status === 'cancelled') {
-        continue;
-      }
-      const acquired = acquireWorkspacePathLock(session.workspacePath, sessionId);
-      if (!acquired.ok) {
-        console.warn(
-          `[ui-server] Duplicate restored workspace path lock detected for session ${sessionId}; path already owned by ${acquired.ownerSessionId}.`,
-        );
-      }
-    }
   }
 
   async function readSessionCheckpointMetadata(sessionId: string): Promise<SessionCheckpointMetadata | undefined> {
@@ -1003,8 +944,6 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         payload: { status: 'cancelled' },
       });
     }
-
-    releaseWorkspacePathLock(session.workspacePath, id);
 
     // Clean up any auto-created per-session worktree.
     if (session.cleanupWorktree) {
@@ -2894,10 +2833,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           return;
         }
 
-        await ensureSessionWorkspaceReady(session, workspaceManager, uiStatePersistence, {
-          releaseWorkspacePathLock,
-          acquireWorkspacePathLock,
-        });
+        await ensureSessionWorkspaceReady(session, workspaceManager, uiStatePersistence);
 
         const thread = sessionChats.get(id) ?? createSessionChatThread(session);
         sessionChats.set(id, thread);
@@ -3318,10 +3254,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           return;
         }
 
-        await ensureSessionWorkspaceReady(session, workspaceManager, uiStatePersistence, {
-          releaseWorkspacePathLock,
-          acquireWorkspacePathLock,
-        });
+        await ensureSessionWorkspaceReady(session, workspaceManager, uiStatePersistence);
 
         const thread = sessionChats.get(id) ?? createSessionChatThread(session);
         sessionChats.set(id, thread);
