@@ -78,7 +78,7 @@ describe('shouldRetryTransientRequestFailure', () => {
     ).toBe(true);
   });
 
-      it('does not retry non-transient unknown failures', () => {
+        it('does not retry non-transient unknown failures', () => {
     expect(
       shouldRetryTransientRequestFailure({
         failureType: 'unknown',

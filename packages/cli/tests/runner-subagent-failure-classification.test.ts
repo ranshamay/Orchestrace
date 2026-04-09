@@ -29,7 +29,7 @@ describe('runner sub-agent failure classification', () => {
     expect(isRetryableSubAgentFailure(new Error('401 unauthorized'))).toBe(false);
   });
 
-      it('treats missing tool-call mapping errors as recoverable tool_runtime', () => {
+        it('treats missing tool-call mapping errors as recoverable tool_runtime', () => {
     const err = new Error('No tool call found for function call output with call_id call_123.');
     const classified = classifySubAgentFailure(err);
     expect(classified).toEqual({ failureType: 'tool_runtime', recoverable: true });
