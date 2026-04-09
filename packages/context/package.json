@@ -7,9 +7,9 @@
   "types": "./dist/index.d.ts",
   "scripts": {
     "build": "tsc",
-    "pretypecheck": "pnpm --filter @orchestrace/context... build",
+    "pretypecheck": "pnpm turbo run build --filter=@orchestrace/context...",
     "typecheck": "tsc --noEmit",
-    "pretest": "pnpm --filter @orchestrace/context... build",
+    "pretest": "pnpm turbo run build --filter=@orchestrace/context...",
     "test": "vitest run",
     "clean": "rm -rf dist"
   },

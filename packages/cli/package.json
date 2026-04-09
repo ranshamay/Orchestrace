@@ -8,7 +8,7 @@
   },
   "scripts": {
     "build": "tsc",
-    "pretypecheck": "pnpm --filter @orchestrace/cli... build",
+    "pretypecheck": "pnpm turbo run build --filter=@orchestrace/cli...",
     "typecheck": "tsc --noEmit",
     "dev": "tsx src/index.ts",
     "test": "vitest run",

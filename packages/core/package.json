@@ -15,9 +15,9 @@
   },
   "scripts": {
     "build": "tsc",
-    "pretypecheck": "pnpm --filter @orchestrace/core... build",
+    "pretypecheck": "pnpm turbo run build --filter=@orchestrace/core...",
     "typecheck": "tsc --noEmit",
-    "pretest": "pnpm --filter @orchestrace/core... build",
+    "pretest": "pnpm turbo run build --filter=@orchestrace/core...",
     "test": "vitest run",
     "clean": "rm -rf dist"
   },

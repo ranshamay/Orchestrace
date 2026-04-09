@@ -163,7 +163,7 @@ pnpm typecheck
 pnpm test
 ```
 
-- Package-level `typecheck`/`test` scripts include `pretypecheck`/`pretest` hooks that build that package and its internal workspace dependencies first (via `pnpm --filter <pkg>... build`).
+- Package-level `typecheck`/`test` scripts include `pretypecheck`/`pretest` hooks that build that package and its internal workspace dependencies first in dependency order (via `pnpm turbo run build --filter=<pkg>...`).
 
 ### Targeted package tests (`@orchestrace/tools`)
 

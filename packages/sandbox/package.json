@@ -7,9 +7,9 @@
   "types": "./dist/index.d.ts",
   "scripts": {
     "build": "tsc",
-    "pretypecheck": "pnpm --filter @orchestrace/sandbox... build",
+    "pretypecheck": "pnpm turbo run build --filter=@orchestrace/sandbox...",
     "typecheck": "tsc --noEmit",
-    "pretest": "pnpm --filter @orchestrace/sandbox... build",
+    "pretest": "pnpm turbo run build --filter=@orchestrace/sandbox...",
     "test": "vitest run",
     "clean": "rm -rf dist"
   },
