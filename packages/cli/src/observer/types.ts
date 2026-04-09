@@ -45,7 +45,7 @@ export interface FindingRecord extends ObserverFinding {
   /** The session ID spawned to fix this finding, or null if not yet spawned. */
   fixSessionId: string | null;
   /** Status of the fix attempt. */
-  fixStatus: 'pending' | 'spawned' | 'completed' | 'failed';
+  fixStatus: 'pending' | 'spawning' | 'spawned' | 'completed' | 'failed';
   /** Additional session IDs that matched this fingerprint after the first detection. */
   additionalSessions: string[];
 }
