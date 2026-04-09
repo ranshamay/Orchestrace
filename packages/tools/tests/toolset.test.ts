@@ -668,7 +668,7 @@ describe('search_files tool', () => {
   });
 
 
-  it('marks search_files as error for genuine command failures without match output', async () => {
+    it('marks search_files as error for genuine command failures without match output', async () => {
     const cwd = await makeWorkspace();
     const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
 
@@ -696,6 +696,45 @@ describe('search_files tool', () => {
       command: 'rg',
       path: 'src',
     });
+
+    runCommandSpy.mockRestore();
+  });
+
+  it('passes -- before pattern arguments so option-like queries stay as query text', async () => {
+    const cwd = await makeWorkspace();
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+    const runCommandSpy = vi.spyOn(commandRunner, 'runCommand').mockResolvedValueOnce({
+      exitCode: 1,
+      stdout: '',
+      stderr: '',
+    });
+
+    const result = await toolset.executeTool({
+      id: 'separator-before-pattern',
+      name: 'search_files',
+      arguments: {
+        query: '-foo',
+        path: 'src',
+      },
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(runCommandSpy).toHaveBeenCalledOnce();
+
+    const args = runCommandSpy.mock.calls[0]?.[1] as string[];
+    expect(args).toEqual(expect.arrayContaining(['--', '-e', '-foo', '--fixed-strings', 'src']));
+
+    const firstSeparatorIndex = args.indexOf('--');
+    const patternFlagIndex = args.indexOf('-e');
+    const patternValueIndex = args.indexOf('-foo');
+    const lastSeparatorIndex = args.lastIndexOf('--');
+    const pathIndex = args.indexOf('src');
+
+    expect(firstSeparatorIndex).toBeGreaterThanOrEqual(0);
+    expect(patternFlagIndex).toBe(firstSeparatorIndex + 1);
+    expect(patternValueIndex).toBe(patternFlagIndex + 1);
+    expect(lastSeparatorIndex).toBeGreaterThan(patternValueIndex);
+    expect(pathIndex).toBe(lastSeparatorIndex + 1);
 
     runCommandSpy.mockRestore();
   });

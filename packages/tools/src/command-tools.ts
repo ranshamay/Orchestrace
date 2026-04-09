@@ -169,7 +169,7 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
         }
 
 
-        const args = ['-n', '--no-heading', '--color', 'never', '-e', query];
+                const args = ['-n', '--no-heading', '--color', 'never', '--', '-e', query];
         if (!useRegex) {
           args.push('--fixed-strings');
         }
