@@ -239,7 +239,9 @@ export class LogWatcher {
         prompt,
         signal: this.abortController.signal,
         apiKey,
-        refreshApiKey: () => this.resolveApiKey(provider),
+                refreshApiKey: () => this.resolveApiKey(provider),
+        allowAuthRefreshRetry: false,
+
       });
 
       const findings = parseLogFindings(result.text);

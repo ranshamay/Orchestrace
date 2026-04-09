@@ -222,7 +222,11 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
   const githubAuthManager = createGithubAuthManager();
   const llm = new PiAiAdapter();
 
-  const resolveProviderApiKey = async (providerId: string): Promise<string | undefined> => authManager.resolveApiKey(providerId);
+    const resolveProviderApiKey = async (
+    providerId: string,
+    options?: { allowRefresh?: boolean },
+  ): Promise<string | undefined> => authManager.resolveApiKey(providerId, options);
+
 
   // -- Persistent backend log stream ------------------------------------------
   const orchestraceDir = join(workspaceManager.getRootDir(), '.orchestrace');
@@ -792,7 +796,9 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
               timeoutMs: Math.min(resolveLongTurnTimeoutMs(), 20_000),
               signal,
               apiKey: await resolveProviderApiKey(candidate.provider),
-              refreshApiKey: () => resolveProviderApiKey(candidate.provider),
+                            refreshApiKey: () => resolveProviderApiKey(candidate.provider, { allowRefresh: false }),
+              allowAuthRefreshRetry: false,
+
             });
 
             const trimmed = trimCompactionSummary(result.text, maxTokens);
@@ -3087,7 +3093,9 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                       signal: subAgentSignal,
                       toolset: subAgentToolset,
                       apiKey: await resolveProviderApiKey(subProvider),
-                      refreshApiKey: () => resolveProviderApiKey(subProvider),
+                                            refreshApiKey: () => resolveProviderApiKey(subProvider, { allowRefresh: false }),
+                      allowAuthRefreshRetry: false,
+
                     });
 
                     const result = await completeSubAgentWithRetry(
@@ -3134,7 +3142,9 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                 },
               }),
               apiKey: await resolveProviderApiKey(session.provider),
-                refreshApiKey: () => resolveProviderApiKey(session.provider),
+                                refreshApiKey: () => resolveProviderApiKey(session.provider, { allowRefresh: false }),
+                allowAuthRefreshRetry: false,
+
             });
 
             const chatPrompt = managedContext.prompt;
@@ -3480,7 +3490,9 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                     signal: subAgentSignal,
                     toolset: subAgentToolset,
                     apiKey: await resolveProviderApiKey(subProvider),
-                    refreshApiKey: () => resolveProviderApiKey(subProvider),
+                                          refreshApiKey: () => resolveProviderApiKey(subProvider, { allowRefresh: false }),
+                      allowAuthRefreshRetry: false,
+
                   });
 
                   const result = await completeSubAgentWithRetry(
@@ -3527,7 +3539,9 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
               },
             }),
             apiKey: await resolveProviderApiKey(session.provider),
-            refreshApiKey: () => resolveProviderApiKey(session.provider),
+                            refreshApiKey: () => resolveProviderApiKey(session.provider, { allowRefresh: false }),
+                allowAuthRefreshRetry: false,
+
           });
 
           const chatPrompt = managedContext.prompt;

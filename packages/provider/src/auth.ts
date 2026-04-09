@@ -65,6 +65,15 @@ export interface ProviderAuthManagerOptions {
   authFilePath?: string;
 }
 
+export interface ResolveApiKeyOptions {
+  /**
+   * Allow refresh side effects (token refresh + persistence) during resolve.
+   * Defaults to true for backward compatibility when explicitly resolving credentials.
+   */
+  allowRefresh?: boolean;
+}
+
+
 export interface PersistedAuthStore {
   oauth: Record<string, OAuthCredentials>;
   apiKeys: Record<string, string>;
@@ -178,8 +187,10 @@ export class ProviderAuthManager {
     return { path: this.authFilePath, removed };
   }
 
-  async resolveApiKey(providerId: string): Promise<string | undefined> {
+    async resolveApiKey(providerId: string, options: ResolveApiKeyOptions = {}): Promise<string | undefined> {
     const store = await this.loadStore();
+    const allowRefresh = options.allowRefresh ?? true;
+
 
     const storedApiKey = store.apiKeys[providerId];
     if (storedApiKey) {
@@ -191,8 +202,18 @@ export class ProviderAuthManager {
       try {
         if (providerId === GITHUB_COPILOT_PROVIDER_ID) {
           const ttl = computeTokenTtlStatus(providerId, oauthCredentials);
-          if (!ttl || ttl.refreshRecommended) {
-            const result = await getOAuthApiKey(providerId as OAuthProviderId, store.oauth);
+                    if (!ttl || ttl.refreshRecommended) {
+            if (!allowRefresh) {
+              return undefined;
+            }
+
+                    if (!allowRefresh) {
+          return undefined;
+        }
+
+        const result = await getOAuthApiKey(providerId as OAuthProviderId, store.oauth);
+
+
             if (!result) {
               return undefined;
             }
