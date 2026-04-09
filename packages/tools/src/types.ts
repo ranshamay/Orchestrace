@@ -8,10 +8,20 @@ export type AgentToolPhase = 'planning' | 'implementation' | 'chat';
 export interface AgentToolPermissions {
   allowWriteTools: boolean;
   allowRunCommand: boolean;
+  /**
+   * Strict executable-level allowlist for run_command/run_command_batch.
+   * When omitted, tools apply their built-in safe default executable set.
+   */
+  runCommandAllowExecutables?: string[];
+  /**
+   * @deprecated Compatibility-only legacy prefix config. Mapped to executable
+   * allowlist by extracting the first token of each prefix.
+   */
   runCommandAllowPrefixes?: string[];
   toolAllowlist?: string[];
   toolBlocklist?: string[];
 }
+
 
 export interface ResolveGithubTokenOptions {
   minimumTtlSeconds?: number;

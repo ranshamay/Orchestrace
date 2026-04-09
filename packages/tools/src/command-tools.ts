@@ -8,10 +8,13 @@ import { formatCommandOutput, runCommand } from './command-tools/command-runner.
 import {
   asRequiredString,
   asString,
+  deriveExecutableAllowlistFromPrefixes,
   looksDestructive,
-  matchesAllowedPrefix,
-  validateShellCommandPayload,
+  matchesAllowedExecutable,
+  normalizeExecutableAllowlist,
+  parseShellCommandToArgv,
 } from './command-tools/guards.js';
+
 
 const GITHUB_API_BASE_URL = 'https://api.github.com';
 const PLAYWRIGHT_ALLOWED_COMMANDS = new Set([
@@ -29,15 +32,34 @@ const MAX_COMMAND_BATCH_ITEMS = 200;
 const DEFAULT_COMMAND_BATCH_MAX_CHARS_PER_COMMAND = 8000;
 const DEFAULT_COMMAND_BATCH_MIN_CONCURRENCY = 1;
 
-function resolveShellExecutable(): string {
-  const envShell = process.env.SHELL?.trim();
-  return envShell && envShell.length > 0 ? envShell : 'sh';
-}
+const DEFAULT_RUN_COMMAND_ALLOWED_EXECUTABLES = [
+  'pnpm',
+  'npm',
+  'yarn',
+  'node',
+  'npx',
+  'git',
+  'cat',
+  'echo',
+  'grep',
+  'find',
+  'sed',
+  'awk',
+  'curl',
+  'python',
+  'make',
+  'docker',
+  'kubectl',
+  'ls',
+  'pwd',
+];
 
 interface CommandToolOptions extends AgentToolsetOptions {
   includeRunCommandTool: boolean;
+  runCommandAllowExecutables?: string[];
   runCommandAllowPrefixes?: string[];
 }
+
 
 interface SearchFilesErrorDetails {
   errorType:
@@ -57,8 +79,14 @@ interface SearchFilesErrorDetails {
 
 
 export function createCommandTools(options: CommandToolOptions): RegisteredAgentTool[] {
-  const shellExecutable = resolveShellExecutable();
+  const allowedExecutables = normalizeExecutableAllowlist(
+    options.runCommandAllowExecutables
+    ?? deriveExecutableAllowlistFromPrefixes(options.runCommandAllowPrefixes)
+    ?? DEFAULT_RUN_COMMAND_ALLOWED_EXECUTABLES,
+  );
+
   const tools: RegisteredAgentTool[] = [
+
     {
       tool: {
         name: 'search_files',
@@ -452,27 +480,29 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
             };
           }
 
-                    if (!matchesAllowedPrefix(command, options.runCommandAllowPrefixes)) {
-            const allowed = options.runCommandAllowPrefixes?.join(', ') ?? '(none configured)';
+                              const parsedCommand = parseShellCommandToArgv(command);
+          if (!parsedCommand.ok || !parsedCommand.parsed) {
             return {
-              content: `Blocked command outside allowlist: ${command}\nAllowed prefixes: ${allowed}`,
+              content: `${parsedCommand.reason ?? 'Blocked non-command payload.'} Payload: ${command}`,
               isError: true,
             };
           }
 
-          const payloadValidation = validateShellCommandPayload(command);
-          if (!payloadValidation.ok) {
+          const { program, args } = parsedCommand.parsed;
+          if (!matchesAllowedExecutable(program, allowedExecutables)) {
+            const allowed = allowedExecutables?.join(', ') ?? '(none configured)';
             return {
-              content: `${payloadValidation.reason ?? 'Blocked non-command payload.'} Payload: ${command}`,
+              content: `Blocked command outside allowlist: ${command}\nAllowed executables: ${allowed}`,
               isError: true,
             };
           }
 
-          const result = await runCommand(shellExecutable, ['-lc', command], {
+          const result = await runCommand(program, args, {
             cwd,
             timeoutMs: options.commandTimeoutMs ?? 120000,
             signal,
           });
+
 
           const output = formatCommandOutput(result, options.maxOutputChars ?? 24000);
           const header = `cwd: ${toWorkspaceRelative(options.cwd, cwd)}\nexitCode: ${result.exitCode}`;
@@ -534,8 +564,8 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
               };
             }
 
-                        if (!matchesAllowedPrefix(entry.command, options.runCommandAllowPrefixes)) {
-              const allowed = options.runCommandAllowPrefixes?.join(', ') ?? '(none configured)';
+                                    const parsedCommand = parseShellCommandToArgv(entry.command);
+            if (!parsedCommand.ok || !parsedCommand.parsed) {
               return {
                 index,
                 command: entry.command,
@@ -543,12 +573,13 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
                 ok: false,
                 blocked: true,
                 exitCode: -1,
-                output: `Blocked command outside allowlist: ${entry.command}\nAllowed prefixes: ${allowed}`,
+                output: `${parsedCommand.reason ?? 'Blocked non-command payload.'} Payload: ${entry.command}`,
               };
             }
 
-            const payloadValidation = validateShellCommandPayload(entry.command);
-            if (!payloadValidation.ok) {
+            const { program, args } = parsedCommand.parsed;
+            if (!matchesAllowedExecutable(program, allowedExecutables)) {
+              const allowed = allowedExecutables?.join(', ') ?? '(none configured)';
               return {
                 index,
                 command: entry.command,
@@ -556,15 +587,16 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
                 ok: false,
                 blocked: true,
                 exitCode: -1,
-                output: `${payloadValidation.reason ?? 'Blocked non-command payload.'} Payload: ${entry.command}`,
+                output: `Blocked command outside allowlist: ${entry.command}\nAllowed executables: ${allowed}`,
               };
             }
 
-            const result = await runCommand(shellExecutable, ['-lc', entry.command], {
+            const result = await runCommand(program, args, {
               cwd,
               timeoutMs: options.commandTimeoutMs ?? 120000,
               signal,
             });
+
 
             return {
               index,
@@ -970,8 +1002,9 @@ function isRiskyLiteralCandidate(query: string): boolean {
 }
 
 function looksLikeFunctionCallLiteral(query: string): boolean {
-  // Protect punctuation-heavy call snippets (e.g. execFileAsync('sh', ['-lc', ...))
+    // Protect punctuation-heavy call snippets (e.g. execFileAsync(...))
   // by forcing literal semantics unless regex intent is explicit.
+
   if (/\b[a-z_$][a-z0-9_$]*\s*\(/i.test(query)) {
     return true;
   }

@@ -1338,7 +1338,27 @@ describe('run_command safety', () => {
     expect(result.content).toContain('Blocked potentially destructive command');
   });
 
-    it('honors run command allowlist prefixes', async () => {
+        it('honors strict executable allowlist', async () => {
+    const cwd = await makeWorkspace();
+    const toolset = createAgentToolset({
+      cwd,
+      phase: 'implementation',
+      taskType: 'code',
+      permissions: { runCommandAllowExecutables: ['pnpm'] },
+    });
+
+    const result = await toolset.executeTool({
+      id: '1',
+      name: 'run_command',
+      arguments: { command: 'git status' },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content).toContain('Blocked command outside allowlist');
+    expect(result.content).toContain('Allowed executables: pnpm');
+  });
+
+  it('maps legacy allowlist prefixes to executable allowlist compatibility', async () => {
     const cwd = await makeWorkspace();
     const toolset = createAgentToolset({
       cwd,
@@ -1354,8 +1374,10 @@ describe('run_command safety', () => {
     });
 
     expect(result.isError).toBe(true);
-    expect(result.content).toContain('Blocked command outside allowlist');
+    expect(result.content).toContain('Allowed executables: pnpm');
   });
+
+
 
   it('rejects markdown-like single-line payloads before shell execution', async () => {
     const cwd = await makeWorkspace();
@@ -1433,7 +1455,41 @@ describe('run_command safety', () => {
     expect(parsed.commands[3].output).toContain('Blocked non-command payload');
   });
 
+    it('uses direct argv execution without shell wrapper for run_command', async () => {
+    const cwd = await makeWorkspace();
+    const runCommandSpy = vi.spyOn(commandRunner, 'runCommand');
+    const toolset = createAgentToolset({ cwd, phase: 'implementation', taskType: 'code' });
+
+    const result = await toolset.executeTool({
+      id: '1',
+      name: 'run_command',
+      arguments: { command: 'echo "hello world"' },
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(runCommandSpy).toHaveBeenCalled();
+    const [program, args] = runCommandSpy.mock.calls.at(-1) ?? [];
+    expect(program).toBe('echo');
+    expect(args).toEqual(['hello world']);
+    expect(program).not.toBe('sh');
+  });
+
+  it('rejects shell operator injection patterns before execution', async () => {
+    const cwd = await makeWorkspace();
+    const toolset = createAgentToolset({ cwd, phase: 'implementation', taskType: 'code' });
+
+    const result = await toolset.executeTool({
+      id: '1',
+      name: 'run_command',
+      arguments: { command: 'echo ok; whoami' },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content).toContain('shell operators');
+  });
+
   it('run_command_batch supports adaptive concurrency metadata', async () => {
+
     const cwd = await makeWorkspace();
     const toolset = createAgentToolset({ cwd, phase: 'implementation', taskType: 'code' });
 

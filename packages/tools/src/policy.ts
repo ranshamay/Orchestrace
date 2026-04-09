@@ -9,14 +9,16 @@ export function resolveAgentToolPermissions(options: AgentToolsetOptions): Agent
   const defaults = getDefaultPermissions(phase, taskType);
   const overrides = options.permissions ?? {};
 
-  return {
+    return {
     ...defaults,
     ...overrides,
+    runCommandAllowExecutables: overrides.runCommandAllowExecutables ?? defaults.runCommandAllowExecutables,
     runCommandAllowPrefixes: overrides.runCommandAllowPrefixes ?? defaults.runCommandAllowPrefixes,
     toolAllowlist: overrides.toolAllowlist ?? defaults.toolAllowlist,
     toolBlocklist: overrides.toolBlocklist ?? defaults.toolBlocklist,
   };
 }
+
 
 function getDefaultPermissions(phase: string, taskType: string): AgentToolPermissions {
   if (phase === 'planning' || phase === 'chat') {

@@ -48,13 +48,17 @@ export function createAgentToolset(options: AgentToolsetOptions): LlmToolset {
       ...options,
       includeWriteTools,
     }),
-    ...createCommandTools({
+        ...createCommandTools({
       ...options,
       includeRunCommandTool,
+      runCommandAllowExecutables: options.permissions?.runCommandAllowExecutables
+        ?? implementationPermissions.runCommandAllowExecutables
+        ?? permissions.runCommandAllowExecutables,
       runCommandAllowPrefixes: options.permissions?.runCommandAllowPrefixes
         ?? implementationPermissions.runCommandAllowPrefixes
         ?? permissions.runCommandAllowPrefixes,
     }),
+
     ...createCoordinationTools({
       ...options,
       includeSubAgentTool,
