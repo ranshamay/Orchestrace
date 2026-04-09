@@ -26,6 +26,17 @@ export interface PlanApprovalRequest {
   planPath: string;
 }
 
+export interface LlmProviderFailoverConfig {
+  /** Ordered fallback candidates for planning. Primary planning model is always tried first. */
+  planningCandidates?: ModelConfig[];
+  /** Ordered fallback candidates for implementation. Primary implementation model is always tried first. */
+  implementationCandidates?: ModelConfig[];
+  /** Failure types that can trigger provider failover. Defaults to ['timeout']. */
+  triggerFailureTypes?: ReplayFailureType[];
+  /** Consecutive trigger failures required before switching provider. Defaults to 2. */
+  consecutiveFailureThreshold?: number;
+}
+
 export interface OrchestratorConfig extends RunnerConfig {
   /** LLM adapter for executing agent tasks. */
   llm: LlmAdapter;
@@ -86,6 +97,8 @@ export interface OrchestratorConfig extends RunnerConfig {
   /** Override task effort classification. When set, controls execution strategy:
    *  trivial/low = skip planning; medium = sub-agents optional; high = full orchestration. */
   taskEffort?: TaskEffort;
+  /** Optional provider/model failover strategy for planning + implementation phases. */
+  providerFailover?: LlmProviderFailoverConfig;
 }
 
 type OrchestratorPhase = 'planning' | 'implementation';
@@ -143,6 +156,7 @@ export async function orchestrate(
     planningNoToolProgressCheckIntervalMs,
     planningNoToolGuardMode,
     taskEffort: configTaskEffort,
+    providerFailover,
   } = config;
 
   const emit = onEvent ?? (() => {});
@@ -180,16 +194,23 @@ export async function orchestrate(
       provider: 'anthropic',
       model: 'claude-sonnet-4-20250514',
     };
-    const planningModel: ModelConfig = node.model ?? defaultPlanningModel ?? fallbackModel;
-    const implementationModel: ModelConfig = node.model ?? defaultImplementationModel ?? fallbackModel;
-    const planningApiKey = await resolveApiKey?.(planningModel.provider);
-    const implementationApiKey = await resolveApiKey?.(implementationModel.provider);
-    const planningRefreshApiKey = resolveApiKey
-      ? async () => resolveApiKey(planningModel.provider)
-      : undefined;
-    const implementationRefreshApiKey = resolveApiKey
-      ? async () => resolveApiKey(implementationModel.provider)
-      : undefined;
+    const basePlanningModel: ModelConfig = node.model ?? defaultPlanningModel ?? fallbackModel;
+    const baseImplementationModel: ModelConfig = node.model ?? defaultImplementationModel ?? fallbackModel;
+
+    const planningCandidates = resolveModelCandidates(
+      basePlanningModel,
+      providerFailover?.planningCandidates,
+    );
+    const implementationCandidates = resolveModelCandidates(
+      baseImplementationModel,
+      providerFailover?.implementationCandidates,
+    );
+    const failoverPolicy = resolveFailoverPolicy(providerFailover);
+
+    let activePlanningCandidateIndex = 0;
+    let activeImplementationCandidateIndex = 0;
+    let planningConsecutiveTriggerFailures = 0;
+    let implementationConsecutiveTriggerFailures = 0;
 
     const usage = { input: 0, output: 0, cost: 0 };
     const replay: TaskReplayRecord = {
@@ -198,9 +219,9 @@ export async function orchestrate(
       taskId: node.id,
       promptVersion: resolvedPromptVersion,
       policyVersion: policyVersion ?? 'default-v1',
-      provider: implementationModel.provider,
-      model: implementationModel.model,
-      reasoning: implementationModel.reasoning,
+      provider: implementationCandidates[0]?.provider ?? baseImplementationModel.provider,
+      model: implementationCandidates[0]?.model ?? baseImplementationModel.model,
+      reasoning: implementationCandidates[0]?.reasoning ?? baseImplementationModel.reasoning,
       attempts: [],
     };
     const taskTokenDumpDir = join(
@@ -230,37 +251,50 @@ export async function orchestrate(
     let persistedPlanPath: string | undefined;
     const resolvedPlanningNoToolGuardMode = normalizePlanningNoToolGuardMode(planningNoToolGuardMode);
 
-    if (!shouldSkipPlanning) {
-      const planningAgent = await llm.spawnAgent({
-        provider: planningModel.provider,
-        model: planningModel.model,
-        reasoning: planningModel.reasoning,
+    const getActivePlanningModel = (): ModelConfig => planningCandidates[activePlanningCandidateIndex] ?? basePlanningModel;
+    const getActiveImplementationModel = (): ModelConfig => implementationCandidates[activeImplementationCandidateIndex] ?? baseImplementationModel;
+
+    const spawnPhaseAgent = async (phase: OrchestratorPhase) => {
+      const activeModel = phase === 'planning' ? getActivePlanningModel() : getActiveImplementationModel();
+      const apiKey = await resolveApiKey?.(activeModel.provider);
+      const refreshApiKey = resolveApiKey
+        ? async () => resolveApiKey(activeModel.provider)
+        : undefined;
+
+      return llm.spawnAgent({
+        provider: activeModel.provider,
+        model: activeModel.model,
+        reasoning: activeModel.reasoning,
         systemPrompt:
-          planningSystemPrompt
+          (phase === 'planning' ? planningSystemPrompt : implementationSystemPrompt)
           ?? systemPrompt
           ?? buildPhaseSystemPrompt({
-            phase: 'planning',
+            phase,
             task: node,
             graphId: graph.id,
             cwd,
-            provider: planningModel.provider,
-            model: planningModel.model,
-            reasoning: planningModel.reasoning,
+            provider: activeModel.provider,
+            model: activeModel.model,
+            reasoning: activeModel.reasoning,
           }),
         signal: context.signal,
         toolset: createToolset?.({
-          phase: 'planning',
+          phase,
           task: node,
           graphId: graph.id,
           cwd,
-          provider: planningModel.provider,
-          model: planningModel.model,
-          reasoning: planningModel.reasoning,
+          provider: activeModel.provider,
+          model: activeModel.model,
+          reasoning: activeModel.reasoning,
           taskRequiresWrites,
         }),
-        apiKey: planningApiKey,
-        refreshApiKey: planningRefreshApiKey,
+        apiKey,
+        refreshApiKey,
       });
+    };
+
+    if (!shouldSkipPlanning) {
+      let planningAgent = await spawnPhaseAgent('planning');
 
       emit({ type: 'task:planning', taskId: node.id });
 
@@ -415,6 +449,7 @@ export async function orchestrate(
             },
           });
         } catch (error) {
+          const activePlanningModel = getActivePlanningModel();
           const wasPlanningNoProgressAbort = planningNoProgressTriggered || isPlanningNoProgressAbortError(error);
           const failureType = wasPlanningNoProgressAbort ? 'timeout' : resolveReplayFailureType(error);
           const planningError = wasPlanningNoProgressAbort
@@ -426,9 +461,9 @@ export async function orchestrate(
             attempt: planningAttempt,
             startedAt: planningAttemptStart,
             completedAt: new Date().toISOString(),
-            provider: planningModel.provider,
-            model: planningModel.model,
-            reasoning: planningModel.reasoning,
+            provider: activePlanningModel.provider,
+            model: activePlanningModel.model,
+            reasoning: activePlanningModel.reasoning,
             error: planningError,
             failureType,
             toolCalls: planningToolCalls,
@@ -442,6 +477,28 @@ export async function orchestrate(
             record: failedPlanningAttempt,
           });
 
+          planningConsecutiveTriggerFailures = isFailoverTriggerFailure(failureType, failoverPolicy)
+            ? planningConsecutiveTriggerFailures + 1
+            : 0;
+
+          const nextPlanningCandidate = planningCandidates[activePlanningCandidateIndex + 1];
+          if (
+            planningAttempt < MAX_PLANNING_ATTEMPTS
+            && nextPlanningCandidate
+            && planningConsecutiveTriggerFailures >= failoverPolicy.consecutiveFailureThreshold
+          ) {
+            emit({
+              type: 'task:verification-failed',
+              taskId: node.id,
+              attempt: planningAttempt,
+              error: `Provider fallback triggered for planning after ${planningConsecutiveTriggerFailures} ${failureType} failure(s): ${activePlanningModel.provider}/${activePlanningModel.model} -> ${nextPlanningCandidate.provider}/${nextPlanningCandidate.model}`,
+            });
+            activePlanningCandidateIndex += 1;
+            planningConsecutiveTriggerFailures = 0;
+            planningAgent = await spawnPhaseAgent('planning');
+            continue;
+          }
+
           if (planningAttempt < MAX_PLANNING_ATTEMPTS && shouldRetryAfterCompletionFailure(failureType)) {
             const delayMs = PLANNING_RETRY_BASE_DELAY_MS * (2 ** (planningAttempt - 1));
             emit({
@@ -452,6 +509,19 @@ export async function orchestrate(
             });
             await delay(delayMs);
             continue;
+          }
+
+          if (
+            planningAttempt < MAX_PLANNING_ATTEMPTS
+            && !nextPlanningCandidate
+            && planningConsecutiveTriggerFailures >= failoverPolicy.consecutiveFailureThreshold
+          ) {
+            emit({
+              type: 'task:verification-failed',
+              taskId: node.id,
+              attempt: planningAttempt,
+              error: `Provider fallback exhausted for planning after ${planningConsecutiveTriggerFailures} ${failureType} failure(s) on ${activePlanningModel.provider}/${activePlanningModel.model}.`,
+            });
           }
 
           return {
@@ -470,14 +540,15 @@ export async function orchestrate(
           context.signal?.removeEventListener('abort', abortPlanningAttemptOnParentCancel);
         }
 
+        const activePlanningModel = getActivePlanningModel();
         const completedPlanningAttempt: ReplayAttemptRecord = {
           phase: 'planning',
           attempt: planningAttempt,
           startedAt: planningAttemptStart,
           completedAt: new Date().toISOString(),
-          provider: planningModel.provider,
-          model: planningModel.model,
-          reasoning: planningModel.reasoning,
+          provider: activePlanningModel.provider,
+          model: activePlanningModel.model,
+          reasoning: activePlanningModel.reasoning,
           stopReason: planningResult.metadata?.stopReason,
           endpoint: planningResult.metadata?.endpoint,
           usage: planningResult.usage,
@@ -499,8 +570,8 @@ export async function orchestrate(
           taskId: node.id,
           agent: 'planning',
           attempt: planningAttempt,
-          provider: planningModel.provider,
-          model: planningModel.model,
+          provider: activePlanningModel.provider,
+          model: activePlanningModel.model,
           usage: planningResult.usage,
         });
 
@@ -624,36 +695,7 @@ export async function orchestrate(
       };
     }
 
-    const implAgent = await llm.spawnAgent({
-      provider: implementationModel.provider,
-      model: implementationModel.model,
-      reasoning: implementationModel.reasoning,
-      systemPrompt:
-        implementationSystemPrompt
-        ?? systemPrompt
-        ?? buildPhaseSystemPrompt({
-          phase: 'implementation',
-          task: node,
-          graphId: graph.id,
-          cwd,
-          provider: implementationModel.provider,
-          model: implementationModel.model,
-          reasoning: implementationModel.reasoning,
-        }),
-      signal: context.signal,
-      toolset: createToolset?.({
-        phase: 'implementation',
-        task: node,
-        graphId: graph.id,
-        cwd,
-        provider: implementationModel.provider,
-        model: implementationModel.model,
-        reasoning: implementationModel.reasoning,
-        taskRequiresWrites,
-      }),
-      apiKey: implementationApiKey,
-      refreshApiKey: implementationRefreshApiKey,
-    });
+    let implAgent = await spawnPhaseAgent('implementation');
 
     const taskRetryBudget = Math.max(0, node.validation?.maxRetries ?? 0);
     const maxAttempts = Math.max(
@@ -716,6 +758,7 @@ export async function orchestrate(
           },
         });
       } catch (error) {
+        const activeImplementationModel = getActiveImplementationModel();
         const failureType = resolveReplayFailureType(error);
         const implementationError = error instanceof Error ? error.message : String(error);
         const failedImplementationAttempt: ReplayAttemptRecord = {
@@ -723,9 +766,9 @@ export async function orchestrate(
           attempt,
           startedAt: implementationAttemptStart,
           completedAt: new Date().toISOString(),
-          provider: implementationModel.provider,
-          model: implementationModel.model,
-          reasoning: implementationModel.reasoning,
+          provider: activeImplementationModel.provider,
+          model: activeImplementationModel.model,
+          reasoning: activeImplementationModel.reasoning,
           error: implementationError,
           failureType,
           toolCalls: implementationToolCalls,
@@ -738,6 +781,33 @@ export async function orchestrate(
           attempt,
           record: failedImplementationAttempt,
         });
+
+        implementationConsecutiveTriggerFailures = isFailoverTriggerFailure(failureType, failoverPolicy)
+          ? implementationConsecutiveTriggerFailures + 1
+          : 0;
+
+        const nextImplementationCandidate = implementationCandidates[activeImplementationCandidateIndex + 1];
+        if (
+          attempt < maxAttempts
+          && nextImplementationCandidate
+          && implementationConsecutiveTriggerFailures >= failoverPolicy.consecutiveFailureThreshold
+        ) {
+          emit({
+            type: 'task:verification-failed',
+            taskId: node.id,
+            attempt,
+            error: `Provider fallback triggered for implementation after ${implementationConsecutiveTriggerFailures} ${failureType} failure(s): ${activeImplementationModel.provider}/${activeImplementationModel.model} -> ${nextImplementationCandidate.provider}/${nextImplementationCandidate.model}`,
+          });
+          activeImplementationCandidateIndex += 1;
+          implementationConsecutiveTriggerFailures = 0;
+          implAgent = await spawnPhaseAgent('implementation');
+          lastFailureType = failureType;
+          lastValidationError = buildCompletionFailureRetryHint({
+            failureType,
+            errorMessage: implementationError,
+          });
+          continue;
+        }
 
         if (attempt < maxAttempts && shouldRetryAfterCompletionFailure(failureType)) {
           lastFailureType = failureType;
@@ -753,6 +823,19 @@ export async function orchestrate(
           });
           await delay(PLANNING_RETRY_BASE_DELAY_MS * (2 ** (attempt - 1)));
           continue;
+        }
+
+        if (
+          attempt < maxAttempts
+          && !nextImplementationCandidate
+          && implementationConsecutiveTriggerFailures >= failoverPolicy.consecutiveFailureThreshold
+        ) {
+          emit({
+            type: 'task:verification-failed',
+            taskId: node.id,
+            attempt,
+            error: `Provider fallback exhausted for implementation after ${implementationConsecutiveTriggerFailures} ${failureType} failure(s) on ${activeImplementationModel.provider}/${activeImplementationModel.model}.`,
+          });
         }
 
         return {
@@ -771,14 +854,15 @@ export async function orchestrate(
         };
       }
 
+      const activeImplementationModel = getActiveImplementationModel();
       const completedImplementationAttempt: ReplayAttemptRecord = {
         phase: 'implementation',
         attempt,
         startedAt: implementationAttemptStart,
         completedAt: new Date().toISOString(),
-        provider: implementationModel.provider,
-        model: implementationModel.model,
-        reasoning: implementationModel.reasoning,
+        provider: activeImplementationModel.provider,
+        model: activeImplementationModel.model,
+        reasoning: activeImplementationModel.reasoning,
         stopReason: implResult.metadata?.stopReason,
         endpoint: implResult.metadata?.endpoint,
         usage: implResult.usage,
@@ -800,8 +884,8 @@ export async function orchestrate(
         taskId: node.id,
         agent: 'implementation',
         attempt,
-        provider: implementationModel.provider,
-        model: implementationModel.model,
+        provider: activeImplementationModel.provider,
+        model: activeImplementationModel.model,
         usage: implResult.usage,
       });
       lastResponse = implResult.text;
@@ -1390,6 +1474,55 @@ function shouldRetryAfterCompletionFailure(failureType: ReplayFailureType): bool
     || failureType === 'rate_limit'
     || failureType === 'tool_runtime'
     || failureType === 'empty_response';
+}
+
+interface ResolvedFailoverPolicy {
+  triggerFailureTypes: Set<ReplayFailureType>;
+  consecutiveFailureThreshold: number;
+}
+
+function resolveFailoverPolicy(config: LlmProviderFailoverConfig | undefined): ResolvedFailoverPolicy {
+  const triggerFailureTypes = new Set<ReplayFailureType>(
+    (config?.triggerFailureTypes?.filter(isReplayFailureType) ?? ['timeout']) as ReplayFailureType[],
+  );
+  const rawThreshold = config?.consecutiveFailureThreshold;
+  const consecutiveFailureThreshold =
+    typeof rawThreshold === 'number' && Number.isFinite(rawThreshold) && rawThreshold > 0
+      ? Math.floor(rawThreshold)
+      : 2;
+
+  return {
+    triggerFailureTypes,
+    consecutiveFailureThreshold,
+  };
+}
+
+function isFailoverTriggerFailure(
+  failureType: ReplayFailureType,
+  policy: ResolvedFailoverPolicy,
+): boolean {
+  return policy.triggerFailureTypes.has(failureType);
+}
+
+function resolveModelCandidates(
+  primary: ModelConfig,
+  fallbackCandidates: ModelConfig[] | undefined,
+): ModelConfig[] {
+  const candidates = [primary, ...(fallbackCandidates ?? [])]
+    .filter((candidate): candidate is ModelConfig => Boolean(candidate?.provider && candidate?.model));
+
+  const deduped: ModelConfig[] = [];
+  const seen = new Set<string>();
+  for (const candidate of candidates) {
+    const key = `${candidate.provider}::${candidate.model}::${candidate.reasoning ?? 'default'}`;
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    deduped.push(candidate);
+  }
+
+  return deduped.length > 0 ? deduped : [primary];
 }
 
 function buildCompletionFailureRetryHint(params: {
