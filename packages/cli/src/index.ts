@@ -405,12 +405,29 @@ async function runGraph(
     }
   };
 
-  const llm = new PiAiAdapter();
+    const llm = new PiAiAdapter();
   const authManager = new ProviderAuthManager();
   const githubAuthManager = createGithubAuthManager();
   const cwd = options.workspace.path;
 
+  const providersToValidate = new Set<string>([provider]);
+  for (const node of graph.nodes) {
+    const nodeProvider = node.model?.provider?.trim();
+    if (nodeProvider) {
+      providersToValidate.add(nodeProvider);
+    }
+  }
+
+  for (const providerId of providersToValidate) {
+    const readiness = await authManager.validateProviderReadiness(providerId);
+    if (!readiness.ok) {
+      console.error(`\n✗ ${readiness.message}`);
+      return 1;
+    }
+  }
+
   const outputs = await orchestrate(graph, {
+
     llm,
     cwd,
     planOutputDir: resolve(cwd, '.orchestrace', 'plans'),
