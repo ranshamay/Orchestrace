@@ -75,7 +75,10 @@ export class SessionLifecycle {
   private readonly entered: SessionLifecyclePhase[];
   private readonly cleanupStack: SessionLifecycleCleanupAction[];
   private readonly cleanupErrors: SessionLifecycleCleanupError[];
+  private cleanupInFlight?: Promise<void>;
+  private cleanupExecuted = false;
   private lastFailure?: SessionLifecycleDiagnostics['lastFailure'];
+
 
   constructor(initialPhase: SessionLifecyclePhase = 'VALIDATING') {
     this.current = initialPhase;
@@ -132,25 +135,46 @@ export class SessionLifecycle {
     return error;
   }
 
-  async cleanup(): Promise<void> {
-    if (!TERMINAL_PHASES.has(this.current) && this.current !== 'CLEANING_UP') {
-      await this.enterPhaseInternal('CLEANING_UP');
+      async cleanup(): Promise<void> {
+    if (this.cleanupExecuted) {
+      return;
     }
 
-    while (this.cleanupStack.length > 0) {
-      const action = this.cleanupStack.pop()!;
-      try {
-        await action.run();
-      } catch (error) {
-        this.cleanupErrors.push({
-          phase: action.phase,
-          actionLabel: action.label,
-          error,
-        });
+    if (this.cleanupInFlight) {
+      await this.cleanupInFlight;
+      return;
+    }
+
+    this.cleanupInFlight = (async () => {
+      if (!TERMINAL_PHASES.has(this.current) && this.current !== 'CLEANING_UP') {
+        await this.enterPhaseInternal('CLEANING_UP');
       }
+
+      while (this.cleanupStack.length > 0) {
+        const action = this.cleanupStack.pop()!;
+        try {
+          await action.run();
+        } catch (error) {
+          this.cleanupErrors.push({
+            phase: action.phase,
+            actionLabel: action.label,
+            error,
+          });
+        }
+      }
+
+      this.cleanupExecuted = true;
+    })();
+
+    try {
+      await this.cleanupInFlight;
+    } finally {
+      this.cleanupInFlight = undefined;
     }
   }
 
+
+  
   async complete(status: 'COMPLETED' | 'FAILED' | 'CANCELLED'): Promise<void> {
     if (this.current !== 'CLEANING_UP' && !TERMINAL_PHASES.has(this.current)) {
       await this.cleanup();
