@@ -6,7 +6,7 @@
   "scripts": {
     "build": "turbo build",
     "dev": "turbo dev",
-    "pretest": "pnpm --filter @orchestrace/provider build && pnpm --filter @orchestrace/context build",
+    "pretest": "pnpm --filter @orchestrace/cli... build",
     "test": "turbo run test",
     "prestart": "pnpm --filter @orchestrace/cli... build",
     "evals": "pnpm --filter @orchestrace/evals run run",
