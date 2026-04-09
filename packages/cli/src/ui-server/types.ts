@@ -11,6 +11,22 @@ export type SessionCreationReason = 'start' | 'retry';
 export type SessionDeliveryStrategy = 'pr-only' | 'merge-after-ci';
 export type ExecutionContext = 'workspace' | 'git-worktree';
 export type SessionWorktreePathSessionIdRelation = 'match' | 'mismatch' | 'none';
+export type ReasoningLevel = 'minimal' | 'low' | 'medium' | 'high';
+export type SessionAgentRole = 'router' | 'planner' | 'implementer' | 'reviewer' | 'investigator';
+
+export interface SessionAgentModelConfig {
+  provider?: string;
+  model?: string;
+  reasoning?: ReasoningLevel;
+}
+
+export interface SessionAgentModels {
+  router?: SessionAgentModelConfig;
+  planner?: SessionAgentModelConfig;
+  implementer?: SessionAgentModelConfig;
+  reviewer?: SessionAgentModelConfig;
+  investigator?: SessionAgentModelConfig;
+}
 
 export interface SessionWorkspaceAssignmentProvenance {
   assignmentSource: 'workspace-root' | 'selected-worktree' | 'fallback-worktree' | 'auto-created-worktree';
@@ -54,7 +70,7 @@ export interface SessionAgentGraphNode {
   status?: 'pending' | 'running' | 'completed' | 'failed';
   provider?: string;
   model?: string;
-  reasoning?: 'minimal' | 'low' | 'medium' | 'high';
+  reasoning?: ReasoningLevel;
 }
 
 export interface UiDagEvent {
@@ -183,6 +199,7 @@ export interface WorkSession {
   promptParts?: SessionChatContentPart[];
   provider: string;
   model: string;
+  agentModels?: SessionAgentModels;
   planningProvider: string;
   planningModel: string;
   implementationProvider: string;
@@ -233,6 +250,7 @@ export interface PersistedWorkSession {
   promptParts?: SessionChatContentPart[];
   provider: string;
   model: string;
+  agentModels?: SessionAgentModels;
   planningProvider?: string;
   planningModel?: string;
   implementationProvider?: string;
@@ -271,6 +289,7 @@ export interface UiPreferences {
   observerShowFindings: boolean;
   defaultProvider: string;
   defaultModel: string;
+  defaultAgentModels: SessionAgentModels;
   defaultPlanningProvider: string;
   defaultPlanningModel: string;
   defaultImplementationProvider: string;
@@ -292,6 +311,7 @@ export interface PersistedUiPreferences {
   observerShowFindings?: boolean;
   defaultProvider?: string;
   defaultModel?: string;
+  defaultAgentModels?: SessionAgentModels;
   defaultPlanningProvider?: string;
   defaultPlanningModel?: string;
   defaultImplementationProvider?: string;

@@ -34,12 +34,29 @@ export interface Workspace {
 }
 
 export type SessionDeliveryStrategy = 'pr-only' | 'merge-after-ci';
+export type ReasoningLevel = 'minimal' | 'low' | 'medium' | 'high';
+export type AgentRole = 'router' | 'planner' | 'implementer' | 'reviewer' | 'investigator';
+
+export interface AgentModelConfig {
+  provider?: string;
+  model?: string;
+  reasoning?: ReasoningLevel;
+}
+
+export interface AgentModels {
+  router?: AgentModelConfig;
+  planner?: AgentModelConfig;
+  implementer?: AgentModelConfig;
+  reviewer?: AgentModelConfig;
+  investigator?: AgentModelConfig;
+}
 
 export interface UiPreferences {
   activeTab: 'graph' | 'settings' | 'logs';
   observerShowFindings: boolean;
   defaultProvider: string;
   defaultModel: string;
+  defaultAgentModels: AgentModels;
   defaultPlanningProvider: string;
   defaultPlanningModel: string;
   defaultImplementationProvider: string;
@@ -96,6 +113,7 @@ export interface WorkSession {
   prompt: string;
   provider: string;
   model: string;
+  agentModels?: AgentModels;
   planningProvider?: string;
   planningModel?: string;
   implementationProvider?: string;
@@ -348,6 +366,7 @@ export async function startWork(payload: {
   prompt: string;
   provider: string;
   model: string;
+  agentModels?: AgentModels;
   planningProvider?: string;
   planningModel?: string;
   implementationProvider?: string;

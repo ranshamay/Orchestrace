@@ -108,6 +108,7 @@ export function useLlmControls(params: Params) {
       planningModel: patch.planningModel ?? workPlanningModel,
       implementationProvider: patch.implementationProvider ?? workProvider,
       implementationModel: patch.implementationModel ?? workModel,
+      agentModels: patch.agentModels ?? defaultLlmControls.agentModels,
       deliveryStrategy: patch.deliveryStrategy ?? deliveryStrategy,
       planningNoToolGuardMode: patch.planningNoToolGuardMode ?? planningNoToolGuardMode,
       workspaceId: patch.workspaceId ?? workWorkspaceId,
@@ -132,6 +133,7 @@ export function useLlmControls(params: Params) {
     selectedSessionId,
     setDefaultLlmControls,
     planningNoToolGuardMode,
+    defaultLlmControls.agentModels,
     workPlanningModel,
     workPlanningProvider,
     workModel,
@@ -167,6 +169,7 @@ export function useLlmControls(params: Params) {
       implementationModel: defaultLlmControls.implementationModel
         || selectedSession.implementationModel
         || selectedSession.model,
+      agentModels: selectedSession.agentModels ?? defaultLlmControls.agentModels,
       deliveryStrategy: selectedSession.deliveryStrategy ?? defaultLlmControls.deliveryStrategy,
       planningNoToolGuardMode: selectedSession.planningNoToolGuardMode ?? defaultLlmControls.planningNoToolGuardMode,
       workspaceId: selectedSession.workspaceId || defaultLlmControls.workspaceId,

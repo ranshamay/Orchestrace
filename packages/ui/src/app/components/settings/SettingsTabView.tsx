@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ChevronDown, ChevronUp, Eye, GitBranch, Loader2, Settings, Zap } from 'lucide-react';
 import {
+  type AgentModels,
   fetchProviderAuthSession,
   fetchProviders,
   fetchGithubDeviceAuthSession,
@@ -137,11 +138,18 @@ type Props = {
   defaultPlanningModel: string;
   defaultImplementationProvider: string;
   defaultImplementationModel: string;
+  defaultAgentModels: AgentModels;
   defaultPlanningNoToolGuardMode: 'enforce' | 'warn';
   setDefaultPlanningProvider: (next: string) => void;
   setDefaultPlanningModel: (next: string) => void;
   setDefaultImplementationProvider: (next: string) => void;
   setDefaultImplementationModel: (next: string) => void;
+  setDefaultRouterProvider: (next: string) => void;
+  setDefaultRouterModel: (next: string) => void;
+  setDefaultReviewerProvider: (next: string) => void;
+  setDefaultReviewerModel: (next: string) => void;
+  setDefaultInvestigatorProvider: (next: string) => void;
+  setDefaultInvestigatorModel: (next: string) => void;
   setDefaultPlanningNoToolGuardMode: (next: 'enforce' | 'warn') => void;
   observerShowFindings: boolean;
   setObserverShowFindings: (next: boolean) => void;
@@ -157,11 +165,18 @@ export function SettingsTabView({
   defaultPlanningModel,
   defaultImplementationProvider,
   defaultImplementationModel,
+  defaultAgentModels,
   defaultPlanningNoToolGuardMode,
   setDefaultPlanningProvider,
   setDefaultPlanningModel,
   setDefaultImplementationProvider,
   setDefaultImplementationModel,
+  setDefaultRouterProvider,
+  setDefaultRouterModel,
+  setDefaultReviewerProvider,
+  setDefaultReviewerModel,
+  setDefaultInvestigatorProvider,
+  setDefaultInvestigatorModel,
   setDefaultPlanningNoToolGuardMode,
   observerShowFindings,
   setObserverShowFindings,
@@ -201,6 +216,34 @@ export function SettingsTabView({
     provider: defaultImplementationProvider,
     model: defaultImplementationModel,
     setModel: setDefaultImplementationModel,
+  });
+
+  const routerProvider = defaultAgentModels.router?.provider ?? '';
+  const routerModel = defaultAgentModels.router?.model ?? '';
+  const reviewerProvider = defaultAgentModels.reviewer?.provider ?? '';
+  const reviewerModel = defaultAgentModels.reviewer?.model ?? '';
+  const investigatorProvider = defaultAgentModels.investigator?.provider ?? '';
+  const investigatorModel = defaultAgentModels.investigator?.model ?? '';
+
+  const routerDefaults = useConnectedDefaultProviderModels({
+    connectedDefaultProviders,
+    provider: routerProvider,
+    model: routerModel,
+    setModel: setDefaultRouterModel,
+  });
+
+  const reviewerDefaults = useConnectedDefaultProviderModels({
+    connectedDefaultProviders,
+    provider: reviewerProvider,
+    model: reviewerModel,
+    setModel: setDefaultReviewerModel,
+  });
+
+  const investigatorDefaults = useConnectedDefaultProviderModels({
+    connectedDefaultProviders,
+    provider: investigatorProvider,
+    model: investigatorModel,
+    setModel: setDefaultInvestigatorModel,
   });
 
   useEffect(() => {
@@ -366,7 +409,7 @@ export function SettingsTabView({
       <div className="mb-6 rounded-lg border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-700 dark:bg-slate-900">
         <h3 className="mb-3 text-xs font-bold uppercase tracking-widest text-slate-500 dark:text-slate-400">Defaults</h3>
         <div className="mb-3 text-xs text-slate-600 dark:text-slate-300">
-          Configure separate planning and implementation model defaults for <span className="font-semibold">new sessions</span>. If a default is not set, the existing fallback selection is used.
+          Configure planner and implementer defaults for <span className="font-semibold">new sessions</span>, then optionally override additional agent roles.
         </div>
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
           <div className="rounded border border-slate-200 p-3 dark:border-slate-700">
@@ -445,6 +488,116 @@ export function SettingsTabView({
                 No models available for the selected implementation provider (or provider is not connected).
               </div>
             )}
+          </div>
+        </div>
+
+        <div className="mt-4 rounded border border-slate-200 p-3 dark:border-slate-700">
+          <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">Additional Agent Role Defaults</div>
+          <div className="mb-3 text-xs text-slate-600 dark:text-slate-300">
+            Optional overrides for router, reviewer, and investigator roles. Leave empty to inherit the implementation defaults.
+          </div>
+          <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
+            <div className="rounded border border-slate-200 p-3 dark:border-slate-700">
+              <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">Router Role</div>
+              <div className="grid grid-cols-1 gap-2">
+                <label className="flex flex-col gap-1 text-sm text-slate-700 dark:text-slate-200">
+                  <span className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">Provider</span>
+                  <select
+                    className="rounded border border-slate-200 px-2 py-1.5 text-sm dark:border-slate-700 dark:bg-slate-900"
+                    value={routerProvider}
+                    onChange={(event) => {
+                      setDefaultRouterProvider(event.target.value);
+                    }}
+                  >
+                    <option value="">Use implementation fallback</option>
+                    {connectedDefaultProviders.length === 0 && (
+                      <option value="" disabled>No connected providers</option>
+                    )}
+                    {connectedDefaultProviders.map((provider) => (
+                      <option key={provider.id} value={provider.id}>{provider.id}</option>
+                    ))}
+                  </select>
+                </label>
+                <label className="flex flex-col gap-1 text-sm text-slate-700 dark:text-slate-200">
+                  <span className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">Model</span>
+                  <ModelAutocomplete
+                    models={routerDefaults.models}
+                    value={routerModel}
+                    onChange={setDefaultRouterModel}
+                    placeholder={routerProvider ? 'Search models…' : 'Select provider first'}
+                    disabled={!routerProvider || routerDefaults.models.length === 0}
+                  />
+                </label>
+              </div>
+            </div>
+
+            <div className="rounded border border-slate-200 p-3 dark:border-slate-700">
+              <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">Reviewer Role</div>
+              <div className="grid grid-cols-1 gap-2">
+                <label className="flex flex-col gap-1 text-sm text-slate-700 dark:text-slate-200">
+                  <span className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">Provider</span>
+                  <select
+                    className="rounded border border-slate-200 px-2 py-1.5 text-sm dark:border-slate-700 dark:bg-slate-900"
+                    value={reviewerProvider}
+                    onChange={(event) => {
+                      setDefaultReviewerProvider(event.target.value);
+                    }}
+                  >
+                    <option value="">Use implementation fallback</option>
+                    {connectedDefaultProviders.length === 0 && (
+                      <option value="" disabled>No connected providers</option>
+                    )}
+                    {connectedDefaultProviders.map((provider) => (
+                      <option key={provider.id} value={provider.id}>{provider.id}</option>
+                    ))}
+                  </select>
+                </label>
+                <label className="flex flex-col gap-1 text-sm text-slate-700 dark:text-slate-200">
+                  <span className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">Model</span>
+                  <ModelAutocomplete
+                    models={reviewerDefaults.models}
+                    value={reviewerModel}
+                    onChange={setDefaultReviewerModel}
+                    placeholder={reviewerProvider ? 'Search models…' : 'Select provider first'}
+                    disabled={!reviewerProvider || reviewerDefaults.models.length === 0}
+                  />
+                </label>
+              </div>
+            </div>
+
+            <div className="rounded border border-slate-200 p-3 dark:border-slate-700">
+              <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">Investigator Role</div>
+              <div className="grid grid-cols-1 gap-2">
+                <label className="flex flex-col gap-1 text-sm text-slate-700 dark:text-slate-200">
+                  <span className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">Provider</span>
+                  <select
+                    className="rounded border border-slate-200 px-2 py-1.5 text-sm dark:border-slate-700 dark:bg-slate-900"
+                    value={investigatorProvider}
+                    onChange={(event) => {
+                      setDefaultInvestigatorProvider(event.target.value);
+                    }}
+                  >
+                    <option value="">Use implementation fallback</option>
+                    {connectedDefaultProviders.length === 0 && (
+                      <option value="" disabled>No connected providers</option>
+                    )}
+                    {connectedDefaultProviders.map((provider) => (
+                      <option key={provider.id} value={provider.id}>{provider.id}</option>
+                    ))}
+                  </select>
+                </label>
+                <label className="flex flex-col gap-1 text-sm text-slate-700 dark:text-slate-200">
+                  <span className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">Model</span>
+                  <ModelAutocomplete
+                    models={investigatorDefaults.models}
+                    value={investigatorModel}
+                    onChange={setDefaultInvestigatorModel}
+                    placeholder={investigatorProvider ? 'Search models…' : 'Select provider first'}
+                    disabled={!investigatorProvider || investigatorDefaults.models.length === 0}
+                  />
+                </label>
+              </div>
+            </div>
           </div>
         </div>
         {connectedDefaultProviders.length === 0 && (

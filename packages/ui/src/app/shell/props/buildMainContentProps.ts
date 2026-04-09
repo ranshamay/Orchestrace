@@ -46,11 +46,18 @@ type Params = {
   defaultPlanningModel: string;
   defaultImplementationProvider: string;
   defaultImplementationModel: string;
+  defaultAgentModels: AppMainContentProps['defaultAgentModels'];
   defaultPlanningNoToolGuardMode: 'enforce' | 'warn';
   onSetDefaultPlanningProvider: AppMainContentProps['onSetDefaultPlanningProvider'];
   onSetDefaultPlanningModel: AppMainContentProps['onSetDefaultPlanningModel'];
   onSetDefaultImplementationProvider: AppMainContentProps['onSetDefaultImplementationProvider'];
   onSetDefaultImplementationModel: AppMainContentProps['onSetDefaultImplementationModel'];
+  onSetDefaultRouterProvider: AppMainContentProps['onSetDefaultRouterProvider'];
+  onSetDefaultRouterModel: AppMainContentProps['onSetDefaultRouterModel'];
+  onSetDefaultReviewerProvider: AppMainContentProps['onSetDefaultReviewerProvider'];
+  onSetDefaultReviewerModel: AppMainContentProps['onSetDefaultReviewerModel'];
+  onSetDefaultInvestigatorProvider: AppMainContentProps['onSetDefaultInvestigatorProvider'];
+  onSetDefaultInvestigatorModel: AppMainContentProps['onSetDefaultInvestigatorModel'];
   onSetDefaultPlanningNoToolGuardMode: AppMainContentProps['onSetDefaultPlanningNoToolGuardMode'];
   observerShowFindings: boolean;
   onSetObserverShowFindings: (next: boolean) => void;
@@ -111,11 +118,18 @@ export function buildMainContentProps(params: Params): AppMainContentProps {
     defaultPlanningModel: params.defaultPlanningModel,
     defaultImplementationProvider: params.defaultImplementationProvider,
     defaultImplementationModel: params.defaultImplementationModel,
+    defaultAgentModels: params.defaultAgentModels,
     defaultPlanningNoToolGuardMode: params.defaultPlanningNoToolGuardMode,
     onSetDefaultPlanningProvider: params.onSetDefaultPlanningProvider,
     onSetDefaultPlanningModel: params.onSetDefaultPlanningModel,
     onSetDefaultImplementationProvider: params.onSetDefaultImplementationProvider,
     onSetDefaultImplementationModel: params.onSetDefaultImplementationModel,
+    onSetDefaultRouterProvider: params.onSetDefaultRouterProvider,
+    onSetDefaultRouterModel: params.onSetDefaultRouterModel,
+    onSetDefaultReviewerProvider: params.onSetDefaultReviewerProvider,
+    onSetDefaultReviewerModel: params.onSetDefaultReviewerModel,
+    onSetDefaultInvestigatorProvider: params.onSetDefaultInvestigatorProvider,
+    onSetDefaultInvestigatorModel: params.onSetDefaultInvestigatorModel,
     onSetDefaultPlanningNoToolGuardMode: params.onSetDefaultPlanningNoToolGuardMode,
     observerShowFindings: params.observerShowFindings,
     onSetObserverShowFindings: params.onSetObserverShowFindings,

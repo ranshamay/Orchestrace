@@ -1684,6 +1684,8 @@ async function main(): Promise<void> {
     await enterLifecyclePhase('EXECUTING');
 
         let outputs: Map<string, TaskOutput>;
+    const planningAgentModel = resolveSessionRoleModel(config, 'planner');
+    const implementationAgentModel = resolveSessionRoleModel(config, 'implementer');
     if (route.category === 'shell_command') {
       const shellCommand = dispatch.shell.command;
       if (!shellCommand) {
@@ -1710,18 +1712,9 @@ async function main(): Promise<void> {
       policyVersion: process.env.ORCHESTRACE_POLICY_VERSION ?? DEFAULT_AGENT_TOOL_POLICY_VERSION,
       enableTrivialTaskGate: trivialTaskGate.enabled,
       trivialTaskMaxPromptLength: trivialTaskGate.maxPromptLength,
-      defaultModel: {
-        provider: config.implementationProvider ?? config.provider,
-        model: config.implementationModel ?? config.model,
-      },
-      defaultPlanningModel: {
-        provider: config.planningProvider ?? config.provider,
-        model: config.planningModel ?? config.model,
-      },
-      defaultImplementationModel: {
-        provider: config.implementationProvider ?? config.provider,
-        model: config.implementationModel ?? config.model,
-      },
+      defaultModel: implementationAgentModel,
+      defaultPlanningModel: planningAgentModel,
+      defaultImplementationModel: implementationAgentModel,
       planningSystemPrompt: buildSystemPrompt(config, 'planning', taskEffort),
       implementationSystemPrompt: buildSystemPrompt(config, 'implementation', taskEffort),
       quickStartMode,
@@ -2769,6 +2762,25 @@ export function assessGitHubStatusCheckRollup(rollup: unknown): {
   };
 }
 
+function resolveSessionRoleModel(config: SessionConfig, role: 'planner' | 'implementer'): {
+  provider: string;
+  model: string;
+  reasoning?: 'minimal' | 'low' | 'medium' | 'high';
+} {
+  const roleConfig = role === 'planner' ? config.agentModels?.planner : config.agentModels?.implementer;
+  const legacyProvider = role === 'planner' ? config.planningProvider : config.implementationProvider;
+  const legacyModel = role === 'planner' ? config.planningModel : config.implementationModel;
+
+  const provider = roleConfig?.provider?.trim() || legacyProvider?.trim() || config.provider;
+  const model = roleConfig?.model?.trim() || legacyModel?.trim() || config.model;
+
+  return {
+    provider,
+    model,
+    ...(roleConfig?.reasoning ? { reasoning: roleConfig.reasoning } : {}),
+  };
+}
+
 function buildSystemPrompt(config: SessionConfig, phase: 'planning' | 'implementation', effort: TaskEffort = 'high'): string {
   const isLowEffort = effort === 'trivial' || effort === 'low';
 
@@ -2822,12 +2834,9 @@ function buildSystemPrompt(config: SessionConfig, phase: 'planning' | 'implement
       'For transient tool or sub-agent failures (timeouts, aborts, rate limits), retry automatically before surfacing a blocker.',
     ];
 
-  const phaseProvider = phase === 'planning'
-    ? (config.planningProvider ?? config.provider)
-    : (config.implementationProvider ?? config.provider);
-  const phaseModel = phase === 'planning'
-    ? (config.planningModel ?? config.model)
-    : (config.implementationModel ?? config.model);
+  const phaseModelConfig = phase === 'planning'
+    ? resolveSessionRoleModel(config, 'planner')
+    : resolveSessionRoleModel(config, 'implementer');
 
   return renderPromptSections([
     { name: PromptSectionName.Identity, lines: [
@@ -2842,7 +2851,7 @@ function buildSystemPrompt(config: SessionConfig, phase: 'planning' | 'implement
     { name: PromptSectionName.PhaseRules, lines: phaseRules },
     { name: PromptSectionName.SessionContext, lines: [
       `Workspace: ${config.workspacePath}`,
-      `Provider/Model: ${phaseProvider}/${phaseModel}`,
+      `Provider/Model: ${phaseModelConfig.provider}/${phaseModelConfig.model}`,
       `Original task prompt: ${config.prompt}`,
     ] },
   ]);

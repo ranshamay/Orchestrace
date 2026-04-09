@@ -1,5 +1,6 @@
 import type { ClipboardEvent } from 'react';
 import type {
+  AgentModels,
   AgentTodo,
   ChatMessage,
   WorkSession,
@@ -22,6 +23,7 @@ export type SessionActionsParams = {
   workPlanningModel: string;
   workProvider: string;
   workModel: string;
+  defaultAgentModels: AgentModels;
   deliveryStrategy: 'pr-only' | 'merge-after-ci';
   planningNoToolGuardMode: 'enforce' | 'warn';
   autoApprove: boolean;

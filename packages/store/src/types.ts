@@ -10,6 +10,22 @@
 
 export type WorkState = 'running' | 'completed' | 'failed' | 'cancelled';
 export type SessionCreationReason = 'start' | 'retry';
+export type ReasoningLevel = 'minimal' | 'low' | 'medium' | 'high';
+export type SessionAgentRole = 'router' | 'planner' | 'implementer' | 'reviewer' | 'investigator';
+
+export interface SessionAgentModelConfig {
+  provider?: string;
+  model?: string;
+  reasoning?: ReasoningLevel;
+}
+
+export interface SessionAgentModels {
+  router?: SessionAgentModelConfig;
+  planner?: SessionAgentModelConfig;
+  implementer?: SessionAgentModelConfig;
+  reviewer?: SessionAgentModelConfig;
+  investigator?: SessionAgentModelConfig;
+}
 
 export type LlmSessionState =
   | 'queued'
@@ -44,7 +60,7 @@ export interface SessionAgentGraphNode {
   status?: 'pending' | 'running' | 'completed' | 'failed';
   provider?: string;
   model?: string;
-  reasoning?: 'minimal' | 'low' | 'medium' | 'high';
+  reasoning?: ReasoningLevel;
 }
 
 export interface UiDagEvent {
@@ -111,6 +127,7 @@ export interface SessionConfig {
   promptParts?: SessionChatContentPart[];
   provider: string;
   model: string;
+  agentModels?: SessionAgentModels;
   planningProvider?: string;
   planningModel?: string;
   implementationProvider?: string;

@@ -1,4 +1,4 @@
-import type { ChatContentPart } from '../lib/api';
+import type { AgentModels, ChatContentPart } from '../lib/api';
 
 export type Tab = 'graph' | 'settings' | 'logs';
 export type ThemeMode = 'light' | 'dark';
@@ -51,6 +51,7 @@ export type SessionLlmControls = {
   planningModel: string;
   implementationProvider: string;
   implementationModel: string;
+  agentModels: AgentModels;
   deliveryStrategy: 'pr-only' | 'merge-after-ci';
   planningNoToolGuardMode: 'enforce' | 'warn';
   workspaceId: string;
