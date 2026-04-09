@@ -184,9 +184,14 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
           signal,
         });
 
-        const stderr = result.stderr.trim();
+                                const stderr = result.stderr.trim();
+        const deterministicPathErrorStderr = hasRipgrepPathError(stderr)
+          ? filterDeterministicRipgrepPathErrorStderr(stderr)
+          : stderr;
 
         if (result.exitCode === -1) {
+
+
           try {
             const fallback = await fallbackSearchFromFs({
               cwd: resolvedCwd.cwd,
@@ -211,19 +216,26 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
             }
 
 
-            return createSearchFilesErrorResult({
+                        return createSearchFilesErrorResult({
               errorType: 'filesystem_fallback_failed',
               message: error instanceof Error ? error.message : String(error),
-              stderr,
+              stderr: deterministicPathErrorStderr,
               exitCode: result.exitCode,
               command: 'rg',
               path: relTarget,
             });
+
           }
         }
 
-                const output = formatCommandOutput(result, options.maxOutputChars ?? 16000);
+                                const output = formatSearchFilesResultOutput({
+
+          stdout: result.stdout,
+          stderr: deterministicPathErrorStderr,
+          maxChars: options.maxOutputChars ?? 16000,
+        });
         const hasMatches = result.stdout.trim().length > 0;
+
 
         // Prefer successful match output when available. ripgrep may emit stderr
         // diagnostics in mixed-result scenarios; only escalate error behavior
@@ -246,7 +258,9 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
           });
         }
 
-        const hasPathError = hasRipgrepPathError(stderr);
+                        const hasPathError = hasRipgrepPathError(stderr);
+
+
 
 
                 if (result.exitCode === 1 && result.stdout.trim().length === 0) {
@@ -287,25 +301,27 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
             }
 
 
-            return createSearchFilesErrorResult({
+                        return createSearchFilesErrorResult({
               errorType: 'filesystem_fallback_failed',
               message: error instanceof Error ? error.message : String(error),
-              stderr,
+              stderr: deterministicPathErrorStderr,
               exitCode: result.exitCode,
               command: 'rg',
               path: relTarget,
             });
+
           }
         }
         if (result.exitCode > 1) {
-          return createSearchFilesErrorResult({
+                    return createSearchFilesErrorResult({
             errorType: 'command_failed',
             message: output,
-            stderr,
+            stderr: deterministicPathErrorStderr,
             exitCode: result.exitCode,
             command: 'rg',
             path: relTarget,
           });
+
         }
 
         return {
@@ -978,9 +994,10 @@ function validateSearchQuery(rawQuery: unknown): ValidationResult<string> {
   if (typeof rawQuery !== 'string') {
     return {
       ok: false,
-      error: 'Missing query',
+      error: 'Invalid query: expected query to be a string search term.',
     };
   }
+
 
   const trimmedQuery = rawQuery.trim();
   if (trimmedQuery.length === 0) {
@@ -1143,11 +1160,40 @@ async function normalizeRequestedSearchPath(rawPath: string): Promise<string> {
     return trimmed;
 }
 
+function formatSearchFilesResultOutput(input: { stdout: string; stderr: string; maxChars: number }): string {
+  const parts = [
+    input.stdout.trim(),
+    input.stderr.trim() ? `stderr:\n${input.stderr.trim()}` : '',
+  ].filter((part) => part.length > 0);
+
+  const combined = parts.join('\n\n');
+  if (combined.length <= input.maxChars) {
+    return combined;
+  }
+
+  return `${combined.slice(0, input.maxChars)}\n... (truncated)`;
+}
+
 function hasRipgrepPathError(stderr: string): boolean {
   return isDeterministicRipgrepPathError(stderr);
 }
 
+function filterDeterministicRipgrepPathErrorStderr(stderr: string): string {
+  const lines = stderr
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+
+  if (lines.length === 0) {
+    return '';
+  }
+
+  const retainedLines = lines.filter((line) => !isDeterministicRipgrepPathError(line));
+  return retainedLines.join('\n');
+}
+
 function isDeterministicRipgrepPathError(stderr: string): boolean {
+
   const normalized = stderr.trim();
   if (normalized.length === 0) {
     return false;

@@ -659,10 +659,12 @@ describe('search_files tool', () => {
       },
     });
 
-    expect(result.isError).toBeFalsy();
+        expect(result.isError).toBeFalsy();
     expect(result.content).toContain('src/coordination-tools.ts:1:async function mapWithAdaptiveConcurrency() {}');
-    expect(result.content).toContain('No such file or directory (os error 2)');
+    expect(result.content.toLowerCase()).not.toContain('no such file or directory');
+    expect(result.content.toLowerCase()).not.toContain('os error 2');
     expect(result.details).toBeUndefined();
+
 
     runCommandSpy.mockRestore();
   });
@@ -762,7 +764,30 @@ describe('search_files tool', () => {
     }
   });
 
+    it('rejects non-string query payloads before invoking ripgrep', async () => {
+    const cwd = await makeWorkspace();
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+
+    const result = await toolset.executeTool({
+      id: 'invalid-query-non-string',
+      name: 'search_files',
+      arguments: {
+        query: { token: 'zod' },
+        path: 'src',
+      },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content).toBe('Invalid query: expected query to be a string search term.');
+    expect(result.details).toMatchObject({
+      errorType: 'invalid_arguments',
+      toolName: 'search_files',
+      path: 'src',
+    });
+  });
+
   it('rejects multiline query payloads before invoking ripgrep', async () => {
+
     const cwd = await makeWorkspace();
     const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
 
