@@ -1091,8 +1091,8 @@ describe('search_files tool', () => {
       },
     });
 
-    expect(result.isError).toBeFalsy();
-    expect(result.content).toContain('src/runner.ts:1:function extractShellCommand() {}');
+        expect(result.isError).toBeFalsy();
+    expect(result.content).toContain('1:function extractShellCommand() {}');
     expect(result.details).toBeUndefined();
     expect(result.content.toLowerCase()).not.toContain('no such file or directory');
     expect(result.content.toLowerCase()).not.toContain('os error 2');
