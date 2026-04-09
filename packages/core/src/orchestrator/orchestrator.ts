@@ -682,6 +682,7 @@ export async function orchestrate(
         previousResponse: lastResponse,
         previousFailureType: lastFailureType,
         previousValidationError: lastValidationError,
+        previousImplementationAttempt: findLatestImplementationAttempt(replay.attempts),
         effort,
       });
 
@@ -1016,6 +1017,7 @@ function buildImplementationPrompt(params: {
   previousResponse: string;
   previousFailureType?: ReplayFailureType;
   previousValidationError: string;
+  previousImplementationAttempt?: ReplayAttemptRecord;
   effort?: TaskEffort;
 }): string {
   const {
@@ -1026,25 +1028,21 @@ function buildImplementationPrompt(params: {
     previousResponse,
     previousFailureType,
     previousValidationError,
+    previousImplementationAttempt,
     effort = 'high',
   } = params;
 
   const depContext = buildDependencyContext(depOutputs);
   const retryContext =
     attempt > 1
-      ? [
-          '',
-          'Previous attempt failure type:',
-          previousFailureType ?? '(unknown)',
-          '',
-          'Previous attempt response:',
-          truncateForRetry(previousResponse) || '(no response)',
-          '',
-          'Validation failures to fix:',
-          truncateForRetry(previousValidationError) || '(missing validation details)',
-          '',
-          PLANNING_FIRST_TOOL_RETRY_DIRECTIVE,
-        ].join('\n')
+      ? buildImplementationRetryContext({
+          attempt,
+          previousFailureType,
+          previousResponse,
+          previousValidationError,
+          previousImplementationAttempt,
+          dependencyCount: depOutputs.size,
+        })
       : '';
 
   const isLowEffort = effort === 'trivial' || effort === 'low';
@@ -1285,6 +1283,128 @@ function delay(ms: number): Promise<void> {
 function truncateForRetry(text: string): string {
   if (text.length <= RETRY_CONTEXT_MAX_CHARS) return text;
   return text.slice(0, RETRY_CONTEXT_MAX_CHARS) + `\n... [truncated ${text.length - RETRY_CONTEXT_MAX_CHARS} chars]`;
+}
+
+function findLatestImplementationAttempt(attempts: ReplayAttemptRecord[]): ReplayAttemptRecord | undefined {
+  for (let index = attempts.length - 1; index >= 0; index -= 1) {
+    const candidate = attempts[index];
+    if (candidate?.phase === 'implementation') {
+      return candidate;
+    }
+  }
+
+  return undefined;
+}
+
+function buildImplementationRetryContext(params: {
+  attempt: number;
+  previousFailureType?: ReplayFailureType;
+  previousResponse: string;
+  previousValidationError: string;
+  previousImplementationAttempt?: ReplayAttemptRecord;
+  dependencyCount: number;
+}): string {
+  const {
+    attempt,
+    previousFailureType,
+    previousResponse,
+    previousValidationError,
+    previousImplementationAttempt,
+    dependencyCount,
+  } = params;
+
+  const stateSnapshotLines = [
+    `- Current retry attempt: ${attempt}`,
+    `- Previous implementation attempt index: ${Math.max(1, attempt - 1)}`,
+    `- Dependency outputs available: ${dependencyCount}`,
+    `- Previous attempt had tool calls: ${(previousImplementationAttempt?.toolCalls.length ?? 0) > 0 ? 'yes' : 'no'}`,
+  ];
+
+  const failedToolCallSummary = formatFailedToolCalls(previousImplementationAttempt?.toolCalls ?? []);
+
+  return [
+    '',
+    'Previous attempt failure type:',
+    previousFailureType ?? '(unknown)',
+    '',
+    'Previous attempt failure detail:',
+    truncateForRetry(previousImplementationAttempt?.error ?? previousValidationError) || '(missing failure detail)',
+    '',
+    'Previous attempt response:',
+    truncateForRetry(previousResponse) || '(no response)',
+    '',
+    'Validation failures to fix:',
+    truncateForRetry(previousValidationError) || '(missing validation details)',
+    '',
+    'Task-specific retry state snapshot:',
+    ...stateSnapshotLines,
+    '',
+    'Prior failed tool/sub-agent calls from previous implementation attempt:',
+    failedToolCallSummary,
+    '',
+    PLANNING_FIRST_TOOL_RETRY_DIRECTIVE,
+  ].join('\n');
+}
+
+function formatFailedToolCalls(toolCalls: ReplayToolCallRecord[]): string {
+  if (toolCalls.length === 0) {
+    return '- None recorded in previous implementation attempt.';
+  }
+
+  const byToolCallId = new Map<string, { toolName: string; input?: string; result?: string; isError?: boolean }>();
+  for (const call of toolCalls) {
+    const existing = byToolCallId.get(call.toolCallId);
+    if (!existing) {
+      byToolCallId.set(call.toolCallId, {
+        toolName: call.toolName,
+        input: call.input,
+        result: call.output,
+        isError: call.isError,
+      });
+      continue;
+    }
+
+    byToolCallId.set(call.toolCallId, {
+      toolName: existing.toolName || call.toolName,
+      input: existing.input ?? call.input,
+      result: call.output ?? existing.result,
+      isError: call.isError ?? existing.isError,
+    });
+  }
+
+  const failedCalls = [...byToolCallId.entries()]
+    .map(([toolCallId, details]) => ({ toolCallId, ...details }))
+    .filter((call) => call.isError);
+
+  if (failedCalls.length === 0) {
+    return '- No explicit tool error results were recorded.';
+  }
+
+  const prioritizedFailedCalls = failedCalls.sort((left, right) => {
+    const leftIsSubagent = left.toolName === 'subagent_spawn' || left.toolName === 'subagent_spawn_batch';
+    const rightIsSubagent = right.toolName === 'subagent_spawn' || right.toolName === 'subagent_spawn_batch';
+    if (leftIsSubagent === rightIsSubagent) {
+      return left.toolCallId.localeCompare(right.toolCallId);
+    }
+
+    return leftIsSubagent ? -1 : 1;
+  });
+
+  return prioritizedFailedCalls
+    .slice(0, 3)
+    .map((call, index) => {
+      const isSubagent = call.toolName === 'subagent_spawn' || call.toolName === 'subagent_spawn_batch';
+      const prefix = isSubagent ? 'Sub-agent failure' : 'Tool failure';
+      const argumentSnippet = truncateForRetry(call.input ?? '(missing arguments)');
+      const resultSnippet = truncateForRetry(call.result ?? '(missing error output)');
+
+      return [
+        `${index + 1}. ${prefix} via ${call.toolName} (toolCallId: ${call.toolCallId})`,
+        `   - arguments: ${argumentSnippet}`,
+        `   - error output: ${resultSnippet}`,
+      ].join('\n');
+    })
+    .join('\n');
 }
 
 function resolveTaskRequiresWrites(task: TaskNode): boolean {
