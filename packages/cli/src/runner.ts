@@ -297,9 +297,10 @@ async function main(): Promise<void> {
     }
   }
 
-  function emitRoutingCoercionAudit(input: RoutingCoercionAudit & {
+    function emitRoutingCoercionAudit(input: RoutingCoercionAudit & {
     source?: 'user' | 'observer';
   }): void {
+
     const source = input.source ?? 'undefined';
     void emit({
       time: iso(),
@@ -1496,7 +1497,7 @@ async function main(): Promise<void> {
     });
   }
 
-  async function markCheckpointInterrupted(at: string, detail: string): Promise<void> {
+    async function markCheckpointInterrupted(at: string, detail: string): Promise<void> {
     const existing = checkpointState.metadata ?? await readCheckpointMetadata();
     if (!existing) {
       return;
@@ -1528,7 +1529,33 @@ async function main(): Promise<void> {
 
     }
 
+  function formatProviderAuthRemediation(providerId: string): string {
+    if (providerId === 'github-copilot') {
+      return [
+        'Missing credentials for provider "github-copilot".',
+        'Authenticate with device flow: `orchestrace auth github-copilot`',
+        'or set `GITHUB_COPILOT_API_KEY` in your environment/secret manager.',
+        'For staging/production, inject this secret from your deployment secret manager (never commit it).',
+      ].join('\n');
+    }
+
+    return [
+      `Missing credentials for provider "${providerId}".`,
+      'Run `orchestrace auth` or configure the provider API key environment variable.',
+    ].join('\n');
+  }
+
+  async function requireProviderCredentials(providerId: string): Promise<void> {
+    const token = await authManager.resolveApiKey(providerId, { allowRefresh: false });
+    if (token) {
+      return;
+    }
+
+    throw new Error(formatProviderAuthRemediation(providerId));
+  }
+
   try {
+
     await emitLifecyclePhaseChange('VALIDATING');
     await enterLifecyclePhase('SETTING_UP', {
       precondition: () => Boolean(config.prompt && config.prompt.trim()) && Boolean(config.workspacePath && config.workspacePath.trim()),
@@ -1681,11 +1708,24 @@ async function main(): Promise<void> {
         : 'LLM dispatch requires provider/model configuration.',
     });
 
+        if (route.category !== 'shell_command') {
+      const providersToCheck = new Set<string>([
+        config.provider,
+        config.planningProvider ?? config.provider,
+        config.implementationProvider ?? config.provider,
+      ].filter((value): value is string => Boolean(value && value.trim())));
+
+      for (const providerId of providersToCheck) {
+        await requireProviderCredentials(providerId);
+      }
+    }
+
     await enterLifecyclePhase('EXECUTING');
 
     const outputs = route.category === 'shell_command'
       ? await runShellCommandRoute(dispatch.shell.command!, config.workspacePath)
       : await orchestrate(graph, {
+
       llm,
       cwd: config.workspacePath,
       planOutputDir: join(config.workspacePath, '.orchestrace', 'plans'),

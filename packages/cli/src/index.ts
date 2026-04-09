@@ -46,6 +46,35 @@ function createGithubAuthManager(): ProviderAuthManager {
   });
 }
 
+function formatProviderAuthRemediation(provider: string): string {
+  if (provider === 'github-copilot') {
+    return [
+      'Missing credentials for provider "github-copilot".',
+      'Authenticate with device flow: `orchestrace auth github-copilot`',
+      'or set `GITHUB_COPILOT_API_KEY` via your environment/secret manager.',
+      'For staging/production, inject this secret from your deployment secret manager (do not commit it).',
+    ].join('\n');
+  }
+
+  return [
+    `Missing credentials for provider "${provider}".`,
+    'Run `orchestrace auth` or configure the provider API key environment variable.',
+  ].join('\n');
+}
+
+async function validateProviderAuthPreflight(
+  authManager: ProviderAuthManager,
+  provider: string,
+): Promise<string | undefined> {
+  const token = await authManager.resolveApiKey(provider, { allowRefresh: false });
+  if (token) {
+    return undefined;
+  }
+
+  return formatProviderAuthRemediation(provider);
+}
+
+
 interface ReplayRunTaskSummary {
   taskId: string;
   status: string;
@@ -185,8 +214,12 @@ Plan file format:
 
 Environment variables:
   OPENAI_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY, etc. (optional fallback)
+    GITHUB_COPILOT_API_KEY (optional alternative to \`orchestrace auth github-copilot\`)
+
   auth.json is preferred and managed by 'orchestrace auth'
+  For staging/production, inject provider secrets via your secret manager (do not commit secrets).
   ORCHESTRACE_DEFAULT_PROVIDER   Default LLM provider (default: anthropic)
+
   ORCHESTRACE_DEFAULT_MODEL      Default model ID
   ORCHESTRACE_WORKSPACE          Active workspace identifier/path override
   ORCHESTRACE_UI_HMR             true/false UI hot reload
@@ -325,14 +358,22 @@ async function runGraph(
     modelOverride?: string;
   },
 ): Promise<number> {
-  const maxParallel = parseInt(process.env.ORCHESTRACE_MAX_PARALLEL ?? '4', 10);
+    const maxParallel = parseInt(process.env.ORCHESTRACE_MAX_PARALLEL ?? '4', 10);
   const provider = options.providerOverride ?? process.env.ORCHESTRACE_DEFAULT_PROVIDER ?? 'anthropic';
   const model = options.modelOverride ?? process.env.ORCHESTRACE_DEFAULT_MODEL ?? 'claude-sonnet-4-20250514';
 
   console.log(`\n▶ Running plan: ${graph.name} (${graph.nodes.length} tasks, max ${maxParallel} parallel)`);
   console.log(`Workspace: ${options.workspace.name} (${options.workspace.path})\n`);
 
+  const authManager = new ProviderAuthManager();
+  const authPreflightError = await validateProviderAuthPreflight(authManager, provider);
+  if (authPreflightError) {
+    console.error(authPreflightError);
+    return 1;
+  }
+
   const approvalGate = createApprovalGate(options.autoApprove);
+
 
   const onEvent = (event: DagEvent) => {
     const ts = new Date().toISOString().slice(11, 19);
@@ -399,8 +440,7 @@ async function runGraph(
     }
   };
 
-  const llm = new PiAiAdapter();
-  const authManager = new ProviderAuthManager();
+    const llm = new PiAiAdapter();
   const githubAuthManager = createGithubAuthManager();
   const cwd = options.workspace.path;
 

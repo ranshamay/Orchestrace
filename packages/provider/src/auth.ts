@@ -22,6 +22,7 @@ const ENV_VAR_BY_PROVIDER: Record<string, string> = {
   cerebras: 'CEREBRAS_API_KEY',
   xai: 'XAI_API_KEY',
   openrouter: 'OPENROUTER_API_KEY',
+  'github-copilot': 'GITHUB_COPILOT_API_KEY',
   'vercel-ai-gateway': 'AI_GATEWAY_API_KEY',
   minimax: 'MINIMAX_API_KEY',
   'minimax-cn': 'MINIMAX_API_KEY',
@@ -115,10 +116,8 @@ export class ProviderAuthManager {
         const oauth = oauthProviders.get(id);
         const envVars = getEnvVarCandidates(id);
 
-        let authType: ProviderInfo['authType'] = 'api-key';
-        if (id === GITHUB_COPILOT_PROVIDER_ID) {
-          authType = 'oauth';
-        } else if (oauth && envVars.length > 0) {
+                let authType: ProviderInfo['authType'] = 'api-key';
+        if (oauth && envVars.length > 0) {
           authType = 'mixed';
         } else if (oauth) {
           authType = 'oauth';
@@ -254,15 +253,19 @@ export class ProviderAuthManager {
     }
 
 
-    // Optional fallback for users who still prefer environment variables.
-    // GitHub Copilot intentionally does not use this fallback to enforce device OAuth.
-    if (providerId === GITHUB_COPILOT_PROVIDER_ID) {
-      return undefined;
-    }
+    
 
+    // Optional fallback for users who still prefer environment variables.
     const envApiKey = getEnvApiKey(providerId as never);
     if (envApiKey) {
       return envApiKey;
+    }
+
+    for (const envVar of getEnvVarCandidates(providerId)) {
+      const value = process.env[envVar]?.trim();
+      if (value) {
+        return value;
+      }
     }
 
     return undefined;
