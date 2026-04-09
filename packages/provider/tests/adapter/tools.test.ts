@@ -185,7 +185,145 @@ describe('executeWithOptionalTools', () => {
     expect(genericRetryPrompt).toBeUndefined();
   });
 
+    it('splits duplicate-path edit_files batches into sequential single-file edit_files calls', async () => {
+    const consumeStreamMock = vi.mocked(consumeStream);
+
+    const firstResponse = makeAssistantMessage([
+      {
+        type: 'toolCall',
+        id: 'edit-batch-dup',
+        name: 'edit_files',
+        arguments: {
+          files: [
+            { path: 'src/a.ts', oldText: 'one', newText: 'ONE' },
+            { path: 'src/b.ts', oldText: 'two', newText: 'TWO' },
+            { path: 'src/a.ts', oldText: 'three', newText: 'THREE' },
+          ],
+          concurrency: 4,
+          adaptiveConcurrency: true,
+          minConcurrency: 1,
+        },
+      },
+    ], 'tool_calls');
+    const finalResponse = makeAssistantMessage([{ type: 'text', text: 'done' }]);
+
+    consumeStreamMock.mockResolvedValueOnce(firstResponse as never);
+    consumeStreamMock.mockResolvedValueOnce(finalResponse as never);
+
+    const executeTool = vi.fn()
+      .mockResolvedValueOnce({
+        isError: false,
+        content: JSON.stringify({ total: 1, successes: 1, failures: 0, files: [{ path: 'src/a.ts', ok: true }] }),
+      })
+      .mockResolvedValueOnce({
+        isError: false,
+        content: JSON.stringify({ total: 1, successes: 1, failures: 0, files: [{ path: 'src/b.ts', ok: true }] }),
+      })
+      .mockResolvedValueOnce({
+        isError: false,
+        content: JSON.stringify({ total: 1, successes: 1, failures: 0, files: [{ path: 'src/a.ts', ok: true }] }),
+      });
+
+    const context: TestContext = {
+      messages: [],
+      tools: [{ name: 'edit_files', description: 'Edit files in batch', parameters: { type: 'object' } }],
+    };
+
+    await executeWithOptionalTools({
+      model: {} as never,
+      context,
+      options: {},
+      toolset: {
+        tools: [],
+        executeTool,
+      },
+      onUsage: () => {},
+    });
+
+    expect(executeTool).toHaveBeenCalledTimes(3);
+
+    const firstCall = executeTool.mock.calls[0]?.[0];
+    const secondCall = executeTool.mock.calls[1]?.[0];
+    const thirdCall = executeTool.mock.calls[2]?.[0];
+
+    expect(firstCall.name).toBe('edit_files');
+    expect(secondCall.name).toBe('edit_files');
+    expect(thirdCall.name).toBe('edit_files');
+
+    expect(firstCall.arguments.files).toEqual([{ path: 'src/a.ts', oldText: 'one', newText: 'ONE' }]);
+    expect(secondCall.arguments.files).toEqual([{ path: 'src/b.ts', oldText: 'two', newText: 'TWO' }]);
+    expect(thirdCall.arguments.files).toEqual([{ path: 'src/a.ts', oldText: 'three', newText: 'THREE' }]);
+
+    expect(firstCall.arguments.concurrency).toBe(4);
+    expect(firstCall.arguments.adaptiveConcurrency).toBe(true);
+    expect(firstCall.arguments.minConcurrency).toBe(1);
+
+    const toolResult = context.messages.find((message) => message.role === 'toolResult');
+    expect(toolResult?.isError).toBe(false);
+    const parsed = JSON.parse(String(toolResult?.content?.[0]?.text ?? '{}')) as {
+      total: number;
+      successes: number;
+      failures: number;
+      files: Array<{ path: string; ok: boolean }>;
+    };
+    expect(parsed.total).toBe(3);
+    expect(parsed.successes).toBe(3);
+    expect(parsed.failures).toBe(0);
+    expect(parsed.files.map((entry) => entry.path)).toEqual(['src/a.ts', 'src/b.ts', 'src/a.ts']);
+  });
+
+  it('uses deterministic remediation guidance for duplicate-path edit_files errors', async () => {
+    const consumeStreamMock = vi.mocked(consumeStream);
+
+    const firstResponse = makeAssistantMessage([
+      {
+        type: 'toolCall',
+        id: 'edit-dup-err',
+        name: 'edit_files',
+        arguments: {
+          files: [
+            { path: 'src/a.ts', oldText: 'one', newText: 'ONE' },
+            { path: 'src/a.ts', oldText: 'two', newText: 'TWO' },
+          ],
+        },
+      },
+    ], 'tool_calls');
+    const finalResponse = makeAssistantMessage([{ type: 'text', text: 'Handled.' }]);
+
+    consumeStreamMock.mockResolvedValueOnce(firstResponse as never);
+    consumeStreamMock.mockResolvedValueOnce(finalResponse as never);
+
+    const context: TestContext = {
+      messages: [],
+      tools: [{ name: 'edit_files', description: 'Edit files in batch', parameters: { type: 'object' } }],
+    };
+
+    await executeWithOptionalTools({
+      model: {} as never,
+      context,
+      options: {},
+      toolset: {
+        tools: [],
+        async executeTool() {
+          return { content: 'Duplicate paths are not allowed: src/a.ts', isError: true };
+        },
+      },
+      onUsage: () => {},
+    });
+
+    const deterministicPrompt = context.messages.find(
+      (message) => message.role === 'user' && String(message.content?.[0]?.text ?? '').includes('This failure is deterministic.'),
+    );
+    expect(deterministicPrompt).toBeDefined();
+
+    const genericRetryPrompt = context.messages.find(
+      (message) => message.role === 'user' && String(message.content?.[0]?.text ?? '').includes('retry this tool call'),
+    );
+    expect(genericRetryPrompt).toBeUndefined();
+  });
+
   it('retries subagent_spawn_batch failures in a single reduced batch request', async () => {
+
     const consumeStreamMock = vi.mocked(consumeStream);
 
     const firstResponse = makeAssistantMessage([
