@@ -72,6 +72,65 @@ describe('log watcher fix-session emission', () => {
     }
   });
 
+  it('rejects ingest findings that violate finding contract requirements', async () => {
+    const orchestraceDir = await mkdtemp(join(tmpdir(), 'orchestrace-observer-'));
+
+    try {
+      const startSession = vi.fn(async () => ({ id: `fix-${String(startSession.mock.calls.length + 1)}` }));
+      const daemon = new ObserverDaemon({
+        orchestraceDir,
+        eventStore: createEventStoreStub(),
+        llm: { complete: vi.fn() } as unknown as any,
+        startSession,
+        resolveApiKey: async () => undefined,
+      });
+
+      await daemon.updateConfig({ enabled: true, maxConcurrentFixSessions: 0 });
+
+      const rejectedSessionObserver = await daemon.ingestSessionObserverFindings('session-123', [
+        {
+          category: 'code-quality',
+          severity: 'high',
+          title: 'Missing high rationale',
+          issueSummary: 'Runtime failures are recurring in this code path.',
+          evidence: ['Failure appears in repeated traces', 'Same error repeats across runs'],
+        },
+        {
+          category: 'code-quality',
+          severity: 'medium',
+          title: 'Multi sentence summary',
+          issueSummary: 'This issue is recurring. It appears in multiple steps.',
+          evidence: ['Repeated issue marker', 'Repeated issue marker in follow-up'],
+        },
+        {
+          category: 'code-quality',
+          severity: 'medium',
+          title: 'Recommendation text present',
+          issueSummary: 'The workflow repeatedly retries a non-retryable error.',
+          evidence: ['The agent should add a guard before retrying', 'Retries continue despite parse failure'],
+        },
+      ]);
+
+      expect(rejectedSessionObserver).toEqual({ registered: 0, spawned: 0 });
+
+      const rejectedLogWatcher = await daemon.ingestLogWatcherFindings([
+        {
+          category: 'error-pattern',
+          severity: 'medium',
+          title: 'Too little evidence',
+          issueSummary: 'Only one observation is available for this issue.',
+          evidence: ['single evidence item'],
+        },
+      ]);
+
+      expect(rejectedLogWatcher).toEqual({ registered: 0, spawned: 0 });
+      expect(daemon.getFindings()).toHaveLength(0);
+      expect(startSession).toHaveBeenCalledTimes(0);
+    } finally {
+      await rm(orchestraceDir, { recursive: true, force: true });
+    }
+  });
+
   it('registers log findings and spawns fix sessions immediately', async () => {
     const orchestraceDir = await mkdtemp(join(tmpdir(), 'orchestrace-observer-'));
 

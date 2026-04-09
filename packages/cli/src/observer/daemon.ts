@@ -49,6 +49,13 @@ type RealtimeFindingInput = {
   relevantFiles?: string[];
 };
 
+type FindingContractInput = {
+  severity: FindingSeverity;
+  issueSummary: string;
+  evidence: string[];
+  severityRationale?: string;
+};
+
 const LOG_WATCHER_SOURCE_SESSION_ID = 'log-watcher';
 
 export interface ObserverDaemonOptions {
@@ -220,6 +227,9 @@ export class ObserverDaemon {
       if (!this.config.assessmentCategories.includes(mappedCategory)) {
         continue;
       }
+      if (!isValidFindingContract(finding)) {
+        continue;
+      }
 
       const { isNew } = this.registry.register({
         category: mappedCategory,
@@ -262,6 +272,9 @@ export class ObserverDaemon {
     let registered = 0;
     for (const finding of findings) {
       if (!this.config.assessmentCategories.includes(finding.category)) {
+        continue;
+      }
+      if (!isValidFindingContract(finding)) {
         continue;
       }
 
@@ -713,6 +726,37 @@ function sanitizeNonEmptyString(value: unknown, fallback: string): string {
 
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : fallback;
+}
+
+function isValidFindingContract(finding: FindingContractInput): boolean {
+  if (!isSingleSentence(finding.issueSummary)) {
+    return false;
+  }
+  if (finding.evidence.length < 2 || finding.evidence.length > 3) {
+    return false;
+  }
+  if (containsRecommendationLanguage([
+    finding.issueSummary,
+    ...finding.evidence,
+    finding.severityRationale ?? '',
+  ].join(' '))) {
+    return false;
+  }
+  if ((finding.severity === 'high' || finding.severity === 'critical') && !finding.severityRationale) {
+    return false;
+  }
+  return true;
+}
+
+function isSingleSentence(text: string): boolean {
+  const normalized = text.trim();
+  if (!normalized) return false;
+  const sentenceEndings = (normalized.match(/[.!?](?:\s|$)/g) ?? []).length;
+  return sentenceEndings <= 1;
+}
+
+function containsRecommendationLanguage(text: string): boolean {
+  return /(should\s+|recommend|fix\s+by|to\s+fix|implement\s+|change\s+the\s+code|add\s+this|remove\s+this|update\s+to)/i.test(text);
 }
 
 /**
