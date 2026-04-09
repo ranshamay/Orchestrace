@@ -129,7 +129,7 @@ describe('runner task routing parity', () => {
     }));
   });
 
-  it('blocks undefined source at dispatch boundary for shell routes', () => {
+    it('blocks undefined source at dispatch boundary for shell routes', () => {
     const prompt = 'git status';
     const forcedShellRoute = resolveTaskRoute(prompt, 'shell_command').result;
     const dispatch = enforceSafeShellDispatch(prompt, forcedShellRoute, undefined);
@@ -144,7 +144,32 @@ describe('runner task routing parity', () => {
     expect(coercionAudit?.risk).toBe('high');
   });
 
-    it('demotes shell route when prompt is markdown-like single-line instructions', () => {
+  it('blocks observer source at dispatch boundary for forced shell markdown prompt', () => {
+    const prompt = '## Task: run git status';
+    const forcedShellRoute = resolveTaskRoute(prompt, 'shell_command').result;
+    const dispatch = enforceSafeShellDispatch(prompt, forcedShellRoute, 'observer');
+
+    expect(forcedShellRoute.category).toBe('shell_command');
+    expect(dispatch.shell.ok).toBe(false);
+    expect(dispatch.shell.reason).toContain('source observer');
+    expect(dispatch.route.category).toBe('code_change');
+    expect(dispatch.route.reason).toContain('source guard');
+  });
+
+  it('blocks undefined source at dispatch boundary for forced shell command prompt', () => {
+    const prompt = 'run git status';
+    const forcedShellRoute = resolveTaskRoute(prompt, 'shell_command').result;
+    const dispatch = enforceSafeShellDispatch(prompt, forcedShellRoute, undefined);
+
+    expect(forcedShellRoute.category).toBe('shell_command');
+    expect(dispatch.shell.ok).toBe(false);
+    expect(dispatch.shell.reason).toContain('source is undefined');
+    expect(dispatch.route.category).toBe('code_change');
+    expect(dispatch.route.reason).toContain('source guard');
+  });
+
+  it('demotes shell route when prompt is markdown-like single-line instructions', () => {
+
     const prompt = '## Task: run git status';
     const forcedShellRoute = resolveTaskRoute(prompt, 'shell_command').result;
     const dispatch = enforceSafeShellDispatch(prompt, forcedShellRoute, 'user');

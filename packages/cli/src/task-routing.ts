@@ -54,8 +54,14 @@ export interface ShellExecutionValidation {
   reason?: string;
 }
 
+const DEFAULT_SHELL_VALIDATION_FAILURE_REASON = 'input did not pass centralized validation';
+
+export function formatShellValidationRejection(entrypoint: string, reason?: string): string {
+  return `[shell-guard] rejected shell execution at ${entrypoint}: ${reason ?? DEFAULT_SHELL_VALIDATION_FAILURE_REASON}`;
+}
 
 export interface SafeDispatchResolution {
+
   route: TaskRouteResult;
   shell: ShellExecutionValidation;
 }
