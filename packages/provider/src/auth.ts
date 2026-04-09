@@ -187,10 +187,9 @@ export class ProviderAuthManager {
     return { path: this.authFilePath, removed };
   }
 
-    async resolveApiKey(providerId: string, options: ResolveApiKeyOptions = {}): Promise<string | undefined> {
+      async resolveApiKey(providerId: string, options: ResolveApiKeyOptions = {}): Promise<string | undefined> {
     const store = await this.loadStore();
     const allowRefresh = options.allowRefresh ?? true;
-
 
     const storedApiKey = store.apiKeys[providerId];
     if (storedApiKey) {
@@ -202,18 +201,12 @@ export class ProviderAuthManager {
       try {
         if (providerId === GITHUB_COPILOT_PROVIDER_ID) {
           const ttl = computeTokenTtlStatus(providerId, oauthCredentials);
-                    if (!ttl || ttl.refreshRecommended) {
+          if (!ttl || ttl.refreshRecommended) {
             if (!allowRefresh) {
               return undefined;
             }
 
-                    if (!allowRefresh) {
-          return undefined;
-        }
-
-        const result = await getOAuthApiKey(providerId as OAuthProviderId, store.oauth);
-
-
+            const result = await getOAuthApiKey(providerId as OAuthProviderId, store.oauth);
             if (!result) {
               return undefined;
             }
@@ -227,6 +220,10 @@ export class ProviderAuthManager {
           if (apiKey) {
             return apiKey;
           }
+        }
+
+        if (!allowRefresh) {
+          return undefined;
         }
 
         const result = await getOAuthApiKey(providerId as OAuthProviderId, store.oauth);
@@ -255,6 +252,7 @@ export class ProviderAuthManager {
 
     return undefined;
   }
+
 
   async getStatus(providerId: string): Promise<ProviderAuthStatus> {
     const provider = this.listProviders().find((item) => item.id === providerId) ?? {
