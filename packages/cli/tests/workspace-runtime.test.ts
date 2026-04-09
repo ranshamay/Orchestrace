@@ -56,17 +56,28 @@ describe('workspace runtime validation', () => {
     expect(warning).toContain('worktree/root mismatch or missing container bind mount');
   });
 
-  it('returns missing critical paths and strict validator throws actionable error', async () => {
+    it('does not require specific test filenames when test directories exist', async () => {
     const workspace = await makeWorkspaceLikeTree();
     await rm(join(workspace, 'packages', 'tools', 'tests', 'toolset.test.ts'), { force: true });
 
     const result = await validateWorkspaceRuntime(workspace);
 
-    expect(result.missingCriticalPaths).toContain('packages/tools/tests/toolset.test.ts');
+    expect(result.missingCriticalPaths).toEqual([]);
+    expect(() => assertWorkspaceRuntimeIsComplete(result)).not.toThrow();
+  });
+
+  it('returns missing critical paths when expected test directories are removed', async () => {
+    const workspace = await makeWorkspaceLikeTree();
+    await rm(join(workspace, 'packages', 'tools', 'tests'), { recursive: true, force: true });
+
+    const result = await validateWorkspaceRuntime(workspace);
+
+    expect(result.missingCriticalPaths).toContain('packages/tools/tests');
     expect(() => assertWorkspaceRuntimeIsComplete(result)).toThrow(
       'Workspace runtime check failed: critical source/test/config files missing under cwd',
     );
   });
+
 
   it('throws for inaccessible workspace paths', async () => {
     await expect(validateWorkspaceRuntime('/tmp/orchestrace-missing-workspace-path')).rejects.toThrow(

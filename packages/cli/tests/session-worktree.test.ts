@@ -57,7 +57,7 @@ describe('session worktree helper', () => {
     }
   });
 
-  it('creates a deterministic managed worktree and reuses it for retry', async () => {
+    it('creates a deterministic managed worktree and reuses it for retry', async () => {
     const repoRoot = await createTempRepoWithOrigin();
     const sessionId = 'session-123';
 
@@ -68,6 +68,8 @@ describe('session worktree helper', () => {
     expect(await pathExists(first.worktreePath)).toBe(true);
     expect((await git(first.worktreePath, ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}']).catch(() => '')).trim()).toBe('origin/main');
 
+    await rm(join(first.worktreePath, 'packages', 'tools', 'tests', 'toolset.test.ts'), { force: true });
+
     const second = await ensureSessionWorktree({ repoRoot, sessionId });
     expect(second.worktreePath).toBe(first.worktreePath);
     expect(second.branchName).toBe(first.branchName);
@@ -77,6 +79,7 @@ describe('session worktree helper', () => {
     await cleanupSessionWorktree({ repoRoot, sessionId });
     expect(await pathExists(first.worktreePath)).toBe(false);
   });
+
 
   it('self-heals an existing session worktree when critical files were deleted', async () => {
     const repoRoot = await createTempRepoWithOrigin();

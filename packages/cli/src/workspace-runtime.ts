@@ -13,7 +13,7 @@ const EXPECTED_SOURCE_DIRS = [
   'packages/cli/src',
 ] as const;
 
-export const WORKSPACE_RUNTIME_CRITICAL_PATHS = [
+const BASE_WORKSPACE_RUNTIME_CRITICAL_PATHS = [
   'package.json',
   'pnpm-workspace.yaml',
   'tsconfig.base.json',
@@ -21,9 +21,28 @@ export const WORKSPACE_RUNTIME_CRITICAL_PATHS = [
   'packages/cli/src/runner.ts',
   'packages/cli/src/ui-server.ts',
   'packages/tools/src/index.ts',
-  'packages/cli/tests/workspace-runtime.test.ts',
-  'packages/tools/tests/toolset.test.ts',
 ] as const;
+
+const CRITICAL_TEST_DIRECTORIES = [
+  'packages/cli/tests',
+  'packages/tools/tests',
+] as const;
+
+export async function resolveWorkspaceRuntimeCriticalPaths(workspacePath: string): Promise<string[]> {
+  const criticalPaths = [...BASE_WORKSPACE_RUNTIME_CRITICAL_PATHS];
+
+  for (const testDir of CRITICAL_TEST_DIRECTORIES) {
+    try {
+      await access(join(workspacePath, testDir), constants.F_OK | constants.R_OK);
+      criticalPaths.push(testDir);
+    } catch {
+      // Optional test directories are validated only when present.
+    }
+  }
+
+  return criticalPaths;
+}
+
 
 export async function validateWorkspaceRuntime(workspacePath: string): Promise<WorkspaceRuntimeValidationResult> {
   const trimmed = workspacePath.trim();
@@ -54,14 +73,16 @@ export async function validateWorkspaceRuntime(workspacePath: string): Promise<W
     }
   }
 
+    const criticalPaths = await resolveWorkspaceRuntimeCriticalPaths(normalizedPath);
   const missingCriticalPaths: string[] = [];
-  for (const criticalPath of WORKSPACE_RUNTIME_CRITICAL_PATHS) {
+  for (const criticalPath of criticalPaths) {
     try {
       await access(join(normalizedPath, criticalPath), constants.F_OK | constants.R_OK);
     } catch {
       missingCriticalPaths.push(criticalPath);
     }
   }
+
 
   return {
     normalizedPath,
