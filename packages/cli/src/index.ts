@@ -613,17 +613,18 @@ export function buildSingleTaskGraph(prompt: string, routeCategory: TaskRouteCat
 }
 
 async function runShellCommandRoute(command: string, cwd: string): Promise<number> {
-  const validation = validateShellInput(command);
-  if (!validation.ok || !validation.command) {
+    const validation = validateShellInput(command);
+  if (!validation.ok || !validation.parsed) {
     console.error(`Shell command validation failed: ${validation.reason ?? 'input did not pass centralized validation'}`);
     return 1;
   }
 
   try {
-    const { stdout, stderr } = await execFileAsync('sh', ['-lc', validation.command], { cwd });
+    const { stdout, stderr } = await execFileAsync(validation.parsed.program, validation.parsed.args, { cwd });
     if (stdout) {
       process.stdout.write(stdout);
     }
+
     if (stderr) {
       process.stderr.write(stderr);
     }

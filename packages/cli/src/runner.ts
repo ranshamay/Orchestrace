@@ -78,7 +78,11 @@ import {
   type ResolutionConflict,
 } from './runner-config-resolution.js';
 import { parseAndSanitizeVerifyCommands } from './verify-commands.js';
-import { formatMissingSourceDirsWarning, validateWorkspaceRuntime } from './workspace-runtime.js';
+import {
+  assertWorkspaceRuntimeIsComplete,
+  formatMissingSourceDirsWarning,
+  validateWorkspaceRuntime,
+} from './workspace-runtime.js';
 import {
   sanitizeToolPayload,
   stringifySanitizedTracePayload,
@@ -185,7 +189,8 @@ async function main(): Promise<void> {
   const controller = new AbortController();
 
   try {
-    const workspaceCheck = await validateWorkspaceRuntime(config.workspacePath);
+        const workspaceCheck = await validateWorkspaceRuntime(config.workspacePath);
+    assertWorkspaceRuntimeIsComplete(workspaceCheck);
     config.workspacePath = workspaceCheck.normalizedPath;
     const workspaceWarning = formatMissingSourceDirsWarning(config.workspacePath, workspaceCheck.missingExpectedDirs);
     if (workspaceWarning) {
@@ -498,8 +503,8 @@ async function main(): Promise<void> {
     command: string,
     timeout: number,
   ): Promise<{ ok: boolean; stdout: string; stderr: string; error?: string }> {
-    const validation = validateShellInput(command);
-    if (!validation.ok || !validation.command) {
+        const validation = validateShellInput(command);
+    if (!validation.ok || !validation.parsed) {
       return {
         ok: false,
         stdout: '',
@@ -509,12 +514,13 @@ async function main(): Promise<void> {
     }
 
     try {
-      const { stdout, stderr } = await execFileAsync('sh', ['-lc', validation.command], {
+      const { stdout, stderr } = await execFileAsync(validation.parsed.program, validation.parsed.args, {
         cwd: config.workspacePath,
         timeout,
         maxBuffer: 5 * 1024 * 1024,
       });
       return { ok: true, stdout, stderr };
+
     } catch (err) {
       const typed = err as ExecFileException;
       return {
@@ -2588,9 +2594,9 @@ function buildSingleTaskGraph(id: string, prompt: string, routeCategory: TaskRou
 
 async function runShellCommandRoute(command: string, cwd: string): Promise<Map<string, TaskOutput>> {
   const startedAt = Date.now();
-  const validation = validateShellInput(command);
+    const validation = validateShellInput(command);
 
-  if (!validation.ok || !validation.command) {
+  if (!validation.ok || !validation.parsed) {
     return new Map([
       ['task', {
         taskId: 'task',
@@ -2604,7 +2610,7 @@ async function runShellCommandRoute(command: string, cwd: string): Promise<Map<s
   }
 
   try {
-    const { stdout, stderr } = await execFileAsync('sh', ['-lc', validation.command], { cwd });
+    const { stdout, stderr } = await execFileAsync(validation.parsed.program, validation.parsed.args, { cwd });
     const text = `${stdout ?? ''}${stderr ?? ''}`.trim();
     return new Map([
       ['task', {
@@ -2615,6 +2621,7 @@ async function runShellCommandRoute(command: string, cwd: string): Promise<Map<s
         retries: 0,
       }],
     ]);
+
   } catch (error) {
     const err = error as ExecFileException;
     const details = `${err.stdout ?? ''}${err.stderr ?? ''}`.trim();

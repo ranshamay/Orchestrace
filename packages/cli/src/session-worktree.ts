@@ -5,6 +5,7 @@ import {
   ensureWorktreeExists,
   resolveManagedWorktreeBaseDir,
 } from '@orchestrace/sandbox';
+import { WORKSPACE_RUNTIME_CRITICAL_PATHS } from './workspace-runtime.js';
 
 export interface SessionWorktreeState {
   repoRoot: string;
@@ -41,10 +42,11 @@ export async function ensureSessionWorktree(params: {
     ? resolve(params.worktreePath)
     : resolveSessionWorktreePath(repoRoot, params.sessionId);
 
-  const ensured = await ensureWorktreeExists({
+    const ensured = await ensureWorktreeExists({
     repoPath: repoRoot,
     branchName,
     worktreePath,
+    requiredPaths: WORKSPACE_RUNTIME_CRITICAL_PATHS,
   });
 
   return {

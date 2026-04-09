@@ -144,13 +144,24 @@ describe('runner task routing parity', () => {
     expect(coercionAudit?.risk).toBe('high');
   });
 
-  it('demotes shell route when prompt is markdown-like single-line instructions', () => {
+    it('demotes shell route when prompt is markdown-like single-line instructions', () => {
     const prompt = '## Task: run git status';
     const forcedShellRoute = resolveTaskRoute(prompt, 'shell_command').result;
     const dispatch = enforceSafeShellDispatch(prompt, forcedShellRoute, 'user');
 
     expect(dispatch.shell.ok).toBe(false);
     expect(dispatch.shell.reason).toContain('markdown/instructional');
+    expect(dispatch.route.category).toBe('code_change');
+    expect(dispatch.route.reason).toContain('Shell dispatch blocked by validation');
+  });
+
+  it('demotes shell route when prompt includes shell operators', () => {
+    const prompt = 'git status && echo hacked';
+    const forcedShellRoute = resolveTaskRoute(prompt, 'shell_command').result;
+    const dispatch = enforceSafeShellDispatch(prompt, forcedShellRoute, 'user');
+
+    expect(dispatch.shell.ok).toBe(false);
+    expect(dispatch.shell.reason).toContain('shell operators');
     expect(dispatch.route.category).toBe('code_change');
     expect(dispatch.route.reason).toContain('Shell dispatch blocked by validation');
   });

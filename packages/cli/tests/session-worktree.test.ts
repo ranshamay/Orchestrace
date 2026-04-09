@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { access, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { access, mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -77,6 +77,22 @@ describe('session worktree helper', () => {
     await cleanupSessionWorktree({ repoRoot, sessionId });
     expect(await pathExists(first.worktreePath)).toBe(false);
   });
+
+  it('self-heals an existing session worktree when critical files were deleted', async () => {
+    const repoRoot = await createTempRepoWithOrigin();
+    const sessionId = 'session-heal';
+
+    const first = await ensureSessionWorktree({ repoRoot, sessionId });
+    await rm(join(first.worktreePath, 'packages', 'tools', 'src', 'index.ts'), { force: true });
+
+    const healed = await ensureSessionWorktree({ repoRoot, sessionId });
+
+    expect(healed.created).toBe(false);
+    expect(healed.recreated).toBe(true);
+    expect(await pathExists(join(healed.worktreePath, 'packages', 'tools', 'src', 'index.ts'))).toBe(true);
+
+    await cleanupSessionWorktree({ repoRoot, sessionId });
+  });
 });
 
 async function createTempRepo(): Promise<string> {
@@ -85,8 +101,21 @@ async function createTempRepo(): Promise<string> {
   await git(repoRoot, ['init', '-b', 'main']);
   await git(repoRoot, ['config', 'user.email', 'orchestrace-tests@example.com']);
   await git(repoRoot, ['config', 'user.name', 'Orchestrace Tests']);
+  await mkdir(join(repoRoot, 'packages', 'cli', 'src'), { recursive: true });
+  await mkdir(join(repoRoot, 'packages', 'tools', 'src'), { recursive: true });
+  await mkdir(join(repoRoot, 'packages', 'cli', 'tests'), { recursive: true });
+  await mkdir(join(repoRoot, 'packages', 'tools', 'tests'), { recursive: true });
   await writeFile(join(repoRoot, 'README.md'), '# temp\n', 'utf8');
-  await git(repoRoot, ['add', 'README.md']);
+  await writeFile(join(repoRoot, 'package.json'), '{"name":"temp"}\n', 'utf8');
+  await writeFile(join(repoRoot, 'pnpm-workspace.yaml'), "packages:\n  - 'packages/*'\n", 'utf8');
+  await writeFile(join(repoRoot, 'tsconfig.base.json'), '{}\n', 'utf8');
+  await writeFile(join(repoRoot, 'vitest.config.ts'), 'export default {}\n', 'utf8');
+  await writeFile(join(repoRoot, 'packages', 'cli', 'src', 'runner.ts'), 'export {}\n', 'utf8');
+  await writeFile(join(repoRoot, 'packages', 'cli', 'src', 'ui-server.ts'), 'export {}\n', 'utf8');
+  await writeFile(join(repoRoot, 'packages', 'tools', 'src', 'index.ts'), 'export {}\n', 'utf8');
+  await writeFile(join(repoRoot, 'packages', 'cli', 'tests', 'workspace-runtime.test.ts'), 'export {}\n', 'utf8');
+  await writeFile(join(repoRoot, 'packages', 'tools', 'tests', 'toolset.test.ts'), 'export {}\n', 'utf8');
+  await git(repoRoot, ['add', '.']);
   await git(repoRoot, ['commit', '-m', 'init']);
   return repoRoot;
 }
