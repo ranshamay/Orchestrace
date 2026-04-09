@@ -71,7 +71,11 @@ import type {
   SessionWorktreePathSessionIdRelation,
 } from './ui-server/types.js';
 import { WorkspaceManager } from './workspace-manager.js';
-import { formatMissingSourceDirsWarning, validateWorkspaceRuntime } from './workspace-runtime.js';
+import {
+  assertWorkspaceRuntimeIsComplete,
+  formatMissingSourceDirsWarning,
+  validateWorkspaceRuntime,
+} from './workspace-runtime.js';
 import { FileEventStore } from '@orchestrace/store';
 import { materializeSession as materializeFromEvents } from '@orchestrace/store';
 import type {
@@ -1047,7 +1051,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
   }
 
     async function resolveWorkspaceRuntimePath(workspacePath: string): Promise<{ workspacePath: string; warning?: string }> {
-    const check = await validateWorkspaceRuntime(workspacePath);
+        const check = await validateWorkspaceRuntime(workspacePath);
+    assertWorkspaceRuntimeIsComplete(check);
     return {
       workspacePath: check.normalizedPath,
       warning: formatMissingSourceDirsWarning(check.normalizedPath, check.missingExpectedDirs),
@@ -7109,7 +7114,8 @@ async function ensureSessionWorkspaceReady(
   uiStatePersistence: { schedule: () => void; flush: () => Promise<void> },
 ): Promise<void> {
   if (existsSync(session.workspacePath)) {
-    const runtimeCheck = await validateWorkspaceRuntime(session.workspacePath);
+        const runtimeCheck = await validateWorkspaceRuntime(session.workspacePath);
+    assertWorkspaceRuntimeIsComplete(runtimeCheck);
     session.workspacePath = runtimeCheck.normalizedPath;
     session.worktreePath = runtimeCheck.normalizedPath;
     const warning = formatMissingSourceDirsWarning(runtimeCheck.normalizedPath, runtimeCheck.missingExpectedDirs);
@@ -7127,7 +7133,8 @@ async function ensureSessionWorkspaceReady(
     branchName: session.worktreeBranch,
   });
 
-  const runtimeCheck = await validateWorkspaceRuntime(managedWorktree.worktreePath);
+    const runtimeCheck = await validateWorkspaceRuntime(managedWorktree.worktreePath);
+  assertWorkspaceRuntimeIsComplete(runtimeCheck);
   const runtimePath = runtimeCheck.normalizedPath;
   session.workspacePath = runtimePath;
   session.workspaceName = workspace.name;

@@ -78,7 +78,11 @@ import {
   type ResolutionConflict,
 } from './runner-config-resolution.js';
 import { parseAndSanitizeVerifyCommands } from './verify-commands.js';
-import { formatMissingSourceDirsWarning, validateWorkspaceRuntime } from './workspace-runtime.js';
+import {
+  assertWorkspaceRuntimeIsComplete,
+  formatMissingSourceDirsWarning,
+  validateWorkspaceRuntime,
+} from './workspace-runtime.js';
 import {
   sanitizeToolPayload,
   stringifySanitizedTracePayload,
@@ -179,7 +183,8 @@ async function main(): Promise<void> {
   const controller = new AbortController();
 
   try {
-    const workspaceCheck = await validateWorkspaceRuntime(config.workspacePath);
+        const workspaceCheck = await validateWorkspaceRuntime(config.workspacePath);
+    assertWorkspaceRuntimeIsComplete(workspaceCheck);
     config.workspacePath = workspaceCheck.normalizedPath;
     const workspaceWarning = formatMissingSourceDirsWarning(config.workspacePath, workspaceCheck.missingExpectedDirs);
     if (workspaceWarning) {
