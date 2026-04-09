@@ -165,6 +165,25 @@ pnpm test
 
 - Package-level `typecheck`/`test` scripts include `pretypecheck`/`pretest` hooks that build that package and its internal workspace dependencies first (via `pnpm --filter <pkg>... build`).
 
+### Targeted package tests (`@orchestrace/tools`)
+
+When targeting a package test via pnpm filter, keep the `--` separator before Vitest arguments.
+
+```bash
+# Full tools package tests
+pnpm --filter @orchestrace/tools test
+
+# Target a specific file from workspace root
+pnpm --filter @orchestrace/tools test -- tests/toolset.test.ts
+
+# Target file + test name pattern
+pnpm --filter @orchestrace/tools test -- tests/toolset.test.ts -t "createAgentToolset phase policy"
+
+# Alternative: run Vitest directly in the filtered package context
+pnpm --filter @orchestrace/tools exec vitest run tests/toolset.test.ts
+```
+
+
 ## License
 
 MIT
