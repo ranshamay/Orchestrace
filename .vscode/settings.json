@@ -1,4 +1,3 @@
 {
-  "git.scanRepositories": [".worktrees"],
-  "git.repositoryScanMaxDepth": 3
+  "git.detectWorktrees": true
 }
