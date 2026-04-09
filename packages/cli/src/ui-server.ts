@@ -216,6 +216,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
   const githubAuthManager = createGithubAuthManager();
   const llm = new PiAiAdapter();
 
+  const resolveProviderApiKey = async (providerId: string): Promise<string | undefined> => authManager.resolveApiKey(providerId);
+
   // -- Persistent backend log stream ------------------------------------------
   const orchestraceDir = join(workspaceManager.getRootDir(), '.orchestrace');
   const backendLogger = new BackendLogger({ orchestraceDir });
@@ -778,8 +780,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
               prompt: text,
               timeoutMs: Math.min(resolveLongTurnTimeoutMs(), 20_000),
               signal,
-              apiKey: await authManager.resolveApiKey(candidate.provider),
-              refreshApiKey: () => authManager.resolveApiKey(candidate.provider),
+              apiKey: await resolveProviderApiKey(candidate.provider),
+              refreshApiKey: () => resolveProviderApiKey(candidate.provider),
             });
 
             const trimmed = trimCompactionSummary(result.text, maxTokens);
@@ -1335,7 +1337,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         eventStore,
         llm,
         config: observerDaemon.getConfig(),
-        resolveApiKey: (provider) => authManager.resolveApiKey(provider),
+        resolveApiKey: (provider) => resolveProviderApiKey(provider),
         emit: (evt) => {
           emitSessionEvent(id, {
             time: new Date().toISOString(),
@@ -1577,7 +1579,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     const uniqueProviders = new Set([planningProvider, implementationProvider]);
     for (const providerId of uniqueProviders) {
       try {
-        const apiKey = await authManager.resolveApiKey(providerId);
+        const apiKey = await resolveProviderApiKey(providerId);
         if (apiKey) {
           continue;
         }
@@ -1879,7 +1881,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     eventStore,
     llm,
     startSession: startWorkSession,
-    resolveApiKey: (provider) => authManager.resolveApiKey(provider),
+    resolveApiKey: (provider) => resolveProviderApiKey(provider),
   });
 
   // -- Log watcher (analyzes backend logs for issues) -------------------------
@@ -1887,7 +1889,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     llm,
     config: observerDaemon.getConfig(),
     logger: backendLogger,
-    resolveApiKey: (provider) => authManager.resolveApiKey(provider),
+    resolveApiKey: (provider) => resolveProviderApiKey(provider),
     onStateChange: (state) => {
       // Broadcast log watcher state to log stream SSE clients
       for (const client of [...logStreamClients]) {
@@ -3188,8 +3190,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                       systemPrompt: resolveSubAgentSystemPrompt(runSubAgentRequest),
                       signal: subAgentSignal,
                       toolset: subAgentToolset,
-                      apiKey: await authManager.resolveApiKey(subProvider),
-                      refreshApiKey: () => authManager.resolveApiKey(subProvider),
+                      apiKey: await resolveProviderApiKey(subProvider),
+                      refreshApiKey: () => resolveProviderApiKey(subProvider),
                     });
 
                     const result = await completeSubAgentWithRetry(
@@ -3235,8 +3237,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                   }
                 },
               }),
-              apiKey: await authManager.resolveApiKey(session.provider),
-                refreshApiKey: () => authManager.resolveApiKey(session.provider),
+              apiKey: await resolveProviderApiKey(session.provider),
+                refreshApiKey: () => resolveProviderApiKey(session.provider),
             });
 
             const chatPrompt = managedContext.prompt;
@@ -3584,8 +3586,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                     systemPrompt: resolveSubAgentSystemPrompt(runSubAgentRequest),
                     signal: subAgentSignal,
                     toolset: subAgentToolset,
-                    apiKey: await authManager.resolveApiKey(subProvider),
-                    refreshApiKey: () => authManager.resolveApiKey(subProvider),
+                    apiKey: await resolveProviderApiKey(subProvider),
+                    refreshApiKey: () => resolveProviderApiKey(subProvider),
                   });
 
                   const result = await completeSubAgentWithRetry(
@@ -3631,8 +3633,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                 }
               },
             }),
-            apiKey: await authManager.resolveApiKey(session.provider),
-            refreshApiKey: () => authManager.resolveApiKey(session.provider),
+            apiKey: await resolveProviderApiKey(session.provider),
+            refreshApiKey: () => resolveProviderApiKey(session.provider),
           });
 
           const chatPrompt = managedContext.prompt;
@@ -4687,12 +4689,19 @@ async function waitMs(ms: number): Promise<void> {
 async function resolveGithubAuthStatus(authManager: ProviderAuthManager): Promise<Record<string, unknown>> {
   const status = await authManager.getStatus(GITHUB_PROVIDER_ID);
   const token = await authManager.resolveApiKey(GITHUB_PROVIDER_ID);
+  const tokenTtl = status.tokenTtl;
+  const authWarning = tokenTtl?.isNearExpiry
+    ? `GitHub Copilot token expires in ${Math.max(0, tokenTtl.expiresInSeconds ?? 0)}s. Re-authentication may be needed soon.`
+    : undefined;
+
   if (!token) {
     return {
       connected: false,
       source: status.source,
       storedApiKeyConfigured: status.storedApiKeyConfigured,
       scopes: [],
+      tokenTtl,
+      warning: authWarning,
     };
   }
 
@@ -4711,6 +4720,8 @@ async function resolveGithubAuthStatus(authManager: ProviderAuthManager): Promis
       login,
       name,
       scopes,
+      tokenTtl,
+      warning: authWarning,
       rateLimit: profile.rateLimit,
       lastStatusCode: profile.status,
       error: profileError,
@@ -4721,6 +4732,8 @@ async function resolveGithubAuthStatus(authManager: ProviderAuthManager): Promis
       source: status.source,
       storedApiKeyConfigured: status.storedApiKeyConfigured,
       scopes: [],
+      tokenTtl,
+      warning: authWarning,
       error: toErrorMessage(error),
     };
   }
