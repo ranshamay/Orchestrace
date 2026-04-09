@@ -65,8 +65,16 @@ export interface UiDagEvent {
   attempt?: number;
   maxRetries?: number;
   totalDurationMs?: number;
+  toolName?: string;
+  toolStatus?: 'started' | 'result';
+  toolCallId?: string;
+  toolInput?: string;
+  toolOutput?: string;
+  toolIsError?: boolean;
+  toolDetails?: unknown;
   message: string;
 }
+
 
 export type AuthSessionState = 'running' | 'awaiting-auth' | 'awaiting-input' | 'completed' | 'failed';
 

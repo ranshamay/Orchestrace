@@ -68,7 +68,9 @@ export interface ReplayToolCallRecord {
   input?: string;
   output?: string;
   isError?: boolean;
+  details?: unknown;
 }
+
 
 export interface ReplayValidationCommandRecord {
   command: string;
@@ -186,9 +188,11 @@ export type DagEvent =
       toolName: string;
       status: 'started' | 'result';
       input?: string;
-      output?: string;
+            output?: string;
       isError?: boolean;
+      details?: unknown;
     }
+
   | { type: 'task:plan-persisted'; taskId: string; path: string }
   | { type: 'task:approval-requested'; taskId: string; path: string }
   | { type: 'task:approved'; taskId: string }

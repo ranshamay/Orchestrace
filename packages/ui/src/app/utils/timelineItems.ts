@@ -34,7 +34,8 @@ export function buildTimelineItems(selectedSession: WorkSession | undefined, cha
         const pendingItem = queue?.shift();
 
         if (pendingItem) {
-          pendingItem.outputSummary = toolOutputSummary(toolInfo.toolName, toolInfo.payload, toolInfo.isError);
+                    pendingItem.outputSummary = toolOutputSummary(toolInfo.toolName, toolInfo.payload, toolInfo.isError, toolInfo.details);
+
           pendingItem.outputPayload = toolInfo.payload;
           pendingItem.toolStatus = toolInfo.isError ? 'error' : 'success';
           pendingItem.endTime = event.time;
@@ -44,7 +45,8 @@ export function buildTimelineItems(selectedSession: WorkSession | undefined, cha
             time: event.time,
             kind: 'tool-call',
             toolName: toolInfo.toolName,
-            outputSummary: toolOutputSummary(toolInfo.toolName, toolInfo.payload, toolInfo.isError),
+                        outputSummary: toolOutputSummary(toolInfo.toolName, toolInfo.payload, toolInfo.isError, toolInfo.details),
+
             outputPayload: toolInfo.payload,
             toolStatus: toolInfo.isError ? 'error' : 'success',
             content: '',

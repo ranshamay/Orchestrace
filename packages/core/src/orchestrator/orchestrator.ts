@@ -418,9 +418,11 @@ export async function orchestrate(
                 toolName: event.toolName,
                 status: event.type,
                 input: event.arguments,
-                output: event.result,
+                                output: event.result,
                 isError: event.isError,
+                details: event.details,
               });
+
             },
           });
         } catch (error) {
@@ -780,9 +782,11 @@ export async function orchestrate(
               toolName: event.toolName,
               status: event.type,
               input: event.arguments,
-              output: event.result,
+                            output: event.result,
               isError: event.isError,
+              details: event.details,
             });
+
           },
         });
       } catch (error) {
@@ -1401,10 +1405,12 @@ function toReplayToolCallRecord(event: LlmToolCallEvent): ReplayToolCallRecord {
     toolName: event.toolName,
     status: event.type,
     input: event.arguments,
-    output: event.result,
+        output: event.result,
     isError: event.isError,
+    details: event.details,
   };
 }
+
 
 function createTextPreview(text: string, maxChars = 600): string {
   const compact = text.replace(/\s+/g, ' ').trim();

@@ -44,7 +44,9 @@ export interface LlmToolCallEvent {
   arguments?: string;
   result?: string;
   isError?: boolean;
+  details?: unknown;
 }
+
 
 /** Tool definition exposed to the model during completion. */
 export interface LlmToolDefinition {

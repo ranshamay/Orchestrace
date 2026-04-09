@@ -121,7 +121,7 @@ export interface WorkSession {
     updatedAt: string;
   };
   taskStatus: Record<string, string>;
-  events: Array<{
+    events: Array<{
     time: string;
     type: string;
     runId?: string;
@@ -130,8 +130,16 @@ export interface WorkSession {
     attempt?: number;
     maxRetries?: number;
     totalDurationMs?: number;
+    toolName?: string;
+    toolStatus?: 'started' | 'result';
+    toolCallId?: string;
+    toolInput?: string;
+    toolOutput?: string;
+    toolIsError?: boolean;
+    toolDetails?: unknown;
     message: string;
   }>;
+
   agentGraph?: Array<{
     id: string;
     name?: string;
