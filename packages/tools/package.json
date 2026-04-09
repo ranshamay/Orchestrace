@@ -7,9 +7,9 @@
   "types": "./dist/index.d.ts",
   "scripts": {
     "build": "tsc",
-    "pretypecheck": "pnpm --filter @orchestrace/tools... build",
+    "pretypecheck": "pnpm --filter @orchestrace/provider build && pnpm --filter @orchestrace/context build && pnpm --filter @orchestrace/tools build",
     "typecheck": "tsc --noEmit",
-    "pretest": "pnpm --filter @orchestrace/tools... build",
+    "pretest": "pnpm --filter @orchestrace/provider build && pnpm --filter @orchestrace/context build && pnpm --filter @orchestrace/tools build",
     "test": "vitest run",
     "clean": "rm -rf dist"
   },
