@@ -398,6 +398,14 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
           };
         }
 
+        const spawnValidation = validateSubAgentToolArgs('subagent_spawn', subAgentSpawnArgsSchema, toolArgs);
+        if (!spawnValidation.ok) {
+          return {
+            content: spawnValidation.message,
+            isError: true,
+          };
+        }
+
         let request: SubAgentRequest;
         try {
           request = await buildSubAgentRequestFromToolArgs(options.cwd, toolArgs, {
@@ -493,36 +501,20 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
       tool: {
         name: 'subagent_spawn_batch',
         description: 'Spawn multiple focused sub-agents in parallel for independent sub-tasks.',
-        parameters: Type.Object({
-          agents: Type.Array(
-            Type.Object({
-              nodeId: Type.Optional(Type.String()),
-              prompt: Type.Optional(Type.String({ minLength: 1 })),
-              contextPacket: Type.Optional(subAgentContextPacketSchema),
-              systemPrompt: Type.Optional(Type.String()),
-              provider: Type.Optional(Type.String()),
-              model: Type.Optional(Type.String()),
-              reasoning: Type.Optional(
-                Type.Union([
-                  Type.Literal('minimal'),
-                  Type.Literal('low'),
-                  Type.Literal('medium'),
-                  Type.Literal('high'),
-                ], { description: 'LLM reasoning effort: "minimal" for simple tasks, "low"/"medium" for moderate complexity, "high" for complex multi-step reasoning.' }),
-              ),
-            }),
-            { minItems: 1 },
-          ),
-          concurrency: Type.Optional(Type.Number({ minimum: 1, maximum: SUBAGENT_BATCH_MAX_CONCURRENCY })),
-          adaptiveConcurrency: Type.Optional(Type.Boolean({ description: 'Automatically tune concurrency based on sub-agent failures while processing the batch.' })),
-          minConcurrency: Type.Optional(Type.Number({ minimum: 1, maximum: SUBAGENT_BATCH_MAX_CONCURRENCY })),
-          maxRetries: Type.Optional(Type.Number({ minimum: 0 })),
-        }),
+        parameters: subAgentSpawnBatchArgsSchema,
       },
       execute: async (toolArgs, signal) => {
         if (!options.runSubAgent) {
           return {
             content: 'Sub-agent runner is not available in this context.',
+            isError: true,
+          };
+        }
+
+        const spawnValidation = validateSubAgentToolArgs('subagent_spawn_batch', subAgentSpawnBatchArgsSchema, toolArgs);
+        if (!spawnValidation.ok) {
+          return {
+            content: spawnValidation.message,
             isError: true,
           };
         }
