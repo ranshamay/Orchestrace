@@ -47,9 +47,11 @@ export async function ensureWorktreeExists(options: EnsureWorktreeOptions): Prom
   const repoPath = resolve(options.repoPath);
   const worktreePath = resolve(options.worktreePath);
   const branchName = options.branchName.trim();
-  const baseRef = options.baseRef?.trim() || 'HEAD';
+  const requestedBaseRef = options.baseRef?.trim() || 'HEAD';
 
   return withWorktreeCreationLock(worktreePath, async () => {
+    const trackingRef = await resolvePreferredTrackingRef(repoPath);
+    const baseRef = shouldUseAutoTrackingBase(requestedBaseRef) ? (trackingRef ?? requestedBaseRef) : requestedBaseRef;
     if (await isWorktreeProperlySetUp(repoPath, worktreePath)) {
       if (options.bootstrapDependencies !== false) {
         await ensureWorktreeDependenciesInstalled(worktreePath);
@@ -70,6 +72,7 @@ export async function ensureWorktreeExists(options: EnsureWorktreeOptions): Prom
       worktreePath,
       baseRef,
       createBranch: !branchAlreadyExists,
+      trackingRef,
     });
 
     if (options.bootstrapDependencies !== false) {
@@ -181,6 +184,7 @@ async function recreateWorktreeInternal(options: {
   worktreePath: string;
   baseRef: string;
   createBranch: boolean;
+  trackingRef?: string;
 }): Promise<void> {
   await comprehensiveWorktreeCleanup(options.repoPath, options.worktreePath);
 
@@ -196,6 +200,7 @@ async function createWorktreeWithRetry(options: {
   worktreePath: string;
   baseRef: string;
   createBranch: boolean;
+  trackingRef?: string;
 }): Promise<void> {
   try {
     await addWorktree(options);
@@ -221,11 +226,16 @@ async function addWorktree(options: {
   worktreePath: string;
   baseRef: string;
   createBranch: boolean;
+  trackingRef?: string;
 }): Promise<void> {
   const args = options.createBranch
     ? ['worktree', 'add', '-b', options.branchName, options.worktreePath, options.baseRef]
     : ['worktree', 'add', options.worktreePath, options.branchName];
   await git(options.repoPath, args);
+
+  if (options.createBranch && options.trackingRef) {
+    await git(options.worktreePath, ['branch', '--set-upstream-to', options.trackingRef, options.branchName]);
+  }
 }
 
 async function isWorktreeProperlySetUp(repoPath: string, worktreePath: string): Promise<boolean> {
@@ -309,6 +319,26 @@ async function getGitCommonDir(repoPath: string): Promise<string> {
 async function branchExists(repoPath: string, branchName: string): Promise<boolean> {
   const result = await gitSafe(repoPath, ['show-ref', '--verify', '--quiet', `refs/heads/${branchName}`]);
   return result.ok;
+}
+
+async function resolvePreferredTrackingRef(repoPath: string): Promise<string | undefined> {
+  const symbolicHead = await gitSafe(repoPath, ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD']);
+  if (symbolicHead.ok && symbolicHead.stdout) {
+    return symbolicHead.stdout;
+  }
+
+  for (const candidate of ['origin/main', 'origin/master']) {
+    const exists = await gitSafe(repoPath, ['show-ref', '--verify', '--quiet', `refs/remotes/${candidate}`]);
+    if (exists.ok) {
+      return candidate;
+    }
+  }
+
+  return undefined;
+}
+
+function shouldUseAutoTrackingBase(baseRef: string): boolean {
+  return !baseRef || baseRef === 'HEAD';
 }
 
 async function withWorktreeCreationLock<T>(worktreePath: string, action: () => Promise<T>): Promise<T> {
