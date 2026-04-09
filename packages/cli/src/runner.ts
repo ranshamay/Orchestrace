@@ -52,14 +52,16 @@ import {
   updateThinkingCircuitBreaker,
 } from './thinking-circuit-breaker.js';
 import {
-    deriveRoutingCoercionAudit,
+  deriveRoutingCoercionAudit,
   enforceSafeShellDispatch,
   formatShellValidationRejection,
+  resolveTaskRouteEnvOverride,
   resolveTaskRouteForSource,
   stripRetryContinuationContext,
   type RoutingCoercionAudit,
   validateShellInput,
 } from './task-routing.js';
+
 import {
   SessionLifecycle,
   SessionLifecycleError,
@@ -272,11 +274,13 @@ async function main(): Promise<void> {
   const agentGraph: SessionAgentGraphNode[] = [];
   const pendingNodeIds = new Map<string, string[]>();
   const promptForRoutingAndEffort = stripRetryContinuationContext(config.prompt);
+    const routeOverride = resolveTaskRouteEnvOverride(process.env.ORCHESTRACE_TASK_ROUTE);
   const resolvedRoute = resolveTaskRouteForSource(
     promptForRoutingAndEffort,
     config.source,
-    process.env.ORCHESTRACE_TASK_ROUTE,
+    routeOverride,
   ).result;
+
   const dispatch = enforceSafeShellDispatch(promptForRoutingAndEffort, resolvedRoute, config.source);
   const route = dispatch.route;
   const effortClassification = classifyTaskEffort(promptForRoutingAndEffort);

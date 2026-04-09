@@ -3,19 +3,29 @@ import {
   enforceSafeShellDispatch,
   extractShellCommand,
   parseShellCommandToArgv,
-  parseTaskRouteOverride,
+    parseTaskRouteOverride,
   resolveTaskRoute,
+  resolveTaskRouteEnvOverride,
+
   validateShellExecutionPrompt,
   validateShellInput,
 } from '../src/task-routing.js';
 
 
 describe('task routing config', () => {
-  it('parses valid override values', () => {
+    it('parses valid override values', () => {
     expect(parseTaskRouteOverride('shell_command')).toBe('shell_command');
     expect(parseTaskRouteOverride(' investigation ')).toBe('investigation');
     expect(parseTaskRouteOverride('invalid')).toBeUndefined();
   });
+
+  it('normalizes route env override with safe fallback to code_change', () => {
+    expect(resolveTaskRouteEnvOverride(undefined)).toBe('code_change');
+    expect(resolveTaskRouteEnvOverride('')).toBe('code_change');
+    expect(resolveTaskRouteEnvOverride('invalid')).toBe('code_change');
+    expect(resolveTaskRouteEnvOverride(' shell_command ')).toBe('shell_command');
+  });
+
 
   it('resolves shell command route with direct strategy', () => {
     const route = resolveTaskRoute('run pnpm -w test');

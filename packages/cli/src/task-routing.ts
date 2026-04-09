@@ -93,6 +93,11 @@ export function parseTaskRouteOverride(raw: string | undefined): TaskRouteCatego
   return undefined;
 }
 
+export function resolveTaskRouteEnvOverride(raw: string | undefined): TaskRouteCategory {
+  return parseTaskRouteOverride(raw) ?? 'code_change';
+}
+
+
 function fallbackToCodeChangeRoute(result: TaskRouteResult, reason: string): TaskRouteResult {
   return {
     category: 'code_change',

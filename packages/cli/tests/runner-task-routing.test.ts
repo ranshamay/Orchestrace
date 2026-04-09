@@ -14,12 +14,25 @@ describe('runner task routing parity', () => {
     expect(route.result.strategy).toBe('full_planning_pipeline');
   });
 
-  it('supports route override parity for runner', () => {
+    it('supports route override parity for runner', () => {
     const route = resolveTaskRoute('implement feature x', 'investigation');
     expect(route.result.category).toBe('investigation');
     expect(route.result.source).toBe('override');
     expect(route.validationEnabled).toBe(false);
   });
+
+  it('keeps safe fallback route when env override is missing/invalid for source-aware routing', () => {
+    const prompt = 'help me with this later';
+
+    const missingOverride = resolveTaskRouteForSource(prompt, 'user', undefined).result;
+    expect(missingOverride.category).toBe('code_change');
+    expect(missingOverride.strategy).toBe('full_planning_pipeline');
+
+    const invalidOverride = resolveTaskRouteForSource(prompt, 'user', 'not_a_route').result;
+    expect(invalidOverride.category).toBe('code_change');
+    expect(invalidOverride.strategy).toBe('full_planning_pipeline');
+  });
+
 
   it('strips retry continuation context before routing while preserving follow-up request', () => {
     const rawPrompt = [

@@ -12,7 +12,14 @@ import { DEFAULT_AGENT_TOOL_POLICY_VERSION, createAgentToolset } from '@orchestr
 import { createInterface } from 'node:readline/promises';
 import { promisify } from 'node:util';
 import { startUiServer } from './ui-server.js';
-import { enforceSafeShellDispatch, formatShellValidationRejection, resolveTaskRoute, validateShellInput } from './task-routing.js';
+import {
+  enforceSafeShellDispatch,
+  formatShellValidationRejection,
+  resolveTaskRoute,
+  resolveTaskRouteEnvOverride,
+  validateShellInput,
+} from './task-routing.js';
+
 import { WorkspaceManager } from './workspace-manager.js';
 import type { WorkspaceEntry } from './workspace-manager.js';
 import { parseAndSanitizeVerifyCommands } from './verify-commands.js';
@@ -204,8 +211,10 @@ Environment variables:
   ORCHESTRACE_ROUTER_PROVIDER / ORCHESTRACE_ROUTER_MODEL
   ORCHESTRACE_REVIEWER_PROVIDER / ORCHESTRACE_REVIEWER_MODEL
   ORCHESTRACE_INVESTIGATOR_PROVIDER / ORCHESTRACE_INVESTIGATOR_MODEL
-  ORCHESTRACE_WORKSPACE          Active workspace identifier/path override
+    ORCHESTRACE_WORKSPACE          Active workspace identifier/path override
+  ORCHESTRACE_TASK_ROUTE         Optional route override: shell_command|investigation|code_change|refactor (missing/invalid => code_change)
   ORCHESTRACE_UI_HMR             true/false UI hot reload
+
   ORCHESTRACE_LLM_TIMEOUT_MS     Per-request LLM timeout in milliseconds (default: 120000)
   ORCHESTRACE_LLM_LONG_TURN_TIMEOUT_MS  Planning/delegation timeout override (default: 300000)
   ORCHESTRACE_LLM_PLANNING_TIMEOUT_MS   Planning timeout override (default: long-turn timeout)
@@ -320,7 +329,9 @@ Environment variables:
       process.exit(1);
     }
 
-    const resolvedRoute = resolveTaskRoute(taskPrompt, process.env.ORCHESTRACE_TASK_ROUTE).result;
+        const routeOverride = resolveTaskRouteEnvOverride(process.env.ORCHESTRACE_TASK_ROUTE);
+    const resolvedRoute = resolveTaskRoute(taskPrompt, routeOverride).result;
+
     const dispatch = enforceSafeShellDispatch(taskPrompt, resolvedRoute, 'user');
     const route = dispatch.route;
     console.log(`[route] category=${route.category} strategy=${route.strategy} source=${route.source} confidence=${route.confidence.toFixed(2)} reason=${route.reason}`);

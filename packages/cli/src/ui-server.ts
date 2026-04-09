@@ -89,7 +89,8 @@ import type {
 import { ObserverDaemon, SessionObserver, BackendLogger, LogWatcher } from './observer/index.js';
 import type { RealtimeFinding } from './observer/index.js';
 import { sanitizeLogLine, sanitizeToolPayload } from './runner/log-sanitizer.js';
-import { parseTaskRouteOverride } from './task-routing.js';
+import { resolveTaskRouteEnvOverride } from './task-routing.js';
+
 
 
 const GITHUB_PROVIDER_ID = 'github';
@@ -8099,8 +8100,9 @@ function buildContextExecutionStateSummary(session: WorkSession, todos: AgentTod
 export function resolveRunnerTaskRouteEnvValue(
   routeOverrideRaw: string | undefined,
 ): 'shell_command' | 'investigation' | 'code_change' | 'refactor' {
-  return parseTaskRouteOverride(routeOverrideRaw) ?? 'code_change';
+  return resolveTaskRouteEnvOverride(routeOverrideRaw);
 }
+
 
 export function buildSessionSystemPrompt(session: WorkSession, phase: SessionPromptPhase): string {
 
