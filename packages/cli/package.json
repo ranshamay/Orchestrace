@@ -6,11 +6,12 @@
   "bin": {
     "orchestrace": "./dist/index.js"
   },
-  "scripts": {
+    "scripts": {
     "build": "tsc",
     "pretypecheck": "pnpm --filter @orchestrace/cli... build",
     "typecheck": "tsc --noEmit",
     "dev": "tsx src/index.ts",
+    "pretest": "pnpm --filter @orchestrace/cli... build",
     "test": "vitest run",
     "clean": "rm -rf dist"
   },
