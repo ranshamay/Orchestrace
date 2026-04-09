@@ -160,12 +160,17 @@ interface SubAgentBatchRunResult {
   cacheHit?: boolean;
 }
 
+const TODO_REPLAN_MAX_COUNT = 3;
+
 interface CoordinationState {
   updatedAt: string;
   todos: TodoItem[];
   agentGraph: { nodes: AgentGraphNode[] };
   subAgents: SubAgentRunRecord[];
+  planLocked: boolean;
+  replanCount: number;
 }
+
 
 export function createCoordinationTools(options: CoordinationToolsOptions): RegisteredAgentTool[] {
   const statePath = join(
@@ -209,8 +214,14 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
           ),
         }),
       },
-      execute: async (toolArgs) => {
+            execute: async (toolArgs) => {
         const state = await readCoordinationState(statePath);
+        if (state.planLocked) {
+          return {
+            content: 'Cannot run todo_set: plan is locked (planLocked=true).',
+            isError: true,
+          };
+        }
         const items = normalizeTodoItems(toolArgs.items);
         state.todos = items;
         state.updatedAt = now();
@@ -223,7 +234,53 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
     },
     {
       tool: {
+        name: 'todo_replan',
+        description: 'Replace todo plan during planning, incrementing capped replan counter.',
+        parameters: Type.Object({
+          items: Type.Array(
+            Type.Object({
+              id: Type.String({ minLength: 1 }),
+              title: Type.String({ minLength: 1 }),
+              status: todoStatusSchema,
+              weight: Type.Optional(Type.Number({ minimum: 0 })),
+              details: Type.Optional(Type.String()),
+              dependsOn: Type.Optional(Type.Array(Type.String())),
+            }),
+            { minItems: 1 },
+          ),
+        }),
+      },
+      execute: async (toolArgs) => {
+        const state = await readCoordinationState(statePath);
+        if (state.planLocked) {
+          return {
+            content: 'Cannot run todo_replan: plan is locked (planLocked=true).',
+            isError: true,
+          };
+        }
+
+        if (state.replanCount >= TODO_REPLAN_MAX_COUNT) {
+          return {
+            content: `Cannot run todo_replan: replan limit reached (current=${state.replanCount}, max=${TODO_REPLAN_MAX_COUNT}).`,
+            isError: true,
+          };
+        }
+
+        const items = normalizeTodoItems(toolArgs.items);
+        state.todos = items;
+        state.replanCount += 1;
+        state.updatedAt = now();
+        await writeCoordinationState(statePath, state);
+
+        return {
+          content: `Replanned todo list with ${items.length} item(s). Replan count is now ${state.replanCount}/${TODO_REPLAN_MAX_COUNT}.`,
+        };
+      },
+    },
+    {
+      tool: {
         name: 'todo_add',
+
         description: 'Add one todo item to the current todo list.',
         parameters: Type.Object({
           id: Type.String({ minLength: 1 }),
@@ -359,8 +416,14 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
           ),
         }),
       },
-      execute: async (toolArgs) => {
+            execute: async (toolArgs) => {
         const state = await readCoordinationState(statePath);
+        if (state.planLocked) {
+          return {
+            content: 'Cannot run agent_graph_set: plan is locked (planLocked=true).',
+            isError: true,
+          };
+        }
         const nodes = normalizeAgentGraphNodes(toolArgs.nodes);
         state.agentGraph = { nodes };
         state.updatedAt = now();
@@ -371,6 +434,7 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
         };
       },
     },
+
     {
       tool: {
         name: 'subagent_list',
@@ -916,7 +980,7 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
             reason: Type.Optional(Type.String()),
           }),
         },
-        execute: async (toolArgs) => {
+                execute: async (toolArgs) => {
           const mode = normalizeAgentToolPhase(toolArgs.mode);
           if (!mode) {
             return {
@@ -927,6 +991,12 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
 
           const reason = optionalString(toolArgs.reason);
           const result = await modeController.setMode(mode, reason);
+          const state = await readCoordinationState(statePath);
+          if (result.mode === 'implementation' && !state.planLocked) {
+            state.planLocked = true;
+            state.updatedAt = now();
+            await writeCoordinationState(statePath, state);
+          }
           return {
             content: result.detail
               ?? (result.changed ? `Mode switched to ${result.mode}.` : `Mode remains ${result.mode}.`),
@@ -937,6 +1007,7 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
           };
         },
       },
+
     );
   }
 
@@ -1201,12 +1272,16 @@ async function readCoordinationState(path: string): Promise<CoordinationState> {
     const todos = normalizeTodoItems(parsed.todos);
     const nodes = normalizeAgentGraphNodes(parsed.agentGraph?.nodes);
     const subAgents = normalizeSubAgentRecords(parsed.subAgents);
+    const planLocked = asBoolean(parsed.planLocked) ?? false;
+    const replanCount = normalizeReplanCount(parsed.replanCount);
 
     return {
       updatedAt: typeof parsed.updatedAt === 'string' ? parsed.updatedAt : now(),
       todos,
       agentGraph: { nodes },
       subAgents,
+      planLocked,
+      replanCount,
     };
   } catch {
     return {
@@ -1214,9 +1289,12 @@ async function readCoordinationState(path: string): Promise<CoordinationState> {
       todos: [],
       agentGraph: { nodes: [] },
       subAgents: [],
+      planLocked: false,
+      replanCount: 0,
     };
   }
 }
+
 
 async function writeCoordinationState(path: string, state: CoordinationState): Promise<void> {
   const persistRawDebug = shouldPersistRawDebugArtifacts();
@@ -1809,7 +1887,17 @@ function asPositiveInteger(value: unknown): number | undefined {
   return normalized > 0 ? normalized : undefined;
 }
 
+function normalizeReplanCount(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return 0;
+  }
+
+  const normalized = Math.floor(value);
+  return normalized >= 0 ? normalized : 0;
+}
+
 function asBoolean(value: unknown): boolean | undefined {
+
   if (typeof value === 'boolean') {
     return value;
   }
