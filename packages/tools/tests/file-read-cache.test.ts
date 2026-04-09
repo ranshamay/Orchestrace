@@ -1,7 +1,7 @@
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { SessionFileReadCache } from '../src/file-read-cache.js';
 import { readFullFileWithCache } from '../src/file-read-cache.js';
 import { createAgentToolset } from '../src/index.js';
@@ -103,5 +103,36 @@ describe('subagent snippet cache reuse', () => {
 
     expect(readAtAfterFirst).toBeDefined();
     expect(readAtAfterSecond).toBe(readAtAfterFirst);
+  });
+
+  it('logs structured warning when direct file-read fallback fails with a non-retriable category', async () => {
+    const cwd = await makeWorkspace();
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    try {
+      const toolset = createAgentToolset({
+        cwd,
+        phase: 'planning',
+        taskType: 'code',
+        graphId: 'g-cache-log',
+        taskId: 't-cache-log',
+        runSubAgent: async () => ({ text: 'ok' }),
+      });
+
+      const result = await toolset.executeTool({
+        id: '1',
+        name: 'subagent_spawn_batch',
+        arguments: {
+          agents: [{ nodeId: 'n1', prompt: 'Inspect src/missing.ts for exports.' }],
+        },
+      });
+
+      expect(result.isError).toBeFalsy();
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('direct file-read fallback failed (bounded single-pass)'));
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('path=src/missing.ts'));
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('category=missing_data'));
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 });

@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -1287,6 +1287,64 @@ describe('subagent prompt enrichment', () => {
     expect(parsed.failedNodeIds).toEqual(['n-fail']);
     expect(parsed.runs).toHaveLength(1);
     expect(parsed.runs[0]).toMatchObject({ nodeId: 'n-fail', status: 'failed' });
+  });
+
+  it('subagent_spawn_batch short-circuits retries for non-retriable missing-data failures', async () => {
+    const cwd = await makeWorkspace();
+    const runSubAgent = vi.fn(async () => {
+      const error = Object.assign(new Error('No such file or directory'), { code: 'ENOENT' });
+      throw error;
+    });
+
+    const toolset = createAgentToolset({
+      cwd,
+      phase: 'planning',
+      taskType: 'code',
+      graphId: 'g1',
+      taskId: 't-retry-non-retriable',
+      runSubAgent,
+    });
+
+    const result = await toolset.executeTool({
+      id: '1',
+      name: 'subagent_spawn_batch',
+      arguments: {
+        agents: [{ nodeId: 'n-missing', prompt: 'Inspect src/missing.ts and fail.' }],
+        maxRetries: 5,
+      },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(runSubAgent).toHaveBeenCalledTimes(1);
+
+    const parsed = JSON.parse(result.content) as {
+      maxRetries: number;
+      completed: number;
+      failed: number;
+      failedNodeIds: string[];
+      failedErrorCategories: {
+        invalid_path_or_arguments: number;
+        missing_data: number;
+        transient_execution_failure: number;
+      };
+      runs: Array<{
+        nodeId?: string;
+        status: 'completed' | 'failed';
+        errorCategory?: 'invalid_path_or_arguments' | 'missing_data' | 'transient_execution_failure';
+      }>;
+    };
+
+    expect(parsed.maxRetries).toBe(5);
+    expect(parsed.completed).toBe(0);
+    expect(parsed.failed).toBe(1);
+    expect(parsed.failedNodeIds).toEqual(['n-missing']);
+    expect(parsed.failedErrorCategories.missing_data).toBe(1);
+    expect(parsed.failedErrorCategories.transient_execution_failure).toBe(0);
+    expect(parsed.runs[0]).toMatchObject({
+      nodeId: 'n-missing',
+      status: 'failed',
+      errorCategory: 'missing_data',
+    });
   });
 
   it('subagent_spawn_batch reuses cached completed results when all nodeIds are cache hits', async () => {

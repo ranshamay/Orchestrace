@@ -143,6 +143,21 @@ interface UsageTotals {
   cost: number;
 }
 
+type CoordinationErrorCategory =
+  | 'invalid_path_or_arguments'
+  | 'missing_data'
+  | 'transient_execution_failure';
+
+class CoordinationError extends Error {
+  readonly category: CoordinationErrorCategory;
+
+  constructor(category: CoordinationErrorCategory, message: string) {
+    super(message);
+    this.name = 'CoordinationError';
+    this.category = category;
+  }
+}
+
 interface SubAgentBatchRunResult {
   id: string;
   nodeId?: string;
@@ -154,6 +169,7 @@ interface SubAgentBatchRunResult {
   usage?: UsageTotals;
   usageReported?: boolean;
   error?: string;
+  errorCategory?: CoordinationErrorCategory;
   cacheHit?: boolean;
 }
 
@@ -665,6 +681,7 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
                 cacheHit: false as const,
               };
             } catch (error) {
+              const errorCategory = categorizeCoordinationError(error);
               return {
                 id: record.id,
                 nodeId: record.nodeId,
@@ -672,6 +689,7 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
                 promptChars: request.prompt.length,
                 promptPreview: compactPromptPreview(request.prompt),
                 error: error instanceof Error ? error.message : String(error),
+                errorCategory,
                 cacheHit: false as const,
               };
             }
@@ -705,7 +723,8 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
               return;
             }
 
-            if (attempt < maxRetries) {
+            const errorCategory = result.errorCategory ?? 'transient_execution_failure';
+            if (attempt < maxRetries && isRetriableCoordinationCategory(errorCategory)) {
               nextPending.push(pendingEntry);
             } else {
               settledByRequestIndex.set(pendingEntry.requestIndex, result);
@@ -792,6 +811,18 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
         const failedNodeIds = settled
           .filter((entry) => entry.status === 'failed')
           .map((entry) => entry.nodeId ?? entry.id);
+        const failedErrorCategories = settled
+          .filter((entry) => entry.status === 'failed')
+          .reduce<Record<CoordinationErrorCategory, number>>((accumulator, entry) => {
+            const category = entry.errorCategory ?? 'transient_execution_failure';
+            accumulator[category] = (accumulator[category] ?? 0) + 1;
+            return accumulator;
+          }, {
+            invalid_path_or_arguments: 0,
+            missing_data: 0,
+            transient_execution_failure: 0,
+          });
+
         const summary = {
           total: settled.length,
           concurrency,
@@ -803,6 +834,7 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
           completed: settled.length - failedCount,
           failed: failedCount,
           failedNodeIds,
+          failedErrorCategories,
           usage: usageTotals,
           cacheHitCount: cacheHits.size,
           cacheMissCount: misses.length,
@@ -885,6 +917,43 @@ function usageOrZero(usage: { input: number; output: number; cost: number } | un
     output: usage?.output ?? 0,
     cost: usage?.cost ?? 0,
   };
+}
+
+function categorizeCoordinationError(error: unknown): CoordinationErrorCategory {
+  if (error instanceof CoordinationError) {
+    return error.category;
+  }
+
+  const code = extractErrorCode(error);
+  if (code === 'ENOENT' || code === 'ENOTDIR') {
+    return 'missing_data';
+  }
+  if (code === 'EACCES' || code === 'EPERM' || code === 'EISDIR' || code === 'EINVAL') {
+    return 'invalid_path_or_arguments';
+  }
+
+  const message = (error instanceof Error ? error.message : String(error)).toLowerCase();
+  if (message.includes('invalid') || message.includes('argument') || message.includes('path')) {
+    return 'invalid_path_or_arguments';
+  }
+  if (message.includes('not found') || message.includes('no such file') || message.includes('missing')) {
+    return 'missing_data';
+  }
+
+  return 'transient_execution_failure';
+}
+
+function isRetriableCoordinationCategory(category: CoordinationErrorCategory): boolean {
+  return category === 'transient_execution_failure';
+}
+
+function extractErrorCode(error: unknown): string | undefined {
+  if (!isRecord(error)) {
+    return undefined;
+  }
+
+  const raw = error.code;
+  return typeof raw === 'string' && raw.trim().length > 0 ? raw.trim() : undefined;
 }
 
 function validateSubAgentToolArgs(
@@ -1539,16 +1608,28 @@ async function enrichDelegationPromptWithFileSnippets(
 
   const extractedPaths = extractCandidateFilePaths(trimmed);
   const missingPaths = extractedPaths.filter((filePath) => !snippetByPath.has(filePath));
-  if (missingPaths.length > 0 && snippetByPath.size < SUBAGENT_CONTEXT_MAX_FILES) {
-    const fallbackSnippets = await collectFileSnippets(cwd, missingPaths, {
+  const boundedFallbackPaths = missingPaths.slice(0, SUBAGENT_CONTEXT_MAX_FILES);
+  if (boundedFallbackPaths.length > 0 && snippetByPath.size < SUBAGENT_CONTEXT_MAX_FILES) {
+    const fallbackAttempts = await collectFileSnippets(cwd, boundedFallbackPaths, {
       fileReadCache: options?.fileReadCache,
     });
+    const fallbackSnippets = fallbackAttempts
+      .filter((entry): entry is { index: number; path: string; status: 'ok'; content: string } => entry.status === 'ok' && typeof entry.content === 'string')
+      .map((entry) => ({ path: entry.path, content: entry.content }));
+
     for (const snippet of fallbackSnippets) {
       if (snippetByPath.size >= SUBAGENT_CONTEXT_MAX_FILES) {
         break;
       }
       if (!snippetByPath.has(snippet.path)) {
         snippetByPath.set(snippet.path, snippet);
+      }
+    }
+
+    const failedFallbacks = fallbackAttempts.filter((entry) => entry.status === 'failed');
+    if (failedFallbacks.length > 0) {
+      for (const failedFallback of failedFallbacks) {
+        console.warn(`[coordination-tools] direct file-read fallback failed (bounded single-pass) path=${failedFallback.path} category=${failedFallback.errorCategory ?? 'transient_execution_failure'} reason=${failedFallback.error ?? 'unknown'}`);
       }
     }
   }
@@ -1622,13 +1703,26 @@ async function collectFileSnippets(
   options?: {
     fileReadCache?: AgentToolsetOptions['fileReadCache'];
   },
-): Promise<SubAgentFileSnippet[]> {
+): Promise<Array<{
+  index: number;
+  path: string;
+  status: 'ok' | 'failed';
+  content?: string;
+  errorCategory?: CoordinationErrorCategory;
+  error?: string;
+}>> {
   const revision = await resolveRevision(cwd);
   const candidates = filePaths.map((filePath, index) => ({ filePath, index }));
   const results = await mapWithConcurrency(candidates, SUBAGENT_SNIPPET_READ_CONCURRENCY, async (candidate) => {
     const absolutePath = resolve(cwd, candidate.filePath);
     if (!isWithinDirectory(absolutePath, cwd)) {
-      return undefined;
+      return {
+        index: candidate.index,
+        path: toPosixPath(candidate.filePath),
+        status: 'failed' as const,
+        errorCategory: 'invalid_path_or_arguments' as const,
+        error: 'Resolved path escapes workspace root.',
+      };
     }
 
     const relativePath = toPosixPath(relative(cwd, absolutePath));
@@ -1642,7 +1736,7 @@ async function collectFileSnippets(
       });
       const content = cached ?? await readFile(absolutePath, 'utf-8');
       if (content.includes('\u0000')) {
-        return undefined;
+        throw new CoordinationError('invalid_path_or_arguments', 'Detected binary content while collecting snippet.');
       }
 
       const trimmedContent = trimText(content.trim(), SUBAGENT_CONTEXT_MAX_CHARS_PER_FILE);
@@ -1659,18 +1753,21 @@ async function collectFileSnippets(
       return {
         index: candidate.index,
         path: relativePath,
+        status: 'ok' as const,
         content: trimmedContent,
       };
-    } catch {
-      return undefined;
+    } catch (error) {
+      return {
+        index: candidate.index,
+        path: relativePath,
+        status: 'failed' as const,
+        errorCategory: categorizeCoordinationError(error),
+        error: error instanceof Error ? error.message : String(error),
+      };
     }
   });
 
-  return results
-    .filter((entry): entry is { index: number; path: string; content: string } => Boolean(entry))
-    .sort((a, b) => a.index - b.index)
-    .slice(0, SUBAGENT_CONTEXT_MAX_FILES)
-    .map((entry) => ({ path: entry.path, content: entry.content }));
+  return results.sort((a, b) => a.index - b.index);
 }
 
 function normalizePromptPath(path: unknown): string | undefined {
