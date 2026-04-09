@@ -11,8 +11,8 @@ import type {
 } from './types.js';
 import { createContext, normalizeModelEndpoint } from './adapter/context.js';
 import { executeWithOptionalTools } from './adapter/tools.js';
-import { resolveTimeoutMs, mapTimeoutError } from './adapter/timeout.js';
-import { resolveEmptyResponseRetries } from './adapter/retry.js';
+import { resolveTimeoutMs, mapTimeoutError, summarizeErrorContext } from './adapter/timeout.js';
+import { resolveEmptyResponseRetries, resolveRetryBackoffDelayMs, waitForRetryDelay } from './adapter/retry.js';
 import { summarizePromptInput, logFailureDump } from './adapter/failure.js';
 import { mergeUsage } from './adapter/usage.js';
 import { classifyLlmFailure, createLlmFailureError } from './adapter/failure-classifier.js';
@@ -39,13 +39,25 @@ export class PiAiAdapter implements LlmAdapter {
         let authRetryUsed = false;
         const maxRetries = resolveEmptyResponseRetries();
         const maxAttempts = maxRetries + 1;
+        const requestSignal = signal ?? request.signal;
+
+        const scheduleRetryDelay = async (attempt: number): Promise<number> => {
+          if (attempt >= maxAttempts) {
+            return 0;
+          }
+          const delayMs = resolveRetryBackoffDelayMs(attempt);
+          await waitForRetryDelay(delayMs, requestSignal);
+          return delayMs;
+        };
+
         for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
           const context = createContext(request, prompt);
           const options: Record<string, unknown> = {};
           if (request.reasoning && model.reasoning) {
             options.reasoning = request.reasoning;
           }
-          const timeoutMs = resolveTimeoutMs(request.timeoutMs);
+          const timeoutMs = resolveTimeoutMs(request.timeoutMs, request.provider);
+          const attemptStartedAt = Date.now();
           if (activeApiKey) {
             options.apiKey = activeApiKey;
           }
