@@ -16,6 +16,8 @@ const RETRYABLE_ERROR_CODES = new Set([
   'UND_ERR_HEADERS_TIMEOUT',
   'UND_ERR_SOCKET',
 ]);
+const MISSING_TOOL_CALL_MAPPING_RE = /(no tool call found\s+for\s+function\s+call\s+output|function call output\s+with\s+call_id)/i;
+
 
 export function resolveEmptyResponseRetries(): number {
   const raw = process.env.ORCHESTRACE_EMPTY_RESPONSE_RETRIES;
@@ -56,9 +58,14 @@ export function shouldRetryTransientRequestFailure(params: {
     return false;
   }
 
-  if (params.failureType === 'timeout' || params.failureType === 'rate_limit') {
+    if (params.failureType === 'timeout' || params.failureType === 'rate_limit') {
     return true;
   }
+
+  if (MISSING_TOOL_CALL_MAPPING_RE.test(params.mappedMessage)) {
+    return true;
+  }
+
 
   if (!(params.error instanceof Error)) {
     return false;
@@ -86,10 +93,12 @@ export function shouldRetryTransientRequestFailure(params: {
   }
 
   const combined = `${mappedMessage}\n${params.error.message}`.toLowerCase();
-  return combined.includes('socket hang up')
+    return combined.includes('socket hang up')
     || combined.includes('connection reset')
-    || combined.includes('temporarily unavailable');
+    || combined.includes('temporarily unavailable')
+    || MISSING_TOOL_CALL_MAPPING_RE.test(combined);
 }
+
 
 export function resolveRetryBackoffDelayMs(attempt: number): number {
   const baseMs = resolvePositiveInt(

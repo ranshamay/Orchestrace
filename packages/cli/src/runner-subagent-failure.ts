@@ -12,7 +12,9 @@ const SUBAGENT_TIMEOUT_RE = /(timed?\s*out|timeout|etimedout|deadline exceeded)/
 const SUBAGENT_RATE_LIMIT_RE = /(rate\s*limit|too many requests|quota exceeded|\b429\b|retry later)/i;
 const SUBAGENT_AUTH_RE = /(unauthorized|forbidden|invalid api key|invalid key|authentication|auth|permission denied|credentials|token expired|\b401\b|\b403\b)/i;
 const SUBAGENT_TOOL_SCHEMA_RE = /(invalid tool call|schema|validatetoolcall|missing required|invalid arguments|tool arguments)/i;
+const SUBAGENT_TOOL_CALL_MAPPING_RE = /(no tool call found\s+for\s+function\s+call\s+output|function call output\s+with\s+call_id)/i;
 const SUBAGENT_TOOL_RUNTIME_RE = /(tool execution failed|unknown tool|not allowed while mode|blocked command|tool failed)/i;
+
 const SUBAGENT_VALIDATION_RE = /(validation failed|verification failed|typecheck|tsc|vitest|eslint)/i;
 
 export function classifySubAgentFailure(err: unknown): ClassifiedSubAgentFailure {
@@ -42,9 +44,14 @@ export function classifySubAgentFailure(err: unknown): ClassifiedSubAgentFailure
     return { failureType: 'tool_schema', recoverable: false };
   }
 
+    if (SUBAGENT_TOOL_CALL_MAPPING_RE.test(combined)) {
+    return { failureType: 'tool_runtime', recoverable: true };
+  }
+
   if (SUBAGENT_TOOL_RUNTIME_RE.test(combined)) {
     return { failureType: 'tool_runtime', recoverable: false };
   }
+
 
   if (SUBAGENT_VALIDATION_RE.test(combined)) {
     return { failureType: 'validation', recoverable: false };

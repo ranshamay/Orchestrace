@@ -78,7 +78,7 @@ describe('shouldRetryTransientRequestFailure', () => {
     ).toBe(true);
   });
 
-  it('does not retry non-transient unknown failures', () => {
+      it('does not retry non-transient unknown failures', () => {
     expect(
       shouldRetryTransientRequestFailure({
         failureType: 'unknown',
@@ -87,6 +87,17 @@ describe('shouldRetryTransientRequestFailure', () => {
       }),
     ).toBe(false);
   });
+
+  it('retries missing tool call mapping provider errors', () => {
+    expect(
+      shouldRetryTransientRequestFailure({
+        failureType: 'tool_runtime',
+        mappedMessage: 'No tool call found for function call output with call_id call_123.',
+        error: Object.assign(new Error('upstream 400'), { status: 400 }),
+      }),
+    ).toBe(true);
+  });
+
 });
 
 describe('waitForRetryDelay', () => {
