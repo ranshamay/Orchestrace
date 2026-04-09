@@ -856,7 +856,32 @@ describe('search_files tool', () => {
 
   });
 
-  it('returns a clear validation error for invalid regex query syntax', async () => {
+    it('auto-escapes unbalanced parentheses for explicit regex queries', async () => {
+    const cwd = await makeWorkspace();
+    await writeFile(
+      join(cwd, 'src', 'routes.ts'),
+      'runShellCommandRoute(\nrunShellCommandRoute\n',
+      'utf-8',
+    );
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+
+    const result = await toolset.executeTool({
+      id: '1',
+      name: 'search_files',
+      arguments: {
+        query: 'runShellCommandRoute(',
+        queryMode: 'regex',
+        path: 'src',
+      },
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.content).toContain('routes.ts:1:runShellCommandRoute(');
+    expect(result.content).not.toContain('routes.ts:2:runShellCommandRoute');
+    expect(result.content.toLowerCase()).not.toContain('regex parse error');
+  });
+
+  it('returns a clear validation error for malformed regex that cannot be repaired', async () => {
     const cwd = await makeWorkspace();
     const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
 
@@ -864,23 +889,25 @@ describe('search_files tool', () => {
       id: '1',
       name: 'search_files',
       arguments: {
-        query: '[unterminated',
+        query: '(?z)invalid',
         queryMode: 'regex',
         path: 'src',
       },
     });
 
-        expect(result.isError).toBe(true);
-    expect(result.content).toBe('Invalid regex query.');
-    expect(result.details).toMatchObject({
-      errorType: 'invalid_regex',
-      message: 'Invalid regex query.',
-      toolName: 'search_files',
-      path: 'src',
-    });
+      expect(result.isError).toBe(true);
+      expect(result.content).toBe('Invalid regex query.');
+      expect(result.details).toMatchObject({
+        errorType: 'invalid_regex',
+        message: 'Invalid regex query.',
+        toolName: 'search_files',
+        path: 'src',
+      });
+      expect(result.content.toLowerCase()).not.toContain('regex parse error');
     expect(result.content.toLowerCase()).not.toContain('no such file or directory');
 
   });
+
 
   it('returns a clear validation error for empty glob text', async () => {
     const cwd = await makeWorkspace();
