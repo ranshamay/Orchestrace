@@ -20,10 +20,16 @@ export type {
 	LlmResultMetadata,
 	SpawnAgentRequest,
 } from './types.js';
+export {
+	ProviderAuthValidationError,
+} from './auth.js';
 export type {
 	PersistedAuthStore,
 	ProviderAuthManagerOptions,
 	ProviderAuthStatus,
+	ProviderAuthValidationErrorCode,
+	ProviderAuthValidationErrorDetails,
 	ProviderInfo,
 	ProviderTokenTtlStatus,
 } from './auth.js';
+

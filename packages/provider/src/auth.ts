@@ -78,9 +78,37 @@ export interface ResolveApiKeyOptions {
   minimumTtlSeconds?: number;
 }
 
+export type ProviderAuthValidationErrorCode =
+  | 'AUTH_PROVIDER_UNKNOWN'
+  | 'AUTH_PROVIDER_NOT_CONFIGURED'
+  | 'AUTH_PROVIDER_CREDENTIAL_UNRESOLVABLE';
 
+export interface ProviderAuthValidationErrorDetails {
+  provider: string;
+  authType: ProviderInfo['authType'];
+  envVars: string[];
+  source: ProviderAuthStatus['source'];
+  remediation: string[];
+}
+
+export class ProviderAuthValidationError extends Error {
+  readonly code: ProviderAuthValidationErrorCode;
+  readonly details: ProviderAuthValidationErrorDetails;
+
+  constructor(
+    code: ProviderAuthValidationErrorCode,
+    message: string,
+    details: ProviderAuthValidationErrorDetails,
+  ) {
+    super(message);
+    this.name = 'ProviderAuthValidationError';
+    this.code = code;
+    this.details = details;
+  }
+}
 
 export interface PersistedAuthStore {
+
   oauth: Record<string, OAuthCredentials>;
   apiKeys: Record<string, string>;
 }
@@ -298,7 +326,7 @@ export class ProviderAuthManager {
     return computeTokenTtlStatus(providerId, store.oauth[providerId]);
   }
 
-  async getAllStatus(): Promise<ProviderAuthStatus[]> {
+    async getAllStatus(): Promise<ProviderAuthStatus[]> {
     const providers = this.listProviders();
     const statuses: ProviderAuthStatus[] = [];
 
@@ -309,7 +337,54 @@ export class ProviderAuthManager {
     return statuses;
   }
 
+  async assertProviderConfigured(providerId: string): Promise<void> {
+    const provider = this.listProviders().find((item) => item.id === providerId) ?? {
+      id: providerId,
+      name: providerId,
+      authType: 'api-key' as const,
+      envVars: getEnvVarCandidates(providerId),
+    };
+    const status = await this.getStatus(provider.id);
+
+    if (status.source === 'none') {
+      throw new ProviderAuthValidationError(
+        'AUTH_PROVIDER_NOT_CONFIGURED',
+        buildMissingCredentialMessage(provider.id, provider.authType, provider.envVars),
+        {
+          provider: provider.id,
+          authType: provider.authType,
+          envVars: provider.envVars,
+          source: status.source,
+          remediation: buildProviderRemediation(provider.id, provider.authType, provider.envVars),
+        },
+      );
+    }
+
+    const key = await this.resolveApiKey(provider.id, { allowRefresh: false });
+    if (!key?.trim()) {
+      throw new ProviderAuthValidationError(
+        'AUTH_PROVIDER_CREDENTIAL_UNRESOLVABLE',
+        buildUnresolvableCredentialMessage(provider.id, provider.authType, provider.envVars),
+        {
+          provider: provider.id,
+          authType: provider.authType,
+          envVars: provider.envVars,
+          source: status.source,
+          remediation: buildProviderRemediation(provider.id, provider.authType, provider.envVars),
+        },
+      );
+    }
+  }
+
+  async assertProvidersConfigured(providerIds: Iterable<string>): Promise<void> {
+    const unique = [...new Set([...providerIds].map((providerId) => providerId.trim()).filter(Boolean))];
+    for (const providerId of unique) {
+      await this.assertProviderConfigured(providerId);
+    }
+  }
+
   private async loadStore(): Promise<PersistedAuthStore> {
+
     const primary = await this.readStore(this.authFilePath);
     if (primary) {
       return primary;
@@ -453,8 +528,62 @@ function isTokenBelowMinimumTtl(ttl: ProviderTokenTtlStatus | undefined, minimum
   return ttl.expiresInSeconds < minimumTtlSeconds;
 }
 
+function buildProviderRemediation(
+  providerId: string,
+  authType: ProviderInfo['authType'],
+  envVars: string[],
+): string[] {
+  if (providerId === GITHUB_COPILOT_PROVIDER_ID) {
+    return [
+      'Run `orchestrace auth github-copilot` to complete OAuth device login.',
+      'GitHub Copilot credentials are not read from environment variables.',
+    ];
+  }
+
+  const envHint = envVars.length > 0
+    ? `Set ${envVars.join(' or ')} in your environment.`
+    : 'Set the provider API key in your environment.';
+
+  if (authType === 'oauth') {
+    return [
+      `Run \`orchestrace auth ${providerId}\` to complete OAuth login.`,
+      envHint,
+    ];
+  }
+
+  if (authType === 'mixed') {
+    return [
+      `Run \`orchestrace auth ${providerId}\` to configure stored credentials.`,
+      envHint,
+    ];
+  }
+
+  return [
+    `Run \`orchestrace auth ${providerId}\` to configure an API key.`,
+    envHint,
+  ];
+}
+
+function buildMissingCredentialMessage(
+  providerId: string,
+  authType: ProviderInfo['authType'],
+  envVars: string[],
+): string {
+  const remediation = buildProviderRemediation(providerId, authType, envVars);
+  return `Provider "${providerId}" is not configured. ${remediation.join(' ')}`;
+}
+
+function buildUnresolvableCredentialMessage(
+  providerId: string,
+  authType: ProviderInfo['authType'],
+  envVars: string[],
+): string {
+  const remediation = buildProviderRemediation(providerId, authType, envVars);
+  return `Provider "${providerId}" has configured credentials, but no usable API key could be resolved without refresh. ${remediation.join(' ')}`;
+}
 
 function findWorkspaceRoot(startDir: string): string {
+
   let current = resolve(startDir);
 
   while (true) {
