@@ -143,6 +143,81 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
         };
       },
     },
+    {
+      tool: {
+        name: 'url_fetch',
+        description: 'Fetch a URL over HTTP(S) and return status, headers, and response body.',
+        parameters: Type.Object({
+          url: Type.String({ description: 'Absolute HTTP(S) URL to fetch.' }),
+          method: Type.Optional(Type.String({ description: 'HTTP method to use. Defaults to GET.' })),
+          headers: Type.Optional(Type.String({ description: 'Optional JSON string object of request headers.' })),
+          body: Type.Optional(Type.String({ description: 'Optional request body as text. Not allowed for GET/HEAD.' })),
+        }),
+      },
+      execute: async (toolArgs, signal) => {
+        const url = normalizeHttpUrl(asRequiredString(toolArgs.url, 'url'));
+        const method = (asString(toolArgs.method) ?? 'GET').trim().toUpperCase();
+        const headersText = asString(toolArgs.headers);
+        const body = asString(toolArgs.body);
+
+        if (!['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'].includes(method)) {
+          return {
+            content: `Unsupported HTTP method: ${method}`,
+            isError: true,
+          };
+        }
+
+        if ((method === 'GET' || method === 'HEAD') && body !== undefined) {
+          return {
+            content: `HTTP ${method} request must not include body.`,
+            isError: true,
+          };
+        }
+
+        let headers: Record<string, string> | undefined;
+        try {
+          headers = headersText ? parseStringRecord(headersText, 'headers') : undefined;
+        } catch (error) {
+          return {
+            content: error instanceof Error ? error.message : String(error),
+            isError: true,
+          };
+        }
+
+        try {
+          const response = await fetch(url, {
+            method,
+            headers,
+            body,
+            signal,
+          });
+
+          const text = await response.text();
+          const contentType = response.headers.get('content-type') ?? '';
+          const data = parseBodyByContentType(text, contentType);
+          const content = truncateText(JSON.stringify({
+            ok: response.ok,
+            status: response.status,
+            statusText: response.statusText,
+            url: response.url,
+            method,
+            contentType,
+            headers: Object.fromEntries(response.headers.entries()),
+            data,
+          }, null, 2), options.maxOutputChars ?? 24000);
+
+          return {
+            content,
+            isError: !response.ok,
+          };
+        } catch (error) {
+          return {
+            content: `URL fetch failed: ${error instanceof Error ? error.message : String(error)}`,
+            isError: true,
+          };
+        }
+      },
+    },
   ];
 
   if (options.includeRunCommandTool) {
@@ -542,6 +617,54 @@ function parseJson(raw: string, field: string): unknown {
   } catch {
     throw new Error(`Invalid JSON in ${field}.`);
   }
+}
+
+function parseStringRecord(raw: string, field: string): Record<string, string> {
+  const parsed = parseJson(raw, field);
+  if (!isRecord(parsed)) {
+    throw new Error(`Invalid ${field}: expected a JSON object.`);
+  }
+
+  const result: Record<string, string> = {};
+  for (const [key, value] of Object.entries(parsed)) {
+    if (typeof value !== 'string') {
+      throw new Error(`Invalid ${field}.${key}: expected a string value.`);
+    }
+    result[key] = value;
+  }
+
+  return result;
+}
+
+function normalizeHttpUrl(rawUrl: string): string {
+  let parsed: URL;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    throw new Error('Invalid url: expected an absolute HTTP(S) URL.');
+  }
+
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new Error('Invalid url: only http:// and https:// are supported.');
+  }
+
+  return parsed.toString();
+}
+
+function parseBodyByContentType(text: string, contentType: string): unknown {
+  if (!text) {
+    return '';
+  }
+
+  if (contentType.includes('application/json')) {
+    try {
+      return JSON.parse(text);
+    } catch {
+      return text;
+    }
+  }
+
+  return text;
 }
 
 async function formatGithubResponse(response: Response): Promise<Record<string, unknown>> {

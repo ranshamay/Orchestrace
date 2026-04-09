@@ -45,6 +45,7 @@ describe('createAgentToolset phase policy', () => {
       'todo_get',
       'todo_set',
       'todo_update',
+      'url_fetch',
     ]);
   });
 
@@ -66,6 +67,7 @@ describe('createAgentToolset phase policy', () => {
       'todo_get',
       'todo_set',
       'todo_update',
+      'url_fetch',
     ]);
   });
 
@@ -92,6 +94,7 @@ describe('createAgentToolset phase policy', () => {
       'todo_get',
       'todo_set',
       'todo_update',
+      'url_fetch',
       'write_file',
       'write_files',
     ]);
@@ -624,6 +627,46 @@ describe('run_command safety', () => {
     expect(parsed.adaptiveConcurrency).toBe(true);
     expect(parsed.concurrency).toBe(2);
     expect(parsed.minConcurrency).toBe(1);
+  });
+});
+
+describe('url_fetch tool', () => {
+  it('is available in planning and implementation phases', async () => {
+    const cwd = await makeWorkspace();
+    const planningToolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+    const implementationToolset = createAgentToolset({ cwd, phase: 'implementation', taskType: 'code' });
+
+    expect(toolNames(planningToolset)).toContain('url_fetch');
+    expect(toolNames(implementationToolset)).toContain('url_fetch');
+  });
+
+  it('fetches JSON response and returns parsed data', async () => {
+    const cwd = await makeWorkspace();
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ ok: true, name: 'demo' }), {
+      status: 200,
+      headers: {
+        'content-type': 'application/json',
+      },
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    try {
+      const toolset = createAgentToolset({ cwd, phase: 'implementation', taskType: 'code' });
+      const result = await toolset.executeTool({
+        id: '1',
+        name: 'url_fetch',
+        arguments: { url: 'https://example.com/data' },
+      });
+
+      expect(result.isError).toBeFalsy();
+      expect(result.content).toContain('"name": "demo"');
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const [requestUrl, requestInit] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(requestUrl).toBe('https://example.com/data');
+      expect(requestInit.method).toBe('GET');
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
 

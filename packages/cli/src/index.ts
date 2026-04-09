@@ -21,6 +21,7 @@ const SUB_AGENT_READ_ONLY_TOOL_ALLOWLIST = [
   'search_files',
   'git_diff',
   'git_status',
+  'url_fetch',
 ];
 
 const GITHUB_PROVIDER_ID = 'github';
