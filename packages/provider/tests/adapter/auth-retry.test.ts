@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { PiAiAdapter } from '../../src/adapter.js';
 import { executeWithOptionalTools } from '../../src/adapter/tools.js';
 
@@ -27,6 +27,13 @@ function makeAssistantTextResponse(text: string) {
 describe('PiAiAdapter auth refresh retry', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    process.env.ORCHESTRACE_LLM_RETRY_BACKOFF_BASE_MS = '1';
+    process.env.ORCHESTRACE_LLM_RETRY_BACKOFF_MAX_MS = '1';
+  });
+
+  afterEach(() => {
+    delete process.env.ORCHESTRACE_LLM_RETRY_BACKOFF_BASE_MS;
+    delete process.env.ORCHESTRACE_LLM_RETRY_BACKOFF_MAX_MS;
   });
 
   it('refreshes credentials once and retries once on auth failure', async () => {
