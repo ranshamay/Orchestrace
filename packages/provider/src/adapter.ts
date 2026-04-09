@@ -12,7 +12,13 @@ import type {
 import { createContext, normalizeModelEndpoint } from './adapter/context.js';
 import { executeWithOptionalTools } from './adapter/tools.js';
 import { resolveTimeoutMs, mapTimeoutError, summarizeErrorContext } from './adapter/timeout.js';
-import { resolveEmptyResponseRetries, resolveRetryBackoffDelayMs, waitForRetryDelay } from './adapter/retry.js';
+import {
+  resolveEmptyResponseRetries,
+  resolveTransientRequestRetries,
+  resolveRetryBackoffDelayMs,
+  shouldRetryTransientRequestFailure,
+  waitForRetryDelay,
+} from './adapter/retry.js';
 import { summarizePromptInput, logFailureDump } from './adapter/failure.js';
 import { mergeUsage } from './adapter/usage.js';
 import { classifyLlmFailure, createLlmFailureError } from './adapter/failure-classifier.js';
@@ -38,7 +44,9 @@ export class PiAiAdapter implements LlmAdapter {
         let activeApiKey = request.apiKey;
         let authRetryUsed = false;
         const maxRetries = resolveEmptyResponseRetries();
-        const maxAttempts = maxRetries + 1;
+        const transientRequestRetries = resolveTransientRequestRetries();
+        const authRefreshRetries = request.refreshApiKey ? 1 : 0;
+        const maxAttempts = Math.max(maxRetries, transientRequestRetries, authRefreshRetries) + 1;
         const requestSignal = signal ?? request.signal;
 
         const scheduleRetryDelay = async (attempt: number): Promise<number> => {
@@ -81,9 +89,17 @@ export class PiAiAdapter implements LlmAdapter {
             const failureType = classifyLlmFailure({ message: mapped.message });
             const elapsedMs = Date.now() - attemptStartedAt;
             const canRetryAuth = failureType === 'auth' && Boolean(request.refreshApiKey) && !authRetryUsed;
+            const canRetryTransient =
+              attempt <= transientRequestRetries
+              && shouldRetryTransientRequestFailure({
+                failureType,
+                mappedMessage: mapped.message,
+                error,
+              });
+            const shouldRetry = canRetryAuth || canRetryTransient;
             let retryDelayMs = 0;
 
-            if (canRetryAuth) {
+            if (shouldRetry) {
               retryDelayMs = await scheduleRetryDelay(attempt);
             }
 
@@ -97,7 +113,7 @@ export class PiAiAdapter implements LlmAdapter {
               maxAttempts,
               timeoutMs,
               elapsedMs,
-              retryScheduled: canRetryAuth,
+              retryScheduled: shouldRetry,
               retryDelayMs,
               errorMessage: mapped.message,
               prompt: summarizePromptInput(prompt),
@@ -112,6 +128,10 @@ export class PiAiAdapter implements LlmAdapter {
                 // Ignore refresh errors and retry once with the current key path.
               }
               attempt -= 1;
+              continue;
+            }
+
+            if (canRetryTransient) {
               continue;
             }
 
@@ -191,7 +211,7 @@ export class PiAiAdapter implements LlmAdapter {
               stopReason: response.stopReason,
               kind: 'empty-zero-token',
             });
-            const shouldRetry = attempt < maxAttempts;
+            const shouldRetry = attempt <= maxRetries;
             const retryDelayMs = shouldRetry ? await scheduleRetryDelay(attempt) : 0;
             logFailureDump({
               kind: 'empty-zero-token',
@@ -235,7 +255,7 @@ export class PiAiAdapter implements LlmAdapter {
               stopReason: response.stopReason,
               kind: 'empty-text',
             });
-            const shouldRetry = attempt < maxAttempts;
+            const shouldRetry = attempt <= maxRetries;
             const retryDelayMs = shouldRetry ? await scheduleRetryDelay(attempt) : 0;
             logFailureDump({
               kind: 'empty-text',
