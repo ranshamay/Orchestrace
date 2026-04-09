@@ -1313,11 +1313,12 @@ describe('subagent prompt enrichment', () => {
       },
     });
 
-    expect(result.isError).toBeFalsy();
-    expect(delegatedPrompts).toHaveLength(1);
-    expect(delegatedPrompts[0]).toContain('[Auto-included file snippets]');
-    expect(delegatedPrompts[0]).toContain('File: src/file.ts');
-    expect(delegatedPrompts[0]).toContain('export const value = 1;');
+        expect(result.isError).toBeFalsy();
+    expect(delegatedPrompts).toHaveLength(2);
+    expect(delegatedPrompts[1]).toContain('[Auto-included file snippets]');
+    expect(delegatedPrompts[1]).toContain('File: src/file.ts');
+    expect(delegatedPrompts[1]).toContain('export const value = 1;');
+
   });
 
   it('subagent_spawn_batch supports adaptive concurrency metadata', async () => {
