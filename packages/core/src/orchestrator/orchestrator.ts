@@ -14,7 +14,6 @@ import type {
 } from '../dag/types.js';
 import type { TaskExecutionContext } from '../dag/scheduler.js';
 import { runDag } from '../dag/scheduler.js';
-import { validate } from '../validation/validator.js';
 import type { LlmAdapter, LlmToolset } from '@orchestrace/provider';
 import { classifyTrivialTaskNode, classifyTaskEffort, resolveTrivialTaskGateConfig } from './task-complexity.js';
 import type { TaskEffort } from './task-complexity.js';
@@ -23,7 +22,7 @@ import {
   buildRoleTaskPrompt,
   buildRoleSystemPrompt,
 } from './role-config.js';
-import { executeRole, spawnRoleAgent } from './role-executor.js';
+import { executeImplementerRole, executeRole, spawnRoleAgent } from './role-executor.js';
 import {
   buildPlanningContractError,
   createPlanningContractFailureSignature,
@@ -705,205 +704,26 @@ export async function orchestrate(
       maxImplementationAttempts ?? taskRetryBudget + 1,
     );
 
-    let lastResponse = '';
-    let lastFailureType: ReplayFailureType | undefined;
-    let lastValidationError = '';
-    let lastValidationResults = undefined as TaskOutput['validationResults'];
-
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      emit({
-        type: 'task:implementation-attempt',
-        taskId: node.id,
-        attempt,
-        maxAttempts,
-      });
-
-      const implementationPrompt = buildRoleTaskPrompt({
-        role: 'implementer',
-        node,
-        depOutputs: context.depOutputs,
-        approvedPlan: planningResult?.text,
-        attempt,
-        previousResponse: lastResponse,
-        previousFailureType: lastFailureType,
-        previousValidationError: lastValidationError,
-        effort,
-      });
-
-      const implementationToolCalls: ReplayToolCallRecord[] = [];
-      const implementationAttemptStart = new Date().toISOString();
-      let implResult;
-      try {
-        implResult = await executeRole({
-          role: 'implementer',
-          agent: implAgent,
-          taskId: node.id,
-          prompt: implementationPrompt,
-          attempt,
-          signal: context.signal,
-          emit,
-          onToolCall: (_event, replayRecord) => {
-            implementationToolCalls.push(replayRecord);
-          },
-        });
-      } catch (error) {
-        const failureType = resolveReplayFailureType(error);
-        const implementationError = error instanceof Error ? error.message : String(error);
-        const failedImplementationAttempt: ReplayAttemptRecord = {
-          phase: 'implementation',
-          attempt,
-          startedAt: implementationAttemptStart,
-          completedAt: new Date().toISOString(),
-          provider: implementationModel.provider,
-          model: implementationModel.model,
-          reasoning: implementationModel.reasoning,
-          error: implementationError,
-          failureType,
-          toolCalls: implementationToolCalls,
-        };
-        replay.attempts.push(failedImplementationAttempt);
-        emit({
-          type: 'task:replay-attempt',
-          taskId: node.id,
-          phase: 'implementation',
-          attempt,
-          record: failedImplementationAttempt,
-        });
-
-        if (attempt < maxAttempts && shouldRetryAfterCompletionFailure(failureType)) {
-          lastFailureType = failureType;
-          lastValidationError = buildCompletionFailureRetryHint({
-            failureType,
-            errorMessage: implementationError,
-          });
-          emit({
-            type: 'task:verification-failed',
-            taskId: node.id,
-            attempt,
-            error: `Retrying after ${failureType} failure: ${implementationError}`,
-          });
-          await delay(PLANNING_RETRY_BASE_DELAY_MS * (2 ** (attempt - 1)));
-          continue;
-        }
-
-        return {
-          taskId: node.id,
-          status: 'failed',
-          plan: planningResult.text,
-          planPath: persistedPlanPath,
-          tokenDumpDir: taskTokenDumpDir,
-          response: lastResponse,
-          error: implementationError,
-          failureType,
-          durationMs: Date.now() - start,
-          retries: attempt - 1,
-          usage,
-          replay,
-        };
-      }
-
-      const completedImplementationAttempt: ReplayAttemptRecord = {
-        phase: 'implementation',
-        attempt,
-        startedAt: implementationAttemptStart,
-        completedAt: new Date().toISOString(),
-        provider: implementationModel.provider,
-        model: implementationModel.model,
-        reasoning: implementationModel.reasoning,
-        stopReason: implResult.metadata?.stopReason,
-        endpoint: implResult.metadata?.endpoint,
-        usage: implResult.usage,
-        textPreview: createTextPreview(implResult.text),
-        toolCalls: implementationToolCalls,
-      };
-      replay.attempts.push(completedImplementationAttempt);
-      emit({
-        type: 'task:replay-attempt',
-        taskId: node.id,
-        phase: 'implementation',
-        attempt,
-        record: completedImplementationAttempt,
-      });
-
-      mergeUsage(usage, implResult.usage);
-      await appendTokenDump(implementationTokenDumpPath, {
-        graphId: graph.id,
-        taskId: node.id,
-        agent: 'implementation',
-        attempt,
-        provider: implementationModel.provider,
-        model: implementationModel.model,
-        usage: implResult.usage,
-      });
-      lastResponse = implResult.text;
-
-      const output: TaskOutput = {
-        taskId: node.id,
-        status: 'completed',
-        plan: planningResult?.text,
-        planPath: persistedPlanPath,
-        tokenDumpDir: taskTokenDumpDir,
-        response: implResult.text,
-        filesChanged: implResult.filesChanged,
-        durationMs: Date.now() - start,
-        retries: attempt - 1,
-        usage,
-        replay,
-      };
-
-      if (!node.validation) {
-        return output;
-      }
-
-      emit({ type: 'task:validating', taskId: node.id });
-      const validationResults = await validate(output, node.validation, cwd);
-      output.validationResults = validationResults;
-      lastValidationResults = validationResults;
-      const allPassed = validationResults.every((result) => result.passed);
-      completedImplementationAttempt.validation = {
-        passed: allPassed,
-        commandResults: validationResults.map((result) => ({
-          command: result.command,
-          passed: result.passed,
-          output: result.output,
-          durationMs: result.durationMs,
-        })),
-      };
-
-      if (allPassed) {
-        return output;
-      }
-
-      lastFailureType = 'validation';
-      completedImplementationAttempt.failureType = 'validation';
-      lastValidationError = validationResults
-        .filter((result) => !result.passed)
-        .map((result) => `${result.command}: ${result.output}`)
-        .join('\n');
-
-      emit({
-        type: 'task:verification-failed',
-        taskId: node.id,
-        attempt,
-        error: lastValidationError,
-      });
-    }
-
-    return {
-      taskId: node.id,
-      status: 'failed',
-      plan: planningResult?.text,
+    return executeImplementerRole({
+      task: node,
+      graphId: graph.id,
+      depOutputs: context.depOutputs,
+      approvedPlan: planningResult?.text,
       planPath: persistedPlanPath,
-      tokenDumpDir: taskTokenDumpDir,
-      response: lastResponse,
-      validationResults: lastValidationResults,
-      error: lastValidationError || 'Implementation did not satisfy validation criteria.',
-      failureType: lastFailureType ?? 'validation',
-      durationMs: Date.now() - start,
-      retries: maxAttempts - 1,
+      effort,
+      implementationModel,
+      implAgent,
+      signal: context.signal,
+      cwd,
+      emit,
+      startTimeMs: start,
+      taskTokenDumpDir,
+      implementationTokenDumpPath,
       usage,
       replay,
-    };
+      maxAttempts,
+      appendTokenDump,
+    });
   };
 
   return runDag(managedRetryGraph, executor, {
@@ -1075,40 +895,6 @@ function shouldRetryAfterCompletionFailure(failureType: ReplayFailureType): bool
     || failureType === 'rate_limit'
     || failureType === 'tool_runtime'
     || failureType === 'empty_response';
-}
-
-function buildCompletionFailureRetryHint(params: {
-  failureType: ReplayFailureType;
-  errorMessage: string;
-}): string {
-  switch (params.failureType) {
-    case 'timeout':
-      return [
-        'Previous attempt failed due to timeout.',
-        'Reduce scope per step, keep tool outputs concise, and continue from current state.',
-        `Failure detail: ${params.errorMessage}`,
-      ].join('\n');
-    case 'rate_limit':
-      return [
-        'Previous attempt hit rate limits.',
-        'Retry with fewer consecutive tool calls and prioritize essential steps first.',
-        `Failure detail: ${params.errorMessage}`,
-      ].join('\n');
-    case 'tool_runtime':
-      return [
-        'Previous attempt failed during tool execution.',
-        'Inspect prior tool-call errors, fix arguments/paths, and retry only needed tools.',
-        `Failure detail: ${params.errorMessage}`,
-      ].join('\n');
-    case 'empty_response':
-      return [
-        'Previous attempt returned empty model output.',
-        'Retry with concise reasoning and continue implementation from known plan context.',
-        `Failure detail: ${params.errorMessage}`,
-      ].join('\n');
-    default:
-      return `Previous attempt failed: ${params.errorMessage}`;
-  }
 }
 
 function resolvePromptVersion(params: {
