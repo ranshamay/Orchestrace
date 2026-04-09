@@ -5,6 +5,7 @@ import {
   parseTaskRouteOverride,
   resolveTaskRoute,
   validateShellExecutionPrompt,
+  validateShellInput,
 } from '../src/task-routing.js';
 
 describe('task routing config', () => {
@@ -79,6 +80,18 @@ describe('task routing config', () => {
     const validation = validateShellExecutionPrompt('run git status');
     expect(validation.ok).toBe(true);
     expect(validation.command).toBe('git status');
+  });
+
+  it('rejects markdown-like single-line payloads through canonical shell validator', () => {
+    const validation = validateShellInput('## Task: run git status');
+    expect(validation.ok).toBe(false);
+    expect(validation.reason).toContain('markdown/instructional');
+  });
+
+  it('keeps validateShellExecutionPrompt aligned with canonical validator', () => {
+    const canonical = validateShellInput('run pnpm test');
+    const alias = validateShellExecutionPrompt('run pnpm test');
+    expect(alias).toEqual(canonical);
   });
 
   it('demotes override-forced shell route to code_change when prompt is prose', () => {
