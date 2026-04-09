@@ -42,10 +42,12 @@ export class PiAiAdapter implements LlmAdapter {
         const usage = { input: 0, output: 0, cost: 0 };
         let hasUsage = false;
         let activeApiKey = request.apiKey;
-        let authRetryUsed = false;
+                let authRetryUsed = false;
         const maxRetries = resolveEmptyResponseRetries();
         const transientRequestRetries = resolveTransientRequestRetries();
-        const authRefreshRetries = request.refreshApiKey ? 1 : 0;
+        const allowAuthRefreshRetry = request.allowAuthRefreshRetry === true;
+        const authRefreshRetries = allowAuthRefreshRetry && request.refreshApiKey ? 1 : 0;
+
         const maxAttempts = Math.max(maxRetries, transientRequestRetries, authRefreshRetries) + 1;
         const requestSignal = signal ?? request.signal;
 
@@ -88,7 +90,12 @@ export class PiAiAdapter implements LlmAdapter {
             const mapped = mapTimeoutError(error, timeoutMs);
             const failureType = classifyLlmFailure({ message: mapped.message });
             const elapsedMs = Date.now() - attemptStartedAt;
-            const canRetryAuth = failureType === 'auth' && Boolean(request.refreshApiKey) && !authRetryUsed;
+                        const canRetryAuth =
+              failureType === 'auth'
+              && allowAuthRefreshRetry
+              && Boolean(request.refreshApiKey)
+              && !authRetryUsed;
+
             const canRetryTransient =
               attempt <= transientRequestRetries
               && shouldRetryTransientRequestFailure({
@@ -165,7 +172,12 @@ export class PiAiAdapter implements LlmAdapter {
             const reason = upstreamError
               ? `Provider error: ${upstreamError}`
               : `Model stopped with reason "${response.stopReason}" before producing a usable response.`;
-            const canRetryAuth = failureType === 'auth' && Boolean(request.refreshApiKey) && !authRetryUsed;
+                        const canRetryAuth =
+              failureType === 'auth'
+              && allowAuthRefreshRetry
+              && Boolean(request.refreshApiKey)
+              && !authRetryUsed;
+
             const retryDelayMs = canRetryAuth ? await scheduleRetryDelay(attempt) : 0;
             logFailureDump({
               kind: 'stop-reason',
@@ -321,7 +333,9 @@ export class PiAiAdapter implements LlmAdapter {
       signal: request.signal,
       toolset: request.toolset,
       apiKey: request.apiKey,
-      refreshApiKey: request.refreshApiKey,
+            refreshApiKey: request.refreshApiKey,
+      allowAuthRefreshRetry: request.allowAuthRefreshRetry,
+
     });
     return agent.complete(request.prompt, request.signal, {
       onTextDelta: request.onTextDelta,

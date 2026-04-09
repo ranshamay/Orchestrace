@@ -906,7 +906,9 @@ async function main(): Promise<void> {
         systemPrompt: 'You are a precise JSON generator. Output only valid JSON, nothing else.',
         timeoutMs: 30_000,
         apiKey: await authManager.resolveApiKey(config.provider),
-        refreshApiKey: () => authManager.resolveApiKey(config.provider),
+                refreshApiKey: () => authManager.resolveApiKey(config.provider, { allowRefresh: false }),
+        allowAuthRefreshRetry: false,
+
       });
 
       const result = await agent.complete(metadataPrompt);
@@ -1698,7 +1700,9 @@ async function main(): Promise<void> {
               signal: subSignal,
               toolset: subToolset,
               apiKey: await authManager.resolveApiKey(subProvider),
-              refreshApiKey: () => authManager.resolveApiKey(subProvider),
+                            refreshApiKey: () => authManager.resolveApiKey(subProvider, { allowRefresh: false }),
+              allowAuthRefreshRetry: false,
+
             });
 
             const result = await completeWithRetry(subAgent, request.prompt, subSignal);

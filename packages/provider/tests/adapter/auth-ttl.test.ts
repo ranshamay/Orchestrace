@@ -74,7 +74,7 @@ describe('ProviderAuthManager Copilot TTL awareness', () => {
     expect(persisted.oauth['github-copilot'].access).toBe('refreshed-access');
   });
 
-  it('uses stored token without refresh when TTL is healthy', async () => {
+    it('uses stored token without refresh when TTL is healthy', async () => {
     const now = Math.floor(Date.now() / 1000);
     await writeAuthStore(now + 3600);
 
@@ -84,6 +84,39 @@ describe('ProviderAuthManager Copilot TTL awareness', () => {
     expect(token).toBe('stored-access-token');
     expect(oauthMock.getOAuthApiKey).not.toHaveBeenCalled();
   });
+
+  it('does not refresh near-expiry token when refresh is disabled', async () => {
+    const now = Math.floor(Date.now() / 1000);
+    await writeAuthStore(now + 30);
+
+    const auth = new ProviderAuthManager({ authFilePath: authPath });
+    const token = await auth.resolveApiKey('github-copilot', { allowRefresh: false });
+
+    expect(token).toBeUndefined();
+    expect(oauthMock.getOAuthApiKey).not.toHaveBeenCalled();
+  });
+
+  it('does not refresh oauth token when refresh is disabled', async () => {
+    const now = Math.floor(Date.now() / 1000);
+    await writeAuthStore(now + 3600);
+
+    oauthMock.getOAuthApiKey.mockResolvedValue({
+      apiKey: 'unexpected-refresh',
+      newCredentials: {
+        access: 'unexpected-refresh',
+        refresh: 'refresh-token',
+        expires: now + 3600,
+      },
+    });
+
+    const auth = new ProviderAuthManager({ authFilePath: authPath });
+    const token = await auth.resolveApiKey('github-copilot', { allowRefresh: false });
+
+    // Healthy Copilot tokens are returned from stored access even with refresh disabled.
+    expect(token).toBe('stored-access-token');
+    expect(oauthMock.getOAuthApiKey).not.toHaveBeenCalled();
+  });
+
 
   it('includes near-expiry metadata in status', async () => {
     const now = Math.floor(Date.now() / 1000);

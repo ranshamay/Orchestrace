@@ -263,7 +263,9 @@ export async function orchestrate(
           taskRequiresWrites,
         }),
         apiKey: planningApiKey,
-        refreshApiKey: planningRefreshApiKey,
+                refreshApiKey: planningRefreshApiKey,
+        allowAuthRefreshRetry: false,
+
       });
 
       emit({ type: 'task:planning', taskId: node.id });
@@ -718,7 +720,9 @@ export async function orchestrate(
         taskRequiresWrites,
       }),
       apiKey: implementationApiKey,
-      refreshApiKey: implementationRefreshApiKey,
+            refreshApiKey: implementationRefreshApiKey,
+      allowAuthRefreshRetry: false,
+
     });
 
     const taskRetryBudget = Math.max(0, node.validation?.maxRetries ?? 0);

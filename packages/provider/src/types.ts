@@ -93,11 +93,20 @@ export interface LlmRequest {
   onUsage?: (usage: { input: number; output: number; cost: number }) => void;
   onToolCall?: (event: LlmToolCallEvent) => void;
   toolset?: LlmToolset;
-  /** Explicit API key (e.g. from OAuth). If omitted, pi-ai reads env vars. */
+    /** Explicit API key (e.g. from OAuth). If omitted, pi-ai reads env vars. */
   apiKey?: string;
-  /** Optional credential refresh hook used for a single auth-retry before failing. */
+  /**
+   * Optional credential refresh hook.
+   * Used only when `allowAuthRefreshRetry` is explicitly true.
+   */
   refreshApiKey?: () => Promise<string | undefined>;
+  /**
+   * Explicit opt-in for one auth-refresh retry.
+   * Defaults to false so auth failures fast-fail with structured errors.
+   */
+  allowAuthRefreshRetry?: boolean;
 }
+
 
 /** Stream-time callbacks for incremental completion output and usage. */
 export interface LlmCompletionOptions {
@@ -123,11 +132,20 @@ export interface SpawnAgentRequest extends AgentModelConfig {
   timeoutMs?: number;
   signal?: AbortSignal;
   toolset?: LlmToolset;
-  /** Explicit API key (e.g. from OAuth). If omitted, pi-ai reads env vars. */
+    /** Explicit API key (e.g. from OAuth). If omitted, pi-ai reads env vars. */
   apiKey?: string;
-  /** Optional credential refresh hook used for a single auth-retry before failing. */
+  /**
+   * Optional credential refresh hook.
+   * Used only when `allowAuthRefreshRetry` is explicitly true.
+   */
   refreshApiKey?: () => Promise<string | undefined>;
+  /**
+   * Explicit opt-in for one auth-refresh retry.
+   * Defaults to false so auth failures fast-fail with structured errors.
+   */
+  allowAuthRefreshRetry?: boolean;
 }
+
 
 /**
  * Abstraction over the LLM layer.

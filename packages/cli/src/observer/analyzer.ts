@@ -43,7 +43,9 @@ export async function analyzeSessionSummaries(
     prompt: userPrompt,
     signal,
     apiKey,
-    refreshApiKey: resolveApiKey ? () => resolveApiKey(config.provider) : undefined,
+        refreshApiKey: resolveApiKey ? () => resolveApiKey(config.provider) : undefined,
+    allowAuthRefreshRetry: false,
+
   });
 
   return parseAnalysisResponse(result.text, allowedCategories);
