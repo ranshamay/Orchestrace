@@ -1,37 +1,55 @@
 import { classifyTaskPrompt, type TaskRouteCategory, type TaskRouteResult } from '@orchestrace/core';
 import type { TaskType } from '@orchestrace/core';
 
-const ALLOWED_SHELL_PROGRAMS = [
-  'pnpm',
-  'npm',
-  'yarn',
-  'node',
-  'npx',
-  'git',
-  'cat',
-  'echo',
-  'grep',
-  'find',
-  'sed',
-  'awk',
-  'curl',
-  'python',
-  'make',
-  'docker',
-  'kubectl',
-  'ls',
-  'pwd',
-] as const;
+type ProgramArgValidator = (args: string[]) => string | undefined;
 
-const ALLOWED_SHELL_PROGRAMS_SET = new Set<string>(ALLOWED_SHELL_PROGRAMS);
-const SHELL_COMMAND_START = new RegExp(`^(${ALLOWED_SHELL_PROGRAMS.join('|')})(?:\\s|$)`, 'i');
-const MARKDOWN_LIKE_PAYLOAD = /(^\s*\[[^\]]+\])|(^\s*#{1,6}\s+\S)|(```)|(^\s*(?:Category|Severity|Issue|Task):\s)/im;
+const SAFE_PACKAGE_MANAGER_SCRIPTS = new Set(['test', 'lint', 'typecheck', 'build']);
+const SAFE_GIT_SUBCOMMANDS = new Set(['status', 'diff', 'log', 'show', 'branch', 'rev-parse', 'remote']);
+const DISALLOWED_GIT_SUBCOMMANDS = new Set([
+  'add',
+  'commit',
+  'push',
+  'pull',
+  'merge',
+  'rebase',
+  'reset',
+  'clean',
+  'checkout',
+  'switch',
+  'stash',
+  'worktree',
+  'clone',
+  'config',
+  'init',
+]);
+
 const FORBIDDEN_SHELL_META_CHARS = /[;&|<>`]/;
 const FORBIDDEN_SHELL_SUBSTITUTIONS = /(\$\(|\$\{|\$\(\()/;
 const FORBIDDEN_SHELL_CONTROL_CHARS = /[\u0000-\u001F\u007F]/;
 const FORBIDDEN_SHELL_LINE_BREAKS = /[\r\n]/;
+const FORBIDDEN_ARG_PATTERNS = [
+  /(^|\/)\.\.(\/|$)/,
+  /^-/,
+  /^(?:https?|ssh|file):\/\//i,
+];
+const MARKDOWN_LIKE_PAYLOAD = /(^\s*\[[^\]]+\])|(^\s*#{1,6}\s+\S)|(```)|(^\s*(?:Category|Severity|Issue|Task):\s)/im;
 
+const SHELL_COMMAND_POLICY: Record<string, ProgramArgValidator> = {
+  git: validateGitArgs,
+  pnpm: (args) => validatePackageManagerArgs('pnpm', args),
+  npm: (args) => validatePackageManagerArgs('npm', args),
+  yarn: (args) => validatePackageManagerArgs('yarn', args),
+  ls: validateLsArgs,
+  pwd: validatePwdArgs,
+  cat: validateCatArgs,
+  grep: validateGrepArgs,
+  find: validateFindArgs,
+  echo: () => undefined,
+};
 
+const ALLOWED_SHELL_PROGRAMS = Object.keys(SHELL_COMMAND_POLICY);
+const ALLOWED_SHELL_PROGRAMS_SET = new Set<string>(ALLOWED_SHELL_PROGRAMS);
+const SHELL_COMMAND_START = new RegExp(`^(${ALLOWED_SHELL_PROGRAMS.map(escapeRegexLiteral).join('|')})(?:\\s|$)`, 'i');
 
 const RETRY_CONTINUATION_MARKER = 'Retry continuation context from previous attempt:';
 const FOLLOW_UP_MARKER = 'Follow-up request:';
@@ -61,7 +79,6 @@ export function formatShellValidationRejection(entrypoint: string, reason?: stri
 }
 
 export interface SafeDispatchResolution {
-
   route: TaskRouteResult;
   shell: ShellExecutionValidation;
 }
@@ -122,15 +139,6 @@ export function resolveTaskRoute(prompt: string, overrideRaw?: string): Resolved
   };
 }
 
-/**
- * Enforces the final dispatch contract shared by runner + CLI entrypoints.
- * Shell dispatch is only allowed when:
- * 1) route selects shell_command,
- * 2) source guard explicitly allows shell execution,
- * 3) prompt passes command extraction validation.
- *
- * Any guard failure deterministically demotes dispatch to code_change.
- */
 export function deriveRoutingCoercionAudit(
   resolvedRoute: TaskRouteResult,
   dispatch: SafeDispatchResolution,
@@ -199,10 +207,6 @@ export function enforceSafeShellDispatch(
   };
 }
 
-/**
- * Source-aware shell gate used as defense-in-depth at dispatch boundary.
- * Only explicit user-originated sessions may execute shell routes.
- */
 export function validateShellDispatchSource(
   source: 'user' | 'observer' | undefined,
 ): ShellDispatchSourceValidation {
@@ -221,11 +225,6 @@ export function validateShellDispatchSource(
   };
 }
 
-/**
- * Observer-generated fix prompts are task instructions, never shell commands.
- * Force observer sessions into the planning/code pipeline even if a global shell
- * route override is enabled.
- */
 export function resolveTaskRouteForSource(
   prompt: string,
   source: 'user' | 'observer' | undefined,
@@ -237,13 +236,6 @@ export function resolveTaskRouteForSource(
   return resolveTaskRoute(prompt, overrideRaw);
 }
 
-/**
- * Canonical shell-input validator used by all shell execution entrypoints.
- * Accepts only single-line executable command text and rejects markdown/prose.
- *
- * Validation now also enforces a strict allowlist and returns a parsed argv
- * payload safe for direct `execFile(program, args)` execution without `sh -lc`.
- */
 export function validateShellInput(input: string): ShellExecutionValidation {
   const normalized = input.trim();
   if (!normalized) {
@@ -252,12 +244,14 @@ export function validateShellInput(input: string): ShellExecutionValidation {
       reason: 'Route shell_command selected, but prompt was empty.',
     };
   }
-    if (FORBIDDEN_SHELL_LINE_BREAKS.test(normalized)) {
+
+  if (FORBIDDEN_SHELL_LINE_BREAKS.test(normalized)) {
     return {
       ok: false,
       reason: 'Rejected shell execution: prompt contains multiple lines and appears to be instructions/markdown, not a single command.',
     };
   }
+
   if (FORBIDDEN_SHELL_CONTROL_CHARS.test(normalized)) {
     return {
       ok: false,
@@ -271,6 +265,7 @@ export function validateShellInput(input: string): ShellExecutionValidation {
       reason: 'Rejected shell execution: prompt appears to contain markdown/instructional content, not a direct command.',
     };
   }
+
   const command = extractShellCommand(normalized);
   if (!command) {
     return {
@@ -290,18 +285,10 @@ export function validateShellInput(input: string): ShellExecutionValidation {
   return { ok: true, command, parsed: parsed.parsed };
 }
 
-
-/**
- * Backward-compatible alias for existing call sites/tests.
- */
 export function validateShellExecutionPrompt(prompt: string): ShellExecutionValidation {
   return validateShellInput(prompt);
 }
 
-/**
- * Removes retry-context scaffolding from retry execution prompts so routing/effort
- * classifiers evaluate user intent instead of serialized continuation metadata.
- */
 export function stripRetryContinuationContext(prompt: string): string {
   let result = prompt.trim();
   if (!result) {
@@ -330,7 +317,9 @@ export function stripRetryContinuationContext(prompt: string): string {
 
 export function extractShellCommand(prompt: string): string | undefined {
   const normalized = prompt.trim();
-    if (FORBIDDEN_SHELL_LINE_BREAKS.test(normalized) || FORBIDDEN_SHELL_CONTROL_CHARS.test(normalized) || normalized.length > 200) return undefined;
+  if (FORBIDDEN_SHELL_LINE_BREAKS.test(normalized) || FORBIDDEN_SHELL_CONTROL_CHARS.test(normalized) || normalized.length > 200) {
+    return undefined;
+  }
 
   const command = normalized
     .replace(/^\$\s*/, '')
@@ -338,7 +327,7 @@ export function extractShellCommand(prompt: string): string | undefined {
     .trim();
   if (!command) return undefined;
   if (!SHELL_COMMAND_START.test(command)) return undefined;
-  return command || undefined;
+  return command;
 }
 
 function tokenizeCommandPreservingQuotes(command: string): { ok: boolean; tokens?: string[]; reason?: string } {
@@ -423,7 +412,7 @@ export function parseShellCommandToArgv(command: string): ShellExecutionValidati
     return { ok: false, reason: 'Rejected shell execution: command is empty.' };
   }
 
-    if (FORBIDDEN_SHELL_LINE_BREAKS.test(normalized) || FORBIDDEN_SHELL_CONTROL_CHARS.test(normalized)) {
+  if (FORBIDDEN_SHELL_LINE_BREAKS.test(normalized) || FORBIDDEN_SHELL_CONTROL_CHARS.test(normalized)) {
     return {
       ok: false,
       reason: 'Rejected shell execution: control characters and line breaks are not allowed.',
@@ -436,7 +425,6 @@ export function parseShellCommandToArgv(command: string): ShellExecutionValidati
       reason: 'Rejected shell execution: shell operators, redirection, piping, or substitution syntax is not allowed.',
     };
   }
-
 
   const tokenized = tokenizeCommandPreservingQuotes(normalized);
   if (!tokenized.ok || !tokenized.tokens) {
@@ -455,13 +443,156 @@ export function parseShellCommandToArgv(command: string): ShellExecutionValidati
     };
   }
 
+  const argValidator = SHELL_COMMAND_POLICY[normalizedProgram];
+  const argValidationError = argValidator?.(args);
+  if (argValidationError) {
+    return {
+      ok: false,
+      reason: `Rejected shell execution: ${argValidationError}`,
+    };
+  }
+
   return {
     ok: true,
     command: normalized,
     parsed: {
-      program,
+      program: normalizedProgram,
       args,
     },
   };
 }
 
+function escapeRegexLiteral(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function validatePackageManagerArgs(program: 'pnpm' | 'npm' | 'yarn', args: string[]): string | undefined {
+  if (args.length === 0) {
+    return `command '${program}' requires an explicit safe script (allowed: ${[...SAFE_PACKAGE_MANAGER_SCRIPTS].join(', ')}).`;
+  }
+
+  if (args.some((arg) => arg.startsWith('-'))) {
+    return `command '${program}' does not allow arbitrary flags from prompt input.`;
+  }
+
+  const [head, ...rest] = args;
+  const normalizedHead = head.toLowerCase();
+
+  if (program === 'npm') {
+    if (normalizedHead !== 'run' || rest.length !== 1) {
+      return `command 'npm' only allows 'npm run <script>' for safe scripts (${[...SAFE_PACKAGE_MANAGER_SCRIPTS].join(', ')}).`;
+    }
+    if (!SAFE_PACKAGE_MANAGER_SCRIPTS.has(rest[0].toLowerCase())) {
+      return `npm script '${rest[0]}' is not in the allowlist (${[...SAFE_PACKAGE_MANAGER_SCRIPTS].join(', ')}).`;
+    }
+    return undefined;
+  }
+
+  if (program === 'yarn') {
+    if (rest.length !== 0 && !(normalizedHead === 'run' && rest.length === 1)) {
+      return `command 'yarn' only allows 'yarn <script>' or 'yarn run <script>' for safe scripts (${[...SAFE_PACKAGE_MANAGER_SCRIPTS].join(', ')}).`;
+    }
+    const script = normalizedHead === 'run' ? rest[0] : head;
+    if (!script || !SAFE_PACKAGE_MANAGER_SCRIPTS.has(script.toLowerCase())) {
+      return `yarn script '${script ?? '<missing>'}' is not in the allowlist (${[...SAFE_PACKAGE_MANAGER_SCRIPTS].join(', ')}).`;
+    }
+    return undefined;
+  }
+
+  if (normalizedHead !== 'run' || rest.length !== 1) {
+    return `command 'pnpm' only allows 'pnpm run <script>' for safe scripts (${[...SAFE_PACKAGE_MANAGER_SCRIPTS].join(', ')}).`;
+  }
+  if (!SAFE_PACKAGE_MANAGER_SCRIPTS.has(rest[0].toLowerCase())) {
+    return `pnpm script '${rest[0]}' is not in the allowlist (${[...SAFE_PACKAGE_MANAGER_SCRIPTS].join(', ')}).`;
+  }
+  return undefined;
+}
+
+function validateGitArgs(args: string[]): string | undefined {
+  if (args.length === 0) {
+    return "command 'git' requires an explicit read-only subcommand.";
+  }
+
+  const [subcommand, ...rest] = args;
+  const normalizedSubcommand = subcommand.toLowerCase();
+  if (DISALLOWED_GIT_SUBCOMMANDS.has(normalizedSubcommand)) {
+    return `git subcommand '${subcommand}' is explicitly blocked for shell route execution.`;
+  }
+  if (!SAFE_GIT_SUBCOMMANDS.has(normalizedSubcommand)) {
+    return `git subcommand '${subcommand}' is not in the allowlist (${[...SAFE_GIT_SUBCOMMANDS].join(', ')}).`;
+  }
+  if (rest.some((arg) => arg.startsWith('-'))) {
+    return `git subcommand '${subcommand}' does not allow arbitrary flags from prompt input.`;
+  }
+  if (rest.some((arg) => !isSafePathLikeToken(arg))) {
+    return `git subcommand '${subcommand}' includes path or token '${rest.find((arg) => !isSafePathLikeToken(arg))}' outside the allowlist.`;
+  }
+  return undefined;
+}
+
+function validatePwdArgs(args: string[]): string | undefined {
+  if (args.length > 0) {
+    return "command 'pwd' does not allow arguments.";
+  }
+  return undefined;
+}
+
+function validateLsArgs(args: string[]): string | undefined {
+  if (args.some((arg) => arg.startsWith('-'))) {
+    return "command 'ls' does not allow flags from prompt input.";
+  }
+  if (args.some((arg) => !isSafePathLikeToken(arg))) {
+    return `command 'ls' includes disallowed path token '${args.find((arg) => !isSafePathLikeToken(arg))}'.`;
+  }
+  return undefined;
+}
+
+function validateCatArgs(args: string[]): string | undefined {
+  if (args.length === 0) {
+    return "command 'cat' requires at least one relative file path.";
+  }
+  if (args.some((arg) => !isSafePathLikeToken(arg))) {
+    return `command 'cat' includes disallowed path token '${args.find((arg) => !isSafePathLikeToken(arg))}'.`;
+  }
+  return undefined;
+}
+
+function validateGrepArgs(args: string[]): string | undefined {
+  if (args.length < 1) {
+    return "command 'grep' requires a pattern argument.";
+  }
+  if (args.some((arg) => arg.startsWith('-'))) {
+    return "command 'grep' does not allow arbitrary flags from prompt input.";
+  }
+  const [pattern, ...paths] = args;
+  if (pattern.length > 200) {
+    return "command 'grep' pattern exceeds maximum length (200 characters).";
+  }
+  if (paths.some((arg) => !isSafePathLikeToken(arg))) {
+    return `command 'grep' includes disallowed path token '${paths.find((arg) => !isSafePathLikeToken(arg))}'.`;
+  }
+  return undefined;
+}
+
+function validateFindArgs(args: string[]): string | undefined {
+  if (args.length > 2) {
+    return "command 'find' allows at most two arguments (<path> <name-pattern>).";
+  }
+  if (args.some((arg) => arg.startsWith('-'))) {
+    return "command 'find' does not allow flags or predicates from prompt input.";
+  }
+  if (args.some((arg) => !isSafePathLikeToken(arg))) {
+    return `command 'find' includes disallowed path token '${args.find((arg) => !isSafePathLikeToken(arg))}'.`;
+  }
+  return undefined;
+}
+
+function isSafePathLikeToken(value: string): boolean {
+  if (!value) {
+    return false;
+  }
+  if (FORBIDDEN_ARG_PATTERNS.some((pattern) => pattern.test(value))) {
+    return false;
+  }
+  return /^[a-zA-Z0-9_./:@%+,=~*-]+$/.test(value);
+}
