@@ -470,7 +470,8 @@ describe('orchestrate replay capture', () => {
       expect(output?.error).toContain('todo_set');
       expect(output?.error).toContain('agent_graph_set');
       expect(output?.error).not.toContain('subagent_spawn');
-      expect(output?.replay?.attempts.length).toBe(3);
+      expect(output?.replay?.attempts.length).toBe(2);
+      expect(output?.error).toContain('Planning stagnated across attempts with no phase advancement');
       expect(output?.replay?.attempts.at(-1)?.failureType).toBe('validation');
     } finally {
       await rm(cwd, { recursive: true, force: true });
@@ -503,7 +504,8 @@ describe('orchestrate replay capture', () => {
       // Sub-agent delegation is no longer required — the LLM decides
       expect(output?.error).not.toContain('subagent_spawn');
       // Planning now retries up to 3 times before giving up
-      expect(output?.replay?.attempts.length).toBe(3);
+      expect(output?.replay?.attempts.length).toBe(2);
+      expect(output?.error).toContain('Planning stagnated across attempts with no phase advancement');
       expect(output?.replay?.attempts.at(-1)?.failureType).toBe('validation');
     } finally {
       await rm(cwd, { recursive: true, force: true });
@@ -574,6 +576,33 @@ describe('orchestrate replay capture', () => {
       await rm(cwd, { recursive: true, force: true });
     }
   });
+
+  it('aborts repeated identical planning-contract failures as stagnation', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'orchestrace-replay-planning-contract-stagnation-'));
+
+    try {
+      const outputs = await orchestrate(makeSingleNodeGraph(), {
+        llm: createAdapter({ omitPlanningCoordination: true }),
+        cwd,
+        requirePlanApproval: false,
+        planningSystemPrompt: 'planning',
+        implementationSystemPrompt: 'implementation',
+        createToolset: () => ({ tools: [], executeTool: async () => ({ content: 'noop' }) }),
+      });
+
+      const output = outputs.get('task-1');
+      expect(output).toBeDefined();
+      expect(output?.status).toBe('failed');
+      expect(output?.failureType).toBe('validation');
+      expect(output?.error).toContain('Planning stagnated across attempts with no phase advancement');
+      expect(output?.error).toContain('planning contract failure signature');
+      expect(output?.replay?.attempts.length).toBe(2);
+      expect(output?.replay?.attempts.every((attempt) => attempt.phase === 'planning')).toBe(true);
+      expect(output?.replay?.attempts.at(-1)?.failureType).toBe('validation');
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  }, 15_000);
 
   it('retries planning after no-tool-progress timeout and succeeds on the next attempt', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'orchestrace-replay-planning-stall-retry-'));
@@ -781,8 +810,9 @@ describe('orchestrate replay capture', () => {
 
       const output = outputs.get('task-1');
       expect(output?.status).toBe('failed');
+      expect(output?.error).toContain('Planning stagnated across attempts with no tool calls');
       expect(output?.error).toContain('no tool progress');
-      expect(output?.replay?.attempts.length).toBe(3);
+      expect(output?.replay?.attempts.length).toBe(2);
       expect(output?.replay?.attempts.every((attempt) => attempt.phase === 'planning')).toBe(true);
     } finally {
       await rm(cwd, { recursive: true, force: true });
@@ -1039,8 +1069,9 @@ describe('orchestrate replay capture', () => {
 
       const output = outputs.get('task-1');
       expect(output?.status).toBe('failed');
+      expect(output?.error).toContain('Planning stagnated across attempts with no tool calls');
       expect(output?.error).toContain('tokens before first tool call');
-      expect(output?.replay?.attempts.length).toBe(3);
+      expect(output?.replay?.attempts.length).toBe(2);
       expect(output?.replay?.attempts.every((attempt) => attempt.phase === 'planning')).toBe(true);
     } finally {
       await rm(cwd, { recursive: true, force: true });
