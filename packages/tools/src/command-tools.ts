@@ -105,18 +105,25 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
         const hasPathError = hasRipgrepPathError(stderr);
 
         if (hasPathError) {
-          const fallback = await fallbackSearchFromFs({
-            cwd: options.cwd,
-            target,
-            relTarget,
-            query,
-            useRegex,
-            glob,
-            maxChars: options.maxOutputChars ?? 16000,
-          });
-          return {
-            content: fallback,
-          };
+          try {
+            const fallback = await fallbackSearchFromFs({
+              cwd: options.cwd,
+              target,
+              relTarget,
+              query,
+              useRegex,
+              glob,
+              maxChars: options.maxOutputChars ?? 16000,
+            });
+            return {
+              content: fallback,
+            };
+          } catch (error) {
+            return {
+              content: error instanceof Error ? error.message : String(error),
+              isError: true,
+            };
+          }
         }
 
         if (result.exitCode === 1 && result.stdout.trim().length === 0) {
