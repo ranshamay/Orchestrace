@@ -24,6 +24,17 @@ export {
   DEFAULT_TASK_PROMPT_MAX_LENGTH,
   validateTaskPromptInput,
 } from './session/validation.js';
+export {
+  extractShellCommand,
+  parseShellCommandToArgv,
+  validateExecutableShellCommand,
+  validateShellInput,
+} from './validation/shell-command.js';
+export type {
+  ParsedShellCommand,
+  ShellExecutionValidation,
+} from './validation/shell-command.js';
+
 export type {
   TaskPromptValidationErrorCode,
   TaskPromptValidationResult,

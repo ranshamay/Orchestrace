@@ -2,7 +2,9 @@ import { constants } from 'node:fs';
 import { access, readdir, readFile, realpath, stat } from 'node:fs/promises';
 import { extname, isAbsolute, join } from 'node:path';
 import { Type } from '@mariozechner/pi-ai';
+import { validateExecutableShellCommand } from '@orchestrace/core';
 import type { AgentToolsetOptions, RegisteredAgentTool } from './types.js';
+
 import { resolveWorkspacePath, toWorkspaceRelative } from './path-utils.js';
 import { formatCommandOutput, runCommand } from './command-tools/command-runner.js';
 import {
@@ -10,8 +12,8 @@ import {
   asString,
   looksDestructive,
   matchesAllowedPrefix,
-  validateShellCommandPayload,
 } from './command-tools/guards.js';
+
 
 const GITHUB_API_BASE_URL = 'https://api.github.com';
 const PLAYWRIGHT_ALLOWED_COMMANDS = new Set([
@@ -29,10 +31,8 @@ const MAX_COMMAND_BATCH_ITEMS = 200;
 const DEFAULT_COMMAND_BATCH_MAX_CHARS_PER_COMMAND = 8000;
 const DEFAULT_COMMAND_BATCH_MIN_CONCURRENCY = 1;
 
-function resolveShellExecutable(): string {
-  const envShell = process.env.SHELL?.trim();
-  return envShell && envShell.length > 0 ? envShell : 'sh';
-}
+// Shell executable resolution removed: run_command tools execute validated program+argv directly.
+
 
 interface CommandToolOptions extends AgentToolsetOptions {
   includeRunCommandTool: boolean;
@@ -57,8 +57,8 @@ interface SearchFilesErrorDetails {
 
 
 export function createCommandTools(options: CommandToolOptions): RegisteredAgentTool[] {
-  const shellExecutable = resolveShellExecutable();
   const tools: RegisteredAgentTool[] = [
+
     {
       tool: {
         name: 'search_files',
@@ -479,19 +479,20 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
             };
           }
 
-          const payloadValidation = validateShellCommandPayload(command);
-          if (!payloadValidation.ok) {
+                    const payloadValidation = validateExecutableShellCommand(command);
+          if (!payloadValidation.ok || !payloadValidation.parsed) {
             return {
               content: `${payloadValidation.reason ?? 'Blocked non-command payload.'} Payload: ${command}`,
               isError: true,
             };
           }
 
-          const result = await runCommand(shellExecutable, ['-lc', command], {
+          const result = await runCommand(payloadValidation.parsed.program, payloadValidation.parsed.args, {
             cwd,
             timeoutMs: options.commandTimeoutMs ?? 120000,
             signal,
           });
+
 
           const output = formatCommandOutput(result, options.maxOutputChars ?? 24000);
           const header = `cwd: ${toWorkspaceRelative(options.cwd, cwd)}\nexitCode: ${result.exitCode}`;
@@ -566,8 +567,8 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
               };
             }
 
-            const payloadValidation = validateShellCommandPayload(entry.command);
-            if (!payloadValidation.ok) {
+                        const payloadValidation = validateExecutableShellCommand(entry.command);
+            if (!payloadValidation.ok || !payloadValidation.parsed) {
               return {
                 index,
                 command: entry.command,
@@ -579,11 +580,12 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
               };
             }
 
-            const result = await runCommand(shellExecutable, ['-lc', entry.command], {
+            const result = await runCommand(payloadValidation.parsed.program, payloadValidation.parsed.args, {
               cwd,
               timeoutMs: options.commandTimeoutMs ?? 120000,
               signal,
             });
+
 
             return {
               index,
