@@ -222,20 +222,11 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
           }
         }
 
-                const output = formatCommandOutput(result, options.maxOutputChars ?? 16000);
+                        const output = formatCommandOutput(result, options.maxOutputChars ?? 16000);
         const hasMatches = result.stdout.trim().length > 0;
 
-        // Prefer successful match output when available. ripgrep may emit stderr
-        // diagnostics in mixed-result scenarios; only escalate error behavior
-        // when there are no matches to return.
-        if (hasMatches) {
-          return {
-            content: output,
-            isError: false,
-          };
-        }
-
         if (result.exitCode === 2 && useRegex) {
+
           return createSearchFilesErrorResult({
             errorType: 'invalid_regex',
             message: 'Invalid regex query.',
@@ -253,7 +244,7 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
           return { content: '(no matches)', isError: false };
         }
 
-        if (hasPathError) {
+                if (hasPathError) {
           const targetKindAfterSearch = await getPathKind(canonicalTarget ?? target);
                     if (targetKindAfterSearch === 'missing') {
             return {
@@ -297,7 +288,18 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
             });
           }
         }
+
+        // Prefer successful match output when available after deterministic
+        // path-missing diagnostics have been handled.
+        if (hasMatches) {
+          return {
+            content: output,
+            isError: false,
+          };
+        }
+
         if (result.exitCode > 1) {
+
           return createSearchFilesErrorResult({
             errorType: 'command_failed',
             message: output,
