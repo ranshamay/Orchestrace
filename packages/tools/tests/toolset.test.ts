@@ -912,7 +912,7 @@ describe('run_command safety', () => {
     expect(result.content).toContain('Blocked potentially destructive command');
   });
 
-  it('honors run command allowlist prefixes', async () => {
+    it('honors run command allowlist prefixes', async () => {
     const cwd = await makeWorkspace();
     const toolset = createAgentToolset({
       cwd,
@@ -931,11 +931,50 @@ describe('run_command safety', () => {
     expect(result.content).toContain('Blocked command outside allowlist');
   });
 
-  it('runs command batches in parallel and reports blocked items', async () => {
+  it('rejects markdown-like single-line payloads before shell execution', async () => {
     const cwd = await makeWorkspace();
     const toolset = createAgentToolset({ cwd, phase: 'implementation', taskType: 'code' });
 
     const result = await toolset.executeTool({
+      id: '1',
+      name: 'run_command',
+      arguments: { command: '## Task: run git status' },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content).toContain('Blocked non-command payload');
+    expect(result.content).toContain('markdown/instructional');
+  });
+
+  it('rejects multiline observer-style payloads before shell execution', async () => {
+    const cwd = await makeWorkspace();
+    const toolset = createAgentToolset({ cwd, phase: 'implementation', taskType: 'code' });
+
+    const result = await toolset.executeTool({
+      id: '1',
+      name: 'run_command',
+      arguments: {
+        command: [
+          '[Observer Fix] Task prompt passed directly as shell command',
+          '',
+          'Category: architecture | Severity: critical',
+          '',
+          '## Task',
+          'Route to coding agent prompt field.',
+        ].join('\n'),
+      },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content).toContain('Blocked non-command payload');
+    expect(result.content).toContain('multiple lines');
+  });
+
+  it('runs command batches in parallel and reports blocked items', async () => {
+    const cwd = await makeWorkspace();
+    const toolset = createAgentToolset({ cwd, phase: 'implementation', taskType: 'code' });
+
+        const result = await toolset.executeTool({
       id: '1',
       name: 'run_command_batch',
       arguments: {
@@ -943,6 +982,7 @@ describe('run_command safety', () => {
           { command: 'echo first' },
           { command: 'echo second' },
           { command: 'git reset --hard' },
+          { command: '## Task: run git status' },
         ],
         concurrency: 3,
       },
@@ -956,13 +996,15 @@ describe('run_command safety', () => {
       commands: Array<{ command: string; ok: boolean; blocked: boolean; output: string }>;
     };
 
-    expect(parsed.total).toBe(3);
+    expect(parsed.total).toBe(4);
     expect(parsed.completed).toBe(2);
-    expect(parsed.failed).toBe(1);
+    expect(parsed.failed).toBe(2);
     expect(parsed.commands[0]).toMatchObject({ command: 'echo first', ok: true, blocked: false });
     expect(parsed.commands[1]).toMatchObject({ command: 'echo second', ok: true, blocked: false });
     expect(parsed.commands[2]).toMatchObject({ command: 'git reset --hard', ok: false, blocked: true });
     expect(parsed.commands[2].output).toContain('Blocked potentially destructive command');
+    expect(parsed.commands[3]).toMatchObject({ command: '## Task: run git status', ok: false, blocked: true });
+    expect(parsed.commands[3].output).toContain('Blocked non-command payload');
   });
 
   it('run_command_batch supports adaptive concurrency metadata', async () => {
