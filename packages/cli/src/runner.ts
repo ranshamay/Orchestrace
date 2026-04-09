@@ -1399,12 +1399,10 @@ async function main(): Promise<void> {
       : errorText;
 
     const cleanupErrors = lifecycle.diagnostics.cleanupErrors;
-    const cleanupErrorSuffix = cleanupErrors.length > 0
-      ? `\nCleanup errors: ${cleanupErrors.map((entry) => `${entry.phase}:${entry.actionLabel}:${errorMsg(entry.error)}`).join(' | ')}`
-      : '';
+    const errorWithCleanup = appendCleanupErrors(finalError, cleanupErrors);
 
-    await emit({ time: t, type: 'session:error-change', payload: { error: `${finalError}${cleanupErrorSuffix}` } });
-    const llmStatus = makeLlmStatus('failed', `${finalError}${cleanupErrorSuffix}`, deliveryError ? 'delivery_failure' : lifecycleError.type);
+    await emit({ time: t, type: 'session:error-change', payload: { error: errorWithCleanup } });
+    const llmStatus = makeLlmStatus('failed', errorWithCleanup, deliveryError ? 'delivery_failure' : lifecycleError.type);
     lastLlmStatusEmission = {
       key: llmStatusIdentityKey(llmStatus),
       emittedAt: parseTimestamp(llmStatus.updatedAt),
