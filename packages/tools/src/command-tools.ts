@@ -51,30 +51,23 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
           })),
         }),
       },
-      execute: async (toolArgs, signal) => {
-        const queryValidation = validateSearchQuery(toolArgs.query);
-        if (!queryValidation.ok) {
+            execute: async (toolArgs, signal) => {
+        const sanitizedQueryAndMode = sanitizeSearchQueryAndMode({
+          query: toolArgs.query,
+          queryMode: asString(toolArgs.queryMode),
+          regex: typeof toolArgs.regex === 'boolean' ? toolArgs.regex : undefined,
+        });
+        if (!sanitizedQueryAndMode.ok) {
           return {
-            content: queryValidation.error,
+            content: sanitizedQueryAndMode.error,
             isError: true,
           };
         }
 
-        const queryModeValidation = validateQueryMode(asString(toolArgs.queryMode));
-        if (!queryModeValidation.ok) {
-          return {
-            content: queryModeValidation.error,
-            isError: true,
-          };
-        }
-
-        const regexFlag = typeof toolArgs.regex === 'boolean' ? toolArgs.regex : undefined;
-        const useRegex = queryModeValidation.value !== undefined
-          ? queryModeValidation.value === 'regex'
-          : regexFlag ?? false;
+        const { query, useRegex } = sanitizedQueryAndMode.value;
 
         if (useRegex) {
-          const regexValidation = validateRegexQuery(queryValidation.value);
+          const regexValidation = validateRegexQuery(query);
           if (!regexValidation.ok) {
             return {
               content: regexValidation.error,
@@ -82,6 +75,7 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
             };
           }
         }
+
 
         const globValidation = validateSearchGlob(toolArgs.glob);
         if (!globValidation.ok) {
@@ -109,7 +103,7 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
           };
         }
 
-        const args = ['-n', '--no-heading', '--color', 'never', '-e', queryValidation.value];
+                const args = ['-n', '--no-heading', '--color', 'never', '-e', query];
         if (!useRegex) {
           args.push('--fixed-strings');
         }
@@ -147,7 +141,7 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
               cwd: options.cwd,
               target,
               relTarget,
-              query: queryValidation.value,
+                            query,
               useRegex,
               glob: globValidation.value,
               maxChars: options.maxOutputChars ?? 16000,
@@ -727,7 +721,62 @@ type ValidationResult<T> =
   | { ok: true; value: T }
   | { ok: false; error: string };
 
+interface SanitizedSearchQueryAndModeInput {
+  query: unknown;
+  queryMode: string | undefined;
+  regex: boolean | undefined;
+}
+
+function sanitizeSearchQueryAndMode(input: SanitizedSearchQueryAndModeInput): ValidationResult<{ query: string; useRegex: boolean }> {
+  const queryValidation = validateSearchQuery(input.query);
+  if (!queryValidation.ok) {
+    return queryValidation;
+  }
+
+  const queryModeValidation = validateQueryMode(input.queryMode);
+  if (!queryModeValidation.ok) {
+    return queryModeValidation;
+  }
+
+  const hasExplicitRegexIntent = queryModeValidation.value === 'regex' || input.regex === true;
+  let useRegex = queryModeValidation.value !== undefined
+    ? queryModeValidation.value === 'regex'
+    : input.regex ?? false;
+
+  // Prefer literal semantics for shell-like query text unless regex intent is explicit.
+  if (!hasExplicitRegexIntent && isRiskyLiteralCandidate(queryValidation.value)) {
+    useRegex = false;
+  }
+
+  return {
+    ok: true,
+    value: {
+      query: queryValidation.value,
+      useRegex,
+    },
+  };
+}
+
+function isRiskyLiteralCandidate(query: string): boolean {
+  const normalized = query.trim().toLowerCase();
+
+  if (/\b(?:ba|z)?sh\s+-[cl]\b/.test(normalized)) {
+    return true;
+  }
+
+  if (/\b(?:exec|eval)\b/.test(normalized)) {
+    return true;
+  }
+
+  if (/\s(?:--?[a-z][a-z0-9-]*)\b/.test(normalized)) {
+    return true;
+  }
+
+  return false;
+}
+
 function validateSearchQuery(rawQuery: unknown): ValidationResult<string> {
+
   if (typeof rawQuery !== 'string') {
     return {
       ok: false,
