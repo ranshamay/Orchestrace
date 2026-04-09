@@ -6,6 +6,8 @@ import {
   type ToolResultMessage,
 } from '@mariozechner/pi-ai';
 import type { LlmCompletionOptions, LlmToolset } from '../types.js';
+
+
 import { consumeStream, getUsage } from './stream.js';
 import { formatToolPayload, toErrorMessage } from './utils.js';
 import { createTimeoutSignal } from './timeout.js';
@@ -158,12 +160,13 @@ async function executeToolCalls(
     try {
       coerceStringifiedArrayArgs(toolCall);
       validatedArgs = validateToolCall(tools, toolCall) as Record<string, unknown>;
-      const toolResult = await executeToolWithSubagentBatchRetry({
+            const toolResult = await executeToolWithEditFilesDedup({
         toolset,
         toolCall,
         arguments: validatedArgs,
         signal,
       });
+
 
       payload = {
         content: toolResult.content,
@@ -241,7 +244,156 @@ const SUBAGENT_RETRY_CONTEXT_MAX_LINE_CHARS = 360;
 const SUBAGENT_BATCH_IDENTICAL_FAILURE_CAP = 2;
 const SUBAGENT_BATCH_RETRY_BASE_DELAY_MS = 200;
 
+async function executeToolWithEditFilesDedup(params: {
+  toolset: LlmToolset;
+  toolCall: ToolCall;
+  arguments: Record<string, unknown>;
+  signal?: AbortSignal;
+}): Promise<ToolExecutionPayload> {
+  const { toolset, toolCall, arguments: toolArgs, signal } = params;
+
+  if (toolCall.name !== 'edit_files') {
+    return executeToolWithSubagentBatchRetry(params);
+  }
+
+  const editFiles = getEditFileEntries(toolArgs.files);
+  if (editFiles.length === 0 || !hasDuplicateEditPaths(editFiles)) {
+    return executeToolWithSubagentBatchRetry(params);
+  }
+
+  return executeDedupedEditFilesBatch({
+    toolset,
+    toolCall,
+    toolArgs,
+    editFiles,
+    signal,
+  });
+}
+
+function getEditFileEntries(value: unknown): Array<Record<string, unknown>> {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .filter((entry): entry is Record<string, unknown> => Boolean(entry) && typeof entry === 'object')
+    .filter((entry) => typeof entry.path === 'string' && entry.path.trim().length > 0);
+}
+
+function hasDuplicateEditPaths(editFiles: Array<Record<string, unknown>>): boolean {
+  const seen = new Set<string>();
+  for (const edit of editFiles) {
+    const key = String(edit.path);
+    if (seen.has(key)) {
+      return true;
+    }
+    seen.add(key);
+  }
+
+  return false;
+}
+
+async function executeDedupedEditFilesBatch(params: {
+  toolset: LlmToolset;
+  toolCall: ToolCall;
+  toolArgs: Record<string, unknown>;
+  editFiles: Array<Record<string, unknown>>;
+  signal?: AbortSignal;
+}): Promise<ToolExecutionPayload> {
+  const { toolset, toolCall, toolArgs, editFiles, signal } = params;
+
+  const aggregateFiles: unknown[] = [];
+  const aggregateDetails: unknown[] = [];
+  let total = 0;
+  let successes = 0;
+  let failures = 0;
+  let hadError = false;
+
+  for (const edit of editFiles) {
+    const perFileArgs: Record<string, unknown> = {
+      ...toolArgs,
+      files: [edit],
+    };
+
+    const result = await executeToolWithSubagentBatchRetry({
+      toolset,
+      toolCall,
+      arguments: perFileArgs,
+      signal,
+    });
+
+    hadError = hadError || (result.isError ?? false);
+    if (result.details !== undefined) {
+      aggregateDetails.push(result.details);
+    }
+
+    const parsed = parseEditFilesBatchResult(result.content);
+    if (parsed) {
+      total += parsed.total;
+      successes += parsed.successes;
+      failures += parsed.failures;
+      if (Array.isArray(parsed.files)) {
+        aggregateFiles.push(...parsed.files);
+      }
+    } else {
+      total += 1;
+      if (result.isError ?? false) {
+        failures += 1;
+      } else {
+        successes += 1;
+      }
+      aggregateFiles.push({
+        path: typeof edit.path === 'string' ? edit.path : 'unknown',
+        ok: !(result.isError ?? false),
+        error: result.isError ? result.content : undefined,
+      });
+    }
+  }
+
+  const payload = {
+    total,
+    successes,
+    failures,
+    files: aggregateFiles,
+  };
+
+  return {
+    content: JSON.stringify(payload, null, 2),
+    isError: hadError,
+    details: aggregateDetails.length > 0 ? { splitBatch: true, results: aggregateDetails } : { splitBatch: true },
+  };
+}
+
+function parseEditFilesBatchResult(content: string): {
+  total: number;
+  successes: number;
+  failures: number;
+  files: unknown[];
+} | undefined {
+  try {
+    const parsed = JSON.parse(content) as Record<string, unknown>;
+    const files = Array.isArray(parsed.files) ? parsed.files : [];
+    const total = typeof parsed.total === 'number' ? parsed.total : files.length;
+    const successes = typeof parsed.successes === 'number'
+      ? parsed.successes
+      : files.filter((entry) => getRecord(entry)?.ok === true).length;
+    const failures = typeof parsed.failures === 'number'
+      ? parsed.failures
+      : Math.max(total - successes, 0);
+
+    return {
+      total,
+      successes,
+      failures,
+      files,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
 async function executeToolWithSubagentBatchRetry(params: {
+
   toolset: LlmToolset;
   toolCall: ToolCall;
   arguments: Record<string, unknown>;
@@ -661,7 +813,10 @@ function isDeterministicEditValidationFailure(toolName: string, errorContent: st
   }
 
   const normalized = errorContent.toLowerCase();
-  return normalized.includes('missing newtext') || normalized.includes('no-op edit is not allowed');
+    return normalized.includes('missing newtext')
+    || normalized.includes('no-op edit is not allowed')
+    || normalized.includes('duplicate paths are not allowed');
+
 }
 
 function getToolCalls(message: AssistantMessage): ToolCall[] {
