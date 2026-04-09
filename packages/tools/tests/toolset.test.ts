@@ -832,7 +832,7 @@ describe('search_files tool', () => {
     expect(result.content.toLowerCase()).not.toContain('no such file or directory');
   });
 
-  it('treats shell-like query text such as sh -c as a literal search by default', async () => {
+    it('treats shell-like query text such as sh -c as a literal search by default', async () => {
     const cwd = await makeWorkspace();
     await writeFile(
       join(cwd, 'src', 'shell-like.txt'),
@@ -856,7 +856,39 @@ describe('search_files tool', () => {
     expect(result.content.toLowerCase()).not.toContain('no such file or directory');
   });
 
-    it('honors explicit regex mode even for shell-like query text', async () => {
+  it('treats observer regression tokens like sh -lc, dispatch, and initialize as literal query text', async () => {
+    const cwd = await makeWorkspace();
+    await writeFile(
+      join(cwd, 'src', 'observer-regression-tokens.txt'),
+      [
+        'sh -lc',
+        'dispatch',
+        'initialize',
+        'initialize dispatcher',
+      ].join('\n') + '\n',
+      'utf-8',
+    );
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+
+    const queries = ['sh -lc', 'dispatch', 'initialize', 'initialize dispatcher'];
+    for (const query of queries) {
+      const result = await toolset.executeTool({
+        id: `observer-token-${query}`,
+        name: 'search_files',
+        arguments: {
+          query,
+          path: 'src',
+        },
+      });
+
+      expect(result.isError).toBeFalsy();
+      expect(result.content).toContain(query);
+      expect(result.content.toLowerCase()).not.toContain('no such file or directory');
+      expect(result.content.toLowerCase()).not.toContain('os error 2');
+    }
+  });
+
+        it('honors explicit regex mode even for shell-like query text', async () => {
     const cwd = await makeWorkspace();
     await writeFile(
       join(cwd, 'src', 'shell-like-regex.txt'),
@@ -878,6 +910,30 @@ describe('search_files tool', () => {
     expect(result.isError).toBeFalsy();
     expect(result.content).toContain('shell-like-regex.txt:1:sh -c');
     expect(result.content).toContain('shell-like-regex.txt:2:shh -c');
+  });
+
+  it('returns a deterministic invalid_arguments error when queryMode and regex disagree', async () => {
+    const cwd = await makeWorkspace();
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+
+    const result = await toolset.executeTool({
+      id: 'query-mode-conflict',
+      name: 'search_files',
+      arguments: {
+        query: 'dispatch',
+        queryMode: 'literal',
+        regex: true,
+        path: 'src',
+      },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content).toBe('Invalid query mode: queryMode and regex disagree. Use queryMode only, or make both values consistent.');
+    expect(result.details).toMatchObject({
+      errorType: 'invalid_arguments',
+      toolName: 'search_files',
+      path: 'src',
+    });
   });
 
     it('treats execFileAsync call snippets as plain literal query text by default', async () => {
