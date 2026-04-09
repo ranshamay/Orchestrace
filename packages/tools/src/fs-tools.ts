@@ -1,5 +1,7 @@
-import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
+import { createReadStream } from 'node:fs';
+import { mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
+
 import { Type } from '@mariozechner/pi-ai';
 import type { AgentToolsetOptions, RegisteredAgentTool } from './types.js';
 import type { FileReadCache, SessionFileReadCache } from './file-read-cache.js';
@@ -12,7 +14,11 @@ interface FilesystemToolOptions extends AgentToolsetOptions {
 
 const DEFAULT_READ_MAX_CHARS = 20000;
 const DEFAULT_READ_BATCH_MAX_CHARS = 8000;
+const READ_LARGE_FILE_THRESHOLD_BYTES = 256 * 1024;
+const READ_STREAM_CHUNK_SIZE_BYTES = 64 * 1024;
+const TRUNCATION_MARKER = '\n... (truncated)';
 const DEFAULT_BATCH_READ_CONCURRENCY = 16;
+
 const DEFAULT_BATCH_WRITE_CONCURRENCY = 12;
 const DEFAULT_BATCH_EDIT_CONCURRENCY = 12;
 const MAX_BATCH_CONCURRENCY = 128;
@@ -513,15 +519,89 @@ async function readWorkspaceFileSliceUncached(
     maxChars: number;
   },
 ): Promise<string> {
-  const content = await readFile(target, 'utf-8');
-  const lines = content.split(/\r?\n/);
   const from = Math.max(1, options.startLine);
-  const to = options.endLine ? Math.min(options.endLine, lines.length) : lines.length;
-  const sliced = lines.slice(from - 1, to).join('\n');
-  return sliced.length > options.maxChars
-    ? `${sliced.slice(0, options.maxChars)}\n... (truncated)`
-    : sliced;
+  const to = options.endLine;
+
+  const fileStats = await stat(target);
+  if (fileStats.size >= READ_LARGE_FILE_THRESHOLD_BYTES) {
+    const streamed = await readWorkspaceFileSliceStreamed(target, {
+      startLine: from,
+      endLine: to,
+    });
+    return formatTruncatedSlice(streamed, options.maxChars);
+  }
+
+  const content = await readFile(target, 'utf-8');
+  const sliced = sliceTextByLines(content, from, to);
+  return formatTruncatedSlice(sliced, options.maxChars);
 }
+
+async function readWorkspaceFileSliceStreamed(
+  target: string,
+  options: {
+    startLine: number;
+    endLine?: number;
+  },
+): Promise<string> {
+  const chunks: string[] = [];
+  let carry = '';
+  let lineNumber = 1;
+
+  const stream = createReadStream(target, {
+    encoding: 'utf-8',
+    highWaterMark: READ_STREAM_CHUNK_SIZE_BYTES,
+  });
+
+  const maybeCollectLine = (line: string): boolean => {
+    const withinStart = lineNumber >= options.startLine;
+    const withinEnd = options.endLine === undefined || lineNumber <= options.endLine;
+
+    if (withinStart && withinEnd) {
+      chunks.push(line);
+    }
+
+    const shouldStop = options.endLine !== undefined && lineNumber >= options.endLine;
+    lineNumber += 1;
+    return shouldStop;
+  };
+
+  for await (const chunk of stream) {
+    const piece = carry + chunk;
+    const normalized = piece.replace(/\r\n/g, '\n');
+    const lines = normalized.split('\n');
+    carry = lines.pop() ?? '';
+
+    for (const line of lines) {
+      if (maybeCollectLine(line)) {
+        stream.destroy();
+        break;
+      }
+    }
+
+    if (stream.destroyed) {
+      break;
+    }
+  }
+
+  if (!stream.destroyed && carry.length > 0) {
+    maybeCollectLine(carry.replace(/\r/g, ''));
+  }
+
+  return chunks.join('\n');
+}
+
+function sliceTextByLines(content: string, startLine: number, endLine?: number): string {
+  const lines = content.split(/\r?\n/);
+  const to = endLine ? Math.min(endLine, lines.length) : lines.length;
+  return lines.slice(startLine - 1, to).join('\n');
+}
+
+function formatTruncatedSlice(content: string, maxChars: number): string {
+  return content.length > maxChars
+    ? `${content.slice(0, maxChars)}${TRUNCATION_MARKER}`
+    : content;
+}
+
 
 function createRevisionResolver(cwd: string): () => Promise<string> {
   let cachedRevision: string | undefined;

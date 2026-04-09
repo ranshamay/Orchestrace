@@ -354,7 +354,50 @@ describe('batch filesystem tools', () => {
     expect(parsedVerify.files[1].content).toContain('value = 1');
   });
 
+    it('read_file returns correct line slices for large files without full-read truncation artifacts', async () => {
+    const cwd = await makeWorkspace();
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+
+    const lines = Array.from({ length: 30_000 }, (_, index) => `line-${index + 1}`);
+    await writeFile(join(cwd, 'src', 'large.txt'), `${lines.join('\n')}\n`, 'utf-8');
+
+    const result = await toolset.executeTool({
+      id: '1',
+      name: 'read_file',
+      arguments: {
+        path: 'src/large.txt',
+        startLine: 20_000,
+        endLine: 20_003,
+      },
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.content).toBe('line-20000\nline-20001\nline-20002\nline-20003');
+  });
+
+  it('read_file applies deterministic maxChars truncation marker on large file reads', async () => {
+    const cwd = await makeWorkspace();
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+
+    const lines = Array.from({ length: 30_000 }, (_, index) => `entry-${index + 1}`);
+    await writeFile(join(cwd, 'src', 'large-truncate.txt'), `${lines.join('\n')}\n`, 'utf-8');
+
+    const result = await toolset.executeTool({
+      id: '1',
+      name: 'read_file',
+      arguments: {
+        path: 'src/large-truncate.txt',
+        maxChars: 250,
+      },
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.content.endsWith('\n... (truncated)')).toBe(true);
+    expect(result.content.length).toBe(250 + '\n... (truncated)'.length);
+  });
+
   it('read_files supports adaptive concurrency metadata', async () => {
+
     const cwd = await makeWorkspace();
     const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
 
