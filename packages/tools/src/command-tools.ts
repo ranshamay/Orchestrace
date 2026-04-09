@@ -1045,32 +1045,11 @@ function looksLikeRipgrepPathSpecFragment(query: string): boolean {
     return false;
   }
 
-  if (/\s--\s/.test(` ${normalized} `)) {
-    return true;
-  }
-
-  const tokens = normalized.split(/\s+/);
-  const first = (tokens[0] ?? '').toLowerCase();
-
-  if (
-    first === '--'
-    || first === '-g'
-    || first === '--glob'
-    || first.startsWith('--glob=')
-    || first === '--iglob'
-    || first.startsWith('--iglob=')
-    || first === '-t'
-    || first === '--type'
-    || first.startsWith('--type=')
-    || first === '-T'
-    || first === '--type-not'
-    || first.startsWith('--type-not=')
-  ) {
-    return true;
-  }
-
-  return false;
+  // Reject explicit ripgrep path separator fragments (e.g., "foo -- src/**").
+  // Other shell-like or option-like text should remain valid literal query text.
+  return /\s--\s/.test(` ${normalized} `);
 }
+
 
 
 function validateQueryMode(rawMode: string | undefined): ValidationResult<'regex' | 'literal' | undefined> {

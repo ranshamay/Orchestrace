@@ -785,7 +785,7 @@ describe('search_files tool', () => {
     expect(result.content.toLowerCase()).not.toContain('no such file or directory');
   });
 
-  it('rejects query payloads that look like ripgrep path/filter fragments', async () => {
+    it('rejects query payloads that include ripgrep path separator fragments', async () => {
     const cwd = await makeWorkspace();
     const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
 
@@ -793,7 +793,7 @@ describe('search_files tool', () => {
       id: 'invalid-query-fragment',
       name: 'search_files',
       arguments: {
-        query: '--glob src/**/*.ts',
+        query: 'dispatch -- src/**/*.ts',
         path: 'src',
       },
     });
