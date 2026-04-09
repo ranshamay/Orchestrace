@@ -703,7 +703,7 @@ describe('search_files tool', () => {
     expect(result.content).toContain('shell-like-regex.txt:2:shh -c');
   });
 
-  it('treats execFileAsync call snippets as plain literal query text by default', async () => {
+    it('treats execFileAsync call snippets as plain literal query text by default', async () => {
     const cwd = await makeWorkspace();
     await writeFile(
       join(cwd, 'src', 'exec-snippet.ts'),
@@ -726,6 +726,43 @@ describe('search_files tool', () => {
     expect(result.content.toLowerCase()).not.toContain('no such file or directory');
     expect(result.content.toLowerCase()).not.toContain('os error 2');
   });
+
+  it('keeps repeated common-pattern searches on the same file non-error', async () => {
+    const cwd = await makeWorkspace();
+    await writeFile(
+      join(cwd, 'src', 'observer-patterns.ts'),
+      [
+        "const cmd = execFileAsync('sh', ['-lc', 'echo hi']);",
+        'subagent_spawn_batch(agentRequests);',
+        'github-copilot',
+      ].join('\n') + '\n',
+      'utf-8',
+    );
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+
+    const patterns = [
+      "execFileAsync('sh', ['-lc',",
+      'subagent_spawn_batch',
+      'github-copilot',
+    ];
+
+    for (const pattern of patterns) {
+      const result = await toolset.executeTool({
+        id: `repeat-${pattern}`,
+        name: 'search_files',
+        arguments: {
+          query: pattern,
+          path: 'src/observer-patterns.ts',
+        },
+      });
+
+            expect(result.isError).toBeFalsy();
+      expect(result.content).toContain(pattern);
+      expect(result.content.toLowerCase()).not.toContain('no such file or directory');
+      expect(result.content.toLowerCase()).not.toContain('os error 2');
+    }
+  });
+
 
   it('treats unmatched punctuation-heavy function call fragments as literal search text', async () => {
     const cwd = await makeWorkspace();

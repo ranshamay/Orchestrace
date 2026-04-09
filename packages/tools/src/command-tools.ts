@@ -223,7 +223,20 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
           });
         }
 
+                        const hasMatches = result.stdout.trim().length > 0;
+
         const hasPathError = hasRipgrepPathError(stderr);
+
+        // Prefer successful match output when available. ripgrep may emit stderr
+        // diagnostics in mixed-result scenarios; only escalate path-missing behavior
+        // when there are no matches to return.
+        if (hasMatches) {
+          const output = formatCommandOutput(result, options.maxOutputChars ?? 16000);
+          return {
+            content: output,
+            isError: false,
+          };
+        }
 
         if (hasPathError) {
           try {
@@ -253,11 +266,12 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
           }
         }
 
-        if (result.exitCode === 1 && result.stdout.trim().length === 0) {
+        if (result.exitCode === 1) {
           return { content: '(no matches)' };
         }
 
         const output = formatCommandOutput(result, options.maxOutputChars ?? 16000);
+
         if (result.exitCode > 1) {
           return createSearchFilesErrorResult({
             errorType: 'command_failed',
