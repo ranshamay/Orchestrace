@@ -930,6 +930,10 @@ interface SanitizedSearchQueryAndModeInput {
   regex: boolean | undefined;
 }
 
+const DISALLOWED_STANDALONE_TOOL_QUERY_NAMES = new Set([
+  'subagent_spawn',
+]);
+
 function sanitizeSearchQueryAndMode(input: SanitizedSearchQueryAndModeInput): ValidationResult<{ query: string; useRegex: boolean }> {
   const queryValidation = validateSearchQuery(input.query);
   if (!queryValidation.ok) {
@@ -945,15 +949,25 @@ function sanitizeSearchQueryAndMode(input: SanitizedSearchQueryAndModeInput): Va
     queryMode: queryModeValidation.value,
     regex: input.regex,
   });
+  const useRegex = resolvedMode === 'regex';
+
+  const queryShapeValidation = validateSearchQueryShape({
+    query: queryValidation.value,
+    useRegex,
+  });
+  if (!queryShapeValidation.ok) {
+    return queryShapeValidation;
+  }
 
   return {
     ok: true,
     value: {
       query: queryValidation.value,
-      useRegex: resolvedMode === 'regex',
+      useRegex,
     },
   };
 }
+
 
 function resolveSearchQueryMode(input: {
   queryMode: 'regex' | 'literal' | undefined;
@@ -1020,6 +1034,40 @@ function validateSearchQuery(rawQuery: unknown): ValidationResult<string> {
 
   return { ok: true, value: trimmedQuery };
 }
+
+function validateSearchQueryShape(input: { query: string; useRegex: boolean }): ValidationResult<string> {
+  const normalized = input.query.trim();
+
+  if (looksLikeStandaloneToolNameQuery(normalized)) {
+    return {
+      ok: false,
+      error: 'Invalid query: standalone tool names are not valid search terms. Provide source text or identifier context.',
+    };
+  }
+
+  if (!input.useRegex && looksLikeShellCommandQuery(normalized)) {
+    return {
+      ok: false,
+      error: 'Invalid query: query appears to be a shell command invocation. Provide search text instead of runnable command syntax.',
+    };
+  }
+
+  return { ok: true, value: normalized };
+}
+
+function looksLikeStandaloneToolNameQuery(query: string): boolean {
+  return DISALLOWED_STANDALONE_TOOL_QUERY_NAMES.has(query.toLowerCase());
+}
+
+function looksLikeShellCommandQuery(query: string): boolean {
+  const normalized = query.trim();
+  if (normalized.length === 0) {
+    return false;
+  }
+
+  return /^(?:sh|bash|zsh|fish|pwsh|powershell)\s+-[a-z]/i.test(normalized);
+}
+
 
 function hasUnsupportedSearchControlChars(query: string): boolean {
   return /[\u0001-\u0008\u000B\u000C\u000E-\u001F\u007F]/.test(query);

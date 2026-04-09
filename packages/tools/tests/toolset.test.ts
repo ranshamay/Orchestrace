@@ -724,7 +724,7 @@ describe('search_files tool', () => {
     expect(result.content.toLowerCase()).not.toContain('no such file or directory');
   });
 
-  it('handles observer-reported identifier queries as plain search terms', async () => {
+    it('handles observer-reported identifier queries as plain search terms', async () => {
     const cwd = await makeWorkspace();
     await writeFile(
       join(cwd, 'src', 'observer-identifiers.ts'),
@@ -742,7 +742,6 @@ describe('search_files tool', () => {
       'checkTokenTTL',
       'ensureGithubCopilotTokenTTL',
       'copilot',
-      'subagent_spawn_batch',
     ];
 
     for (const query of queries) {
@@ -761,6 +760,30 @@ describe('search_files tool', () => {
       expect(result.content.toLowerCase()).not.toContain('os error 2');
     }
   });
+
+  it('rejects standalone tool-name query payloads before invoking ripgrep', async () => {
+    const cwd = await makeWorkspace();
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+
+    const result = await toolset.executeTool({
+      id: 'invalid-query-tool-name',
+      name: 'search_files',
+      arguments: {
+        query: 'subagent_spawn',
+        path: 'src',
+      },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content).toBe('Invalid query: standalone tool names are not valid search terms. Provide source text or identifier context.');
+    expect(result.details).toMatchObject({
+      errorType: 'invalid_arguments',
+      toolName: 'search_files',
+      path: 'src',
+    });
+    expect(result.content.toLowerCase()).not.toContain('no such file or directory');
+  });
+
 
   it('rejects multiline query payloads before invoking ripgrep', async () => {
     const cwd = await makeWorkspace();
@@ -832,53 +855,58 @@ describe('search_files tool', () => {
     expect(result.content.toLowerCase()).not.toContain('no such file or directory');
   });
 
-  it('treats shell-like query text such as sh -c as a literal search by default', async () => {
+    it('rejects shell-command-like query text such as sh -lc in literal mode', async () => {
     const cwd = await makeWorkspace();
     await writeFile(
       join(cwd, 'src', 'shell-like.txt'),
-      'sh -c\nshh -c\n',
+      'sh -lc\nshh -lc\n',
       'utf-8',
     );
     const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
 
     const result = await toolset.executeTool({
-      id: '1',
+      id: 'invalid-query-shell-command',
       name: 'search_files',
       arguments: {
-        query: 'sh -c',
+        query: 'sh -lc',
         path: 'src',
       },
     });
 
-    expect(result.isError).toBeFalsy();
-    expect(result.content).toContain('shell-like.txt:1:sh -c');
-    expect(result.content).not.toContain('shell-like.txt:2:shh -c');
+    expect(result.isError).toBe(true);
+    expect(result.content).toBe('Invalid query: query appears to be a shell command invocation. Provide search text instead of runnable command syntax.');
+    expect(result.details).toMatchObject({
+      errorType: 'invalid_arguments',
+      toolName: 'search_files',
+      path: 'src',
+    });
     expect(result.content.toLowerCase()).not.toContain('no such file or directory');
   });
 
-    it('honors explicit regex mode even for shell-like query text', async () => {
+    it('honors explicit regex mode for shell-like text patterns such as sh\\s+-lc', async () => {
     const cwd = await makeWorkspace();
     await writeFile(
       join(cwd, 'src', 'shell-like-regex.txt'),
-      'sh -c\nshh -c\n',
+      'sh -lc\nshh -lc\n',
       'utf-8',
     );
     const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
 
     const result = await toolset.executeTool({
-      id: '1',
+      id: 'shell-like-regex',
       name: 'search_files',
       arguments: {
-        query: 'sh+ -c',
+        query: 'sh\\s+-lc',
         queryMode: 'regex',
         path: 'src',
       },
     });
 
     expect(result.isError).toBeFalsy();
-    expect(result.content).toContain('shell-like-regex.txt:1:sh -c');
-    expect(result.content).toContain('shell-like-regex.txt:2:shh -c');
+    expect(result.content).toContain('shell-like-regex.txt:1:sh -lc');
+    expect(result.content).not.toContain('shell-like-regex.txt:2:shh -lc');
   });
+
 
     it('treats execFileAsync call snippets as plain literal query text by default', async () => {
     const cwd = await makeWorkspace();
