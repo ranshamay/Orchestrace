@@ -65,6 +65,10 @@ import {
   appendCleanupErrors,
   formatLifecyclePhaseFailure,
 } from './runner-lifecycle-diagnostics.js';
+import {
+  createBranchFromBase,
+  ensureCleanAndSyncedBaseBranch,
+} from './runner/branching.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -881,23 +885,22 @@ async function main(): Promise<void> {
 
     const baseBranch = await resolveBaseBranch();
 
-    // Create branch with LLM-generated name
-    const branchRes = await runGitSafeWithTimeout(
-      ['checkout', '-B', prMeta.branchName],
-      SESSION_DELIVERY_GIT_TIMEOUT_MS,
-    );
-    if (!branchRes.ok) {
-      // Fallback to generated branch name if LLM name conflicts
-      const fallbackBranch = `orchestrace/session-${sessionId.slice(0, 8)}-${Date.now().toString(36)}`;
-      const fallbackRes = await runGitSafeWithTimeout(
-        ['checkout', '-B', fallbackBranch],
-        SESSION_DELIVERY_GIT_TIMEOUT_MS,
-      );
-      if (!fallbackRes.ok) {
-        throw new Error(`Unable to create delivery branch: ${(fallbackRes.error ?? fallbackRes.stderr) || 'git checkout failed'}`);
-      }
-      prMeta.branchName = fallbackBranch;
-    }
+    await ensureCleanAndSyncedBaseBranch({
+      baseBranch,
+      timeoutMs: SESSION_DELIVERY_GIT_TIMEOUT_MS,
+      runGit: runGitSafeWithTimeout,
+      getWorktreeDirtySummary,
+    });
+
+    // Create branch with LLM-generated name from the synced base branch tip.
+    const fallbackBranch = `orchestrace/session-${sessionId.slice(0, 8)}-${Date.now().toString(36)}`;
+    prMeta.branchName = await createBranchFromBase({
+      preferredBranchName: prMeta.branchName,
+      fallbackBranchName: fallbackBranch,
+      baseBranch,
+      timeoutMs: SESSION_DELIVERY_GIT_TIMEOUT_MS,
+      runGit: runGitSafeWithTimeout,
+    });
 
     const pushRes = await runGitSafeWithTimeout(
       ['push', '--set-upstream', 'origin', prMeta.branchName],
