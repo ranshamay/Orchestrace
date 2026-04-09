@@ -321,7 +321,7 @@ describe('git_status tool', () => {
     const init = await toolset.executeTool({ id: '1', name: 'run_command', arguments: { command: 'git init' } });
     expect(init.isError).toBeFalsy();
 
-    const status = await toolset.executeTool({ id: '2', name: 'git_status', arguments: {} });
+    const status = await toolset.executeTool({ id: '2', name: 'git_status', arguments: { intent: 'read_only' } });
     expect(status.isError).toBeFalsy();
     expect(status.content.toLowerCase()).toContain('##');
   });
@@ -330,8 +330,39 @@ describe('git_status tool', () => {
     const cwd = await makeWorkspace();
     const toolset = createAgentToolset({ cwd, phase: 'implementation', taskType: 'code' });
 
-    const status = await toolset.executeTool({ id: '2', name: 'git_status', arguments: {} });
+    const status = await toolset.executeTool({ id: '2', name: 'git_status', arguments: { intent: 'read_only' } });
     expect(status.isError).toBe(true);
+  });
+});
+
+describe('repo-state intent enforcement', () => {
+  it('rejects git_status without intent', async () => {
+    const cwd = await makeWorkspace();
+    const toolset = createAgentToolset({ cwd, phase: 'implementation', taskType: 'code' });
+
+    const result = await toolset.executeTool({ id: '1', name: 'git_status', arguments: {} });
+    expect(result.isError).toBe(true);
+    expect(result.content).toContain('requires arguments.intent');
+  });
+
+  it('rejects git_diff with invalid intent', async () => {
+    const cwd = await makeWorkspace();
+    const toolset = createAgentToolset({ cwd, phase: 'implementation', taskType: 'code' });
+
+    const result = await toolset.executeTool({ id: '1', name: 'git_diff', arguments: { intent: 'invalid' } });
+    expect(result.isError).toBe(true);
+    expect(result.content).toContain('requires arguments.intent');
+  });
+
+  it('accepts git_diff with valid intent', async () => {
+    const cwd = await makeWorkspace();
+    const toolset = createAgentToolset({ cwd, phase: 'implementation', taskType: 'code' });
+
+    const init = await toolset.executeTool({ id: '1', name: 'run_command', arguments: { command: 'git init' } });
+    expect(init.isError).toBeFalsy();
+
+    const result = await toolset.executeTool({ id: '2', name: 'git_diff', arguments: { intent: 'read_only' } });
+    expect(result.isError).toBeFalsy();
   });
 });
 

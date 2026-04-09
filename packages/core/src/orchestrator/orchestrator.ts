@@ -737,6 +737,9 @@ function buildPlanningPrompt(node: TaskNode, depOutputs: Map<string, TaskOutput>
         '- ALWAYS use subagent_spawn_batch (not individual subagent_spawn calls) when multiple independent sub-agents can run concurrently',
         '- subagent_spawn/subagent_spawn_batch calls must include nodeId values that map back to agent_graph_set node ids',
         '- pass nodeId on each sub-agent request so graph progress can be tracked per node',
+        '- classify task intent before repo-state tools: read-only vs write',
+        '- if no file writes/state changes are needed, skip git_status/git_diff repository checks',
+        '- for read-only tasks, rollback/risk notes should be `N/A - read-only task`',
       ],
     },
     {
@@ -748,7 +751,7 @@ function buildPlanningPrompt(node: TaskNode, depOutputs: Map<string, TaskOutput>
         '3) per-stage atomic tasks with explicit dependencies and concurrency boundaries',
         '4) files likely to change',
         '5) verification strategy with explicit commands',
-        '6) rollback/risk notes',
+        '6) rollback/risk notes (required for write/state-changing plans; for read-only tasks use: N/A - read-only task)',
         '7) a sub-agent delegation map aligned to agent_graph_set nodes and minimal per-agent context',
         '8) atomic todo specification per task: {id, action, target, deps, verification, done_criteria}',
         '9) Next Follow-up Suggestions section with 1-3 numbered, concrete next actions',

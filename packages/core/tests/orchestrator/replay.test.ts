@@ -292,6 +292,9 @@ describe('orchestrate replay capture', () => {
       expect(planningPrompt).toContain('Never bundle multiple actions in one task; split broad work into smaller tasks before finalizing the plan.');
       expect(planningPrompt).toContain('If a task would take more than ~15 minutes or touches multiple independent areas, split it further.');
       expect(planningPrompt).toContain('3) per-stage atomic tasks with explicit dependencies and concurrency boundaries');
+      expect(planningPrompt).toContain('classify task intent before repo-state tools: read-only vs write');
+      expect(planningPrompt).toContain('if no file writes/state changes are needed, skip git_status/git_diff repository checks');
+      expect(planningPrompt).toContain('rollback/risk notes (required for write/state-changing plans; for read-only tasks use: N/A - read-only task)');
       expect(planningPrompt).toContain('8) atomic todo specification per task: {id, action, target, deps, verification, done_criteria}');
       expect(planningPrompt).toContain('9) Next Follow-up Suggestions section with 1-3 numbered, concrete next actions');
     } finally {

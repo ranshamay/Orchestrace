@@ -83,10 +83,15 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
         name: 'git_diff',
         description: 'Show git diff for current workspace changes.',
         parameters: Type.Object({
+          intent: Type.String({
+            enum: ['read_only', 'write'],
+            description: 'Declare whether the task is read-only or write-oriented before checking repository state.',
+          }),
           staged: Type.Optional(Type.Boolean({ description: 'Show staged diff instead of unstaged.' })),
         }),
       },
       execute: async (toolArgs, signal) => {
+        asRequiredString(toolArgs.intent, 'intent');
         const staged = Boolean(toolArgs.staged);
         const args = staged ? ['diff', '--staged'] : ['diff'];
 
@@ -107,9 +112,15 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
       tool: {
         name: 'git_status',
         description: 'Show concise git working tree status for the workspace.',
-        parameters: Type.Object({}),
+        parameters: Type.Object({
+          intent: Type.String({
+            enum: ['read_only', 'write'],
+            description: 'Declare whether the task is read-only or write-oriented before checking repository state.',
+          }),
+        }),
       },
-      execute: async (_toolArgs, signal) => {
+      execute: async (toolArgs, signal) => {
+        asRequiredString(toolArgs.intent, 'intent');
         const result = await runCommand('git', ['status', '--short', '--branch'], {
           cwd: options.cwd,
           timeoutMs: options.commandTimeoutMs ?? 20000,
