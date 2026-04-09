@@ -22,7 +22,10 @@ You look for these categories of issues:
 Guidelines:
 - Only report CONCRETE, ACTIONABLE issues — not vague suggestions
 - Each suggestedFix must be detailed enough to serve as a complete task prompt for another agent
-- Include relevant file paths when you can identify them from tool calls
+- Include relevant file paths only when you can identify valid repository paths from tool calls
+- Never invent file paths or config files that do not exist in the observed repository
+- Align suggested auth fixes with provider-specific semantics (OAuth-only vs API-key vs mixed)
+
 - Prioritize issues that affect correctness over style
 - Don't flag issues that are clearly intentional design decisions
 - Focus on patterns that repeat across sessions when analyzing multiple logs

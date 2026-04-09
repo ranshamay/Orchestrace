@@ -39,8 +39,12 @@ pnpm --filter @orchestrace/cli dev auth
 # Credentials are saved to repo-root auth.json by default
 # Override with: ORCHESTRACE_AUTH_FILE=/custom/path/auth.json
 
-# GitHub Copilot uses device/mobile code OAuth flow
+# GitHub Copilot supports device/mobile code OAuth flow
 pnpm --filter @orchestrace/cli dev auth github-copilot
+
+# Optional: use an API key from environment/secret manager
+export GITHUB_COPILOT_API_KEY=...
+
 
 # Start local dashboard (status, start/cancel, auth)
 pnpm --filter @orchestrace/cli dev ui --port 4310
