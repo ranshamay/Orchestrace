@@ -45,7 +45,6 @@ export async function ensureSessionWorktree(params: {
     repoPath: repoRoot,
     branchName,
     worktreePath,
-    baseRef: 'HEAD',
   });
 
   return {
