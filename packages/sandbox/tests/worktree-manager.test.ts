@@ -8,6 +8,7 @@ import { cleanupWorktree, ensureWorktreeExists } from '../src/worktree-manager.j
 
 const execFileAsync = promisify(execFile);
 const tempDirs: string[] = [];
+const REQUIRED_PATHS = ['README.md'];
 
 afterEach(async () => {
   await Promise.all(tempDirs.splice(0, tempDirs.length).map(async (dir) => {
@@ -26,6 +27,7 @@ describe('worktree manager', () => {
       branchName,
       worktreePath,
       baseRef: 'HEAD',
+      requiredPaths: REQUIRED_PATHS,
     });
     expect(first.created).toBe(true);
     expect(first.recreated).toBe(true);
@@ -38,6 +40,7 @@ describe('worktree manager', () => {
       branchName,
       worktreePath,
       baseRef: 'HEAD',
+      requiredPaths: REQUIRED_PATHS,
     });
     expect(second.created).toBe(false);
     expect(second.recreated).toBe(false);
@@ -58,6 +61,7 @@ describe('worktree manager', () => {
       branchName,
       worktreePath,
       baseRef: 'HEAD',
+      requiredPaths: REQUIRED_PATHS,
     });
     await git(repoRoot, ['worktree', 'remove', worktreePath, '--force']);
 
@@ -66,10 +70,41 @@ describe('worktree manager', () => {
       branchName,
       worktreePath,
       baseRef: 'HEAD',
+      requiredPaths: REQUIRED_PATHS,
     });
     expect(recreated.created).toBe(false);
     expect(recreated.recreated).toBe(true);
     expect(await pathExists(worktreePath)).toBe(true);
+
+    await cleanupWorktree({ repoPath: repoRoot, worktreePath, branchName });
+  });
+
+  it('recreates an existing registered worktree when required files are missing', async () => {
+    const repoRoot = await createTempRepoWithOrigin();
+    const worktreePath = join(repoRoot, '.managed-worktrees', 'session-3');
+    const branchName = 'orchestrace/session-3';
+
+    await ensureWorktreeExists({
+      repoPath: repoRoot,
+      branchName,
+      worktreePath,
+      baseRef: 'HEAD',
+      requiredPaths: REQUIRED_PATHS,
+    });
+
+    await rm(join(worktreePath, 'README.md'), { force: true });
+
+    const healed = await ensureWorktreeExists({
+      repoPath: repoRoot,
+      branchName,
+      worktreePath,
+      baseRef: 'HEAD',
+      requiredPaths: REQUIRED_PATHS,
+    });
+
+    expect(healed.created).toBe(false);
+    expect(healed.recreated).toBe(true);
+    expect(await pathExists(join(worktreePath, 'README.md'))).toBe(true);
 
     await cleanupWorktree({ repoPath: repoRoot, worktreePath, branchName });
   });
