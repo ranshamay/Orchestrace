@@ -45,7 +45,7 @@ function makeFocusedSingleNodeGraph(): TaskGraph {
 
 function createAdapter(params: {
   planningThrows?: boolean;
-  failImplementationOnceWithType?: 'timeout' | 'rate_limit' | 'tool_runtime' | 'empty_response';
+  failImplementationOnceWithType?: 'timeout' | 'rate_limit' | 'tool_runtime' | 'empty_response' | 'prompt_too_large' | 'provider_unresponsive';
   omitPlanningCoordination?: boolean;
   planningDelegationDelaySuccessfulCalls?: number;
   onPrompt?: (phase: 'planning' | 'implementation', prompt: LlmPromptInput, systemPrompt: string) => void;
@@ -365,6 +365,76 @@ describe('orchestrate replay capture', () => {
       expect(output?.replay?.attempts[1]?.failureType).toBe('timeout');
       expect(output?.replay?.attempts[2]?.phase).toBe('implementation');
       expect(output?.replay?.attempts[2]?.error).toBeUndefined();
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('does not retry implementation on prompt_too_large failures', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'orchestrace-replay-prompt-too-large-'));
+
+    try {
+      const outputs = await orchestrate(makeSingleNodeGraph(), {
+        llm: createAdapter({
+          implementationBehavior: async ({ implementationCall }) => {
+            if (implementationCall === 1) {
+              const error = new Error('context window exceeded: maximum prompt length reached') as Error & { failureType?: string };
+              error.failureType = 'prompt_too_large';
+              throw error;
+            }
+            return {
+              text: 'should not reach here',
+              usage: { input: 1, output: 1, cost: 0 },
+            };
+          },
+        }),
+        cwd,
+        requirePlanApproval: false,
+        planningSystemPrompt: 'planning',
+        implementationSystemPrompt: 'implementation',
+        maxImplementationAttempts: 3,
+      });
+
+      const output = outputs.get('task-1');
+      expect(output?.status).toBe('failed');
+      expect(output?.failureType).toBe('prompt_too_large');
+      const implementationAttempts = output?.replay?.attempts.filter((attempt) => attempt.phase === 'implementation') ?? [];
+      expect(implementationAttempts.length).toBe(1);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('does not retry implementation on provider_unresponsive failures', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'orchestrace-replay-provider-unresponsive-'));
+
+    try {
+      const outputs = await orchestrate(makeSingleNodeGraph(), {
+        llm: createAdapter({
+          implementationBehavior: async ({ implementationCall }) => {
+            if (implementationCall === 1) {
+              const error = new Error('provider remained unresponsive after retries') as Error & { failureType?: string };
+              error.failureType = 'provider_unresponsive';
+              throw error;
+            }
+            return {
+              text: 'should not reach here',
+              usage: { input: 1, output: 1, cost: 0 },
+            };
+          },
+        }),
+        cwd,
+        requirePlanApproval: false,
+        planningSystemPrompt: 'planning',
+        implementationSystemPrompt: 'implementation',
+        maxImplementationAttempts: 3,
+      });
+
+      const output = outputs.get('task-1');
+      expect(output?.status).toBe('failed');
+      expect(output?.failureType).toBe('provider_unresponsive');
+      const implementationAttempts = output?.replay?.attempts.filter((attempt) => attempt.phase === 'implementation') ?? [];
+      expect(implementationAttempts.length).toBe(1);
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }

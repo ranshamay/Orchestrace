@@ -31,6 +31,14 @@ describe('classifyLlmFailure', () => {
     expect(classifyLlmFailure({ kind: 'empty-text' })).toBe('empty_response');
   });
 
+  it('classifies prompt/context too large failures as non-retryable', () => {
+    expect(classifyLlmFailure({ message: 'Context window exceeded: maximum prompt length reached' })).toBe('prompt_too_large');
+  });
+
+  it('classifies persistent provider availability failures as provider_unresponsive', () => {
+    expect(classifyLlmFailure({ message: '503 service unavailable: upstream unavailable' })).toBe('provider_unresponsive');
+  });
+
   it('falls back to unknown for unmatched messages', () => {
     expect(classifyLlmFailure({ message: 'something unusual happened' })).toBe('unknown');
   });
