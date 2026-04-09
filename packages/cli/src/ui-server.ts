@@ -64,6 +64,9 @@ import type {
   WorkState,
   LlmSessionState,
   SessionCreationReason,
+  ExecutionContext,
+  SessionWorkspaceAssignmentProvenance,
+  SessionWorktreePathSessionIdRelation,
 } from './ui-server/types.js';
 import { WorkspaceManager } from './workspace-manager.js';
 import { FileEventStore } from '@orchestrace/store';
@@ -158,6 +161,12 @@ interface SessionContextState {
   previousCompressedHistory?: string;
 }
 
+interface NativeGitWorktree {
+  path: string;
+  branch?: string;
+  detached: boolean;
+}
+
 function createInheritedSubAgentToolset(
   cwd: string,
   options: {
@@ -234,6 +243,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
   const sessionContextEngines = new Map<string, ContextEngine>();
   const sessionContextStates = new Map<string, SessionContextState>();
   const pendingSubagentNodeIdsBySession = new Map<string, Map<string, string[]>>();
+  const worktreePathLocks = new Map<string, string>();
   const sessionObservers = new Map<string, SessionObserver>();
   const chatStreams = new Map<string, ChatTokenStream>();
   let uiPreferences = resolveUiPreferencesDefaults();
@@ -326,6 +336,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         if (!materialized) continue;
 
         const c = materialized.config;
+        const legacyConfig = c as unknown as Record<string, unknown>;
         const session: WorkSession = {
           id: c.id,
           workspaceId: c.workspaceId,
@@ -344,6 +355,13 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
             ?? resolvePlanningNoToolGuardModeDefault(),
           quickStartMode: c.quickStartMode,
           quickStartMaxPreDelegationToolCalls: c.quickStartMaxPreDelegationToolCalls,
+          executionContext: normalizeExecutionContext(legacyConfig.executionContext)
+            ?? (parseBooleanSetting(legacyConfig.useWorktree) ? 'git-worktree' : 'workspace'),
+          selectedWorktreePath: asString(legacyConfig.selectedWorktreePath)
+            || asString(c.worktreePath)
+            || undefined,
+          useWorktree: (normalizeExecutionContext(legacyConfig.executionContext)
+            ?? (parseBooleanSetting(legacyConfig.useWorktree) ? 'git-worktree' : 'workspace')) === 'git-worktree',
           adaptiveConcurrency: c.adaptiveConcurrency,
           batchConcurrency: c.batchConcurrency,
           batchMinConcurrency: c.batchMinConcurrency,
@@ -351,6 +369,18 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           trivialTaskMaxPromptLength: c.trivialTaskMaxPromptLength ?? resolveTrivialTaskMaxPromptLengthDefault(),
           worktreePath: c.worktreePath,
           worktreeBranch: c.worktreeBranch,
+          workspaceAssignment: isRecord(legacyConfig.workspaceAssignment)
+            ? {
+              assignmentSource: normalizeWorkspaceAssignmentSource(legacyConfig.workspaceAssignment.assignmentSource) ?? 'workspace-root',
+              reusedExistingWorktree: parseBooleanSetting(legacyConfig.workspaceAssignment.reusedExistingWorktree) ?? undefined,
+              cleanupApplied: parseBooleanSetting(legacyConfig.workspaceAssignment.cleanupApplied) ?? undefined,
+              cleanupDefaultBranch: asString(legacyConfig.workspaceAssignment.cleanupDefaultBranch) || undefined,
+              workspacePathSessionIdRelation: normalizeWorkspacePathSessionIdRelation(
+                legacyConfig.workspaceAssignment.workspacePathSessionIdRelation,
+              ),
+              workspacePathSessionId: asString(legacyConfig.workspaceAssignment.workspacePathSessionId) || undefined,
+            }
+            : undefined,
           creationReason: c.creationReason,
           sourceSessionId: c.sourceSessionId,
           source: c.source,
