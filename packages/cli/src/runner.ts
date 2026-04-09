@@ -2412,9 +2412,17 @@ function toUiEvent(
   attempt?: number;
   maxRetries?: number;
   totalDurationMs?: number;
+  toolName?: string;
+  toolStatus?: 'started' | 'result';
+  toolCallId?: string;
+  toolInput?: string;
+  toolOutput?: string;
+  toolIsError?: boolean;
+  toolDetails?: unknown;
   message: string;
 } | undefined {
-  const base = {
+
+    const base = {
     time: t,
     runId,
     type: event.type,
@@ -2423,7 +2431,15 @@ function toUiEvent(
     attempt: event.type === 'task:failed' ? event.attempt : undefined,
     maxRetries: event.type === 'task:failed' ? event.maxRetries : undefined,
     totalDurationMs: event.type === 'task:failed' ? event.totalDurationMs : undefined,
+    toolName: event.type === 'task:tool-call' ? event.toolName : undefined,
+    toolStatus: event.type === 'task:tool-call' ? event.status : undefined,
+    toolCallId: event.type === 'task:tool-call' ? event.toolCallId : undefined,
+    toolInput: event.type === 'task:tool-call' ? event.input : undefined,
+    toolOutput: event.type === 'task:tool-call' ? event.output : undefined,
+    toolIsError: event.type === 'task:tool-call' ? event.isError : undefined,
+    toolDetails: event.type === 'task:tool-call' ? event.details : undefined,
   };
+
   const tag = (msg: string) => `[run:${runId}] ${msg}`;
 
   switch (event.type) {

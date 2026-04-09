@@ -543,8 +543,10 @@ describe('search_files tool', () => {
       },
     });
 
-    expect(result.isError).toBeFalsy();
+        expect(result.isError).toBeFalsy();
     expect(result.content).toBe('(no matches)');
+    expect(result.details).toBeUndefined();
+
   });
 
   it('treats regression tokens as query text, not file paths', async () => {
@@ -745,9 +747,16 @@ describe('search_files tool', () => {
       },
     });
 
-    expect(result.isError).toBe(true);
+        expect(result.isError).toBe(true);
     expect(result.content).toBe('Invalid query: query must not be empty.');
+    expect(result.details).toMatchObject({
+      errorType: 'invalid_arguments',
+      message: 'Invalid query: query must not be empty.',
+      toolName: 'search_files',
+      path: 'src',
+    });
     expect(result.content.toLowerCase()).not.toContain('no such file or directory');
+
   });
 
   it('returns a clear validation error for invalid regex query syntax', async () => {
@@ -764,9 +773,16 @@ describe('search_files tool', () => {
       },
     });
 
-    expect(result.isError).toBe(true);
+        expect(result.isError).toBe(true);
     expect(result.content).toBe('Invalid regex query.');
+    expect(result.details).toMatchObject({
+      errorType: 'invalid_regex',
+      message: 'Invalid regex query.',
+      toolName: 'search_files',
+      path: 'src',
+    });
     expect(result.content.toLowerCase()).not.toContain('no such file or directory');
+
   });
 
   it('returns a clear validation error for empty glob text', async () => {
@@ -783,9 +799,16 @@ describe('search_files tool', () => {
       },
     });
 
-    expect(result.isError).toBe(true);
+        expect(result.isError).toBe(true);
     expect(result.content).toBe('Invalid glob: expected a non-empty string when provided.');
+    expect(result.details).toMatchObject({
+      errorType: 'invalid_arguments',
+      message: 'Invalid glob: expected a non-empty string when provided.',
+      toolName: 'search_files',
+      path: 'src',
+    });
     expect(result.content.toLowerCase()).not.toContain('no such file or directory');
+
   });
 
     it('returns a clear validation error when glob is used with a file path', async () => {
@@ -803,9 +826,16 @@ describe('search_files tool', () => {
       },
     });
 
-    expect(result.isError).toBe(true);
+        expect(result.isError).toBe(true);
     expect(result.content).toBe('Invalid glob usage: glob can only be used when path points to a directory.');
+    expect(result.details).toMatchObject({
+      errorType: 'invalid_arguments',
+      message: 'Invalid glob usage: glob can only be used when path points to a directory.',
+      toolName: 'search_files',
+      path: 'src/file-only.txt',
+    });
     expect(result.content.toLowerCase()).not.toContain('no such file or directory');
+
   });
 
   it('returns a deterministic error when cwd is invalid', async () => {
@@ -822,10 +852,16 @@ describe('search_files tool', () => {
       },
     });
 
-    expect(result.isError).toBe(true);
+        expect(result.isError).toBe(true);
     expect(result.content).toContain('Invalid working directory for search_files:');
+    expect(result.details).toMatchObject({
+      errorType: 'invalid_working_directory',
+      toolName: 'search_files',
+      path: 'src',
+    });
     expect(result.content.toLowerCase()).not.toContain('ripgrep');
     expect(result.content.toLowerCase()).not.toContain('no such file or directory');
+
   });
 
   it('accepts absolute search path inside workspace and returns normalized matches', async () => {

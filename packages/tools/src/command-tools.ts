@@ -39,6 +39,23 @@ interface CommandToolOptions extends AgentToolsetOptions {
   runCommandAllowPrefixes?: string[];
 }
 
+interface SearchFilesErrorDetails {
+  errorType:
+    | 'invalid_arguments'
+    | 'invalid_working_directory'
+    | 'missing_dependency'
+    | 'invalid_regex'
+    | 'filesystem_fallback_failed'
+    | 'command_failed';
+  message: string;
+  toolName: 'search_files';
+  stderr?: string;
+  exitCode?: number;
+  command?: string;
+  path?: string;
+}
+
+
 export function createCommandTools(options: CommandToolOptions): RegisteredAgentTool[] {
   const shellExecutable = resolveShellExecutable();
   const tools: RegisteredAgentTool[] = [
@@ -59,17 +76,19 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
           })),
         }),
       },
-      execute: async (toolArgs, signal) => {
+            execute: async (toolArgs, signal) => {
+        const requestedPath = asString(toolArgs.path) ?? '.';
         const sanitizedQueryAndMode = sanitizeSearchQueryAndMode({
           query: toolArgs.query,
           queryMode: asString(toolArgs.queryMode),
           regex: typeof toolArgs.regex === 'boolean' ? toolArgs.regex : undefined,
         });
         if (!sanitizedQueryAndMode.ok) {
-          return {
-            content: sanitizedQueryAndMode.error,
-            isError: true,
-          };
+          return createSearchFilesErrorResult({
+            errorType: 'invalid_arguments',
+            message: sanitizedQueryAndMode.error,
+            path: requestedPath,
+          });
         }
 
         const { query, useRegex } = sanitizedQueryAndMode.value;
@@ -77,31 +96,32 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
         if (useRegex) {
           const regexValidation = validateRegexQuery(query);
           if (!regexValidation.ok) {
-            return {
-              content: regexValidation.error,
-              isError: true,
-            };
+            return createSearchFilesErrorResult({
+              errorType: 'invalid_regex',
+              message: regexValidation.error,
+              path: requestedPath,
+            });
           }
         }
 
-
         const globValidation = validateSearchGlob(toolArgs.glob);
         if (!globValidation.ok) {
-          return {
-            content: globValidation.error,
-            isError: true,
-          };
+          return createSearchFilesErrorResult({
+            errorType: 'invalid_arguments',
+            message: globValidation.error,
+            path: requestedPath,
+          });
         }
 
         const resolvedCwd = await normalizeSearchCwd(options.cwd);
         if (!resolvedCwd.ok) {
-          return {
-            content: `Invalid working directory for search_files: ${resolvedCwd.cwd}`,
-            isError: true,
-          };
+          return createSearchFilesErrorResult({
+            errorType: 'invalid_working_directory',
+            message: `Invalid working directory for search_files: ${resolvedCwd.cwd}`,
+            path: requestedPath,
+          });
         }
 
-                                const requestedPath = asString(toolArgs.path) ?? '.';
         const normalizedRequestedPath = await normalizeRequestedSearchPath(requestedPath);
         const normalizedPathForResolution = isAbsolute(normalizedRequestedPath)
           ? (await canonicalizeExistingPath(normalizedRequestedPath)) ?? normalizedRequestedPath
@@ -121,17 +141,17 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
         const targetKind = await getPathKind(canonicalTarget ?? target);
 
         if (targetKind === 'missing') {
-
           return {
             content: `(skipped invalid search path: ${relTarget})`,
           };
         }
 
-                if (globValidation.value && targetKind === 'file') {
-          return {
-            content: 'Invalid glob usage: glob can only be used when path points to a directory.',
-            isError: true,
-          };
+        if (globValidation.value && targetKind === 'file') {
+          return createSearchFilesErrorResult({
+            errorType: 'invalid_arguments',
+            message: 'Invalid glob usage: glob can only be used when path points to a directory.',
+            path: relTarget,
+          });
         }
 
         // Re-check right before spawning rg to avoid deterministic path-miss noise
@@ -144,7 +164,6 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
         }
 
         const args = ['-n', '--no-heading', '--color', 'never', '-e', query];
-
         if (!useRegex) {
           args.push('--fixed-strings');
         }
@@ -158,6 +177,8 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
           timeoutMs: options.commandTimeoutMs ?? 20000,
           signal,
         });
+
+        const stderr = result.stderr.trim();
 
         if (result.exitCode === -1) {
           try {
@@ -174,24 +195,37 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
               content: fallback,
             };
           } catch (error) {
-            return {
-              content: error instanceof Error ? error.message : String(error),
-              isError: true,
-            };
+            if (isMissingPathErrorLike(error)) {
+              return {
+                content: `(skipped invalid search path: ${relTarget})`,
+              };
+            }
+
+            return createSearchFilesErrorResult({
+              errorType: 'filesystem_fallback_failed',
+              message: error instanceof Error ? error.message : String(error),
+              stderr,
+              exitCode: result.exitCode,
+              command: 'rg',
+              path: relTarget,
+            });
           }
         }
 
         if (result.exitCode === 2 && useRegex) {
-          return {
-            content: 'Invalid regex query.',
-            isError: true,
-          };
+          return createSearchFilesErrorResult({
+            errorType: 'invalid_regex',
+            message: 'Invalid regex query.',
+            stderr,
+            exitCode: result.exitCode,
+            command: 'rg',
+            path: relTarget,
+          });
         }
 
-        const stderr = result.stderr.trim();
         const hasPathError = hasRipgrepPathError(stderr);
 
-                if (hasPathError) {
+        if (hasPathError) {
           try {
             const fallback = await fallbackSearchFromFs({
               cwd: resolvedCwd.cwd,
@@ -219,17 +253,28 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
           }
         }
 
-
         if (result.exitCode === 1 && result.stdout.trim().length === 0) {
           return { content: '(no matches)' };
         }
 
         const output = formatCommandOutput(result, options.maxOutputChars ?? 16000);
+        if (result.exitCode > 1) {
+          return createSearchFilesErrorResult({
+            errorType: 'command_failed',
+            message: output,
+            stderr,
+            exitCode: result.exitCode,
+            command: 'rg',
+            path: relTarget,
+          });
+        }
+
         return {
           content: output,
-          isError: result.exitCode > 1,
+          isError: false,
         };
       },
+
     },
     {
       tool: {
@@ -801,6 +846,17 @@ async function normalizeSearchCwd(cwd: string): Promise<{ ok: true; cwd: string 
   }
 }
 
+function createSearchFilesErrorResult(details: Omit<SearchFilesErrorDetails, 'toolName'>): { content: string; isError: true; details: SearchFilesErrorDetails } {
+  return {
+    content: details.message,
+    isError: true,
+    details: {
+      ...details,
+      toolName: 'search_files',
+    },
+  };
+}
+
 async function canonicalizeExistingPath(path: string): Promise<string | undefined> {
   try {
     return await realpath(path);
@@ -808,6 +864,7 @@ async function canonicalizeExistingPath(path: string): Promise<string | undefine
     return undefined;
   }
 }
+
 
 async function getPathKind(path: string): Promise<PathKind> {
   try {

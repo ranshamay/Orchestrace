@@ -2,6 +2,17 @@ import type { TimelineItem } from '../types';
 import { normalizeFailureType } from './failure';
 import { compactInline, parseJsonObject, stripRunTag, stripTaskPrefix } from './text';
 
+interface SearchFilesErrorDetails {
+  errorType?: string;
+  message?: string;
+  stderr?: string;
+  exitCode?: number;
+  toolName?: string;
+  command?: string;
+  path?: string;
+}
+
+
 function asNumber(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
 }
@@ -247,7 +258,13 @@ export function toolInputSummary(toolName: string, payload: string): string {
   return `Calling ${toolName}`;
 }
 
-export function toolOutputSummary(toolName: string, payload: string, isError: boolean): string {
+export function toolOutputSummary(
+  toolName: string,
+  payload: string,
+  isError: boolean,
+  details?: unknown,
+): string {
+
   if (toolName === 'subagent_spawn_batch') {
     const summary = summarizeSubAgentBatchOutput(payload);
     if (summary) {
@@ -269,9 +286,26 @@ export function toolOutputSummary(toolName: string, payload: string, isError: bo
     }
   }
 
-  if (isError) {
+    if (isError) {
+    if (toolName === 'search_files' && details && typeof details === 'object') {
+      const searchDetails = details as SearchFilesErrorDetails;
+      const message = typeof searchDetails.message === 'string' && searchDetails.message.trim().length > 0
+        ? searchDetails.message.trim()
+        : undefined;
+      const errorType = typeof searchDetails.errorType === 'string' && searchDetails.errorType.trim().length > 0
+        ? searchDetails.errorType.trim().replace(/_/g, ' ')
+        : undefined;
+      if (message && errorType) {
+        return compactInline(`Search failed (${errorType}): ${message}`, 260);
+      }
+      if (message) {
+        return compactInline(`Search failed: ${message}`, 260);
+      }
+    }
+
     return compactInline(payload || 'Tool returned an error.', 260);
   }
+
   if (!payload.trim()) {
     return 'Completed with empty output.';
   }
@@ -304,7 +338,8 @@ function renderToolEventContent(params: {
 }): string {
   const summary = params.direction === 'input'
     ? toolInputSummary(params.toolName, params.payload)
-    : toolOutputSummary(params.toolName, params.payload, params.isError);
+        : toolOutputSummary(params.toolName, params.payload, params.isError);
+
   const payloadLimit = params.toolName === 'subagent_spawn_batch'
     ? 200_000
     : params.toolName === 'subagent_spawn'
@@ -318,14 +353,42 @@ function renderToolEventContent(params: {
   return `${summary}\n\n\`\`\`${codeLanguage}\n${displayPayload}\n\`\`\``;
 }
 
-export function parseToolCallEvent(event: { type: string; message: string }): {
+export function parseToolCallEvent(event: {
+  type: string;
+  message: string;
+  taskId?: string;
+  toolName?: string;
+  toolStatus?: 'started' | 'result';
+  toolInput?: string;
+  toolOutput?: string;
+  toolIsError?: boolean;
+  toolDetails?: unknown;
+}): {
   taskId: string;
   toolName: string;
   direction: 'input' | 'output';
   isError: boolean;
   payload: string;
+  details?: unknown;
 } | undefined {
   if (event.type !== 'task:tool-call') return undefined;
+
+  if (event.toolName && event.toolStatus) {
+    const direction = event.toolStatus === 'started' ? 'input' : 'output';
+    const payload = direction === 'input' ? (event.toolInput ?? '') : (event.toolOutput ?? '');
+    const taskId = typeof event.taskId === 'string' && event.taskId.trim().length > 0
+      ? event.taskId
+      : 'task';
+    return {
+      taskId,
+      toolName: event.toolName,
+      direction,
+      isError: event.toolIsError === true,
+      payload,
+      details: event.toolDetails,
+    };
+  }
+
   const clean = stripRunTag(event.message);
   const match = clean.match(/^([^:]+):\s+tool\s+([a-zA-Z0-9_.-]+)\s+(input|output)(\s+\[error\])?\s*([\s\S]*)$/);
   if (!match) return undefined;
@@ -337,6 +400,7 @@ export function parseToolCallEvent(event: { type: string; message: string }): {
     payload: match[5] ?? '',
   };
 }
+
 
 export function formatTimelineEvent(event: { type: string; message: string; taskId?: string; failureType?: string }): Pick<TimelineItem, 'title' | 'subtitle' | 'content' | 'tone' | 'failureType'> {
   const clean = stripRunTag(event.message);

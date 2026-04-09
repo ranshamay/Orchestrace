@@ -5328,7 +5328,7 @@ function deriveLlmStatusFromWorkState(status: WorkState, updatedAt: string, erro
 }
 
 function toUiEvent(runId: string, event: DagEvent): UiDagEvent | undefined {
-  const base = {
+    const base = {
     time: now(),
     runId,
     type: event.type,
@@ -5337,7 +5337,15 @@ function toUiEvent(runId: string, event: DagEvent): UiDagEvent | undefined {
     attempt: event.type === 'task:failed' ? event.attempt : undefined,
     maxRetries: event.type === 'task:failed' ? event.maxRetries : undefined,
     totalDurationMs: event.type === 'task:failed' ? event.totalDurationMs : undefined,
+    toolName: event.type === 'task:tool-call' ? event.toolName : undefined,
+    toolStatus: event.type === 'task:tool-call' ? event.status : undefined,
+    toolCallId: event.type === 'task:tool-call' ? event.toolCallId : undefined,
+    toolInput: event.type === 'task:tool-call' ? event.input : undefined,
+    toolOutput: event.type === 'task:tool-call' ? event.output : undefined,
+    toolIsError: event.type === 'task:tool-call' ? event.isError : undefined,
+    toolDetails: event.type === 'task:tool-call' ? event.details : undefined,
   };
+
 
   const tagged = (message: string): string => `[run:${runId}] ${message}`;
 

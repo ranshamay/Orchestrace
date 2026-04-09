@@ -163,14 +163,16 @@ async function executeToolCalls(
         details: { skipped: true, reason: 'prior_tool_call_succeeded' },
       };
 
-      completionOptions?.onToolCall?.({
+            completionOptions?.onToolCall?.({
         type: 'result',
         toolCallId: toolCall.id,
         toolName: toolCall.name,
         arguments: formatToolPayload(toolCall.arguments),
         result: formatToolPayload(payload.content),
         isError: false,
+        details: payload.details,
       });
+
     } else {
       try {
         coerceStringifiedArrayArgs(toolCall);
@@ -188,14 +190,16 @@ async function executeToolCalls(
           details: toolResult.details,
         };
 
-        completionOptions?.onToolCall?.({
+                completionOptions?.onToolCall?.({
           type: 'result',
           toolCallId: toolCall.id,
           toolName: toolCall.name,
           arguments: formatToolPayload(toolCall.arguments),
           result: formatToolPayload(toolResult.content),
           isError: toolResult.isError ?? false,
+          details: toolResult.details,
         });
+
       } catch (error) {
         payload = {
           content:
@@ -204,14 +208,16 @@ async function executeToolCalls(
           isError: true,
         };
 
-        completionOptions?.onToolCall?.({
+                completionOptions?.onToolCall?.({
           type: 'result',
           toolCallId: toolCall.id,
           toolName: toolCall.name,
           arguments: formatToolPayload(toolCall.arguments),
           result: formatToolPayload(payload.content),
           isError: true,
+          details: payload.details,
         });
+
       }
     }
 
