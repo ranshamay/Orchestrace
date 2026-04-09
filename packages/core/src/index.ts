@@ -21,6 +21,19 @@ export type { OrchestratorConfig, PlanApprovalRequest } from './orchestrator/orc
 export type { PromptSection, PromptSectionNameType } from './prompt/sections.js';
 export { validate } from './validation/validator.js';
 export {
+  DEFAULT_ALLOWED_SHELL_PROGRAMS,
+  DEFAULT_CLI_SHELL_COMMAND_POLICY,
+  extractShellCommand,
+  parseShellCommandToArgv,
+  validateShellInput,
+} from './validation/shell-command.js';
+export type {
+  ParsedShellCommand,
+  ShellCommandPolicy,
+  ShellExecutionValidation,
+} from './validation/shell-command.js';
+
+export {
   DEFAULT_TASK_PROMPT_MAX_LENGTH,
   validateTaskPromptInput,
 } from './session/validation.js';

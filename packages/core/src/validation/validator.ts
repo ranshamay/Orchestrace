@@ -1,13 +1,19 @@
-import { exec } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { access } from 'node:fs/promises';
 import { join } from 'node:path';
+import { promisify } from 'node:util';
 import type { TaskOutput, ValidationConfig, ValidationResult } from '../dag/types.js';
+import { parseShellCommandToArgv } from './shell-command.js';
+
+
+const execFileAsync = promisify(execFile);
 
 /**
  * Run validation commands against a task's output.
  * Returns individual results for each check.
  */
 export async function validate(
+
   output: TaskOutput,
   config: ValidationConfig,
   cwd: string,
@@ -108,14 +114,27 @@ async function pathExists(path: string): Promise<boolean> {
   }
 }
 
-function runCommand(command: string, cwd: string): Promise<string> {
-  return new Promise((resolve, reject) => {
-    exec(command, { cwd, timeout: 120_000, maxBuffer: 10 * 1024 * 1024 }, (error, stdout, stderr) => {
-      if (error) {
-        reject(new Error(`${command} failed:\n${stderr || stdout || error.message}`));
-      } else {
-        resolve(stdout);
-      }
+async function runCommand(command: string, cwd: string): Promise<string> {
+  const parsed = parseShellCommandToArgv(command);
+  if (!parsed.ok || !parsed.parsed) {
+    throw new Error(`${command} failed:\n${parsed.reason ?? 'command did not pass shared shell validation'}`);
+  }
+
+  try {
+    const { stdout } = await execFileAsync(parsed.parsed.program, parsed.parsed.args, {
+      cwd,
+      timeout: 120_000,
+      maxBuffer: 10 * 1024 * 1024,
     });
-  });
+    return stdout;
+  } catch (error) {
+    const stderr = isRecord(error) && typeof error.stderr === 'string' ? error.stderr : '';
+    const stdout = isRecord(error) && typeof error.stdout === 'string' ? error.stdout : '';
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`${command} failed:\n${stderr || stdout || message}`);
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
 }

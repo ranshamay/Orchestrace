@@ -2,7 +2,9 @@ import { constants } from 'node:fs';
 import { access, readdir, readFile, realpath, stat } from 'node:fs/promises';
 import { extname, isAbsolute, join } from 'node:path';
 import { Type } from '@mariozechner/pi-ai';
+import { validateShellInput } from '@orchestrace/core';
 import type { AgentToolsetOptions, RegisteredAgentTool } from './types.js';
+
 import { resolveWorkspacePath, toWorkspaceRelative } from './path-utils.js';
 import { formatCommandOutput, runCommand } from './command-tools/command-runner.js';
 import {
@@ -10,8 +12,8 @@ import {
   asString,
   looksDestructive,
   matchesAllowedPrefix,
-  validateShellCommandPayload,
 } from './command-tools/guards.js';
+
 
 const GITHUB_API_BASE_URL = 'https://api.github.com';
 const PLAYWRIGHT_ALLOWED_COMMANDS = new Set([
@@ -29,10 +31,8 @@ const MAX_COMMAND_BATCH_ITEMS = 200;
 const DEFAULT_COMMAND_BATCH_MAX_CHARS_PER_COMMAND = 8000;
 const DEFAULT_COMMAND_BATCH_MIN_CONCURRENCY = 1;
 
-function resolveShellExecutable(): string {
-  const envShell = process.env.SHELL?.trim();
-  return envShell && envShell.length > 0 ? envShell : 'sh';
-}
+// Shell execution is routed through validated argv (program + args), never via shell -lc.
+
 
 interface CommandToolOptions extends AgentToolsetOptions {
   includeRunCommandTool: boolean;
@@ -57,8 +57,8 @@ interface SearchFilesErrorDetails {
 
 
 export function createCommandTools(options: CommandToolOptions): RegisteredAgentTool[] {
-  const shellExecutable = resolveShellExecutable();
-  const tools: RegisteredAgentTool[] = [
+    const tools: RegisteredAgentTool[] = [
+
     {
       tool: {
         name: 'search_files',
@@ -479,19 +479,20 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
             };
           }
 
-          const payloadValidation = validateShellCommandPayload(command);
-          if (!payloadValidation.ok) {
+                    const validation = validateShellInput(command);
+          if (!validation.ok || !validation.parsed) {
             return {
-              content: `${payloadValidation.reason ?? 'Blocked non-command payload.'} Payload: ${command}`,
+              content: `Blocked non-command payload: ${validation.reason ?? 'input did not pass shared shell validation'} Payload: ${command}`,
               isError: true,
             };
           }
 
-          const result = await runCommand(shellExecutable, ['-lc', command], {
+          const result = await runCommand(validation.parsed.program, validation.parsed.args, {
             cwd,
             timeoutMs: options.commandTimeoutMs ?? 120000,
             signal,
           });
+
 
           const output = formatCommandOutput(result, options.maxOutputChars ?? 24000);
           const header = `cwd: ${toWorkspaceRelative(options.cwd, cwd)}\nexitCode: ${result.exitCode}`;
@@ -566,8 +567,8 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
               };
             }
 
-            const payloadValidation = validateShellCommandPayload(entry.command);
-            if (!payloadValidation.ok) {
+                        const validation = validateShellInput(entry.command);
+            if (!validation.ok || !validation.parsed) {
               return {
                 index,
                 command: entry.command,
@@ -575,15 +576,16 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
                 ok: false,
                 blocked: true,
                 exitCode: -1,
-                output: `${payloadValidation.reason ?? 'Blocked non-command payload.'} Payload: ${entry.command}`,
+                output: `Blocked non-command payload: ${validation.reason ?? 'input did not pass shared shell validation'} Payload: ${entry.command}`,
               };
             }
 
-            const result = await runCommand(shellExecutable, ['-lc', entry.command], {
+            const result = await runCommand(validation.parsed.program, validation.parsed.args, {
               cwd,
               timeoutMs: options.commandTimeoutMs ?? 120000,
               signal,
             });
+
 
             return {
               index,
