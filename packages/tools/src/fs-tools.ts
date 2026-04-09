@@ -1,6 +1,8 @@
 import { createReadStream } from 'node:fs';
 import { mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { availableParallelism } from 'node:os';
 import { dirname } from 'node:path';
+
 
 import { Type } from '@mariozechner/pi-ai';
 import type { AgentToolsetOptions, RegisteredAgentTool } from './types.js';
@@ -24,6 +26,8 @@ const DEFAULT_BATCH_EDIT_CONCURRENCY = 12;
 const MAX_BATCH_CONCURRENCY = 128;
 const MAX_BATCH_ITEMS = 1000;
 const DEFAULT_BATCH_MIN_CONCURRENCY = 1;
+const MAX_IO_CAPACITY_CONCURRENCY = 64;
+
 
 export function createFilesystemTools(options: FilesystemToolOptions): RegisteredAgentTool[] {
   const resolveRevision = createRevisionResolver(options.cwd);
@@ -112,13 +116,17 @@ export function createFilesystemTools(options: FilesystemToolOptions): Registere
         const adaptiveConcurrency = asBoolean(toolArgs.adaptiveConcurrency)
           ?? options.adaptiveConcurrency
           ?? false;
-        const minConcurrency = clampConcurrency(
+                const minConcurrency = clampConcurrency(
           asPositiveInteger(toolArgs.minConcurrency)
             ?? options.batchMinConcurrency
             ?? DEFAULT_BATCH_MIN_CONCURRENCY,
         );
+        // Read batches are I/O bound; bound adaptive growth by remaining workload and host capacity
+        // so metadata/finalConcurrency reflects realistic parallelism instead of terminal-window inflation.
+        const readBatchAdaptiveMaxConcurrency = computeReadBatchAdaptiveMaxConcurrency(files.length);
 
                 const mapper = async (request: ReadBatchRequest): Promise<ReadBatchResult> => {
+
           const target = resolveWorkspacePath(options.cwd, request.path);
           try {
             const content = await readWorkspaceFileSlice(target, {
@@ -163,7 +171,8 @@ export function createFilesystemTools(options: FilesystemToolOptions): Registere
           ? await mapWithAdaptiveConcurrency(files, {
               initialConcurrency: concurrency,
               minConcurrency,
-              maxConcurrency: MAX_BATCH_CONCURRENCY,
+                            maxConcurrency: readBatchAdaptiveMaxConcurrency,
+
             }, mapper, isReadBatchFailure)
           : {
               results: await mapWithConcurrency(files, concurrency, mapper),
@@ -736,7 +745,24 @@ function clampConcurrency(value: number): number {
   return Math.max(1, Math.min(MAX_BATCH_CONCURRENCY, value));
 }
 
+function detectIoCapacityConcurrency(): number {
+  try {
+    const parallelism = availableParallelism();
+    // File reads are mostly storage-bound; keep a conservative multiplier and hard ceiling.
+    return clampConcurrency(Math.min(MAX_IO_CAPACITY_CONCURRENCY, Math.max(2, parallelism * 2)));
+  } catch {
+    return clampConcurrency(8);
+  }
+}
+
+function computeReadBatchAdaptiveMaxConcurrency(batchSize: number): number {
+  const workloadLimit = clampConcurrency(Math.max(1, batchSize));
+  const ioCapacityLimit = detectIoCapacityConcurrency();
+  return Math.max(1, Math.min(MAX_BATCH_CONCURRENCY, workloadLimit, ioCapacityLimit));
+}
+
 async function mapWithConcurrency<T, U>(
+
   values: readonly T[],
   concurrency: number,
   mapper: (value: T, index: number) => Promise<U>,
@@ -777,8 +803,10 @@ async function mapWithAdaptiveConcurrency<T, U>(
 
   const results = new Array<U>(values.length);
   let nextIndex = 0;
-  let currentConcurrency = clampConcurrency(options.initialConcurrency);
-  const minConcurrency = Math.max(1, Math.min(options.maxConcurrency, options.minConcurrency));
+    const maxConcurrency = clampConcurrency(options.maxConcurrency);
+  let currentConcurrency = Math.max(1, Math.min(maxConcurrency, options.initialConcurrency));
+  const minConcurrency = Math.max(1, Math.min(maxConcurrency, options.minConcurrency));
+
   let windows = 0;
 
   while (nextIndex < values.length) {
@@ -794,12 +822,17 @@ async function mapWithAdaptiveConcurrency<T, U>(
       results[indexes[offset]] = batchResults[offset];
     }
 
-    windows += 1;
+        windows += 1;
     const failures = batchResults.reduce((count, result) => (isFailure(result) ? count + 1 : count), 0);
-    currentConcurrency = failures === 0
-      ? Math.min(options.maxConcurrency, currentConcurrency * 2)
-      : Math.max(minConcurrency, Math.floor(currentConcurrency / 2));
     nextIndex = end;
+    const remaining = values.length - nextIndex;
+    if (remaining > 0) {
+      const nextWindowMax = Math.max(1, Math.min(maxConcurrency, remaining));
+      currentConcurrency = failures === 0
+        ? Math.min(nextWindowMax, currentConcurrency * 2)
+        : Math.max(minConcurrency, Math.floor(currentConcurrency / 2));
+    }
+
   }
 
   return {

@@ -458,7 +458,8 @@ describe('batch filesystem tools', () => {
     expect(result.content.length).toBe(250 + '\n... (truncated)'.length);
   });
 
-  it('read_files supports adaptive concurrency metadata', async () => {
+      it('read_files supports adaptive concurrency metadata', async () => {
+
 
     const cwd = await makeWorkspace();
     const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
@@ -490,8 +491,40 @@ describe('batch filesystem tools', () => {
     expect(parsed.windows).toBeGreaterThanOrEqual(1);
   });
 
-  it('read_files uses run-level adaptive defaults when tool args omit them', async () => {
+  it.each([
+    { id: 'small-3', concurrency: 3, files: 3 },
+    { id: 'small-5', concurrency: 5, files: 5 },
+  ])('read_files adaptive finalConcurrency stays bounded for small batches ($id)', async ({ id, concurrency, files }) => {
     const cwd = await makeWorkspace();
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+    const requests = Array.from({ length: files }, () => ({ path: 'src/file.ts' }));
+
+    const result = await toolset.executeTool({
+      id,
+      name: 'read_files',
+      arguments: {
+        files: requests,
+        concurrency,
+        adaptiveConcurrency: true,
+        minConcurrency: 1,
+      },
+    });
+
+    expect(result.isError).toBeFalsy();
+    const parsed = JSON.parse(result.content) as {
+      total: number;
+      finalConcurrency: number;
+      windows: number;
+    };
+    expect(parsed.total).toBe(files);
+    expect(parsed.finalConcurrency).toBeLessThanOrEqual(files);
+    expect(parsed.finalConcurrency).toBeLessThanOrEqual(concurrency);
+    expect(parsed.windows).toBeGreaterThanOrEqual(1);
+  });
+
+    it('read_files uses run-level adaptive defaults when tool args omit them', async () => {
+    const cwd = await makeWorkspace();
+
     const toolset = createAgentToolset({
       cwd,
       phase: 'planning',
