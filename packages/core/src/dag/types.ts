@@ -178,6 +178,17 @@ export type DagEvent =
       record: ReplayAttemptRecord;
     }
   | {
+      type: 'task:planning-abort-alert';
+      taskId: string;
+      provider: string;
+      model: string;
+      attempt: number;
+      maxAttempts: number;
+      consecutiveAbortFailures: number;
+      failureType: ReplayFailureType;
+      error: string;
+    }
+  | {
       type: 'task:tool-call';
       taskId: string;
       phase: 'planning' | 'implementation';

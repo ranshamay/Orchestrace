@@ -77,6 +77,8 @@ export interface OrchestratorConfig extends RunnerConfig {
   quickStartMode?: boolean;
   /** Max successful tool calls allowed before first successful sub-agent delegation. Defaults to 3 when quick-start is enabled. */
   quickStartMaxPreDelegationToolCalls?: number;
+  /** Planning-phase LLM timeout override in milliseconds. */
+  planningTimeoutMs?: number;
   /** Abort a planning attempt only after prolonged no-tool progress. Defaults to 5 minutes. */
   planningNoToolProgressTimeoutMs?: number;
   /** Polling interval used for planning no-tool progress checks. Defaults to 1 second. */
@@ -143,6 +145,7 @@ export async function orchestrate(
     trivialTaskMaxPromptLength,
     quickStartMode,
     quickStartMaxPreDelegationToolCalls,
+    planningTimeoutMs,
     planningNoToolProgressTimeoutMs,
     planningNoToolProgressCheckIntervalMs,
     planningNoToolGuardMode,
