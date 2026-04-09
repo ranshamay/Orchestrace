@@ -340,7 +340,16 @@ function parseLogFindings(text: string): LogFinding[] {
           : undefined,
         logSnippet: String(f.logSnippet ?? ''),
         detectedAt: new Date().toISOString(),
-      }));
+      }))
+      .filter((finding) =>
+        isSingleSentence(finding.issueSummary) &&
+        finding.evidence.length >= 2 &&
+        finding.evidence.length <= 3 &&
+        !containsRecommendationLanguage(
+          [finding.issueSummary, ...finding.evidence, finding.severityRationale ?? ''].join(' '),
+        ) &&
+        (!['high', 'critical'].includes(finding.severity) || !!finding.severityRationale),
+      );
   } catch {
     return [];
   }
@@ -354,6 +363,17 @@ function validateLogCategory(cat: string): LogFindingCategory {
 function validateSeverity(sev: string): FindingSeverity {
   const valid: FindingSeverity[] = ['low', 'medium', 'high', 'critical'];
   return valid.includes(sev as FindingSeverity) ? (sev as FindingSeverity) : 'medium';
+}
+
+function isSingleSentence(text: string): boolean {
+  const normalized = text.trim();
+  if (!normalized) return false;
+  const sentenceEndings = (normalized.match(/[.!?](?:\s|$)/g) ?? []).length;
+  return sentenceEndings <= 1;
+}
+
+function containsRecommendationLanguage(text: string): boolean {
+  return /(should\s+|recommend|fix\s+by|to\s+fix|implement\s+|change\s+the\s+code|add\s+this|remove\s+this|update\s+to)/i.test(text);
 }
 
 function pickModelSetting(value: unknown, fallback: string): string {

@@ -33,8 +33,9 @@ type LogWatcherFindingInput = {
   category: LogFindingCategory;
   severity: FindingSeverity;
   title: string;
-  description: string;
-  suggestedFix: string;
+  issueSummary: string;
+  evidence: string[];
+  severityRationale?: string;
   relevantFiles?: string[];
 };
 
