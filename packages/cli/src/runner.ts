@@ -391,6 +391,13 @@ async function main(): Promise<void> {
   const sessionHeadAtStart = await getGitHeadSha();
   let deliveryFinalized = false;
   const committedCheckpointShas: string[] = [];
+  /** Tracks per-task commit boundaries for structured PR commits. */
+  const taskCommitRanges: Array<{
+    todoId: string;
+    todoTitle: string;
+    fromSha: string;
+    toSha: string;
+  }> = [];
 
   async function maybeCheckpoint(reason: 'edit-threshold' | 'todo-completed' | 'terminal', opts?: {
     todoId?: string;
@@ -472,6 +479,19 @@ async function main(): Promise<void> {
         const fullSha = fullHead.stdout.trim();
         if (fullSha) {
           committedCheckpointShas.push(fullSha);
+
+          // Record per-task boundary when a todo-completed checkpoint succeeds
+          if (reason === 'todo-completed' && opts?.todoId) {
+            const prevTaskEnd = taskCommitRanges.length > 0
+              ? taskCommitRanges[taskCommitRanges.length - 1].toSha
+              : sessionHeadAtStart;
+            taskCommitRanges.push({
+              todoId: opts.todoId,
+              todoTitle: opts.todoTitle ?? opts.todoId,
+              fromSha: prevTaskEnd ?? fullSha,
+              toSha: fullSha,
+            });
+          }
         }
       }
 
@@ -533,43 +553,196 @@ async function main(): Promise<void> {
     };
   }
 
-  async function ensureRemoteDeliveryForCommittedSession(): Promise<void> {
-    if (deliveryFinalized) {
-      return;
-    }
-
-    const currentHead = await getGitHeadSha();
-    const fallbackHead = committedCheckpointShas.at(-1);
-    const targetHead = currentHead ?? fallbackHead;
-    if (!targetHead) {
-      return;
-    }
-
-    let commitCount = 0;
-    if (sessionHeadAtStart) {
-      const commitCountRes = await runGitSafeWithTimeout(
-        ['rev-list', '--count', `${sessionHeadAtStart}..${targetHead}`],
-        SESSION_DELIVERY_GIT_TIMEOUT_MS,
-      );
-      if (!commitCountRes.ok) {
-        if (committedCheckpointShas.length === 0) {
-          throw new Error(`Unable to determine session commit delta: ${(commitCountRes.error ?? commitCountRes.stderr) || 'git rev-list failed'}`);
-        }
-      } else {
-        const parsedCount = Number.parseInt(commitCountRes.stdout.trim(), 10);
-        if (Number.isFinite(parsedCount) && parsedCount > 0) {
-          commitCount = parsedCount;
+  /**
+   * Deterministic code-change detection: compares session start HEAD against
+   * current HEAD and checks for any uncommitted/staged/untracked changes.
+   * Returns an authoritative verdict on whether the session produced code changes.
+   */
+  async function detectSessionCodeChanges(): Promise<{
+    hasChanges: boolean;
+    commitCount: number;
+    diffSummary: string;
+    changedFiles: string[];
+  }> {
+    // First: commit any remaining dirty changes so nothing is lost
+    const dirty = await getWorktreeDirtySummary();
+    if (dirty.hasUncommittedChanges || dirty.hasStagedChanges || dirty.hasUntrackedChanges) {
+      await runGitSafe(['add', '-A']);
+      const hasStaged = await runGitSafe(['diff', '--cached', '--quiet']);
+      if (!hasStaged.ok) {
+        await runGitSafe(['commit', '-m', 'checkpoint: final uncommitted changes']);
+        const fullHead = await runGitSafe(['rev-parse', 'HEAD']);
+        if (fullHead.ok && fullHead.stdout.trim()) {
+          committedCheckpointShas.push(fullHead.stdout.trim());
         }
       }
     }
 
+    const currentHead = await getGitHeadSha();
+    if (!currentHead || !sessionHeadAtStart) {
+      // Fallback: if we can't determine SHAs, check committed checkpoint tracking
+      return {
+        hasChanges: committedCheckpointShas.length > 0,
+        commitCount: committedCheckpointShas.length,
+        diffSummary: '',
+        changedFiles: [],
+      };
+    }
+
+    if (currentHead === sessionHeadAtStart && committedCheckpointShas.length === 0) {
+      return { hasChanges: false, commitCount: 0, diffSummary: '', changedFiles: [] };
+    }
+
+    // Count commits between start and current HEAD
+    let commitCount = 0;
+    const countRes = await runGitSafeWithTimeout(
+      ['rev-list', '--count', `${sessionHeadAtStart}..${currentHead}`],
+      SESSION_DELIVERY_GIT_TIMEOUT_MS,
+    );
+    if (countRes.ok) {
+      const parsed = Number.parseInt(countRes.stdout.trim(), 10);
+      if (Number.isFinite(parsed) && parsed > 0) commitCount = parsed;
+    }
     if (commitCount <= 0 && committedCheckpointShas.length > 0) {
       commitCount = committedCheckpointShas.length;
     }
 
     if (commitCount <= 0) {
-      return;
+      return { hasChanges: false, commitCount: 0, diffSummary: '', changedFiles: [] };
     }
+
+    // Get diff summary for LLM context
+    const diffStatRes = await runGitSafeWithTimeout(
+      ['diff', '--stat', `${sessionHeadAtStart}..${currentHead}`],
+      SESSION_DELIVERY_GIT_TIMEOUT_MS,
+    );
+    const diffSummary = diffStatRes.ok ? diffStatRes.stdout.trim() : '';
+
+    const diffNameRes = await runGitSafeWithTimeout(
+      ['diff', '--name-only', `${sessionHeadAtStart}..${currentHead}`],
+      SESSION_DELIVERY_GIT_TIMEOUT_MS,
+    );
+    const changedFiles = diffNameRes.ok
+      ? diffNameRes.stdout.trim().split('\n').filter(Boolean)
+      : [];
+
+    return { hasChanges: true, commitCount, diffSummary, changedFiles };
+  }
+
+  /**
+   * Uses the LLM to generate meaningful PR metadata: branch name, title,
+   * description, and per-task commit messages.
+   */
+  async function generatePrMetadata(context: {
+    prompt: string;
+    diffSummary: string;
+    changedFiles: string[];
+    commitCount: number;
+    taskRanges: Array<{ todoId: string; todoTitle: string; changedFiles: string[] }>;
+  }): Promise<{
+    branchName: string;
+    prTitle: string;
+    prDescription: string;
+    taskCommitMessages: Array<{ todoId: string; message: string }>;
+    fallbackCommitMessage: string;
+  }> {
+    const taskSection = context.taskRanges.length > 0
+      ? [
+        '',
+        '## Tasks Completed',
+        ...context.taskRanges.map((t, i) =>
+          `${i + 1}. "${t.todoTitle}" (files: ${t.changedFiles.slice(0, 10).join(', ')}${t.changedFiles.length > 10 ? ` +${t.changedFiles.length - 10} more` : ''})`,
+        ),
+      ].join('\n')
+      : '';
+
+    const metadataPrompt = [
+      'You are generating metadata for a pull request. Respond ONLY with a valid JSON object, no markdown fences, no extra text.',
+      '',
+      '## Original Task',
+      context.prompt,
+      '',
+      '## Changes Summary',
+      `Files changed (${context.changedFiles.length}): ${context.changedFiles.slice(0, 30).join(', ')}`,
+      '',
+      context.diffSummary ? `Diff stats:\n${context.diffSummary}` : '',
+      '',
+      `Total commits: ${context.commitCount}`,
+      taskSection,
+      '',
+      '## Instructions',
+      'Generate a JSON object with these exact keys:',
+      '- "branchName": a short kebab-case git branch name (no spaces, max 60 chars, no special chars except hyphens). Prefix with "feat/", "fix/", "refactor/", or "chore/" as appropriate.',
+      '- "prTitle": a concise, descriptive PR title (max 80 chars). Use conventional commit style (e.g., "feat: add user auth flow").',
+      '- "prDescription": a detailed markdown PR description covering: what changed, why, and key implementation details. Include a brief summary and a bullet list of notable changes.',
+      ...(context.taskRanges.length > 0
+        ? [
+          '- "taskCommitMessages": an array of objects, one per task in the same order, each with:',
+          '  - "todoId": the task ID (match exactly from the tasks list above)',
+          '  - "message": a conventional-commit-style commit message for that task (max 72 chars). Be specific about what the task accomplished.',
+        ]
+        : []),
+      '- "fallbackCommitMessage": a meaningful single-line commit message for the overall change (max 72 chars). Use conventional commit style.',
+      '',
+      'Respond with ONLY the JSON object.',
+    ].join('\n');
+
+    try {
+      const agent = await llm.spawnAgent({
+        provider: config.provider,
+        model: config.model,
+        systemPrompt: 'You are a precise JSON generator. Output only valid JSON, nothing else.',
+        timeoutMs: 30_000,
+        apiKey: await authManager.resolveApiKey(config.provider),
+        refreshApiKey: () => authManager.resolveApiKey(config.provider),
+      });
+
+      const result = await agent.complete(metadataPrompt);
+      const parsed = parsePrMetadataResponse(result.text, context.taskRanges);
+      if (parsed) return parsed;
+    } catch (err) {
+      console.warn(`[runner] LLM PR metadata generation failed: ${errorMsg(err)}. Using fallback.`);
+    }
+
+    // Fallback: generate reasonable defaults from the prompt
+    const slug = config.prompt
+      .toLowerCase()
+      .replace(/[^a-z0-9\s-]/g, '')
+      .trim()
+      .split(/\s+/)
+      .slice(0, 5)
+      .join('-')
+      .slice(0, 50);
+
+    return {
+      branchName: `feat/${slug || `session-${sessionId.slice(0, 8)}`}`,
+      prTitle: compact(config.prompt, 80),
+      prDescription: [
+        `## Summary`,
+        compact(config.prompt, 200),
+        '',
+        `## Changes`,
+        ...context.changedFiles.slice(0, 20).map((f) => `- \`${f}\``),
+        context.changedFiles.length > 20 ? `- ... and ${context.changedFiles.length - 20} more files` : '',
+      ].join('\n'),
+      taskCommitMessages: context.taskRanges.map((t) => ({
+        todoId: t.todoId,
+        message: compact(t.todoTitle, 72),
+      })),
+      fallbackCommitMessage: compact(config.prompt, 72),
+    };
+  }
+
+  /**
+   * Rewrites session checkpoint commits into per-task commits, each with an
+   * LLM-generated message, then pushes and creates a PR.
+   */
+  async function ensureRemoteDeliveryForCommittedSession(): Promise<void> {
+    if (deliveryFinalized) return;
+
+    // Deterministic code-change gate
+    const changes = await detectSessionCodeChanges();
+    if (!changes.hasChanges) return;
 
     if (!SESSION_DELIVERY_REQUIRED) {
       throw new Error(
@@ -579,15 +752,159 @@ async function main(): Promise<void> {
 
     deliveryFinalized = true;
 
+    // Resolve per-task changed files for LLM context
+    const taskRangesWithFiles = await Promise.all(
+      taskCommitRanges.map(async (range) => {
+        const filesRes = await runGitSafeWithTimeout(
+          ['diff', '--name-only', `${range.fromSha}..${range.toSha}`],
+          SESSION_DELIVERY_GIT_TIMEOUT_MS,
+        );
+        return {
+          todoId: range.todoId,
+          todoTitle: range.todoTitle,
+          changedFiles: filesRes.ok ? filesRes.stdout.trim().split('\n').filter(Boolean) : [],
+        };
+      }),
+    );
+
+    // Use LLM to generate meaningful PR metadata + per-task commit messages
+    const prMeta = await generatePrMetadata({
+      prompt: config.prompt,
+      diffSummary: changes.diffSummary,
+      changedFiles: changes.changedFiles,
+      commitCount: changes.commitCount,
+      taskRanges: taskRangesWithFiles,
+    });
+
+    // Rewrite history: one commit per task
+    if (sessionHeadAtStart && taskCommitRanges.length > 0) {
+      // Build message map from LLM output
+      const messageMap = new Map<string, string>();
+      for (const tcm of prMeta.taskCommitMessages) {
+        messageMap.set(tcm.todoId, tcm.message);
+      }
+
+      // Reset to session start, then replay per-task ranges
+      const resetRes = await runGitSafeWithTimeout(
+        ['reset', '--soft', sessionHeadAtStart],
+        SESSION_DELIVERY_GIT_TIMEOUT_MS,
+      );
+      if (resetRes.ok) {
+        // Commit once per task range by cherry-picking the diff
+        for (const range of taskCommitRanges) {
+          const message = messageMap.get(range.todoId) ?? compact(range.todoTitle, 72);
+
+          // Apply all changes from this task's range
+          const patchRes = await runGitSafeWithTimeout(
+            ['diff', `${range.fromSha}..${range.toSha}`],
+            SESSION_DELIVERY_GIT_TIMEOUT_MS,
+          );
+          if (patchRes.ok && patchRes.stdout.trim()) {
+            const applyRes = await runGitSafeWithTimeout(
+              ['apply', '--index', '--allow-empty', '-'],
+              SESSION_DELIVERY_GIT_TIMEOUT_MS,
+            );
+            // If apply fails, try checkout-based approach
+            if (!applyRes.ok) {
+              await runGitSafeWithTimeout(
+                ['checkout', range.toSha, '--', '.'],
+                SESSION_DELIVERY_GIT_TIMEOUT_MS,
+              );
+              await runGitSafe(['add', '-A']);
+            }
+          } else {
+            // Fallback: checkout the tree state at toSha
+            await runGitSafeWithTimeout(
+              ['checkout', range.toSha, '--', '.'],
+              SESSION_DELIVERY_GIT_TIMEOUT_MS,
+            );
+            await runGitSafe(['add', '-A']);
+          }
+
+          const hasStaged = await runGitSafe(['diff', '--cached', '--quiet']);
+          if (!hasStaged.ok) {
+            const commitRes = await runGitSafeWithTimeout(
+              ['commit', '-m', message],
+              SESSION_DELIVERY_GIT_TIMEOUT_MS,
+            );
+            if (!commitRes.ok) {
+              // If per-task commit fails, bail to single-commit fallback
+              console.warn(`[runner] Per-task commit failed for ${range.todoId}, falling back to single commit.`);
+              await runGitSafeWithTimeout(['reset', '--soft', sessionHeadAtStart], SESSION_DELIVERY_GIT_TIMEOUT_MS);
+              break;
+            }
+          }
+        }
+
+        // Ensure final tree matches the original session end
+        const finalHead = await getGitHeadSha();
+        const lastRange = taskCommitRanges[taskCommitRanges.length - 1];
+        if (finalHead !== lastRange.toSha) {
+          // There may be trailing changes after the last task (terminal checkpoint)
+          const currentHead = committedCheckpointShas[committedCheckpointShas.length - 1];
+          if (currentHead && currentHead !== finalHead) {
+            await runGitSafeWithTimeout(['checkout', currentHead, '--', '.'], SESSION_DELIVERY_GIT_TIMEOUT_MS);
+            await runGitSafe(['add', '-A']);
+            const trailingStaged = await runGitSafe(['diff', '--cached', '--quiet']);
+            if (!trailingStaged.ok) {
+              await runGitSafeWithTimeout(
+                ['commit', '-m', prMeta.fallbackCommitMessage],
+                SESSION_DELIVERY_GIT_TIMEOUT_MS,
+              );
+            }
+          }
+        }
+      }
+    } else if (sessionHeadAtStart && changes.commitCount >= 1) {
+      // No task ranges: squash all into one commit with LLM message
+      if (changes.commitCount > 1) {
+        const resetRes = await runGitSafeWithTimeout(
+          ['reset', '--soft', sessionHeadAtStart],
+          SESSION_DELIVERY_GIT_TIMEOUT_MS,
+        );
+        if (resetRes.ok) {
+          const commitRes = await runGitSafeWithTimeout(
+            ['commit', '-m', prMeta.fallbackCommitMessage],
+            SESSION_DELIVERY_GIT_TIMEOUT_MS,
+          );
+          if (!commitRes.ok) {
+            throw new Error(`Failed to create squash commit: ${(commitRes.error ?? commitRes.stderr) || 'git commit failed'}`);
+          }
+        }
+      } else {
+        await runGitSafeWithTimeout(
+          ['commit', '--amend', '-m', prMeta.fallbackCommitMessage],
+          SESSION_DELIVERY_GIT_TIMEOUT_MS,
+        );
+      }
+    }
+
     const baseBranch = await resolveBaseBranch();
-    const headBranch = await ensureDeliveryBranch(baseBranch, targetHead);
+
+    // Create branch with LLM-generated name
+    const branchRes = await runGitSafeWithTimeout(
+      ['checkout', '-B', prMeta.branchName],
+      SESSION_DELIVERY_GIT_TIMEOUT_MS,
+    );
+    if (!branchRes.ok) {
+      // Fallback to generated branch name if LLM name conflicts
+      const fallbackBranch = `orchestrace/session-${sessionId.slice(0, 8)}-${Date.now().toString(36)}`;
+      const fallbackRes = await runGitSafeWithTimeout(
+        ['checkout', '-B', fallbackBranch],
+        SESSION_DELIVERY_GIT_TIMEOUT_MS,
+      );
+      if (!fallbackRes.ok) {
+        throw new Error(`Unable to create delivery branch: ${(fallbackRes.error ?? fallbackRes.stderr) || 'git checkout failed'}`);
+      }
+      prMeta.branchName = fallbackBranch;
+    }
 
     const pushRes = await runGitSafeWithTimeout(
-      ['push', '--set-upstream', 'origin', headBranch],
+      ['push', '--set-upstream', 'origin', prMeta.branchName],
       SESSION_DELIVERY_GIT_TIMEOUT_MS,
     );
     if (!pushRes.ok) {
-      throw new Error(`git push failed for ${headBranch}: ${(pushRes.error ?? pushRes.stderr) || 'unknown error'}`);
+      throw new Error(`git push failed for ${prMeta.branchName}: ${(pushRes.error ?? pushRes.stderr) || 'unknown error'}`);
     }
 
     const remoteRes = await runGitSafeWithTimeout(['remote', 'get-url', 'origin'], SESSION_DELIVERY_GIT_TIMEOUT_MS);
@@ -609,22 +926,16 @@ async function main(): Promise<void> {
       host: remote.host,
       owner: remote.owner,
       repo: remote.repo,
-      headBranch,
+      headBranch: prMeta.branchName,
       baseBranch,
       token,
-      title: `Session ${sessionId.slice(0, 8)}: ${compact(config.prompt, 72)}`,
-      body: [
-        `Automated delivery for session ${sessionId}.`,
-        '',
-        `- Source: ${config.source ?? 'user'}`,
-        `- Commits created in this session: ${commitCount}`,
-        `- Branch: ${headBranch}`,
-      ].join('\n'),
+      title: prMeta.prTitle,
+      body: prMeta.prDescription,
     });
 
     const deliveryMessage = pr.created
-      ? `Committed session changes were pushed to origin/${headBranch} and PR #${pr.number} was created: ${pr.url}`
-      : `Committed session changes were pushed to origin/${headBranch} and existing PR #${pr.number} was reused: ${pr.url}`;
+      ? `Committed session changes were pushed to origin/${prMeta.branchName} and PR #${pr.number} was created: ${pr.url}`
+      : `Committed session changes were pushed to origin/${prMeta.branchName} and existing PR #${pr.number} was reused: ${pr.url}`;
 
     await emit({
       time: iso(),
@@ -659,31 +970,6 @@ async function main(): Promise<void> {
     }
 
     return 'main';
-  }
-
-  async function ensureDeliveryBranch(baseBranch: string, targetHead?: string): Promise<string> {
-    const branchRes = await runGitSafeWithTimeout(['rev-parse', '--abbrev-ref', 'HEAD'], SESSION_DELIVERY_GIT_TIMEOUT_MS);
-    if (!branchRes.ok) {
-      throw new Error(`Unable to determine current branch: ${(branchRes.error ?? branchRes.stderr) || 'git rev-parse failed'}`);
-    }
-
-    const currentBranch = branchRes.stdout.trim();
-    const currentHead = await getGitHeadSha();
-    const currentHeadMatchesTarget = !targetHead || (currentHead === targetHead);
-    if (currentBranch && currentBranch !== 'HEAD' && currentBranch !== baseBranch && currentHeadMatchesTarget) {
-      return currentBranch;
-    }
-
-    const generatedBranch = `orchestrace/session-${sessionId.slice(0, 8)}-${Date.now().toString(36)}`;
-    const checkoutArgs = targetHead
-      ? ['checkout', '-B', generatedBranch, targetHead]
-      : ['checkout', '-b', generatedBranch];
-    const checkoutRes = await runGitSafeWithTimeout(checkoutArgs, SESSION_DELIVERY_GIT_TIMEOUT_MS);
-    if (!checkoutRes.ok) {
-      throw new Error(`Unable to create delivery branch ${generatedBranch}: ${(checkoutRes.error ?? checkoutRes.stderr) || 'git checkout failed'}`);
-    }
-
-    return generatedBranch;
   }
 
   async function ensurePullRequest(params: {
@@ -2060,12 +2346,22 @@ async function completeWithRetry(
 ): Promise<{ text: string; usage?: { input: number; output: number; cost: number } }> {
   let lastError: unknown;
   for (let attempt = 1; attempt <= SUBAGENT_RETRY_MAX_ATTEMPTS; attempt++) {
+    const startedAt = Date.now();
     try {
       return await agent.complete(prompt, signal);
     } catch (err) {
       lastError = err;
-      if (attempt >= SUBAGENT_RETRY_MAX_ATTEMPTS || !isRetryable(err)) throw err;
-      await new Promise<void>((r) => setTimeout(r, SUBAGENT_RETRY_BASE_DELAY_MS * attempt));
+      const elapsedMs = Date.now() - startedAt;
+      const retryable = isRetryable(err);
+      const exhausted = attempt >= SUBAGENT_RETRY_MAX_ATTEMPTS;
+      const retryDelayMs = retryable && !exhausted ? SUBAGENT_RETRY_BASE_DELAY_MS * attempt : 0;
+
+      console.warn(
+        `[runner] Sub-agent LLM attempt failed (attempt=${attempt}/${SUBAGENT_RETRY_MAX_ATTEMPTS}, elapsedMs=${elapsedMs}, retryable=${retryable}, retryDelayMs=${retryDelayMs}): ${errorMsg(err)}`,
+      );
+
+      if (exhausted || !retryable) throw err;
+      await new Promise<void>((r) => setTimeout(r, retryDelayMs));
     }
   }
   throw lastError instanceof Error ? lastError : new Error(errorMsg(lastError));
@@ -2105,6 +2401,60 @@ function parseResultJson(text: string): Record<string, unknown> | undefined {
     } catch { /* next */ }
   }
   return undefined;
+}
+
+function parsePrMetadataResponse(
+  text: string,
+  taskRanges: Array<{ todoId: string; todoTitle: string }>,
+): {
+  branchName: string;
+  prTitle: string;
+  prDescription: string;
+  taskCommitMessages: Array<{ todoId: string; message: string }>;
+  fallbackCommitMessage: string;
+} | undefined {
+  const parsed = parseResultJson(text);
+  if (!parsed) return undefined;
+
+  const branchName = typeof parsed.branchName === 'string' ? parsed.branchName.trim() : '';
+  const prTitle = typeof parsed.prTitle === 'string' ? parsed.prTitle.trim() : '';
+  const prDescription = typeof parsed.prDescription === 'string' ? parsed.prDescription.trim() : '';
+  const fallbackCommitMessage = typeof parsed.fallbackCommitMessage === 'string'
+    ? parsed.fallbackCommitMessage.trim()
+    : (typeof parsed.commitMessage === 'string' ? parsed.commitMessage.trim() : '');
+
+  if (!branchName || !prTitle || !fallbackCommitMessage) return undefined;
+
+  // Sanitize branch name: only allow alphanumeric, hyphens, slashes, dots
+  const safeBranch = branchName.replace(/[^a-zA-Z0-9/._-]/g, '-').replace(/-{2,}/g, '-').slice(0, 60);
+
+  // Parse per-task commit messages
+  const rawTaskMessages = Array.isArray(parsed.taskCommitMessages) ? parsed.taskCommitMessages : [];
+  const taskCommitMessages: Array<{ todoId: string; message: string }> = [];
+  const parsedMap = new Map<string, string>();
+  for (const item of rawTaskMessages) {
+    if (!item || typeof item !== 'object') continue;
+    const r = item as Record<string, unknown>;
+    const todoId = typeof r.todoId === 'string' ? r.todoId.trim() : '';
+    const message = typeof r.message === 'string' ? r.message.trim() : '';
+    if (todoId && message) parsedMap.set(todoId, message.slice(0, 120));
+  }
+
+  // Ensure one message per task range, falling back to todoTitle
+  for (const range of taskRanges) {
+    taskCommitMessages.push({
+      todoId: range.todoId,
+      message: parsedMap.get(range.todoId) ?? compact(range.todoTitle, 72),
+    });
+  }
+
+  return {
+    branchName: safeBranch,
+    prTitle: prTitle.slice(0, 120),
+    prDescription: prDescription || prTitle,
+    taskCommitMessages,
+    fallbackCommitMessage: fallbackCommitMessage.slice(0, 120),
+  };
 }
 
 function strList(value: unknown): string[] {
