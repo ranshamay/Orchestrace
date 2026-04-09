@@ -18,6 +18,18 @@ export type StartSessionFn = (request: {
   creationReason?: 'start' | 'retry';
   sourceSessionId?: string;
   source?: 'user' | 'observer';
+  routingAuditContext?: {
+    eventType: 'observer_fix_prompt_conversion';
+    findingFingerprint: string;
+    findingTitle: string;
+    findingCategory: string;
+    findingSeverity: string;
+    observedSessionCount: number;
+    relevantFileCount: number;
+    promptCharLength: number;
+    routeIntent: 'code_change';
+    reason: string;
+  };
 }) => Promise<{ id: string } | { error: string; statusCode: number }>;
 
 /**
@@ -30,13 +42,16 @@ export async function spawnFixSessions(
   config: ObserverConfig,
   startSession: StartSessionFn,
   activeFixSessionCount = 0,
+  ignoreLimit = false,
 ): Promise<number> {
   const pending = registry.getPending();
-  const limit = config.maxConcurrentFixSessions > 0 ? config.maxConcurrentFixSessions : Infinity;
+  const limit = ignoreLimit
+    ? Infinity
+    : (config.maxConcurrentFixSessions > 0 ? config.maxConcurrentFixSessions : Infinity);
   const canSpawn = Math.max(0, limit - activeFixSessionCount);
   if (canSpawn === 0) return 0;
 
-  const toSpawn = pending.slice(0, canSpawn);
+  const toSpawn = ignoreLimit ? pending : pending.slice(0, canSpawn);
   let spawned = 0;
 
   for (const finding of toSpawn) {
@@ -69,6 +84,18 @@ async function spawnFixSession(
       autoApprove: config.fixAutoApprove,
       creationReason: 'start',
       source: 'observer',
+      routingAuditContext: {
+        eventType: 'observer_fix_prompt_conversion',
+        findingFingerprint: finding.fingerprint,
+        findingTitle: finding.title,
+        findingCategory: finding.category,
+        findingSeverity: finding.severity,
+        observedSessionCount: finding.observedInSessions.length + finding.additionalSessions.length,
+        relevantFileCount: finding.relevantFiles?.length ?? 0,
+        promptCharLength: prompt.length,
+        routeIntent: 'code_change',
+        reason: 'Observer finding converted into implementation prompt; forcing observer source and planning pipeline intent.',
+      },
     });
 
     if ('error' in result) {

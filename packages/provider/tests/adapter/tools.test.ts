@@ -144,4 +144,626 @@ describe('executeWithOptionalTools', () => {
 
     expect(retryPrompt).toBeUndefined();
   });
+
+  it('uses deterministic remediation guidance for edit validation failures', async () => {
+    const consumeStreamMock = vi.mocked(consumeStream);
+
+    const firstResponse = makeAssistantMessage([
+      { type: 'toolCall', id: 'edit-1', name: 'edit_file', arguments: { path: 'src/file.ts', oldText: 'x', newText: '\n' } },
+    ], 'tool_calls');
+    const finalResponse = makeAssistantMessage([{ type: 'text', text: 'Handled.' }]);
+
+    consumeStreamMock.mockResolvedValueOnce(firstResponse as never);
+    consumeStreamMock.mockResolvedValueOnce(finalResponse as never);
+
+    const context: TestContext = {
+      messages: [],
+      tools: [{ name: 'edit_file', description: 'Edit file', parameters: { type: 'object' } }],
+    };
+
+    await executeWithOptionalTools({
+      model: {} as never,
+      context,
+      options: {},
+      toolset: {
+        tools: [],
+        async executeTool() {
+          return { content: 'Missing newText', isError: true };
+        },
+      },
+      onUsage: () => {},
+    });
+
+    const deterministicPrompt = context.messages.find(
+      (message) => message.role === 'user' && String(message.content?.[0]?.text ?? '').includes('This failure is deterministic.'),
+    );
+    expect(deterministicPrompt).toBeDefined();
+
+    const genericRetryPrompt = context.messages.find(
+      (message) => message.role === 'user' && String(message.content?.[0]?.text ?? '').includes('retry this tool call'),
+    );
+    expect(genericRetryPrompt).toBeUndefined();
+  });
+
+  it('retries subagent_spawn_batch failures in a single reduced batch request', async () => {
+    const consumeStreamMock = vi.mocked(consumeStream);
+
+    const firstResponse = makeAssistantMessage([
+      {
+        type: 'toolCall',
+        id: 'batch-1',
+        name: 'subagent_spawn_batch',
+        arguments: {
+          agents: [
+            { nodeId: 'graph_cli_task_entrypoint', prompt: 'one' },
+            { nodeId: 'graph_runner_session_flow', prompt: 'two' },
+            { nodeId: 'graph_docs', prompt: 'three' },
+          ],
+        },
+      },
+    ], 'tool_calls');
+    const finalResponse = makeAssistantMessage([{ type: 'text', text: 'done' }]);
+
+    consumeStreamMock.mockResolvedValueOnce(firstResponse as never);
+    consumeStreamMock.mockResolvedValueOnce(finalResponse as never);
+
+    const executeTool = vi.fn()
+      .mockResolvedValueOnce({
+        isError: true,
+        content: JSON.stringify({
+          failedNodeIds: ['graph_cli_task_entrypoint', 'graph_runner_session_flow'],
+          runs: [
+            { nodeId: 'graph_cli_task_entrypoint', status: 'failed' },
+            { nodeId: 'graph_runner_session_flow', status: 'failed' },
+            { nodeId: 'graph_docs', status: 'completed' },
+          ],
+        }),
+      })
+      .mockResolvedValueOnce({
+        isError: false,
+        content: JSON.stringify({ completed: 2, failed: 0 }),
+      });
+
+    const context: TestContext = {
+      messages: [],
+      tools: [{ name: 'subagent_spawn_batch', description: 'spawn many', parameters: { type: 'object' } }],
+    };
+
+    await executeWithOptionalTools({
+      model: {} as never,
+      context,
+      options: {},
+      toolset: {
+        tools: [],
+        executeTool,
+      },
+      onUsage: () => {},
+    });
+
+    expect(executeTool).toHaveBeenCalledTimes(2);
+
+    const retryCall = executeTool.mock.calls[1]?.[0];
+    expect(retryCall.name).toBe('subagent_spawn_batch');
+    expect(retryCall.arguments).toMatchObject({
+      agents: [
+        {
+          nodeId: 'graph_cli_task_entrypoint',
+          prompt: 'one',
+          contextPacket: {
+            relevantContext: [
+              expect.stringContaining('Retry context: prior sub-agent attempt failed for node "graph_cli_task_entrypoint"'),
+            ],
+          },
+        },
+        {
+          nodeId: 'graph_runner_session_flow',
+          prompt: 'two',
+          contextPacket: {
+            relevantContext: [
+              expect.stringContaining('Retry context: prior sub-agent attempt failed for node "graph_runner_session_flow"'),
+            ],
+          },
+        },
+      ],
+    });
+    expect(retryCall.arguments.agents).not.toEqual(firstResponse.content[0].arguments.agents.slice(0, 2));
+  });
+
+  it('injects bounded generic retry context when failed runs omit explicit error', async () => {
+    const consumeStreamMock = vi.mocked(consumeStream);
+
+    const firstResponse = makeAssistantMessage([
+      {
+        type: 'toolCall',
+        id: 'batch-2',
+        name: 'subagent_spawn_batch',
+        arguments: {
+          agents: [
+            { nodeId: 'graph_retry_node', prompt: 'retry me' },
+            { nodeId: 'graph_ok_node', prompt: 'ok' },
+          ],
+        },
+      },
+    ], 'tool_calls');
+    const finalResponse = makeAssistantMessage([{ type: 'text', text: 'done' }]);
+
+    consumeStreamMock.mockResolvedValueOnce(firstResponse as never);
+    consumeStreamMock.mockResolvedValueOnce(finalResponse as never);
+
+    const executeTool = vi.fn()
+      .mockResolvedValueOnce({
+        isError: true,
+        content: JSON.stringify({
+          runs: [
+            { nodeId: 'graph_retry_node', status: 'failed' },
+            { nodeId: 'graph_ok_node', status: 'completed' },
+          ],
+        }),
+      })
+      .mockResolvedValueOnce({
+        isError: false,
+        content: JSON.stringify({ completed: 1, failed: 0 }),
+      });
+
+    const context: TestContext = {
+      messages: [],
+      tools: [{ name: 'subagent_spawn_batch', description: 'spawn many', parameters: { type: 'object' } }],
+    };
+
+    await executeWithOptionalTools({
+      model: {} as never,
+      context,
+      options: {},
+      toolset: {
+        tools: [],
+        executeTool,
+      },
+      onUsage: () => {},
+    });
+
+    const retryCall = executeTool.mock.calls[1]?.[0];
+    expect(retryCall.arguments).toMatchObject({
+      agents: [
+        {
+          nodeId: 'graph_retry_node',
+          contextPacket: {
+            relevantContext: [
+              expect.stringContaining('Retry context: prior sub-agent attempt failed for node "graph_retry_node".'),
+            ],
+          },
+        },
+      ],
+    });
+    const retryLine = retryCall.arguments.agents[0].contextPacket.relevantContext[0] as string;
+    expect(retryLine).toContain('Retry context:');
+    expect(retryLine.length).toBeLessThanOrEqual(360);
+  });
+
+  it('returns inline fallback for critical nodes after retry cap exhaustion', async () => {
+    const consumeStreamMock = vi.mocked(consumeStream);
+
+    const firstResponse = makeAssistantMessage([
+      {
+        type: 'toolCall',
+        id: 'batch-critical',
+        name: 'subagent_spawn_batch',
+        arguments: {
+          agents: [
+            { nodeId: 'graph_cli_task_entrypoint', prompt: 'critical node' },
+            { nodeId: 'graph_runner_session_flow', prompt: 'critical node 2' },
+          ],
+        },
+      },
+    ], 'tool_calls');
+    const finalResponse = makeAssistantMessage([{ type: 'text', text: 'done' }]);
+
+    consumeStreamMock.mockResolvedValueOnce(firstResponse as never);
+    consumeStreamMock.mockResolvedValueOnce(finalResponse as never);
+
+    const failurePayloadAttempt1 = JSON.stringify({
+      failedNodeIds: ['graph_cli_task_entrypoint', 'graph_runner_session_flow'],
+      runs: [
+        { nodeId: 'graph_cli_task_entrypoint', status: 'failed', error: 'timeout a' },
+        { nodeId: 'graph_runner_session_flow', status: 'failed', error: 'aborted a' },
+      ],
+    });
+    const failurePayloadAttempt2 = JSON.stringify({
+      failedNodeIds: ['graph_cli_task_entrypoint', 'graph_runner_session_flow'],
+      runs: [
+        { nodeId: 'graph_cli_task_entrypoint', status: 'failed', error: 'timeout b' },
+        { nodeId: 'graph_runner_session_flow', status: 'failed', error: 'aborted b' },
+      ],
+    });
+    const failurePayloadAttempt3 = JSON.stringify({
+      failedNodeIds: ['graph_cli_task_entrypoint', 'graph_runner_session_flow'],
+      runs: [
+        { nodeId: 'graph_cli_task_entrypoint', status: 'failed', error: 'timeout c' },
+        { nodeId: 'graph_runner_session_flow', status: 'failed', error: 'aborted c' },
+      ],
+    });
+
+    const executeTool = vi.fn()
+      .mockResolvedValueOnce({ isError: true, content: failurePayloadAttempt1 })
+      .mockResolvedValueOnce({ isError: true, content: failurePayloadAttempt2 })
+      .mockResolvedValueOnce({ isError: true, content: failurePayloadAttempt3 });
+
+    const context: TestContext = {
+      messages: [],
+      tools: [{ name: 'subagent_spawn_batch', description: 'spawn many', parameters: { type: 'object' } }],
+    };
+
+    await executeWithOptionalTools({
+      model: {} as never,
+      context,
+      options: {},
+      toolset: {
+        tools: [],
+        executeTool,
+      },
+      onUsage: () => {},
+    });
+
+    expect(executeTool).toHaveBeenCalledTimes(3);
+
+    const toolResult = context.messages.find((message) => message.role === 'toolResult');
+    expect(toolResult?.isError).toBe(true);
+    const parsed = JSON.parse(String(toolResult?.content?.[0]?.text ?? '{}')) as {
+      status: string;
+      retryCap: number;
+      critical: string[];
+      nonCritical: string[];
+      inlineInstructions?: string;
+    };
+    expect(parsed.status).toBe('fallback');
+    expect(parsed.retryCap).toBe(2);
+    expect(parsed.critical).toEqual(['graph_cli_task_entrypoint', 'graph_runner_session_flow']);
+    expect(parsed.nonCritical).toEqual([]);
+    expect(parsed.inlineInstructions).toContain('Inline fallback required for critical nodes');
+  });
+
+  it('trips subagent batch circuit breaker on third identical failure and escalates', async () => {
+    const consumeStreamMock = vi.mocked(consumeStream);
+
+    const firstResponse = makeAssistantMessage([
+      {
+        type: 'toolCall',
+        id: 'batch-breaker',
+        name: 'subagent_spawn_batch',
+        arguments: {
+          agents: [
+            { nodeId: 'graph_cli_task_entrypoint', prompt: 'critical node' },
+            { nodeId: 'graph_runner_session_flow', prompt: 'critical node 2' },
+          ],
+        },
+      },
+    ], 'tool_calls');
+    const finalResponse = makeAssistantMessage([{ type: 'text', text: 'done' }]);
+
+    consumeStreamMock.mockResolvedValueOnce(firstResponse as never);
+    consumeStreamMock.mockResolvedValueOnce(finalResponse as never);
+
+    const failurePayload = JSON.stringify({
+      failedNodeIds: ['graph_cli_task_entrypoint', 'graph_runner_session_flow'],
+      runs: [
+        { nodeId: 'graph_cli_task_entrypoint', status: 'failed', error: 'timeout' },
+        { nodeId: 'graph_runner_session_flow', status: 'failed', error: 'aborted' },
+      ],
+    });
+
+    const executeTool = vi.fn()
+      .mockResolvedValueOnce({ isError: true, content: failurePayload })
+      .mockResolvedValueOnce({ isError: true, content: failurePayload })
+      .mockResolvedValueOnce({ isError: true, content: failurePayload });
+
+    const context: TestContext = {
+      messages: [],
+      tools: [{ name: 'subagent_spawn_batch', description: 'spawn many', parameters: { type: 'object' } }],
+    };
+
+    await executeWithOptionalTools({
+      model: {} as never,
+      context,
+      options: {},
+      toolset: {
+        tools: [],
+        executeTool,
+      },
+      onUsage: () => {},
+    });
+
+    const toolResult = context.messages.find((message) => message.role === 'toolResult');
+    const parsed = JSON.parse(String(toolResult?.content?.[0]?.text ?? '{}')) as {
+      status: string;
+      reason: string;
+      failedNodeIds: string[];
+      consecutiveIdenticalFailures: number;
+      actionRequired: string;
+    };
+
+    expect(toolResult?.isError).toBe(true);
+    expect(parsed.status).toBe('escalated_error');
+    expect(parsed.reason).toBe('identical_subagent_batch_failures_repeated');
+    expect(parsed.failedNodeIds).toEqual(['graph_cli_task_entrypoint', 'graph_runner_session_flow']);
+    expect(parsed.consecutiveIdenticalFailures).toBe(3);
+    expect(parsed.actionRequired).toContain('manual_intervention_or_backoff_before_retry');
+  });
+
+  it('continues subagent batch retries when failure signature changes between attempts', async () => {
+    const consumeStreamMock = vi.mocked(consumeStream);
+
+    const firstResponse = makeAssistantMessage([
+      {
+        type: 'toolCall',
+        id: 'batch-changed-signature',
+        name: 'subagent_spawn_batch',
+        arguments: {
+          agents: [
+            { nodeId: 'n1', prompt: 'one' },
+            { nodeId: 'n2', prompt: 'two' },
+          ],
+        },
+      },
+    ], 'tool_calls');
+    const finalResponse = makeAssistantMessage([{ type: 'text', text: 'done' }]);
+
+    consumeStreamMock.mockResolvedValueOnce(firstResponse as never);
+    consumeStreamMock.mockResolvedValueOnce(finalResponse as never);
+
+    const executeTool = vi.fn()
+      .mockResolvedValueOnce({
+        isError: true,
+        content: JSON.stringify({ failedNodeIds: ['n1'], runs: [{ nodeId: 'n1', status: 'failed', error: 'timeout' }] }),
+      })
+      .mockResolvedValueOnce({
+        isError: true,
+        content: JSON.stringify({ failedNodeIds: ['n2'], runs: [{ nodeId: 'n2', status: 'failed', error: 'rate limit' }] }),
+      })
+      .mockResolvedValueOnce({ isError: false, content: JSON.stringify({ completed: 1, failed: 0 }) });
+
+    const context: TestContext = {
+      messages: [],
+      tools: [{ name: 'subagent_spawn_batch', description: 'spawn many', parameters: { type: 'object' } }],
+    };
+
+    await executeWithOptionalTools({
+      model: {} as never,
+      context,
+      options: {},
+      toolset: {
+        tools: [],
+        executeTool,
+      },
+      onUsage: () => {},
+    });
+
+    expect(executeTool).toHaveBeenCalledTimes(3);
+    const toolResult = context.messages.find((message) => message.role === 'toolResult');
+    expect(toolResult?.isError).toBeFalsy();
+  });
+
+  it('skips non-critical research nodes after retry cap exhaustion', async () => {
+    const consumeStreamMock = vi.mocked(consumeStream);
+
+    const firstResponse = makeAssistantMessage([
+      {
+        type: 'toolCall',
+        id: 'batch-noncritical',
+        name: 'subagent_spawn_batch',
+        arguments: {
+          agents: [
+            { nodeId: 'research_source_scan', prompt: 'non-critical node' },
+            { nodeId: 'context_lookup', prompt: 'non-critical node 2' },
+          ],
+        },
+      },
+    ], 'tool_calls');
+    const finalResponse = makeAssistantMessage([{ type: 'text', text: 'done' }]);
+
+    consumeStreamMock.mockResolvedValueOnce(firstResponse as never);
+    consumeStreamMock.mockResolvedValueOnce(finalResponse as never);
+
+    const failurePayloadAttempt1 = JSON.stringify({
+      failedNodeIds: ['research_source_scan', 'context_lookup'],
+      runs: [
+        { nodeId: 'research_source_scan', status: 'failed', error: 'timeout a' },
+        { nodeId: 'context_lookup', status: 'failed', error: 'aborted a' },
+      ],
+    });
+    const failurePayloadAttempt2 = JSON.stringify({
+      failedNodeIds: ['research_source_scan', 'context_lookup'],
+      runs: [
+        { nodeId: 'research_source_scan', status: 'failed', error: 'timeout b' },
+        { nodeId: 'context_lookup', status: 'failed', error: 'aborted b' },
+      ],
+    });
+    const failurePayloadAttempt3 = JSON.stringify({
+      failedNodeIds: ['research_source_scan', 'context_lookup'],
+      runs: [
+        { nodeId: 'research_source_scan', status: 'failed', error: 'timeout c' },
+        { nodeId: 'context_lookup', status: 'failed', error: 'aborted c' },
+      ],
+    });
+
+    const executeTool = vi.fn()
+      .mockResolvedValueOnce({ isError: true, content: failurePayloadAttempt1 })
+      .mockResolvedValueOnce({ isError: true, content: failurePayloadAttempt2 })
+      .mockResolvedValueOnce({ isError: true, content: failurePayloadAttempt3 });
+
+    const context: TestContext = {
+      messages: [],
+      tools: [{ name: 'subagent_spawn_batch', description: 'spawn many', parameters: { type: 'object' } }],
+    };
+
+    await executeWithOptionalTools({
+      model: {} as never,
+      context,
+      options: {},
+      toolset: {
+        tools: [],
+        executeTool,
+      },
+      onUsage: () => {},
+    });
+
+    const toolResult = context.messages.find((message) => message.role === 'toolResult');
+    expect(toolResult?.isError).toBe(false);
+    const parsed = JSON.parse(String(toolResult?.content?.[0]?.text ?? '{}')) as {
+      status: string;
+      retryCap: number;
+      critical: string[];
+      nonCritical: string[];
+      warning?: string;
+      skippedNodes?: string[];
+    };
+    expect(parsed.status).toBe('fallback');
+    expect(parsed.retryCap).toBe(2);
+    expect(parsed.critical).toEqual([]);
+    expect(parsed.nonCritical).toEqual(['research_source_scan', 'context_lookup']);
+    expect(parsed.skippedNodes).toEqual(['research_source_scan', 'context_lookup']);
+    expect(parsed.warning).toContain('Skipped non-critical research nodes');
+  });
+
+  it('skips fallback tool calls after first successful call', async () => {
+    const consumeStreamMock = vi.mocked(consumeStream);
+    const executeTool = vi.fn(async (call: { id: string }) => ({ content: `ok:${call.id}`, isError: false }));
+
+    const firstResponse = makeAssistantMessage([
+      { type: 'toolCall', id: 'call-1', name: 'run_command', arguments: { command: 'echo hello world' } },
+      { type: 'toolCall', id: 'call-2', name: 'run_command', arguments: { command: '/bin/echo hello world' } },
+      { type: 'toolCall', id: 'call-3', name: 'run_command', arguments: { command: 'printf "hello world\\n"' } },
+    ], 'tool_calls');
+    const finalResponse = makeAssistantMessage([{ type: 'text', text: 'Verified.' }]);
+
+    consumeStreamMock.mockResolvedValueOnce(firstResponse as never);
+    consumeStreamMock.mockResolvedValueOnce(finalResponse as never);
+
+    const context: TestContext = {
+      messages: [],
+      tools: [{ name: 'run_command', description: 'Run shell command', parameters: { type: 'object' } }],
+    };
+
+    await executeWithOptionalTools({
+      model: {} as never,
+      context,
+      options: {},
+      toolset: {
+        tools: [],
+        executeTool,
+      },
+      onUsage: () => {},
+    });
+
+    expect(executeTool).toHaveBeenCalledTimes(1);
+
+    const toolResultMessages = context.messages.filter((message) => message.role === 'toolResult');
+    expect(toolResultMessages).toHaveLength(3);
+    expect(toolResultMessages[0].content?.[0]?.text).toBe('ok:call-1');
+    expect(String(toolResultMessages[1].content?.[0]?.text ?? '')).toContain('Skipped fallback tool call');
+    expect(String(toolResultMessages[2].content?.[0]?.text ?? '')).toContain('Skipped fallback tool call');
+    expect(toolResultMessages[1].isError).toBe(false);
+    expect(toolResultMessages[2].isError).toBe(false);
+  });
+
+  it('executes next fallback when primary fails then stops after success', async () => {
+    const consumeStreamMock = vi.mocked(consumeStream);
+    const executeTool = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('primary failed'))
+      .mockResolvedValueOnce({ content: 'fallback succeeded', isError: false });
+
+    const firstResponse = makeAssistantMessage([
+      { type: 'toolCall', id: 'call-1', name: 'run_command', arguments: { command: 'echo hello world' } },
+      { type: 'toolCall', id: 'call-2', name: 'run_command', arguments: { command: '/bin/echo hello world' } },
+      { type: 'toolCall', id: 'call-3', name: 'run_command', arguments: { command: 'printf "hello world\\n"' } },
+    ], 'tool_calls');
+    const finalResponse = makeAssistantMessage([{ type: 'text', text: 'Recovered.' }]);
+
+    consumeStreamMock.mockResolvedValueOnce(firstResponse as never);
+    consumeStreamMock.mockResolvedValueOnce(finalResponse as never);
+
+    const context: TestContext = {
+      messages: [],
+      tools: [{ name: 'run_command', description: 'Run shell command', parameters: { type: 'object' } }],
+    };
+
+    await executeWithOptionalTools({
+      model: {} as never,
+      context,
+      options: {},
+      toolset: {
+        tools: [],
+        executeTool,
+      },
+      onUsage: () => {},
+    });
+
+    expect(executeTool).toHaveBeenCalledTimes(2);
+
+    const toolResultMessages = context.messages.filter((message) => message.role === 'toolResult');
+    expect(toolResultMessages).toHaveLength(3);
+    expect(String(toolResultMessages[0].content?.[0]?.text ?? '')).toContain('primary failed');
+    expect(toolResultMessages[0].isError).toBe(true);
+    expect(toolResultMessages[1].content?.[0]?.text).toBe('fallback succeeded');
+    expect(toolResultMessages[1].isError).toBe(false);
+    expect(String(toolResultMessages[2].content?.[0]?.text ?? '')).toContain('Skipped fallback tool call');
+
+    const retryPrompts = context.messages.filter(
+      (message) => message.role === 'user' && String(message.content?.[0]?.text ?? '').includes('retry this tool call'),
+    );
+    expect(retryPrompts).toHaveLength(1);
+    expect(String(retryPrompts[0].content?.[0]?.text ?? '')).toContain('run_command (call-1)');
+  });
+
+  it('emits skipped marker for short-circuited fallback calls', async () => {
+    const consumeStreamMock = vi.mocked(consumeStream);
+    const toolEvents: ToolEvent[] = [];
+
+    const firstResponse = makeAssistantMessage([
+      { type: 'toolCall', id: 'call-1', name: 'run_command', arguments: { command: 'echo hello world' } },
+      { type: 'toolCall', id: 'call-2', name: 'run_command', arguments: { command: '/bin/echo hello world' } },
+    ], 'tool_calls');
+    const finalResponse = makeAssistantMessage([{ type: 'text', text: 'Done.' }]);
+
+    consumeStreamMock.mockResolvedValueOnce(firstResponse as never);
+    consumeStreamMock.mockResolvedValueOnce(finalResponse as never);
+
+    const context: TestContext = {
+      messages: [],
+      tools: [{ name: 'run_command', description: 'Run shell command', parameters: { type: 'object' } }],
+    };
+
+    await executeWithOptionalTools({
+      model: {} as never,
+      context,
+      options: {},
+      toolset: {
+        tools: [],
+        async executeTool() {
+          return { content: 'hello world', isError: false };
+        },
+      },
+      completionOptions: {
+        onToolCall: (event) => toolEvents.push(event),
+      },
+      onUsage: () => {},
+    });
+
+    const toolResultMessages = context.messages.filter((message) => message.role === 'toolResult');
+    expect(toolResultMessages).toHaveLength(2);
+    expect(toolResultMessages[1].isError).toBe(false);
+    expect(String(toolResultMessages[1].content?.[0]?.text ?? '')).toContain('Skipped fallback tool call');
+    expect(toolResultMessages[1]).toMatchObject({
+      details: { skipped: true, reason: 'prior_tool_call_succeeded' },
+    });
+
+    const skippedResultEvent = toolEvents.find(
+      (event) => event.type === 'result' && event.toolCallId === 'call-2',
+    );
+    expect(skippedResultEvent).toMatchObject({
+      type: 'result',
+      toolCallId: 'call-2',
+      toolName: 'run_command',
+      isError: false,
+    });
+  });
 });

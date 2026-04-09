@@ -38,6 +38,11 @@ export interface UiPreferences {
   observerShowFindings: boolean;
   defaultProvider: string;
   defaultModel: string;
+  defaultPlanningProvider: string;
+  defaultPlanningModel: string;
+  defaultImplementationProvider: string;
+  defaultImplementationModel: string;
+  planningNoToolGuardMode: 'enforce' | 'warn';
   adaptiveConcurrency: boolean;
   batchConcurrency: number;
   batchMinConcurrency: number;
@@ -88,12 +93,17 @@ export interface WorkSession {
   prompt: string;
   provider: string;
   model: string;
+  planningProvider?: string;
+  planningModel?: string;
+  implementationProvider?: string;
+  implementationModel?: string;
   autoApprove: boolean;
+  planningNoToolGuardMode?: 'enforce' | 'warn';
   adaptiveConcurrency?: boolean;
   batchConcurrency?: number;
   batchMinConcurrency?: number;
-  worktreePath: string;
-  worktreeBranch: string;
+  worktreePath?: string;
+  worktreeBranch?: string;
   creationReason?: SessionCreationReason;
   sourceSessionId?: string;
   source?: 'user' | 'observer';
@@ -111,7 +121,17 @@ export interface WorkSession {
     updatedAt: string;
   };
   taskStatus: Record<string, string>;
-  events: Array<{ time: string; type: string; runId?: string; taskId?: string; failureType?: string; message: string }>;
+  events: Array<{
+    time: string;
+    type: string;
+    runId?: string;
+    taskId?: string;
+    failureType?: string;
+    attempt?: number;
+    maxRetries?: number;
+    totalDurationMs?: number;
+    message: string;
+  }>;
   agentGraph?: Array<{
     id: string;
     name?: string;
@@ -288,7 +308,12 @@ export async function startWork(payload: {
   prompt: string;
   provider: string;
   model: string;
+  planningProvider?: string;
+  planningModel?: string;
+  implementationProvider?: string;
+  implementationModel?: string;
   autoApprove: boolean;
+  planningNoToolGuardMode?: 'enforce' | 'warn';
   adaptiveConcurrency?: boolean;
   batchConcurrency?: number;
   batchMinConcurrency?: number;
@@ -381,6 +406,8 @@ export interface ObserverStatusResponse {
     enabled: boolean;
     provider: string;
     model: string;
+    logWatcherProvider: string;
+    logWatcherModel: string;
     fixProvider: string;
     fixModel: string;
     analysisCooldownMs: number;
@@ -402,6 +429,27 @@ export interface ObserverStatusResponse {
   };
 }
 
+export interface ObserverFailedSessionMonitor {
+  sessionId: string;
+  workspaceId: string;
+  workspaceName: string;
+  prompt: string;
+  status: string;
+  createdAt: string;
+  updatedAt: string;
+  observer: {
+    analyzed: boolean;
+    findings: number;
+    latestFindingAt: string | null;
+    fixStatusCounts: {
+      pending: number;
+      spawned: number;
+      completed: number;
+      failed: number;
+    };
+  };
+}
+
 export async function fetchObserverStatus(): Promise<ObserverStatusResponse> {
   const res = await fetch(`${API_BASE}/observer/status`);
   return readJson(res);
@@ -409,6 +457,11 @@ export async function fetchObserverStatus(): Promise<ObserverStatusResponse> {
 
 export async function fetchObserverFindings(): Promise<{ findings: ObserverFinding[] }> {
   const res = await fetch(`${API_BASE}/observer/findings`);
+  return readJson(res);
+}
+
+export async function fetchObserverFailedSessions(): Promise<{ sessions: ObserverFailedSessionMonitor[] }> {
+  const res = await fetch(`${API_BASE}/observer/failed-sessions`);
   return readJson(res);
 }
 

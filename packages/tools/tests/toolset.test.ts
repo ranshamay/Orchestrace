@@ -45,6 +45,7 @@ describe('createAgentToolset phase policy', () => {
       'todo_get',
       'todo_set',
       'todo_update',
+      'url_fetch',
     ]);
   });
 
@@ -66,6 +67,7 @@ describe('createAgentToolset phase policy', () => {
       'todo_get',
       'todo_set',
       'todo_update',
+      'url_fetch',
     ]);
   });
 
@@ -92,6 +94,7 @@ describe('createAgentToolset phase policy', () => {
       'todo_get',
       'todo_set',
       'todo_update',
+      'url_fetch',
       'write_file',
       'write_files',
     ]);
@@ -186,6 +189,109 @@ describe('batch filesystem tools', () => {
 
     expect(duplicateResult.isError).toBe(true);
     expect(duplicateResult.content).toContain('Duplicate paths are not allowed');
+  });
+
+  it('edit_file rejects newline-only newText and does not mutate file', async () => {
+    const cwd = await makeWorkspace();
+    const toolset = createAgentToolset({ cwd, phase: 'implementation', taskType: 'code' });
+
+    const failedEdit = await toolset.executeTool({
+      id: '1',
+      name: 'edit_file',
+      arguments: {
+        path: 'src/file.ts',
+        oldText: 'value = 1',
+        newText: '\n',
+      },
+    });
+
+    expect(failedEdit.isError).toBe(true);
+    expect(failedEdit.content).toContain('Missing newText');
+
+    const readBack = await toolset.executeTool({
+      id: '2',
+      name: 'read_file',
+      arguments: { path: 'src/file.ts' },
+    });
+
+    expect(readBack.isError).toBeFalsy();
+    expect(readBack.content).toContain('export const value = 1;');
+  });
+
+  it('edit_file rejects no-op replacement and does not mutate file', async () => {
+    const cwd = await makeWorkspace();
+    const toolset = createAgentToolset({ cwd, phase: 'implementation', taskType: 'code' });
+
+    const failedEdit = await toolset.executeTool({
+      id: '1',
+      name: 'edit_file',
+      arguments: {
+        path: 'src/file.ts',
+        oldText: 'value = 1',
+        newText: 'value = 1',
+      },
+    });
+
+    expect(failedEdit.isError).toBe(true);
+    expect(failedEdit.content).toContain('No-op edit is not allowed');
+
+    const readBack = await toolset.executeTool({
+      id: '2',
+      name: 'read_file',
+      arguments: { path: 'src/file.ts' },
+    });
+
+    expect(readBack.isError).toBeFalsy();
+    expect(readBack.content).toContain('export const value = 1;');
+  });
+
+  it('edit_files rejects invalid replacement payloads before writing', async () => {
+    const cwd = await makeWorkspace();
+    const toolset = createAgentToolset({ cwd, phase: 'implementation', taskType: 'code' });
+
+    const seed = await toolset.executeTool({
+      id: '1',
+      name: 'write_files',
+      arguments: {
+        files: [
+          { path: 'src/one.ts', content: 'export const value = 1;\n' },
+          { path: 'src/two.ts', content: 'export const value = 1;\n' },
+        ],
+      },
+    });
+    expect(seed.isError).toBeFalsy();
+
+    const invalidBatch = await toolset.executeTool({
+      id: '2',
+      name: 'edit_files',
+      arguments: {
+        files: [
+          { path: 'src/one.ts', oldText: 'value = 1', newText: '\n', replaceAll: false },
+          { path: 'src/two.ts', oldText: 'value = 1', newText: 'value = 1', replaceAll: true },
+        ],
+      },
+    });
+
+    expect(invalidBatch.isError).toBe(true);
+    expect(invalidBatch.content).toMatch(/Missing files\[0\]\.newText|No-op edit is not allowed/);
+
+    const verify = await toolset.executeTool({
+      id: '3',
+      name: 'read_files',
+      arguments: {
+        files: [
+          { path: 'src/one.ts' },
+          { path: 'src/two.ts' },
+        ],
+      },
+    });
+
+    expect(verify.isError).toBeFalsy();
+    const parsedVerify = JSON.parse(verify.content) as {
+      files: Array<{ path: string; ok: boolean; content?: string }>;
+    };
+    expect(parsedVerify.files[0].content).toContain('value = 1');
+    expect(parsedVerify.files[1].content).toContain('value = 1');
   });
 
   it('edit_files applies replacements in parallel and reports partial failures', async () => {
@@ -311,58 +417,323 @@ describe('batch filesystem tools', () => {
     expect(parsed.concurrency).toBe(2);
     expect(parsed.minConcurrency).toBe(1);
   });
-});
 
-describe('git_status tool', () => {
-  it('returns status output in a git repository', async () => {
+  it('invalidates cached read slices after write_file mutation', async () => {
     const cwd = await makeWorkspace();
     const toolset = createAgentToolset({ cwd, phase: 'implementation', taskType: 'code' });
+
+    const firstRead = await toolset.executeTool({
+      id: '1',
+      name: 'read_file',
+      arguments: { path: 'src/file.ts' },
+    });
+    expect(firstRead.isError).toBeFalsy();
+    expect(firstRead.content).toContain('value = 1');
+
+    const writeResult = await toolset.executeTool({
+      id: '2',
+      name: 'write_file',
+      arguments: { path: 'src/file.ts', content: 'export const value = 99;\n' },
+    });
+    expect(writeResult.isError).toBeFalsy();
+
+    const secondRead = await toolset.executeTool({
+      id: '3',
+      name: 'read_file',
+      arguments: { path: 'src/file.ts' },
+    });
+    expect(secondRead.isError).toBeFalsy();
+    expect(secondRead.content).toContain('value = 99');
+  });
+});
+
+describe('search_files tool', () => {
+  it('treats query as literal by default and matches regex-special characters', async () => {
+    const cwd = await makeWorkspace();
+    await writeFile(join(cwd, 'src', 'literal.txt'), 'call(value)\ncallXvalue\n', 'utf-8');
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+
+    const result = await toolset.executeTool({
+      id: '1',
+      name: 'search_files',
+      arguments: {
+        query: 'call(value)',
+        path: 'src',
+      },
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.content).toContain('literal.txt:1:call(value)');
+    expect(result.content).not.toContain('literal.txt:2:callXvalue');
+  });
+
+  it('supports regex mode when regex=true', async () => {
+    const cwd = await makeWorkspace();
+    await writeFile(join(cwd, 'src', 'regex.txt'), 'call(value)\ncallvalue\n', 'utf-8');
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+
+    const result = await toolset.executeTool({
+      id: '1',
+      name: 'search_files',
+      arguments: {
+        query: 'call(value)',
+        regex: true,
+        path: 'src',
+      },
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.content).toContain('regex.txt:2:callvalue');
+    expect(result.content).not.toContain('regex.txt:1:call(value)');
+  });
+
+  it('returns (no matches) when nothing matches', async () => {
+    const cwd = await makeWorkspace();
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+
+    const result = await toolset.executeTool({
+      id: '1',
+      name: 'search_files',
+      arguments: {
+        query: 'definitely-not-present',
+        path: 'src',
+      },
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.content).toBe('(no matches)');
+  });
+
+  it('treats regression tokens as query text, not file paths', async () => {
+    const cwd = await makeWorkspace();
+    await writeFile(
+      join(cwd, 'src', 'tokens.txt'),
+      'retry\nsubagent_spawn_batch\ngithub-copilot\n',
+      'utf-8',
+    );
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+
+    const result = await toolset.executeTool({
+      id: '1',
+      name: 'search_files',
+      arguments: {
+        query: 'subagent_spawn_batch',
+        path: 'src',
+      },
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.content).toContain('tokens.txt:2:subagent_spawn_batch');
+    expect(result.content.toLowerCase()).not.toContain('no such file or directory');
+  });
+
+  it('treats colon tokens as plain query text', async () => {
+    const cwd = await makeWorkspace();
+    await writeFile(
+      join(cwd, 'src', 'tokens-colon.txt'),
+      'task:tool-call\nrunSubAgent\n',
+      'utf-8',
+    );
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+
+    const result = await toolset.executeTool({
+      id: '1',
+      name: 'search_files',
+      arguments: {
+        query: 'task:tool-call',
+        path: 'src',
+      },
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.content).toContain('tokens-colon.txt:1:task:tool-call');
+    expect(result.content.toLowerCase()).not.toContain('no such file or directory');
+  });
+
+  it('skips invalid target paths without surfacing retriable ripgrep errors', async () => {
+    const cwd = await makeWorkspace();
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+
+    const result = await toolset.executeTool({
+      id: '1',
+      name: 'search_files',
+      arguments: {
+        query: 'value',
+        path: 'src/missing-directory',
+      },
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.content).toBe('(skipped invalid search path: src/missing-directory)');
+    expect(result.content.toLowerCase()).not.toContain('no such file or directory');
+  });
+
+  it('returns a clear validation error for empty query text', async () => {
+    const cwd = await makeWorkspace();
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+
+    const result = await toolset.executeTool({
+      id: '1',
+      name: 'search_files',
+      arguments: {
+        query: '   ',
+        path: 'src',
+      },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content).toBe('Invalid query: query must not be empty.');
+    expect(result.content.toLowerCase()).not.toContain('no such file or directory');
+  });
+
+  it('returns a clear validation error for invalid regex query syntax', async () => {
+    const cwd = await makeWorkspace();
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+
+    const result = await toolset.executeTool({
+      id: '1',
+      name: 'search_files',
+      arguments: {
+        query: '[unterminated',
+        queryMode: 'regex',
+        path: 'src',
+      },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content).toBe('Invalid regex query.');
+    expect(result.content.toLowerCase()).not.toContain('no such file or directory');
+  });
+
+  it('returns a clear validation error for empty glob text', async () => {
+    const cwd = await makeWorkspace();
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+
+    const result = await toolset.executeTool({
+      id: '1',
+      name: 'search_files',
+      arguments: {
+        query: 'value',
+        path: 'src',
+        glob: '   ',
+      },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content).toBe('Invalid glob: expected a non-empty string when provided.');
+    expect(result.content.toLowerCase()).not.toContain('no such file or directory');
+  });
+
+  it('returns a clear validation error when glob is used with a file path', async () => {
+    const cwd = await makeWorkspace();
+    await writeFile(join(cwd, 'src', 'file-only.txt'), 'value\n', 'utf-8');
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+
+    const result = await toolset.executeTool({
+      id: '1',
+      name: 'search_files',
+      arguments: {
+        query: 'value',
+        path: 'src/file-only.txt',
+        glob: '*.txt',
+      },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content).toBe('Invalid glob usage: glob can only be used when path points to a directory.');
+    expect(result.content.toLowerCase()).not.toContain('no such file or directory');
+  });
+});
+
+describe('git_status and git_diff session gating', () => {
+  it('returns status output in a git repository when task requires writes', async () => {
+    const cwd = await makeWorkspace();
+    const toolset = createAgentToolset({
+      cwd,
+      phase: 'implementation',
+      taskType: 'code',
+      taskRequiresWrites: true,
+    });
 
     const init = await toolset.executeTool({ id: '1', name: 'run_command', arguments: { command: 'git init' } });
     expect(init.isError).toBeFalsy();
 
-    const status = await toolset.executeTool({ id: '2', name: 'git_status', arguments: { intent: 'read_only' } });
+    const status = await toolset.executeTool({
+      id: '2',
+      name: 'git_status',
+      arguments: {},
+    });
     expect(status.isError).toBeFalsy();
     expect(status.content.toLowerCase()).toContain('##');
   });
 
-  it('returns an error outside git repositories', async () => {
+  it('returns an error outside git repositories when task requires writes', async () => {
     const cwd = await makeWorkspace();
-    const toolset = createAgentToolset({ cwd, phase: 'implementation', taskType: 'code' });
+    const toolset = createAgentToolset({
+      cwd,
+      phase: 'implementation',
+      taskType: 'code',
+      taskRequiresWrites: true,
+    });
 
-    const status = await toolset.executeTool({ id: '2', name: 'git_status', arguments: { intent: 'read_only' } });
+    const status = await toolset.executeTool({
+      id: '2',
+      name: 'git_status',
+      arguments: {},
+    });
     expect(status.isError).toBe(true);
   });
-});
 
-describe('repo-state intent enforcement', () => {
-  it('rejects git_status without intent', async () => {
+  it('rejects git_status calls for read-only task sessions', async () => {
     const cwd = await makeWorkspace();
-    const toolset = createAgentToolset({ cwd, phase: 'implementation', taskType: 'code' });
+    const toolset = createAgentToolset({
+      cwd,
+      phase: 'implementation',
+      taskType: 'code',
+      taskRequiresWrites: false,
+    });
 
-    const result = await toolset.executeTool({ id: '1', name: 'git_status', arguments: {} });
-    expect(result.isError).toBe(true);
-    expect(result.content).toContain('requires arguments.intent');
+    const status = await toolset.executeTool({ id: '1', name: 'git_status', arguments: {} });
+    expect(status.isError).toBe(true);
+    expect(status.content).toBe('Task classified as read-only during planning; git_status is not needed.');
   });
 
-  it('rejects git_diff with invalid intent', async () => {
+  it('rejects git_diff calls for read-only task sessions', async () => {
     const cwd = await makeWorkspace();
-    const toolset = createAgentToolset({ cwd, phase: 'implementation', taskType: 'code' });
+    const toolset = createAgentToolset({
+      cwd,
+      phase: 'implementation',
+      taskType: 'code',
+      taskRequiresWrites: false,
+    });
 
-    const result = await toolset.executeTool({ id: '1', name: 'git_diff', arguments: { intent: 'invalid' } });
-    expect(result.isError).toBe(true);
-    expect(result.content).toContain('requires arguments.intent');
+    const diff = await toolset.executeTool({
+      id: '1',
+      name: 'git_diff',
+      arguments: {},
+    });
+    expect(diff.isError).toBe(true);
+    expect(diff.content).toBe('Task classified as read-only during planning; git_diff is not needed.');
   });
 
-  it('accepts git_diff with valid intent', async () => {
+  it('accepts git_diff calls when task requires writes', async () => {
     const cwd = await makeWorkspace();
-    const toolset = createAgentToolset({ cwd, phase: 'implementation', taskType: 'code' });
+    const toolset = createAgentToolset({
+      cwd,
+      phase: 'implementation',
+      taskType: 'code',
+      taskRequiresWrites: true,
+    });
 
     const init = await toolset.executeTool({ id: '1', name: 'run_command', arguments: { command: 'git init' } });
     expect(init.isError).toBeFalsy();
 
-    const result = await toolset.executeTool({ id: '2', name: 'git_diff', arguments: { intent: 'read_only' } });
-    expect(result.isError).toBeFalsy();
+    const diff = await toolset.executeTool({
+      id: '2',
+      name: 'git_diff',
+      arguments: {},
+    });
+    expect(diff.isError).toBeFalsy();
   });
 });
 
@@ -499,6 +870,46 @@ describe('run_command safety', () => {
     expect(parsed.adaptiveConcurrency).toBe(true);
     expect(parsed.concurrency).toBe(2);
     expect(parsed.minConcurrency).toBe(1);
+  });
+});
+
+describe('url_fetch tool', () => {
+  it('is available in planning and implementation phases', async () => {
+    const cwd = await makeWorkspace();
+    const planningToolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+    const implementationToolset = createAgentToolset({ cwd, phase: 'implementation', taskType: 'code' });
+
+    expect(toolNames(planningToolset)).toContain('url_fetch');
+    expect(toolNames(implementationToolset)).toContain('url_fetch');
+  });
+
+  it('fetches JSON response and returns parsed data', async () => {
+    const cwd = await makeWorkspace();
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ ok: true, name: 'demo' }), {
+      status: 200,
+      headers: {
+        'content-type': 'application/json',
+      },
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    try {
+      const toolset = createAgentToolset({ cwd, phase: 'implementation', taskType: 'code' });
+      const result = await toolset.executeTool({
+        id: '1',
+        name: 'url_fetch',
+        arguments: { url: 'https://example.com/data' },
+      });
+
+      expect(result.isError).toBeFalsy();
+      expect(result.content).toContain('"name": "demo"');
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const [requestUrl, requestInit] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(requestUrl).toBe('https://example.com/data');
+      expect(requestInit.method).toBe('GET');
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
 
@@ -702,6 +1113,121 @@ describe('mode tools smoke test', () => {
 });
 
 describe('subagent prompt enrichment', () => {
+  it('subagent_spawn validates args synchronously and skips sub-agent invocation on malformed payload', async () => {
+    const cwd = await makeWorkspace();
+    const runSubAgent = vi.fn(async () => ({ text: 'unexpected dispatch' }));
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    try {
+      const toolset = createAgentToolset({
+        cwd,
+        phase: 'planning',
+        taskType: 'code',
+        graphId: 'g1',
+        taskId: 't-sync-validation-single',
+        runSubAgent,
+      });
+
+      const result = await toolset.executeTool({
+        id: '1',
+        name: 'subagent_spawn',
+        arguments: {
+          contextPacket: {
+            objective: 'Investigate failing task',
+            boundaries: {
+              timeoutMs: 0,
+            },
+          },
+        },
+      });
+
+      expect(result.isError).toBe(true);
+      expect(result.content).toContain('subagent_spawn argument validation failed before spawn');
+      expect(result.content).toContain('contextPacket.boundaries.timeoutMs');
+      expect(runSubAgent).not.toHaveBeenCalled();
+      expect(warnSpy).toHaveBeenCalled();
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('subagent_spawn_batch validates args synchronously and skips all sub-agent invocations on malformed payload', async () => {
+    const cwd = await makeWorkspace();
+    const runSubAgent = vi.fn(async () => ({ text: 'unexpected dispatch' }));
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    try {
+      const toolset = createAgentToolset({
+        cwd,
+        phase: 'planning',
+        taskType: 'code',
+        graphId: 'g1',
+        taskId: 't-sync-validation-batch',
+        runSubAgent,
+      });
+
+      const result = await toolset.executeTool({
+        id: '1',
+        name: 'subagent_spawn_batch',
+        arguments: {
+          agents: [
+            {
+              contextPacket: {
+                objective: 'Review code',
+              },
+              unexpected: true,
+            },
+          ],
+        },
+      });
+
+      expect(result.isError).toBe(true);
+      expect(result.content).toContain('subagent_spawn_batch argument validation failed before spawn');
+      expect(result.content).toContain('agents.0');
+      expect(result.content).toContain('additional properties');
+      expect(runSubAgent).not.toHaveBeenCalled();
+      expect(warnSpy).toHaveBeenCalled();
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+  it('prefers provided context packet snippets over disk reads', async () => {
+    const cwd = await makeWorkspace();
+    const delegatedPrompts: string[] = [];
+
+    const toolset = createAgentToolset({
+      cwd,
+      phase: 'planning',
+      taskType: 'code',
+      graphId: 'g1',
+      taskId: 't1',
+      runSubAgent: async (request) => {
+        delegatedPrompts.push(request.prompt);
+        return { text: 'ok' };
+      },
+    });
+
+    const result = await toolset.executeTool({
+      id: '1',
+      name: 'subagent_spawn',
+      arguments: {
+        contextPacket: {
+          objective: 'Summarize src/file.ts',
+          fileSnippets: [
+            { path: 'src/file.ts', content: 'export const value = 777;\n' },
+          ],
+        },
+      },
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(delegatedPrompts).toHaveLength(1);
+    expect(delegatedPrompts[0]).toContain('[Auto-included file snippets]');
+    expect(delegatedPrompts[0]).toContain('File: src/file.ts');
+    expect(delegatedPrompts[0]).toContain('export const value = 777;');
+    expect(delegatedPrompts[0]).not.toContain('export const value = 1;');
+  });
+
   it('auto-includes referenced file snippets for batch delegation', async () => {
     const cwd = await makeWorkspace();
     const delegatedPrompts: string[] = [];
@@ -726,6 +1252,14 @@ describe('subagent prompt enrichment', () => {
           {
             nodeId: 'n1',
             prompt: 'Analyze src/file.ts and summarize its exported symbols.',
+            reasoning: 'high',
+            contextPacket: {
+              objective: 'Document exported symbols and include confidence notes.',
+              relevantContext: ['Used for integration tests', 'Output consumed by CI summaries'],
+              requiredOutputSchema: '{ symbols: string[], notes: string[] }',
+              evidenceRequirements: ['Cite src/file.ts lines'],
+              boundaries: { writePolicy: 'none' },
+            },
           },
         ],
       },
@@ -764,9 +1298,39 @@ describe('subagent prompt enrichment', () => {
       name: 'subagent_spawn_batch',
       arguments: {
         agents: [
-          { nodeId: 'n1', prompt: 'Inspect src/file.ts' },
-          { nodeId: 'n2', prompt: 'Inspect src/file.ts' },
-          { nodeId: 'n3', prompt: 'Inspect src/file.ts' },
+          {
+            nodeId: 'n1',
+            prompt: 'Inspect src/file.ts for exports and test impact.',
+            reasoning: 'high',
+            contextPacket: {
+              objective: 'Produce test-impact notes.',
+              relevantContext: ['Used by runtime entrypoint', 'Used by tests'],
+              requiredOutputSchema: '{ findings: string[] }',
+              evidenceRequirements: ['Cite file snippets'],
+            },
+          },
+          {
+            nodeId: 'n2',
+            prompt: 'Inspect src/file.ts for exports and test impact.',
+            reasoning: 'high',
+            contextPacket: {
+              objective: 'Produce test-impact notes.',
+              relevantContext: ['Used by runtime entrypoint', 'Used by tests'],
+              requiredOutputSchema: '{ findings: string[] }',
+              evidenceRequirements: ['Cite file snippets'],
+            },
+          },
+          {
+            nodeId: 'n3',
+            prompt: 'Inspect src/file.ts for exports and test impact.',
+            reasoning: 'high',
+            contextPacket: {
+              objective: 'Produce test-impact notes.',
+              relevantContext: ['Used by runtime entrypoint', 'Used by tests'],
+              requiredOutputSchema: '{ findings: string[] }',
+              evidenceRequirements: ['Cite file snippets'],
+            },
+          },
         ],
         concurrency: 4,
         adaptiveConcurrency: true,
@@ -813,5 +1377,370 @@ describe('subagent prompt enrichment', () => {
     expect(parsed.runs.every((entry) => entry.promptChars > 0)).toBe(true);
     expect(parsed.runs.some((entry) => entry.nodeId === 'n2' && entry.status === 'failed')).toBe(true);
     expect(parsed.runs.some((entry) => entry.nodeId === 'n1' && entry.status === 'completed' && entry.usage?.input === 12)).toBe(true);
+  });
+
+  it('subagent_spawn_batch retries only failed nodeIds and merges retried success', async () => {
+    const cwd = await makeWorkspace();
+    const callCount = new Map<string, number>();
+
+    const runSubAgent = vi.fn(async (request: { nodeId?: string }) => {
+      const nodeId = request.nodeId ?? 'none';
+      const count = (callCount.get(nodeId) ?? 0) + 1;
+      callCount.set(nodeId, count);
+
+      if (nodeId === 'n2' && count === 1) {
+        throw new Error('n2 fails on first attempt');
+      }
+
+      return {
+        text: `ok:${nodeId}:attempt-${count}`,
+        usage: { input: 10, output: 4, cost: 0.01 },
+      };
+    });
+
+    const toolset = createAgentToolset({
+      cwd,
+      phase: 'planning',
+      taskType: 'code',
+      graphId: 'g1',
+      taskId: 't-retry-partial',
+      runSubAgent,
+    });
+
+    const result = await toolset.executeTool({
+      id: '1',
+      name: 'subagent_spawn_batch',
+      arguments: {
+        agents: [
+          { nodeId: 'n1', prompt: 'Inspect src/file.ts for n1' },
+          { nodeId: 'n2', prompt: 'Inspect src/file.ts for n2' },
+        ],
+        maxRetries: 2,
+      },
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(runSubAgent).toHaveBeenCalledTimes(3);
+    expect(callCount.get('n1')).toBe(1);
+    expect(callCount.get('n2')).toBe(2);
+
+    const parsed = JSON.parse(result.content) as {
+      failed: number;
+      completed: number;
+      maxRetries: number;
+      failedNodeIds: string[];
+      dispatchedNodeIds: string[];
+      runs: Array<{ nodeId?: string; status: 'completed' | 'failed' }>;
+    };
+
+    expect(parsed.maxRetries).toBe(2);
+    expect(parsed.failed).toBe(0);
+    expect(parsed.completed).toBe(2);
+    expect(parsed.failedNodeIds).toEqual([]);
+    expect(parsed.dispatchedNodeIds.filter((id) => id === 'n1')).toHaveLength(1);
+    expect(parsed.dispatchedNodeIds.filter((id) => id === 'n2')).toHaveLength(2);
+    expect(parsed.runs).toHaveLength(2);
+    expect(parsed.runs[0]).toMatchObject({ nodeId: 'n1', status: 'completed' });
+    expect(parsed.runs[1]).toMatchObject({ nodeId: 'n2', status: 'completed' });
+  });
+
+  it('subagent_spawn_batch defaults maxRetries when argument is non-finite or non-number', async () => {
+    const invalidMaxRetries = [Number.NaN, Number.POSITIVE_INFINITY, '3'];
+
+    for (const maxRetries of invalidMaxRetries) {
+      const cwd = await makeWorkspace();
+      const runSubAgent = vi.fn(async () => ({ text: 'ok', usage: { input: 1, output: 1, cost: 0.001 } }));
+
+      const toolset = createAgentToolset({
+        cwd,
+        phase: 'planning',
+        taskType: 'code',
+        graphId: 'g1',
+        taskId: `t-retry-default-${String(maxRetries)}`,
+        runSubAgent,
+      });
+
+      const result = await toolset.executeTool({
+        id: '1',
+        name: 'subagent_spawn_batch',
+        arguments: {
+          agents: [{ nodeId: 'n1', prompt: 'Inspect src/file.ts.' }],
+          maxRetries,
+        },
+      });
+
+      expect(result.isError).toBeFalsy();
+      const parsed = JSON.parse(result.content) as { maxRetries: number };
+      expect(parsed.maxRetries).toBe(2);
+    }
+  });
+
+  it('subagent_spawn_batch honors maxRetries cap for persistent failures', async () => {
+    const cwd = await makeWorkspace();
+    const runSubAgent = vi.fn(async (request: { nodeId?: string }) => {
+      if (request.nodeId === 'n-fail') {
+        throw new Error('always fails');
+      }
+
+      return { text: 'ok', usage: { input: 1, output: 1, cost: 0.001 } };
+    });
+
+    const toolset = createAgentToolset({
+      cwd,
+      phase: 'planning',
+      taskType: 'code',
+      graphId: 'g1',
+      taskId: 't-retry-cap',
+      runSubAgent,
+    });
+
+    const result = await toolset.executeTool({
+      id: '1',
+      name: 'subagent_spawn_batch',
+      arguments: {
+        agents: [{ nodeId: 'n-fail', prompt: 'Inspect src/file.ts and fail.' }],
+        maxRetries: 2,
+      },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(runSubAgent).toHaveBeenCalledTimes(3);
+
+    const parsed = JSON.parse(result.content) as {
+      maxRetries: number;
+      completed: number;
+      failed: number;
+      failedNodeIds: string[];
+      runs: Array<{ nodeId?: string; status: 'completed' | 'failed' }>;
+    };
+
+    expect(parsed.maxRetries).toBe(2);
+    expect(parsed.completed).toBe(0);
+    expect(parsed.failed).toBe(1);
+    expect(parsed.failedNodeIds).toEqual(['n-fail']);
+    expect(parsed.runs).toHaveLength(1);
+    expect(parsed.runs[0]).toMatchObject({ nodeId: 'n-fail', status: 'failed' });
+  });
+
+  it('subagent_spawn_batch trips circuit breaker on third identical failure wave', async () => {
+    const cwd = await makeWorkspace();
+    const runSubAgent = vi.fn(async () => {
+      throw new Error('provider timeout');
+    });
+
+    const toolset = createAgentToolset({
+      cwd,
+      phase: 'planning',
+      taskType: 'code',
+      graphId: 'g1',
+      taskId: 't-retry-breaker',
+      runSubAgent,
+    });
+
+    const result = await toolset.executeTool({
+      id: '1',
+      name: 'subagent_spawn_batch',
+      arguments: {
+        agents: [{ nodeId: 'n-fail', prompt: 'Inspect src/file.ts and fail.' }],
+        maxRetries: 5,
+      },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(runSubAgent).toHaveBeenCalledTimes(3);
+
+    const parsed = JSON.parse(result.content) as {
+      status?: string;
+      reason?: string;
+      consecutiveIdenticalFailures?: number;
+      failedNodeIds: string[];
+      runs: Array<{ nodeId?: string; status: 'completed' | 'failed'; error?: string }>;
+    };
+
+    expect(parsed.status).toBe('escalated_error');
+    expect(parsed.reason).toBe('identical_subagent_batch_failures_repeated');
+    expect(parsed.consecutiveIdenticalFailures).toBe(3);
+    expect(parsed.failedNodeIds).toEqual(['n-fail']);
+    expect(parsed.runs[0]?.error).toContain('Circuit breaker tripped');
+  });
+
+  it('subagent_spawn_batch does not trip breaker when failed node set changes', async () => {
+    const cwd = await makeWorkspace();
+    const callCount = new Map<string, number>();
+    const runSubAgent = vi.fn(async (request: { nodeId?: string }) => {
+      const nodeId = request.nodeId ?? 'none';
+      const count = (callCount.get(nodeId) ?? 0) + 1;
+      callCount.set(nodeId, count);
+
+      if (nodeId === 'n1' && count === 1) {
+        throw new Error('n1 first-wave failure');
+      }
+      if (nodeId === 'n2' && count === 1) {
+        throw new Error('n2 second-wave failure');
+      }
+
+      return { text: 'ok', usage: { input: 1, output: 1, cost: 0.001 } };
+    });
+
+    const toolset = createAgentToolset({
+      cwd,
+      phase: 'planning',
+      taskType: 'code',
+      graphId: 'g1',
+      taskId: 't-retry-changing',
+      runSubAgent,
+    });
+
+    const result = await toolset.executeTool({
+      id: '1',
+      name: 'subagent_spawn_batch',
+      arguments: {
+        agents: [
+          { nodeId: 'n1', prompt: 'task n1' },
+          { nodeId: 'n2', prompt: 'task n2' },
+        ],
+        maxRetries: 3,
+      },
+    });
+
+    expect(result.isError).toBeFalsy();
+    const parsed = JSON.parse(result.content) as {
+      status?: string;
+      completed: number;
+      failed: number;
+    };
+
+    expect(parsed.status).toBeUndefined();
+    expect(parsed.completed).toBe(2);
+    expect(parsed.failed).toBe(0);
+  });
+
+  it('subagent_spawn_batch reuses cached completed results when all nodeIds are cache hits', async () => {
+    const cwd = await makeWorkspace();
+    const runSubAgent = vi.fn(async () => ({ text: 'unexpected dispatch' }));
+
+    const toolset = createAgentToolset({
+      cwd,
+      phase: 'planning',
+      taskType: 'code',
+      graphId: 'g1',
+      taskId: 't-cache-all-hit',
+      runSubAgent,
+    });
+
+    const first = await toolset.executeTool({
+      id: '1',
+      name: 'subagent_spawn_batch',
+      arguments: {
+        agents: [
+          { nodeId: 'n1', prompt: 'Inspect src/file.ts for exports' },
+          { nodeId: 'n2', prompt: 'Inspect src/file.ts for imports' },
+        ],
+      },
+    });
+    expect(first.isError).toBeFalsy();
+    expect(runSubAgent).toHaveBeenCalledTimes(2);
+
+    runSubAgent.mockClear();
+
+    const second = await toolset.executeTool({
+      id: '2',
+      name: 'subagent_spawn_batch',
+      arguments: {
+        agents: [
+          { nodeId: 'n1', prompt: 'Inspect src/file.ts for exports' },
+          { nodeId: 'n2', prompt: 'Inspect src/file.ts for imports' },
+        ],
+      },
+    });
+
+    expect(second.isError).toBeFalsy();
+    expect(runSubAgent).toHaveBeenCalledTimes(0);
+
+    const parsed = JSON.parse(second.content) as {
+      total: number;
+      failed: number;
+      cacheHitCount: number;
+      cacheMissCount: number;
+      cachedNodeIds: string[];
+      dispatchedNodeIds: string[];
+      runs: Array<{ nodeId?: string; status: 'completed' | 'failed'; cacheHit?: boolean }>;
+    };
+
+    expect(parsed.total).toBe(2);
+    expect(parsed.failed).toBe(0);
+    expect(parsed.cacheHitCount).toBe(2);
+    expect(parsed.cacheMissCount).toBe(0);
+    expect(parsed.cachedNodeIds).toEqual(['n1', 'n2']);
+    expect(parsed.dispatchedNodeIds).toEqual([]);
+    expect(parsed.runs).toHaveLength(2);
+    expect(parsed.runs.every((run) => run.status === 'completed')).toBe(true);
+    expect(parsed.runs.every((run) => run.cacheHit === true)).toBe(true);
+  });
+
+  it('subagent_spawn_batch dispatches only cache misses in mixed cache-hit and miss batches', async () => {
+    const cwd = await makeWorkspace();
+    const runSubAgent = vi.fn(async (request: { nodeId?: string }) => ({
+      text: `ok:${request.nodeId ?? 'none'}`,
+      usage: { input: 5, output: 2, cost: 0.001 },
+    }));
+
+    const toolset = createAgentToolset({
+      cwd,
+      phase: 'planning',
+      taskType: 'code',
+      graphId: 'g1',
+      taskId: 't-cache-mixed',
+      runSubAgent,
+    });
+
+    const seed = await toolset.executeTool({
+      id: '1',
+      name: 'subagent_spawn_batch',
+      arguments: {
+        agents: [{ nodeId: 'cached-node', prompt: 'Seed cached node result from src/file.ts' }],
+      },
+    });
+    expect(seed.isError).toBeFalsy();
+    expect(runSubAgent).toHaveBeenCalledTimes(1);
+
+    runSubAgent.mockClear();
+
+    const mixed = await toolset.executeTool({
+      id: '2',
+      name: 'subagent_spawn_batch',
+      arguments: {
+        agents: [
+          { nodeId: 'cached-node', prompt: 'Reuse cached node result from src/file.ts' },
+          { nodeId: 'fresh-node', prompt: 'Need a fresh run for src/file.ts' },
+          { prompt: 'No nodeId should always dispatch for src/file.ts' },
+        ],
+      },
+    });
+
+    expect(mixed.isError).toBeFalsy();
+    expect(runSubAgent).toHaveBeenCalledTimes(2);
+    expect(runSubAgent.mock.calls[0]?.[0]?.nodeId).toBe('fresh-node');
+    expect(runSubAgent.mock.calls[1]?.[0]?.nodeId).toBeUndefined();
+
+    const parsed = JSON.parse(mixed.content) as {
+      total: number;
+      failed: number;
+      cacheHitCount: number;
+      cacheMissCount: number;
+      cachedNodeIds: string[];
+      dispatchedNodeIds: string[];
+      runs: Array<{ nodeId?: string; status: 'completed' | 'failed'; cacheHit?: boolean }>;
+    };
+
+    expect(parsed.total).toBe(3);
+    expect(parsed.failed).toBe(0);
+    expect(parsed.cacheHitCount).toBe(1);
+    expect(parsed.cacheMissCount).toBe(2);
+    expect(parsed.cachedNodeIds).toEqual(['cached-node']);
+    expect(parsed.dispatchedNodeIds).toContain('fresh-node');
+    expect(parsed.runs[0]).toMatchObject({ nodeId: 'cached-node', status: 'completed', cacheHit: true });
+    expect(parsed.runs[1]).toMatchObject({ nodeId: 'fresh-node', status: 'completed', cacheHit: false });
+    expect(parsed.runs[2]).toMatchObject({ status: 'completed', cacheHit: false });
   });
 });

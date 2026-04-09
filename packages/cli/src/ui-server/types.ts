@@ -7,7 +7,6 @@ export interface UiServerOptions {
 }
 
 export type WorkState = 'running' | 'completed' | 'failed' | 'cancelled';
-export type ExecutionContext = 'workspace' | 'git-worktree';
 export type SessionCreationReason = 'start' | 'retry';
 
 export type LlmSessionState =
@@ -52,6 +51,9 @@ export interface UiDagEvent {
   type: DagEvent['type'];
   taskId?: string;
   failureType?: string;
+  attempt?: number;
+  maxRetries?: number;
+  totalDurationMs?: number;
   message: string;
 }
 
@@ -118,6 +120,40 @@ export interface ChatTokenStream {
   updatedAt: string;
 }
 
+export interface SessionCheckpointInfo {
+  status: 'committed' | 'skipped' | 'failed';
+  reason: 'edit-threshold' | 'todo-completed' | 'terminal';
+  message: string;
+  trigger?: {
+    threshold?: number;
+    editCountSinceLast?: number;
+    todoId?: string;
+    todoTitle?: string;
+  };
+  commit?: {
+    hash?: string;
+    summary?: string;
+  };
+  error?: string;
+  time: string;
+}
+
+export interface SessionRecoveryInfo {
+  reason: 'restore-dead-runner' | 'runner-exit-fallback';
+  runnerPid?: number;
+  exitCode?: number | null;
+  git: {
+    cwd: string;
+    branch?: string;
+    head?: string;
+    detached?: boolean;
+    dirty: boolean;
+    changedFiles?: string[];
+    diffSummary?: string;
+  };
+  time: string;
+}
+
 export interface WorkSession {
   id: string;
   workspaceId: string;
@@ -127,13 +163,19 @@ export interface WorkSession {
   promptParts?: SessionChatContentPart[];
   provider: string;
   model: string;
+  planningProvider: string;
+  planningModel: string;
+  implementationProvider: string;
+  implementationModel: string;
   autoApprove: boolean;
-  executionContext: ExecutionContext;
-  selectedWorktreePath?: string;
-  useWorktree: boolean;
+  planningNoToolGuardMode: 'enforce' | 'warn';
+  quickStartMode?: boolean;
+  quickStartMaxPreDelegationToolCalls?: number;
   adaptiveConcurrency: boolean;
   batchConcurrency: number;
   batchMinConcurrency: number;
+  enableTrivialTaskGate: boolean;
+  trivialTaskMaxPromptLength: number;
   worktreePath?: string;
   worktreeBranch?: string;
   creationReason: SessionCreationReason;
@@ -148,6 +190,10 @@ export interface WorkSession {
   agentGraph: SessionAgentGraphNode[];
   error?: string;
   output?: { text?: string; planPath?: string; failureType?: string };
+  lastCheckpoint?: SessionCheckpointInfo;
+  lastRecovery?: SessionRecoveryInfo;
+  /** Internal runner-only prompt override (not serialized to clients/persistence). */
+  executionPromptOverride?: string;
   controller: AbortController;
   /** Clean up an auto-created per-session worktree on session delete. Not persisted. */
   cleanupWorktree?: () => Promise<void>;
@@ -162,13 +208,19 @@ export interface PersistedWorkSession {
   promptParts?: SessionChatContentPart[];
   provider: string;
   model: string;
+  planningProvider?: string;
+  planningModel?: string;
+  implementationProvider?: string;
+  implementationModel?: string;
   autoApprove: boolean;
-  executionContext?: ExecutionContext;
-  selectedWorktreePath?: string;
-  useWorktree?: boolean;
+  planningNoToolGuardMode?: 'enforce' | 'warn';
+  quickStartMode?: boolean;
+  quickStartMaxPreDelegationToolCalls?: number;
   adaptiveConcurrency?: boolean;
   batchConcurrency?: number;
   batchMinConcurrency?: number;
+  enableTrivialTaskGate?: boolean;
+  trivialTaskMaxPromptLength?: number;
   worktreePath?: string;
   worktreeBranch?: string;
   creationReason?: SessionCreationReason;
@@ -189,12 +241,16 @@ export interface UiPreferences {
   observerShowFindings: boolean;
   defaultProvider: string;
   defaultModel: string;
-  executionContext: ExecutionContext;
-  selectedWorktreePath?: string;
-  useWorktree: boolean;
+  defaultPlanningProvider: string;
+  defaultPlanningModel: string;
+  defaultImplementationProvider: string;
+  defaultImplementationModel: string;
+  planningNoToolGuardMode: 'enforce' | 'warn';
   adaptiveConcurrency: boolean;
   batchConcurrency: number;
   batchMinConcurrency: number;
+  enableTrivialTaskGate: boolean;
+  trivialTaskMaxPromptLength: number;
 }
 
 export interface PersistedUiPreferences {
@@ -202,12 +258,16 @@ export interface PersistedUiPreferences {
   observerShowFindings?: boolean;
   defaultProvider?: string;
   defaultModel?: string;
-  executionContext?: ExecutionContext;
-  selectedWorktreePath?: string;
-  useWorktree?: boolean;
+  defaultPlanningProvider?: string;
+  defaultPlanningModel?: string;
+  defaultImplementationProvider?: string;
+  defaultImplementationModel?: string;
+  planningNoToolGuardMode?: 'enforce' | 'warn';
   adaptiveConcurrency?: boolean;
   batchConcurrency?: number;
   batchMinConcurrency?: number;
+  enableTrivialTaskGate?: boolean;
+  trivialTaskMaxPromptLength?: number;
 }
 
 export interface PersistedUiState {

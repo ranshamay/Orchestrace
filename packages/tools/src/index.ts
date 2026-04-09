@@ -13,9 +13,11 @@ export type {
   AgentToolsetOptions,
   SubAgentContextPacket,
   SubAgentEvidenceItem,
+  SubAgentFileSnippet,
   SubAgentRequest,
   SubAgentResult,
 } from './types.js';
+export { createFileReadCache } from './file-read-cache.js';
 export { DEFAULT_AGENT_TOOL_POLICY_VERSION } from './policy.js';
 
 export interface AgentToolDescriptor {
@@ -162,14 +164,11 @@ async function executeToolCall(
     };
   }
 
-  if (call.name === 'git_status' || call.name === 'git_diff') {
-    const intent = typeof call.arguments?.intent === 'string' ? call.arguments.intent : undefined;
-    if (intent !== 'read_only' && intent !== 'write') {
-      return {
-        content: `Tool ${call.name} requires arguments.intent to be one of: "read_only" | "write". Declare task intent before repository state checks.`,
-        isError: true,
-      };
-    }
+  if ((call.name === 'git_status' || call.name === 'git_diff') && options.taskRequiresWrites === false) {
+    return {
+      content: `Task classified as read-only during planning; ${call.name} is not needed.`,
+      isError: true,
+    };
   }
 
   return tool.execute(call.arguments, signal);

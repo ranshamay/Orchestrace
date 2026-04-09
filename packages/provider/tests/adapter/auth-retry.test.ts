@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { PiAiAdapter } from '../../src/adapter.js';
 import { executeWithOptionalTools } from '../../src/adapter/tools.js';
 
@@ -27,6 +27,15 @@ function makeAssistantTextResponse(text: string) {
 describe('PiAiAdapter auth refresh retry', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    process.env.ORCHESTRACE_LLM_RETRY_BACKOFF_BASE_MS = '1';
+    process.env.ORCHESTRACE_LLM_RETRY_BACKOFF_MAX_MS = '1';
+    process.env.ORCHESTRACE_LLM_TRANSIENT_RETRY_ATTEMPTS = '1';
+  });
+
+  afterEach(() => {
+    delete process.env.ORCHESTRACE_LLM_RETRY_BACKOFF_BASE_MS;
+    delete process.env.ORCHESTRACE_LLM_RETRY_BACKOFF_MAX_MS;
+    delete process.env.ORCHESTRACE_LLM_TRANSIENT_RETRY_ATTEMPTS;
   });
 
   it('refreshes credentials once and retries once on auth failure', async () => {
@@ -55,5 +64,64 @@ describe('PiAiAdapter auth refresh retry', () => {
     const secondCall = executeMock.mock.calls[1][0] as { options: Record<string, unknown> };
     expect(firstCall.options.apiKey).toBe('stale-token');
     expect(secondCall.options.apiKey).toBe('fresh-token');
+  });
+
+  it('retries timeout once and succeeds without session-level replay pressure', async () => {
+    process.env.ORCHESTRACE_LLM_TRANSIENT_RETRY_ATTEMPTS = '1';
+
+    const executeMock = vi.mocked(executeWithOptionalTools);
+    executeMock.mockRejectedValueOnce(new Error('deadline exceeded by upstream'));
+    executeMock.mockResolvedValueOnce(makeAssistantTextResponse('Recovered after transient timeout.') as never);
+
+    const adapter = new PiAiAdapter();
+    const agent = await adapter.spawnAgent({
+      provider: 'github-copilot',
+      model: 'gpt-5.3-codex',
+      systemPrompt: 'system',
+    });
+
+    const result = await agent.complete('hello');
+
+    expect(result.text).toBe('Recovered after transient timeout.');
+    expect(executeMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('fails after exhausting configured transient timeout retries', async () => {
+    process.env.ORCHESTRACE_LLM_TRANSIENT_RETRY_ATTEMPTS = '1';
+
+    const executeMock = vi.mocked(executeWithOptionalTools);
+    executeMock.mockRejectedValue(new Error('deadline exceeded by upstream'));
+
+    const adapter = new PiAiAdapter();
+    const agent = await adapter.spawnAgent({
+      provider: 'github-copilot',
+      model: 'gpt-5.3-codex',
+      systemPrompt: 'system',
+    });
+
+    await expect(agent.complete('hello')).rejects.toMatchObject({
+      name: 'LlmFailureError',
+      failureType: 'timeout',
+    });
+    expect(executeMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not retry non-retryable unknown request failures', async () => {
+    process.env.ORCHESTRACE_LLM_TRANSIENT_RETRY_ATTEMPTS = '3';
+
+    const executeMock = vi.mocked(executeWithOptionalTools);
+    executeMock.mockRejectedValue(new Error('tool schema mismatch: invalid argument shape'));
+
+    const adapter = new PiAiAdapter();
+    const agent = await adapter.spawnAgent({
+      provider: 'github-copilot',
+      model: 'gpt-5.3-codex',
+      systemPrompt: 'system',
+    });
+
+    await expect(agent.complete('hello')).rejects.toMatchObject({
+      name: 'LlmFailureError',
+    });
+    expect(executeMock).toHaveBeenCalledTimes(1);
   });
 });

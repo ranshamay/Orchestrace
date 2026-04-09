@@ -12,6 +12,7 @@ import { useBootstrapData } from './app/hooks/useBootstrapData';
 import { useProviderModels } from './app/hooks/useProviderModels';
 import { useSessionPolling } from './app/hooks/useSessionPolling';
 import { useSessionStream } from './app/hooks/useSessionStream';
+import { useSessionsStatusStream } from './app/hooks/useSessionsStatusStream';
 import { useRunUrlSync } from './app/hooks/useRunUrlSync';
 import { useTimelineFollow } from './app/hooks/useTimelineFollow';
 import { useToolsPanel } from './app/hooks/useToolsPanel';
@@ -51,8 +52,11 @@ export default function App() {
     providers, providerStatuses, workspaces, activeWorkspaceId,
     sessions, setSessions, selectedSessionId, setSelectedSessionId,
     defaultLlmControls, setDefaultLlmControls,
+    workPlanningProvider, setWorkPlanningProvider,
+    workPlanningModel, setWorkPlanningModel,
     workProvider, setWorkProvider, workModel, setWorkModel,
     workWorkspaceId, setWorkWorkspaceId, autoApprove, setAutoApprove,
+    planningNoToolGuardMode, setPlanningNoToolGuardMode,
     errorMessage, setErrorMessage,
     adaptiveConcurrency, setAdaptiveConcurrency,
     bootstrapComplete,
@@ -90,6 +94,7 @@ export default function App() {
     updateTabInUrl(tab, 'push');
   }, []);
 
+  useSessionsStatusStream({ selectedSessionId, setSelectedSessionId: setSessionSelection, setSessions });
   useSessionPolling({ selectedSessionId, setSelectedSessionId: setSessionSelection, setSessions, setChatMessages, setTodos });
   useSessionStream({ selectedSessionId, setSessions, setChatMessages, setTodos, setNodeTokenStreams, setObserverState });
   useRunUrlSync(selectedSessionId, setSessionSelection);
@@ -146,60 +151,186 @@ export default function App() {
 
   const { setLlmControlsBySessionId, updateActiveLlmControls } = useLlmControls({
     selectedSessionId, selectedSession, defaultLlmControls, setDefaultLlmControls,
+    workPlanningProvider, setWorkPlanningProvider, workPlanningModel, setWorkPlanningModel,
     workProvider, setWorkProvider, workModel, setWorkModel, workWorkspaceId, setWorkWorkspaceId,
+    planningNoToolGuardMode, setPlanningNoToolGuardMode,
     autoApprove, setAutoApprove,
     adaptiveConcurrency, setAdaptiveConcurrency,
     batchConcurrency, setBatchConcurrency,
     batchMinConcurrency, setBatchMinConcurrency,
   });
 
-  const setDefaultProvider = useCallback((nextProvider: string) => {
+  const persistPhaseDefaults = useCallback((next: {
+    planningProvider: string;
+    planningModel: string;
+    implementationProvider: string;
+    implementationModel: string;
+  }) => {
+    void updateUiPreferences({
+      defaultProvider: next.implementationProvider,
+      defaultModel: next.implementationModel,
+      defaultPlanningProvider: next.planningProvider,
+      defaultPlanningModel: next.planningModel,
+      defaultImplementationProvider: next.implementationProvider,
+      defaultImplementationModel: next.implementationModel,
+    }).catch(() => undefined);
+  }, []);
+
+  const setDefaultPlanningProvider = useCallback((nextProvider: string) => {
     const normalizedProvider = typeof nextProvider === 'string' ? nextProvider.trim() : '';
-    const resetModel = normalizedProvider !== defaultLlmControls.provider;
-    const nextModel = resetModel ? '' : defaultLlmControls.model;
+    const resetModel = normalizedProvider !== defaultLlmControls.planningProvider;
+    const nextModel = resetModel ? '' : defaultLlmControls.planningModel;
 
     setDefaultLlmControls((current) => ({
       ...current,
-      provider: normalizedProvider,
-      model: resetModel ? '' : current.model,
+      planningProvider: normalizedProvider,
+      planningModel: resetModel ? '' : current.planningModel,
     }));
 
-    if (!selectedSessionId) {
-      updateActiveLlmControls({ provider: normalizedProvider, model: nextModel });
-    }
-  }, [defaultLlmControls.model, defaultLlmControls.provider, selectedSessionId, setDefaultLlmControls, updateActiveLlmControls]);
+    setWorkPlanningProvider(normalizedProvider);
+    setWorkPlanningModel(nextModel);
+    setLlmControlsBySessionId((current) => {
+      const next = { ...current };
+      for (const sessionId of Object.keys(next)) {
+        const existing = next[sessionId];
+        next[sessionId] = {
+          ...existing,
+          planningProvider: normalizedProvider,
+          planningModel: nextModel,
+        };
+      }
+      return next;
+    });
+    persistPhaseDefaults({
+      planningProvider: normalizedProvider,
+      planningModel: nextModel,
+      implementationProvider: defaultLlmControls.implementationProvider,
+      implementationModel: defaultLlmControls.implementationModel,
+    });
+    updateActiveLlmControls({ planningProvider: normalizedProvider, planningModel: nextModel });
+  }, [defaultLlmControls.implementationModel, defaultLlmControls.implementationProvider, defaultLlmControls.planningModel, defaultLlmControls.planningProvider, persistPhaseDefaults, setDefaultLlmControls, setLlmControlsBySessionId, setWorkPlanningModel, setWorkPlanningProvider, updateActiveLlmControls]);
 
-  const setDefaultModel = useCallback((nextModel: string) => {
+  const setDefaultPlanningModel = useCallback((nextModel: string) => {
     const normalizedModel = typeof nextModel === 'string' ? nextModel.trim() : '';
-    setDefaultLlmControls((current) => ({ ...current, model: normalizedModel }));
+    setDefaultLlmControls((current) => ({ ...current, planningModel: normalizedModel }));
+    setWorkPlanningModel(normalizedModel);
+    setLlmControlsBySessionId((current) => {
+      const next = { ...current };
+      for (const sessionId of Object.keys(next)) {
+        const existing = next[sessionId];
+        next[sessionId] = {
+          ...existing,
+          planningModel: normalizedModel,
+        };
+      }
+      return next;
+    });
+    persistPhaseDefaults({
+      planningProvider: defaultLlmControls.planningProvider,
+      planningModel: normalizedModel,
+      implementationProvider: defaultLlmControls.implementationProvider,
+      implementationModel: defaultLlmControls.implementationModel,
+    });
+    updateActiveLlmControls({ planningModel: normalizedModel });
+  }, [defaultLlmControls.implementationModel, defaultLlmControls.implementationProvider, defaultLlmControls.planningProvider, persistPhaseDefaults, setDefaultLlmControls, setLlmControlsBySessionId, setWorkPlanningModel, updateActiveLlmControls]);
 
-    if (!selectedSessionId) {
-      updateActiveLlmControls({ model: normalizedModel });
-    }
-  }, [selectedSessionId, setDefaultLlmControls, updateActiveLlmControls]);
+  const setDefaultImplementationProvider = useCallback((nextProvider: string) => {
+    const normalizedProvider = typeof nextProvider === 'string' ? nextProvider.trim() : '';
+    const resetModel = normalizedProvider !== defaultLlmControls.implementationProvider;
+    const nextModel = resetModel ? '' : defaultLlmControls.implementationModel;
+
+    setDefaultLlmControls((current) => ({
+      ...current,
+      implementationProvider: normalizedProvider,
+      implementationModel: resetModel ? '' : current.implementationModel,
+    }));
+
+    setWorkProvider(normalizedProvider);
+    setWorkModel(nextModel);
+    setLlmControlsBySessionId((current) => {
+      const next = { ...current };
+      for (const sessionId of Object.keys(next)) {
+        const existing = next[sessionId];
+        next[sessionId] = {
+          ...existing,
+          implementationProvider: normalizedProvider,
+          implementationModel: nextModel,
+        };
+      }
+      return next;
+    });
+    persistPhaseDefaults({
+      planningProvider: defaultLlmControls.planningProvider,
+      planningModel: defaultLlmControls.planningModel,
+      implementationProvider: normalizedProvider,
+      implementationModel: nextModel,
+    });
+    updateActiveLlmControls({ implementationProvider: normalizedProvider, implementationModel: nextModel });
+  }, [defaultLlmControls.implementationModel, defaultLlmControls.implementationProvider, defaultLlmControls.planningModel, defaultLlmControls.planningProvider, persistPhaseDefaults, setDefaultLlmControls, setLlmControlsBySessionId, setWorkModel, setWorkProvider, updateActiveLlmControls]);
+
+  const setDefaultImplementationModel = useCallback((nextModel: string) => {
+    const normalizedModel = typeof nextModel === 'string' ? nextModel.trim() : '';
+    setDefaultLlmControls((current) => ({ ...current, implementationModel: normalizedModel }));
+    setWorkModel(normalizedModel);
+    setLlmControlsBySessionId((current) => {
+      const next = { ...current };
+      for (const sessionId of Object.keys(next)) {
+        const existing = next[sessionId];
+        next[sessionId] = {
+          ...existing,
+          implementationModel: normalizedModel,
+        };
+      }
+      return next;
+    });
+    persistPhaseDefaults({
+      planningProvider: defaultLlmControls.planningProvider,
+      planningModel: defaultLlmControls.planningModel,
+      implementationProvider: defaultLlmControls.implementationProvider,
+      implementationModel: normalizedModel,
+    });
+    updateActiveLlmControls({ implementationModel: normalizedModel });
+  }, [defaultLlmControls.implementationProvider, defaultLlmControls.planningModel, defaultLlmControls.planningProvider, persistPhaseDefaults, setDefaultLlmControls, setLlmControlsBySessionId, setWorkModel, updateActiveLlmControls]);
 
   const handleStartNewSessionDraft = useCallback(() => {
     setActiveTab('graph');
     setSessionSelection('');
     updateActiveLlmControls({
-      provider: defaultLlmControls.provider,
-      model: defaultLlmControls.model,
+      planningProvider: defaultLlmControls.planningProvider,
+      planningModel: defaultLlmControls.planningModel,
+      implementationProvider: defaultLlmControls.implementationProvider,
+      implementationModel: defaultLlmControls.implementationModel,
+      planningNoToolGuardMode: defaultLlmControls.planningNoToolGuardMode,
     });
-  }, [defaultLlmControls.model, defaultLlmControls.provider, setActiveTab, setSessionSelection, updateActiveLlmControls]);
+  }, [
+    defaultLlmControls.implementationModel,
+    defaultLlmControls.implementationProvider,
+    defaultLlmControls.planningNoToolGuardMode,
+    defaultLlmControls.planningModel,
+    defaultLlmControls.planningProvider,
+    setActiveTab,
+    setSessionSelection,
+    updateActiveLlmControls,
+  ]);
 
-  const preferredModelForProvider = workProvider === defaultLlmControls.provider
-    ? defaultLlmControls.model
-    : '';
+  const modalTargetsPlanningPhase = composerMode === 'planning';
+  const modalWorkProvider = modalTargetsPlanningPhase ? workPlanningProvider : workProvider;
+  const modalWorkModel = modalTargetsPlanningPhase ? workPlanningModel : workModel;
+  const modalSetWorkModel = modalTargetsPlanningPhase ? setWorkPlanningModel : setWorkModel;
+  const modalPreferredModelForProvider = modalTargetsPlanningPhase
+    ? (modalWorkProvider === defaultLlmControls.planningProvider ? defaultLlmControls.planningModel : '')
+    : (modalWorkProvider === defaultLlmControls.implementationProvider ? defaultLlmControls.implementationModel : '');
+
   const {
     currentModels,
     missingModelWarning,
     confirmMissingModelSwitch,
     dismissMissingModelWarning,
   } = useProviderModels(
-    workProvider,
-    workModel,
-    setWorkModel,
-    preferredModelForProvider,
+    modalWorkProvider,
+    modalWorkModel,
+    modalSetWorkModel,
+    modalPreferredModelForProvider,
   );
 
   const timelineItems = useMemo(() => buildTimelineItems(selectedSession, chatMessages), [chatMessages, selectedSession]);
@@ -209,7 +340,13 @@ export default function App() {
 
   const actions = useSessionActions({
     selectedSessionId, selectedSession, sessions, chatMessages, todos, composerText, composerImages,
-    workWorkspaceId, workProvider, workModel, autoApprove,
+    workWorkspaceId,
+    workPlanningProvider,
+    workPlanningModel,
+    workProvider,
+    workModel,
+    planningNoToolGuardMode,
+    autoApprove,
     adaptiveConcurrency, batchConcurrency, batchMinConcurrency,
     setErrorMessage, setSessions, setSelectedSessionId, setChatMessages, setTodos,
     setComposerText, setComposerImages, setLlmControlsBySessionId,
@@ -232,8 +369,7 @@ export default function App() {
     const payload = {
       activeTab,
       observerShowFindings,
-      defaultProvider: defaultLlmControls.provider,
-      defaultModel: defaultLlmControls.model,
+      planningNoToolGuardMode,
       adaptiveConcurrency,
       batchConcurrency,
       batchMinConcurrency,
@@ -261,12 +397,29 @@ export default function App() {
     batchConcurrency,
     batchMinConcurrency,
     bootstrapComplete,
-    defaultLlmControls.model,
-    defaultLlmControls.provider,
     onSettingsSaveStatus,
     observerShowFindings,
+    planningNoToolGuardMode,
     setErrorMessage,
   ]);
+
+  const setDefaultPlanningNoToolGuardMode = useCallback((next: 'enforce' | 'warn') => {
+    const normalized = next === 'warn' ? 'warn' : 'enforce';
+    setDefaultLlmControls((current) => ({ ...current, planningNoToolGuardMode: normalized }));
+    setPlanningNoToolGuardMode(normalized);
+    setLlmControlsBySessionId((current) => {
+      const nextControls = { ...current };
+      for (const sessionId of Object.keys(nextControls)) {
+        const existing = nextControls[sessionId];
+        nextControls[sessionId] = {
+          ...existing,
+          planningNoToolGuardMode: normalized,
+        };
+      }
+      return nextControls;
+    });
+    updateActiveLlmControls({ planningNoToolGuardMode: normalized });
+  }, [setDefaultLlmControls, setLlmControlsBySessionId, setPlanningNoToolGuardMode, updateActiveLlmControls]);
 
   const sessionSidebarProps = buildSessionSidebarProps({
     activeTab,
@@ -312,8 +465,11 @@ export default function App() {
     composerMode,
     workspaces,
     workWorkspaceId,
+    workPlanningProvider,
+    workPlanningModel,
     workProvider,
     workModel,
+    planningNoToolGuardMode,
     autoApprove,
     composerText,
     setComposerText,
@@ -328,10 +484,16 @@ export default function App() {
     providers,
     providerStatuses,
     activeWorkspaceId,
-    defaultProvider: defaultLlmControls.provider,
-    defaultModel: defaultLlmControls.model,
-    onSetDefaultProvider: setDefaultProvider,
-    onSetDefaultModel: setDefaultModel,
+    defaultPlanningProvider: defaultLlmControls.planningProvider,
+    defaultPlanningModel: defaultLlmControls.planningModel,
+    defaultImplementationProvider: defaultLlmControls.implementationProvider,
+    defaultImplementationModel: defaultLlmControls.implementationModel,
+    defaultPlanningNoToolGuardMode: defaultLlmControls.planningNoToolGuardMode,
+    onSetDefaultPlanningProvider: setDefaultPlanningProvider,
+    onSetDefaultPlanningModel: setDefaultPlanningModel,
+    onSetDefaultImplementationProvider: setDefaultImplementationProvider,
+    onSetDefaultImplementationModel: setDefaultImplementationModel,
+    onSetDefaultPlanningNoToolGuardMode: setDefaultPlanningNoToolGuardMode,
     observerShowFindings,
     onSetObserverShowFindings: setObserverShowFindings,
     onSettingsSaveStatus,
@@ -353,16 +515,20 @@ export default function App() {
     workspaces,
     currentModels,
     workWorkspaceId,
-    workProvider,
-    workModel,
+    workProvider: modalWorkProvider,
+    workModel: modalWorkModel,
     autoApprove,
     adaptiveConcurrency,
     batchConcurrency,
     batchMinConcurrency,
     closeLlmControlsModal,
     onChangeWorkspace: (workspaceId) => updateActiveLlmControls({ workspaceId }),
-    onChangeProvider: (provider) => updateActiveLlmControls({ provider, model: '' }),
-    onChangeModel: (model) => updateActiveLlmControls({ model }),
+    onChangeProvider: (provider) => updateActiveLlmControls(modalTargetsPlanningPhase
+      ? { planningProvider: provider, planningModel: '' }
+      : { implementationProvider: provider, implementationModel: '' }),
+    onChangeModel: (model) => updateActiveLlmControls(modalTargetsPlanningPhase
+      ? { planningModel: model }
+      : { implementationModel: model }),
     onChangeAutoApprove: (next) => updateActiveLlmControls({ autoApprove: next }),
     onChangeAdaptiveConcurrency: (next) => updateActiveLlmControls({ adaptiveConcurrency: next }),
     onChangeBatchConcurrency: (next) => updateActiveLlmControls({ batchConcurrency: next }),

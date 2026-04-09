@@ -336,6 +336,42 @@ describe('materializeSession', () => {
     expect(session.lastSeq).toBe(8);
   });
 
+  it('preserves retry metadata for session:dag-event materialization', () => {
+    const t = now();
+    const config = makeConfig();
+    const events: SessionEvent[] = [
+      { seq: 1, time: t, type: 'session:created', payload: { config } },
+      {
+        seq: 2,
+        time: t,
+        type: 'session:dag-event',
+        payload: {
+          event: {
+            time: t,
+            type: 'task:failed',
+            taskId: 'task',
+            failureType: 'validation',
+            attempt: 3,
+            maxRetries: 2,
+            totalDurationMs: 2450,
+            message: '[run:sess-1] task: failed',
+          },
+        },
+      },
+    ];
+
+    const session = materializeSession(events)!;
+    expect(session.events).toHaveLength(1);
+    expect(session.events[0]).toMatchObject({
+      type: 'task:failed',
+      taskId: 'task',
+      failureType: 'validation',
+      attempt: 3,
+      maxRetries: 2,
+      totalDurationMs: 2450,
+    });
+  });
+
   it('materializes failed session', () => {
     const t = now();
     const config = makeConfig();
@@ -523,6 +559,49 @@ describe('materializeSession', () => {
 
     const session = materializeSession(events)!;
     expect(session.lastHeartbeat).toBe(t);
+  });
+
+  it('materializes checkpoint and recovery metadata', () => {
+    const t = now();
+    const t2 = new Date(Date.now() + 1_000).toISOString();
+    const t3 = new Date(Date.now() + 2_000).toISOString();
+    const config = makeConfig();
+    const events = [
+      { seq: 1, time: t, type: 'session:created' as const, payload: { config } },
+      {
+        seq: 2,
+        time: t2,
+        type: 'session:checkpoint' as const,
+        payload: {
+          status: 'committed' as const,
+          reason: 'edit-threshold' as const,
+          message: 'checkpoint: t1',
+          commit: { hash: 'abc123' },
+        },
+      },
+      {
+        seq: 3,
+        time: t3,
+        type: 'session:recovery-detected' as const,
+        payload: {
+          reason: 'runner-exit-fallback' as const,
+          exitCode: 1,
+          git: {
+            cwd: '/tmp/test',
+            dirty: true,
+            changedFiles: ['packages/cli/src/runner.ts'],
+          },
+        },
+      },
+    ];
+
+    const session = materializeSession(events)!;
+    expect(session.lastCheckpoint?.status).toBe('committed');
+    expect(session.lastCheckpoint?.commit?.hash).toBe('abc123');
+    expect(session.lastCheckpoint?.time).toBe(t2);
+    expect(session.lastRecovery?.reason).toBe('runner-exit-fallback');
+    expect(session.lastRecovery?.git.dirty).toBe(true);
+    expect(session.lastRecovery?.time).toBe(t3);
   });
 
   it('stream-delta is a no-op for materialized state', () => {

@@ -131,11 +131,15 @@ export async function runDag(
     state.output = output;
     failed.add(nodeId);
     outputs.set(nodeId, output);
+    const totalDurationMs = Math.max(0, Date.now() - (state.startedAt ?? Date.now()));
     emit({
       type: 'task:failed',
       taskId: nodeId,
       error: output.error ?? 'Unknown error',
       retries: state.retryCount,
+      attempt: state.retryCount + 1,
+      maxRetries,
+      totalDurationMs,
       failureType: output.failureType,
     });
     scheduleReady();
@@ -168,7 +172,7 @@ export async function runDag(
           status: 'failed',
           error: errorMsg,
           durationMs: Date.now() - (state.startedAt ?? Date.now()),
-          retries: 0,
+          retries: state.retryCount,
         });
       },
     );

@@ -3,7 +3,7 @@ import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { resolve } from 'node:path';
 import { config as loadDotEnv } from 'dotenv';
-import { orchestrate } from '@orchestrace/core';
+import { orchestrate, type TaskRouteCategory } from '@orchestrace/core';
 import type { TaskGraph, DagEvent, PlanApprovalRequest, TaskOutput } from '@orchestrace/core';
 import { PiAiAdapter, ProviderAuthManager } from '@orchestrace/provider';
 import type { ProviderInfo } from '@orchestrace/provider';
@@ -11,8 +11,10 @@ import { DEFAULT_AGENT_TOOL_POLICY_VERSION, createAgentToolset } from '@orchestr
 import { createInterface } from 'node:readline/promises';
 import { promisify } from 'node:util';
 import { startUiServer } from './ui-server.js';
+import { enforceSafeShellDispatch, resolveTaskRoute } from './task-routing.js';
 import { WorkspaceManager } from './workspace-manager.js';
 import type { WorkspaceEntry } from './workspace-manager.js';
+import { parseAndSanitizeVerifyCommands } from './verify-commands.js';
 
 const SUB_AGENT_READ_ONLY_TOOL_ALLOWLIST = [
   'list_directory',
@@ -20,14 +22,16 @@ const SUB_AGENT_READ_ONLY_TOOL_ALLOWLIST = [
   'search_files',
   'git_diff',
   'git_status',
+  'url_fetch',
 ];
 
 const GITHUB_PROVIDER_ID = 'github';
 
-function createReadOnlySubAgentToolset(cwd: string) {
+function createReadOnlySubAgentToolset(cwd: string, taskRequiresWrites?: boolean) {
   return createAgentToolset({
     cwd,
     phase: 'planning',
+    taskRequiresWrites,
     permissions: {
       allowWriteTools: false,
       allowRunCommand: false,
@@ -131,7 +135,7 @@ orchestrace — DAG-based agent orchestration
 
 Usage:
   orchestrace run <plan.json>   Execute a task graph from a JSON plan file
-  orchestrace task <prompt>     Run a single prompt task using the generalized flow
+  orchestrace task <prompt>     Run a single prompt task with automatic routing (shell/investigation/code)
   orchestrace replay list [--limit 20]   List persisted replay runs
   orchestrace replay show <runId> [--task <taskId>]  Show persisted replay artifacts
   orchestrace workspace         Manage registered workspaces and active workspace
@@ -280,7 +284,21 @@ Environment variables:
       process.exit(1);
     }
 
-    const graph = buildSingleTaskGraph(taskPrompt);
+    const resolvedRoute = resolveTaskRoute(taskPrompt, process.env.ORCHESTRACE_TASK_ROUTE).result;
+    const dispatch = enforceSafeShellDispatch(taskPrompt, resolvedRoute, 'user');
+    const route = dispatch.route;
+    console.log(`[route] category=${route.category} strategy=${route.strategy} source=${route.source} confidence=${route.confidence.toFixed(2)} reason=${route.reason}`);
+
+    if (resolvedRoute.category === 'shell_command' && route.category !== 'shell_command') {
+      console.log(`[route] shell fallback applied: ${dispatch.shell.reason ?? 'prompt failed shell validation'}`);
+    }
+
+    if (route.category === 'shell_command') {
+      const code = await runShellCommandRoute(dispatch.shell.command!, workspace.path);
+      process.exit(code);
+    }
+
+    const graph = buildSingleTaskGraph(taskPrompt, route.category);
     const code = await runGraph(graph, {
       autoApprove,
       autoPush,
@@ -398,9 +416,10 @@ async function runGraph(
     requirePlanApproval: true,
     onPlanApproval: approvalGate,
     resolveApiKey: (providerId) => authManager.resolveApiKey(providerId),
-    createToolset: ({ phase, task, graphId, provider: activeProvider, model: activeModel, reasoning }) => createAgentToolset({
+    createToolset: ({ phase, task, graphId, provider: activeProvider, model: activeModel, reasoning, taskRequiresWrites }) => createAgentToolset({
       cwd,
       phase,
+      taskRequiresWrites,
       taskType: task.type,
       graphId,
       taskId: task.id,
@@ -411,7 +430,7 @@ async function runGraph(
       runSubAgent: async (request, _signal) => {
         const subProvider = request.provider ?? activeProvider;
         const subModel = request.model ?? activeModel;
-        const subAgentToolset = createReadOnlySubAgentToolset(cwd);
+        const subAgentToolset = createReadOnlySubAgentToolset(cwd, taskRequiresWrites);
         const subAgent = await llm.spawnAgent({
           provider: subProvider,
           model: subModel,
@@ -561,40 +580,55 @@ function previewText(text: string | undefined, maxChars = 1500): string | undefi
   return compact.length > maxChars ? `${compact.slice(0, maxChars - 3)}...` : compact;
 }
 
-function buildSingleTaskGraph(prompt: string): TaskGraph {
+export function buildSingleTaskGraph(prompt: string, routeCategory: TaskRouteCategory = 'code_change'): TaskGraph {
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
   const verifyCommands = parseVerifyCommands();
+  const nodeType = routeCategory === 'refactor' ? 'refactor' : 'code';
+  const graphName = routeCategory === 'investigation' ? 'Single Prompt Investigation Task' : 'Single Prompt Task';
+  const validationCommands = routeCategory === 'investigation' ? [] : verifyCommands;
 
   return {
     id: `task-${timestamp}`,
-    name: 'Single Prompt Task',
+    name: graphName,
     nodes: [
       {
         id: 'task',
         name: 'Execute prompt task',
-        type: 'code',
+        type: nodeType,
         prompt,
         dependencies: [],
         validation: {
-          commands: verifyCommands,
+          commands: validationCommands,
           maxRetries: 2,
           retryDelayMs: 0,
+        },
+        meta: {
+          routeCategory,
         },
       },
     ],
   };
 }
 
-function parseVerifyCommands(): string[] {
-  const raw = process.env.ORCHESTRACE_VERIFY_COMMANDS;
-  if (!raw) {
-    return ['pnpm typecheck', 'pnpm test'];
+async function runShellCommandRoute(command: string, cwd: string): Promise<number> {
+  try {
+    const { stdout, stderr } = await execFileAsync('sh', ['-lc', command], { cwd });
+    if (stdout) {
+      process.stdout.write(stdout);
+    }
+    if (stderr) {
+      process.stderr.write(stderr);
+    }
+    return 0;
+  } catch (error) {
+    const details = error instanceof Error ? error.message : String(error);
+    console.error(`Shell command failed: ${details}`);
+    return 1;
   }
+}
 
-  return raw
-    .split(';')
-    .map((part) => part.trim())
-    .filter((part) => part.length > 0);
+function parseVerifyCommands(): string[] {
+  return parseAndSanitizeVerifyCommands(process.env.ORCHESTRACE_VERIFY_COMMANDS);
 }
 
 function getBooleanFlag(args: string[], flag: string, fallback: boolean): boolean {

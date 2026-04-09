@@ -18,8 +18,11 @@ export type SessionActionsParams = {
   composerText: string;
   composerImages: ComposerImageAttachment[];
   workWorkspaceId: string;
+  workPlanningProvider: string;
+  workPlanningModel: string;
   workProvider: string;
   workModel: string;
+  planningNoToolGuardMode: 'enforce' | 'warn';
   autoApprove: boolean;
   adaptiveConcurrency: boolean;
   batchConcurrency: number;

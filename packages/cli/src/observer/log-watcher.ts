@@ -59,6 +59,8 @@ export interface LogWatcherOptions {
   resolveApiKey: (provider: string) => Promise<string | undefined>;
   /** Called when status or findings change. */
   onStateChange?: (state: LogWatcherState) => void;
+  /** Called only with findings newly detected in the latest analysis batch. */
+  onFindings?: (findings: LogFinding[]) => void | Promise<void>;
   /** Maximum lines to accumulate before triggering analysis (default 200). */
   batchSize?: number;
   /** Time window (ms) — trigger analysis after this interval even if batch isn't full (default 120s). */
@@ -119,9 +121,10 @@ Respond ONLY with valid JSON matching this schema:
 
 export class LogWatcher {
   private readonly llm: LlmAdapter;
-  private readonly config: ObserverConfig;
+  private config: ObserverConfig;
   private readonly resolveApiKey: (provider: string) => Promise<string | undefined>;
   private readonly onStateChange?: (state: LogWatcherState) => void;
+  private readonly onFindings?: (findings: LogFinding[]) => void | Promise<void>;
   private readonly batchSize: number;
   private readonly timeWindowMs: number;
 
@@ -141,11 +144,17 @@ export class LogWatcher {
 
   constructor(options: LogWatcherOptions) {
     this.llm = options.llm;
-    this.config = options.config;
+    this.config = { ...options.config };
     this.resolveApiKey = options.resolveApiKey;
     this.onStateChange = options.onStateChange;
+    this.onFindings = options.onFindings;
     this.batchSize = options.batchSize ?? 200;
     this.timeWindowMs = options.timeWindowMs ?? 120_000;
+  }
+
+  /** Update runtime config snapshot (called when observer config changes). */
+  updateConfig(config: ObserverConfig): void {
+    this.config = { ...config };
   }
 
   /** Start watching log lines from the backend logger. */
@@ -219,12 +228,13 @@ export class LogWatcher {
 
     try {
       const prompt = this.buildAnalysisPrompt(batch);
-      const provider = this.config.provider;
+      const provider = pickModelSetting(this.config.logWatcherProvider, this.config.provider);
+      const model = pickModelSetting(this.config.logWatcherModel, this.config.model);
       const apiKey = await this.resolveApiKey(provider);
 
       const result = await this.llm.complete({
         provider,
-        model: this.config.model,
+        model,
         systemPrompt: LOG_WATCHER_SYSTEM_PROMPT,
         prompt,
         signal: this.abortController.signal,
@@ -233,11 +243,21 @@ export class LogWatcher {
       });
 
       const findings = parseLogFindings(result.text);
+      const newlyDetected: LogFinding[] = [];
 
       for (const finding of findings) {
         // Deduplicate by title
         if (this.state.findings.some((f) => f.title === finding.title)) continue;
         this.state.findings.push(finding);
+        newlyDetected.push(finding);
+      }
+
+      if (newlyDetected.length > 0 && this.onFindings) {
+        void Promise.resolve(this.onFindings(newlyDetected)).catch((err) => {
+          process.stderr.write(
+            `[orchestrace][log-watcher] Finding callback error: ${(err as Error).message}\n`,
+          );
+        });
       }
 
       this.state.analyzedBatches++;
@@ -323,4 +343,13 @@ function validateLogCategory(cat: string): LogFindingCategory {
 function validateSeverity(sev: string): FindingSeverity {
   const valid: FindingSeverity[] = ['low', 'medium', 'high', 'critical'];
   return valid.includes(sev as FindingSeverity) ? (sev as FindingSeverity) : 'medium';
+}
+
+function pickModelSetting(value: unknown, fallback: string): string {
+  if (typeof value !== 'string') {
+    return fallback;
+  }
+
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : fallback;
 }

@@ -47,8 +47,11 @@ export type ComposerImageAttachment = {
 };
 
 export type SessionLlmControls = {
-  provider: string;
-  model: string;
+  planningProvider: string;
+  planningModel: string;
+  implementationProvider: string;
+  implementationModel: string;
+  planningNoToolGuardMode: 'enforce' | 'warn';
   workspaceId: string;
   autoApprove: boolean;
   adaptiveConcurrency: boolean;

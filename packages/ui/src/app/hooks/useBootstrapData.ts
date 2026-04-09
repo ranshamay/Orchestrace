@@ -13,6 +13,7 @@ import {
 } from '../../lib/api';
 import type { SessionLlmControls } from '../types';
 import { readRunIdFromUrl, updateRunIdInUrl } from '../utils/runUrl';
+import { sortSessionsByActivityAndRecency } from '../utils/sessionSort';
 import { readTabFromUrl } from '../utils/viewRoute';
 
 type ProviderStatus = { provider: string; source: string };
@@ -32,8 +33,11 @@ export function useBootstrapData() {
   const [selectedSessionId, setSelectedSessionId] = useState<string>(() => readRunIdFromUrl());
 
   const [defaultLlmControls, setDefaultLlmControls] = useState<SessionLlmControls>({
-    provider: '',
-    model: '',
+    planningProvider: '',
+    planningModel: '',
+    implementationProvider: '',
+    implementationModel: '',
+    planningNoToolGuardMode: 'enforce',
     workspaceId: '',
     autoApprove: true,
     adaptiveConcurrency: false,
@@ -41,9 +45,12 @@ export function useBootstrapData() {
     batchMinConcurrency: 1,
   });
 
+  const [workPlanningProvider, setWorkPlanningProvider] = useState('');
+  const [workPlanningModel, setWorkPlanningModel] = useState('');
   const [workProvider, setWorkProvider] = useState('');
   const [workModel, setWorkModel] = useState('');
   const [workWorkspaceId, setWorkWorkspaceId] = useState('');
+  const [planningNoToolGuardMode, setPlanningNoToolGuardMode] = useState<'enforce' | 'warn'>('enforce');
   const [autoApprove, setAutoApprove] = useState(true);
   const [adaptiveConcurrency, setAdaptiveConcurrency] = useState(false);
   const [batchConcurrency, setBatchConcurrency] = useState(8);
@@ -66,7 +73,7 @@ export function useBootstrapData() {
 
         const bootstrapErrors: string[] = [];
 
-        let providersState;
+        let providersState: Awaited<ReturnType<typeof fetchProviders>> | undefined;
         if (providersResult.status === 'fulfilled') {
           providersState = providersResult.value;
           setProviders(providersState.providers);
@@ -87,13 +94,14 @@ export function useBootstrapData() {
         let sessionsState;
         if (sessionsResult.status === 'fulfilled') {
           sessionsState = sessionsResult.value;
-          setSessions(sessionsState.sessions);
+          const sortedSessions = sortSessionsByActivityAndRecency(sessionsState.sessions);
+          setSessions(sortedSessions);
 
           const runIdFromUrl = readRunIdFromUrl();
           const hasRunIdInResults = Boolean(
-            runIdFromUrl && sessionsState.sessions.some((session) => session.id === runIdFromUrl),
+            runIdFromUrl && sortedSessions.some((session) => session.id === runIdFromUrl),
           );
-          const initialSessionId = hasRunIdInResults ? runIdFromUrl : sessionsState.sessions[0]?.id ?? '';
+          const initialSessionId = hasRunIdInResults ? runIdFromUrl : sortedSessions[0]?.id ?? '';
 
           setSelectedSessionId(initialSessionId);
           updateRunIdInUrl(initialSessionId);
@@ -110,6 +118,11 @@ export function useBootstrapData() {
           observerShowFindings: false,
           defaultProvider: '',
           defaultModel: '',
+          defaultPlanningProvider: '',
+          defaultPlanningModel: '',
+          defaultImplementationProvider: '',
+          defaultImplementationModel: '',
+          planningNoToolGuardMode: 'enforce',
           adaptiveConcurrency: false,
           batchConcurrency: 8,
           batchMinConcurrency: 1,
@@ -122,18 +135,17 @@ export function useBootstrapData() {
           bootstrapErrors.push(toErrorMessage(preferencesResult.reason));
         }
 
-        const preferredProvider = (() => {
-          const configured = typeof preferences.defaultProvider === 'string'
-            ? preferences.defaultProvider.trim()
-            : '';
+        const resolvePreferredConnectedProvider = (configuredValue: string | undefined): string => {
+          const configured = typeof configuredValue === 'string' ? configuredValue.trim() : '';
           if (!configured) {
             return '';
           }
-
           return providersState?.statuses.some((status) => status.provider === configured && status.source !== 'none')
             ? configured
             : '';
-        })();
+        };
+
+        const preferredProvider = resolvePreferredConnectedProvider(preferences.defaultProvider);
 
         const connectedProvider = providersState?.statuses.find((status) => status.source !== 'none')?.provider || '';
         const defaultProvider = preferredProvider
@@ -144,11 +156,22 @@ export function useBootstrapData() {
         const defaultModel = typeof preferences.defaultModel === 'string'
           ? preferences.defaultModel.trim()
           : '';
+        const defaultPlanningProvider = resolvePreferredConnectedProvider(preferences.defaultPlanningProvider) || defaultProvider;
+        const defaultPlanningModel = typeof preferences.defaultPlanningModel === 'string'
+          ? preferences.defaultPlanningModel.trim()
+          : defaultModel;
+        const defaultImplementationProvider = resolvePreferredConnectedProvider(preferences.defaultImplementationProvider) || defaultProvider;
+        const defaultImplementationModel = typeof preferences.defaultImplementationModel === 'string'
+          ? preferences.defaultImplementationModel.trim()
+          : defaultModel;
         const defaultWorkspace = workspacesState?.activeWorkspaceId || workspacesState?.workspaces[0]?.id || '';
 
         const initialControls: SessionLlmControls = {
-          provider: defaultProvider,
-          model: defaultModel,
+          planningProvider: defaultPlanningProvider,
+          planningModel: defaultPlanningModel,
+          implementationProvider: defaultImplementationProvider,
+          implementationModel: defaultImplementationModel,
+          planningNoToolGuardMode: preferences.planningNoToolGuardMode === 'warn' ? 'warn' : 'enforce',
           workspaceId: defaultWorkspace,
           autoApprove: true,
           adaptiveConcurrency: preferences.adaptiveConcurrency,
@@ -157,8 +180,11 @@ export function useBootstrapData() {
         };
 
         setDefaultLlmControls(initialControls);
-        setWorkProvider(initialControls.provider);
-        setWorkModel(initialControls.model);
+        setWorkPlanningProvider(initialControls.planningProvider);
+        setWorkPlanningModel(initialControls.planningModel);
+        setWorkProvider(initialControls.implementationProvider);
+        setWorkModel(initialControls.implementationModel);
+        setPlanningNoToolGuardMode(initialControls.planningNoToolGuardMode);
         setWorkWorkspaceId(initialControls.workspaceId);
         setAutoApprove(initialControls.autoApprove);
         setAdaptiveConcurrency(initialControls.adaptiveConcurrency);
@@ -193,12 +219,18 @@ export function useBootstrapData() {
     setSelectedSessionId,
     defaultLlmControls,
     setDefaultLlmControls,
+    workPlanningProvider,
+    setWorkPlanningProvider,
+    workPlanningModel,
+    setWorkPlanningModel,
     workProvider,
     setWorkProvider,
     workModel,
     setWorkModel,
     workWorkspaceId,
     setWorkWorkspaceId,
+    planningNoToolGuardMode,
+    setPlanningNoToolGuardMode,
     autoApprove,
     setAutoApprove,
     adaptiveConcurrency,

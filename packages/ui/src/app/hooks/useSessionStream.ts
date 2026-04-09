@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react';
 import { API_BASE, type AgentTodo, type ChatMessage, type SessionObserverFinding, type SessionObserverState, type WorkSession } from '../../lib/api';
 import type { NodeTokenStream } from '../types';
+import { upsertSessionWithActivityTransition } from '../utils/sessionSort';
 
 type Params = {
   selectedSessionId: string;
@@ -42,13 +43,7 @@ export function useSessionStream({ selectedSessionId, setSessions, setChatMessag
         };
         if (data.session) {
           setSessions((prev) => {
-            const idx = prev.findIndex((s) => s.id === data.id);
-            if (idx >= 0) {
-              const next = [...prev];
-              next[idx] = data.session;
-              return next;
-            }
-            return [data.session, ...prev];
+            return upsertSessionWithActivityTransition(prev, data.session);
           });
         }
         if (data.messages) {
@@ -69,13 +64,7 @@ export function useSessionStream({ selectedSessionId, setSessions, setChatMessag
         const data = JSON.parse(ev.data) as { id: string; session: WorkSession };
         if (!data.session) return;
         setSessions((prev) => {
-          const idx = prev.findIndex((s) => s.id === data.id);
-          if (idx >= 0) {
-            const next = [...prev];
-            next[idx] = data.session;
-            return next;
-          }
-          return prev;
+          return upsertSessionWithActivityTransition(prev, data.session);
         });
       } catch {
         // Ignore malformed data
@@ -133,11 +122,20 @@ export function useSessionStream({ selectedSessionId, setSessions, setChatMessag
     const handleEnd = (ev: MessageEvent) => {
       try {
         const data = JSON.parse(ev.data) as { id: string; status: string; llmStatus?: WorkSession['llmStatus'] };
-        setSessions((prev) =>
-          prev.map((s) =>
-            s.id === data.id ? { ...s, status: data.status, llmStatus: data.llmStatus ?? s.llmStatus } : s,
-          ),
-        );
+        setSessions((prev) => {
+          const existing = prev.find((session) => session.id === data.id);
+          if (!existing) {
+            return prev;
+          }
+
+          const nextSession: WorkSession = {
+            ...existing,
+            status: data.status,
+            llmStatus: data.llmStatus ?? existing.llmStatus,
+          };
+
+          return upsertSessionWithActivityTransition(prev, nextSession);
+        });
       } catch {
         // Ignore malformed data
       }
@@ -146,13 +144,21 @@ export function useSessionStream({ selectedSessionId, setSessions, setChatMessag
     const handleError = (ev: MessageEvent) => {
       try {
         const data = JSON.parse(ev.data) as { id: string; error?: string; llmStatus?: WorkSession['llmStatus'] };
-        setSessions((prev) =>
-          prev.map((s) =>
-            s.id === data.id
-              ? { ...s, status: 'failed', error: data.error, llmStatus: data.llmStatus ?? s.llmStatus }
-              : s,
-          ),
-        );
+        setSessions((prev) => {
+          const existing = prev.find((session) => session.id === data.id);
+          if (!existing) {
+            return prev;
+          }
+
+          const nextSession: WorkSession = {
+            ...existing,
+            status: 'failed',
+            error: data.error,
+            llmStatus: data.llmStatus ?? existing.llmStatus,
+          };
+
+          return upsertSessionWithActivityTransition(prev, nextSession);
+        });
       } catch {
         // Ignore malformed data
       }

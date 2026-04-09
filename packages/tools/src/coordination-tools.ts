@@ -1,6 +1,6 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join, relative, resolve, sep } from 'node:path';
-import { Type } from '@mariozechner/pi-ai';
+import { Type, validateToolCall } from '@mariozechner/pi-ai';
 import type {
   AgentToolPhase,
   AgentGraphNode,
@@ -8,11 +8,14 @@ import type {
   RegisteredAgentTool,
   SubAgentContextPacket,
   SubAgentEvidenceItem,
+  SubAgentFileSnippet,
   SubAgentRequest,
   SubAgentResult,
   TodoItem,
 } from './types.js';
 import { sanitizeForPathSegment } from './path-utils.js';
+import type { SessionFileReadCache } from './file-read-cache.js';
+import { readFullFileWithCache } from './file-read-cache.js';
 
 const todoStatusSchema = Type.Union([
   Type.Literal('todo'),
@@ -46,6 +49,7 @@ const SUBAGENT_SNIPPET_READ_CONCURRENCY = 8;
 const SUBAGENT_BATCH_DEFAULT_CONCURRENCY = 8;
 const SUBAGENT_BATCH_MAX_CONCURRENCY = 64;
 const SUBAGENT_BATCH_MIN_CONCURRENCY = 1;
+const SUBAGENT_BATCH_IDENTICAL_FAILURE_CAP = 2;
 const SUBAGENT_PROMPT_SOFT_LIMIT_CHARS = 2200;
 const SUBAGENT_PROMPT_PREVIEW_MAX_CHARS = 220;
 const SUBAGENT_OUTPUT_PREVIEW_MAX_CHARS = 900;
@@ -54,6 +58,13 @@ const COORDINATION_PERSIST_RAW_DEBUG_ENV = 'ORCHESTRACE_PERSIST_RAW_DEBUG';
 const COORDINATION_PERSIST_PROMPT_MAX_CHARS = 1_600;
 const COORDINATION_PERSIST_OUTPUT_MAX_CHARS = 1_000;
 const PROMPT_FILE_PATH_PATTERN = /(?:^|[\s`"'])((?:\.?\.?\/)?[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)+\.[A-Za-z0-9._-]+)(?=$|[\s`"':),])/g;
+
+const subAgentReasoningSchema = Type.Union([
+  Type.Literal('minimal'),
+  Type.Literal('low'),
+  Type.Literal('medium'),
+  Type.Literal('high'),
+], { description: 'LLM reasoning effort: "minimal" for simple tasks, "low"/"medium" for moderate complexity, "high" for complex multi-step reasoning.' });
 
 const subAgentContextPacketSchema = Type.Object({
   objective: Type.String({ minLength: 1 }),
@@ -65,10 +76,50 @@ const subAgentContextPacketSchema = Type.Object({
   relevantContext: Type.Optional(Type.Array(Type.String())),
   requiredOutputSchema: Type.Optional(Type.String()),
   evidenceRequirements: Type.Optional(Type.Array(Type.String())),
+  fileSnippets: Type.Optional(Type.Array(
+    Type.Object({
+      path: Type.String({ minLength: 1 }),
+      content: Type.String(),
+    }),
+  )),
 });
+
+const subAgentSpawnEntrySchema = Type.Object({
+  nodeId: Type.Optional(Type.String()),
+  prompt: Type.Optional(Type.String({ minLength: 1 })),
+  contextPacket: Type.Optional(subAgentContextPacketSchema),
+  systemPrompt: Type.Optional(Type.String()),
+  provider: Type.Optional(Type.String()),
+  model: Type.Optional(Type.String()),
+  reasoning: Type.Optional(subAgentReasoningSchema),
+}, { additionalProperties: false });
+
+const subAgentSpawnArgsSchema = Type.Object({
+  ...subAgentSpawnEntrySchema.properties,
+}, { additionalProperties: false });
+
+const subAgentSpawnBatchArgsSchema = Type.Object({
+  agents: Type.Array(subAgentSpawnEntrySchema, { minItems: 1 }),
+  concurrency: Type.Optional(Type.Number({ minimum: 1, maximum: SUBAGENT_BATCH_MAX_CONCURRENCY })),
+  adaptiveConcurrency: Type.Optional(Type.Boolean({ description: 'Automatically tune concurrency based on sub-agent failures while processing the batch.' })),
+  minConcurrency: Type.Optional(Type.Number({ minimum: 1, maximum: SUBAGENT_BATCH_MAX_CONCURRENCY })),
+  maxRetries: Type.Optional(Type.Number({ minimum: 0 })),
+}, { additionalProperties: false });
+
+type SubAgentToolName = 'subagent_spawn' | 'subagent_spawn_batch';
 
 interface CoordinationToolsOptions extends AgentToolsetOptions {
   includeSubAgentTool: boolean;
+}
+
+interface CachedSubAgentMergePayload {
+  summary: string;
+  actions: string[];
+  evidence: SubAgentEvidenceItem[];
+  risks: string[];
+  openQuestions: string[];
+  patchIntent: string[];
+  artifact?: unknown;
 }
 
 interface SubAgentRunRecord {
@@ -83,12 +134,30 @@ interface SubAgentRunRecord {
   finishedAt?: string;
   outputPreview?: string;
   error?: string;
+  promptPreview?: string;
+  usage?: UsageTotals;
+  usageReported?: boolean;
+  mergePayload?: CachedSubAgentMergePayload;
 }
 
 interface UsageTotals {
   input: number;
   output: number;
   cost: number;
+}
+
+interface SubAgentBatchRunResult {
+  id: string;
+  nodeId?: string;
+  status: 'completed' | 'failed';
+  promptChars: number;
+  promptPreview: string;
+  outputPreview?: string;
+  mergePayload?: CachedSubAgentMergePayload;
+  usage?: UsageTotals;
+  usageReported?: boolean;
+  error?: string;
+  cacheHit?: boolean;
 }
 
 interface CoordinationState {
@@ -322,22 +391,7 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
       tool: {
         name: 'subagent_spawn',
         description: 'Spawn a focused sub-agent for a dependent sub-task and return a concise result.',
-        parameters: Type.Object({
-          nodeId: Type.Optional(Type.String()),
-          prompt: Type.Optional(Type.String({ minLength: 1 })),
-          contextPacket: Type.Optional(subAgentContextPacketSchema),
-          systemPrompt: Type.Optional(Type.String()),
-          provider: Type.Optional(Type.String()),
-          model: Type.Optional(Type.String()),
-          reasoning: Type.Optional(
-            Type.Union([
-              Type.Literal('minimal'),
-              Type.Literal('low'),
-              Type.Literal('medium'),
-              Type.Literal('high'),
-            ], { description: 'LLM reasoning effort: "minimal" for simple tasks, "low"/"medium" for moderate complexity, "high" for complex multi-step reasoning.' }),
-          ),
-        }),
+        parameters: subAgentSpawnArgsSchema,
       },
       execute: async (toolArgs, signal) => {
         if (!options.runSubAgent) {
@@ -347,9 +401,19 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
           };
         }
 
+        const spawnValidation = validateSubAgentToolArgs('subagent_spawn', subAgentSpawnArgsSchema, toolArgs);
+        if (!spawnValidation.ok) {
+          return {
+            content: spawnValidation.message,
+            isError: true,
+          };
+        }
+
         let request: SubAgentRequest;
         try {
-          request = await buildSubAgentRequestFromToolArgs(options.cwd, toolArgs);
+          request = await buildSubAgentRequestFromToolArgs(options.cwd, toolArgs, {
+            fileReadCache: options.fileReadCache,
+          });
         } catch (error) {
           return {
             content: error instanceof Error ? error.message : String(error),
@@ -384,6 +448,10 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
             current.status = 'completed';
             current.finishedAt = now();
             current.outputPreview = preview;
+            current.promptPreview = compactPromptPreview(request.prompt);
+            current.usage = usage;
+            current.usageReported = Boolean(result.usage);
+            current.mergePayload = mergePayload;
           }
           latest.updatedAt = now();
           await writeCoordinationState(statePath, latest);
@@ -408,6 +476,11 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
           if (current) {
             current.status = 'failed';
             current.finishedAt = now();
+            current.outputPreview = undefined;
+            current.promptPreview = undefined;
+            current.usage = undefined;
+            current.usageReported = undefined;
+            current.mergePayload = undefined;
             current.error = message;
           }
           latest.updatedAt = now();
@@ -431,35 +504,20 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
       tool: {
         name: 'subagent_spawn_batch',
         description: 'Spawn multiple focused sub-agents in parallel for independent sub-tasks.',
-        parameters: Type.Object({
-          agents: Type.Array(
-            Type.Object({
-              nodeId: Type.Optional(Type.String()),
-              prompt: Type.Optional(Type.String({ minLength: 1 })),
-              contextPacket: Type.Optional(subAgentContextPacketSchema),
-              systemPrompt: Type.Optional(Type.String()),
-              provider: Type.Optional(Type.String()),
-              model: Type.Optional(Type.String()),
-              reasoning: Type.Optional(
-                Type.Union([
-                  Type.Literal('minimal'),
-                  Type.Literal('low'),
-                  Type.Literal('medium'),
-                  Type.Literal('high'),
-                ], { description: 'LLM reasoning effort: "minimal" for simple tasks, "low"/"medium" for moderate complexity, "high" for complex multi-step reasoning.' }),
-              ),
-            }),
-            { minItems: 1 },
-          ),
-          concurrency: Type.Optional(Type.Number({ minimum: 1, maximum: SUBAGENT_BATCH_MAX_CONCURRENCY })),
-          adaptiveConcurrency: Type.Optional(Type.Boolean({ description: 'Automatically tune concurrency based on sub-agent failures while processing the batch.' })),
-          minConcurrency: Type.Optional(Type.Number({ minimum: 1, maximum: SUBAGENT_BATCH_MAX_CONCURRENCY })),
-        }),
+        parameters: subAgentSpawnBatchArgsSchema,
       },
       execute: async (toolArgs, signal) => {
         if (!options.runSubAgent) {
           return {
             content: 'Sub-agent runner is not available in this context.',
+            isError: true,
+          };
+        }
+
+        const spawnValidation = validateSubAgentToolArgs('subagent_spawn_batch', subAgentSpawnBatchArgsSchema, toolArgs);
+        if (!spawnValidation.ok) {
+          return {
+            content: spawnValidation.message,
             isError: true,
           };
         }
@@ -485,6 +543,7 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
             ?? SUBAGENT_BATCH_MIN_CONCURRENCY,
           SUBAGENT_BATCH_MAX_CONCURRENCY,
         );
+        const maxRetries = Math.max(0, Math.floor(asNumber(toolArgs.maxRetries) ?? 2));
 
         const requestInputs = rawAgents.filter((entry): entry is Record<string, unknown> => isRecord(entry));
         if (requestInputs.length === 0) {
@@ -499,7 +558,9 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
           requests = await mapWithConcurrency(
             requestInputs,
             concurrency,
-            async (entry) => buildSubAgentRequestFromToolArgs(options.cwd, entry),
+            async (entry) => buildSubAgentRequestFromToolArgs(options.cwd, entry, {
+              fileReadCache: options.fileReadCache,
+            }),
           );
         } catch (error) {
           return {
@@ -509,63 +570,228 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
         }
 
         const state = await readCoordinationState(statePath);
+
+        const cacheHits = new Map<number, {
+          request: SubAgentRequest;
+          record: SubAgentRunRecord;
+          run: SubAgentBatchRunResult;
+        }>();
+        const misses: Array<{ request: SubAgentRequest; requestIndex: number }> = [];
+
+        requests.forEach((request, requestIndex) => {
+          const nodeId = request.nodeId?.trim();
+          if (!nodeId) {
+            misses.push({ request, requestIndex });
+            return;
+          }
+
+          const cachedRecord = findLatestCompletedSubAgentByNodeId(state.subAgents, nodeId);
+          if (!cachedRecord || !cachedRecord.mergePayload) {
+            misses.push({ request, requestIndex });
+            return;
+          }
+
+          const promptPreview = cachedRecord.promptPreview ?? compactPromptPreview(request.prompt);
+          const usage = usageOrZero(cachedRecord.usage);
+          const usageReported = cachedRecord.usageReported ?? Boolean(cachedRecord.usage);
+
+          cacheHits.set(requestIndex, {
+            request,
+            record: cachedRecord,
+            run: {
+              id: cachedRecord.id,
+              nodeId,
+              status: 'completed',
+              promptChars: request.prompt.length,
+              promptPreview,
+              outputPreview: cachedRecord.outputPreview ?? cachedRecord.mergePayload.summary,
+              mergePayload: cachedRecord.mergePayload,
+              usage,
+              usageReported,
+              cacheHit: true,
+            },
+          });
+        });
+
         const startIndex = state.subAgents.length;
-        const records: SubAgentRunRecord[] = requests.map((request, index) => ({
+        const allRecords = misses.map(({ request }, index) => ({
           id: `sub-${startIndex + index + 1}`,
           nodeId: request.nodeId,
           prompt: request.prompt,
-          status: 'running',
+          status: 'running' as const,
           provider: request.provider,
           model: request.model,
           reasoning: request.reasoning,
           startedAt: now(),
         }));
 
-        state.subAgents.push(...records);
-        state.updatedAt = now();
-        await writeCoordinationState(statePath, state);
+        if (allRecords.length > 0) {
+          state.subAgents.push(...allRecords);
+          state.updatedAt = now();
+          await writeCoordinationState(statePath, state);
+        }
 
-        const mapper = async (record: SubAgentRunRecord, index: number) => {
-          const request = requests[index];
-          try {
-            const result = await options.runSubAgent?.(request, signal);
-            const mergePayload = buildSubAgentMergePayload(result ?? { text: '' }, record.id, request);
-            return {
-              id: record.id,
-              nodeId: record.nodeId,
-              status: 'completed' as const,
-              promptChars: request.prompt.length,
-              promptPreview: compactPromptPreview(request.prompt),
-              outputPreview: mergePayload.summary,
-              mergePayload,
-              usage: usageOrZero(result?.usage),
-              usageReported: Boolean(result?.usage),
-            };
-          } catch (error) {
-            return {
-              id: record.id,
-              nodeId: record.nodeId,
-              status: 'failed' as const,
-              promptChars: request.prompt.length,
-              promptPreview: compactPromptPreview(request.prompt),
-              error: error instanceof Error ? error.message : String(error),
-            };
+        const recordByRequestIndex = new Map<number, SubAgentRunRecord>();
+        misses.forEach((miss, index) => {
+          recordByRequestIndex.set(miss.requestIndex, allRecords[index]);
+        });
+
+        const settledByRequestIndex = new Map<number, SubAgentBatchRunResult>();
+        let pending = misses.map((miss, index) => ({
+          request: miss.request,
+          requestIndex: miss.requestIndex,
+          record: allRecords[index],
+        }));
+        const dispatchedNodeIds: string[] = [];
+        let finalConcurrency = allRecords.length > 0 ? concurrency : 0;
+        let windows = 0;
+        let previousFailureSignature: string | undefined;
+        let consecutiveIdenticalFailures = 0;
+        let breakerTripped = false;
+
+        for (let attempt = 0; pending.length > 0 && attempt <= maxRetries; attempt += 1) {
+          const mapper = async (
+            pendingEntry: { request: SubAgentRequest; requestIndex: number; record: SubAgentRunRecord },
+          ): Promise<SubAgentBatchRunResult> => {
+            const request = pendingEntry.request;
+            const record = pendingEntry.record;
+            try {
+              const result = await options.runSubAgent?.(request, signal);
+              const mergePayload = buildSubAgentMergePayload(result ?? { text: '' }, record.id, request);
+              return {
+                id: record.id,
+                nodeId: record.nodeId,
+                status: 'completed' as const,
+                promptChars: request.prompt.length,
+                promptPreview: compactPromptPreview(request.prompt),
+                outputPreview: mergePayload.summary,
+                mergePayload,
+                usage: usageOrZero(result?.usage),
+                usageReported: Boolean(result?.usage),
+                cacheHit: false as const,
+              };
+            } catch (error) {
+              return {
+                id: record.id,
+                nodeId: record.nodeId,
+                status: 'failed' as const,
+                promptChars: request.prompt.length,
+                promptPreview: compactPromptPreview(request.prompt),
+                error: error instanceof Error ? error.message : String(error),
+                cacheHit: false as const,
+              };
+            }
+          };
+
+          const batchRun = adaptiveConcurrency
+            ? await mapWithAdaptiveConcurrency(pending, {
+                initialConcurrency: concurrency,
+                minConcurrency,
+                maxConcurrency: SUBAGENT_BATCH_MAX_CONCURRENCY,
+              }, mapper, (result) => result.status === 'failed')
+            : {
+                results: await mapWithConcurrency(pending, concurrency, mapper),
+                finalConcurrency: concurrency,
+                windows: 1,
+              };
+
+          finalConcurrency = batchRun.finalConcurrency;
+          windows += batchRun.windows;
+
+          const nextPending: typeof pending = [];
+          const failedPendingEntries: Array<{
+            pendingEntry: typeof pending[number];
+            result: SubAgentBatchRunResult;
+          }> = [];
+          batchRun.results.forEach((result, pendingIndex) => {
+            const pendingEntry = pending[pendingIndex];
+            dispatchedNodeIds.push(
+              pendingEntry.request.nodeId
+                ?? pendingEntry.record.id,
+            );
+
+            if (result.status === 'completed') {
+              settledByRequestIndex.set(pendingEntry.requestIndex, result);
+              return;
+            }
+
+            failedPendingEntries.push({ pendingEntry, result });
+            if (attempt < maxRetries) {
+              nextPending.push(pendingEntry);
+            } else {
+              settledByRequestIndex.set(pendingEntry.requestIndex, result);
+            }
+          });
+
+          pending = nextPending;
+
+          if (failedPendingEntries.length > 0) {
+            const failureSignature = JSON.stringify({
+              failedNodeIds: failedPendingEntries
+                .map(({ pendingEntry }) => pendingEntry.request.nodeId ?? pendingEntry.record.id)
+                .sort(),
+              errors: failedPendingEntries
+                .map(({ result }) => `${result.nodeId ?? result.id}:${(result.error ?? 'unknown-error').replace(/\s+/g, ' ').trim()}`)
+                .sort(),
+            });
+
+            if (failureSignature === previousFailureSignature) {
+              consecutiveIdenticalFailures += 1;
+            } else {
+              previousFailureSignature = failureSignature;
+              consecutiveIdenticalFailures = 1;
+            }
+
+            if (consecutiveIdenticalFailures > SUBAGENT_BATCH_IDENTICAL_FAILURE_CAP) {
+              breakerTripped = true;
+              for (const { pendingEntry, result } of failedPendingEntries) {
+                settledByRequestIndex.set(pendingEntry.requestIndex, {
+                  id: result.id,
+                  nodeId: result.nodeId,
+                  status: 'failed',
+                  promptChars: result.promptChars,
+                  promptPreview: result.promptPreview,
+                  error: [
+                    'Circuit breaker tripped: identical subagent batch failures repeated more than twice consecutively.',
+                    'Manual intervention or explicit backoff is required before retrying this batch.',
+                    `failedNodeId=${result.nodeId ?? result.id}`,
+                  ].join(' '),
+                  cacheHit: false,
+                });
+              }
+              pending = [];
+              break;
+            }
           }
-        };
 
-        const batchRun = adaptiveConcurrency
-          ? await mapWithAdaptiveConcurrency(records, {
-              initialConcurrency: concurrency,
-              minConcurrency,
-              maxConcurrency: SUBAGENT_BATCH_MAX_CONCURRENCY,
-            }, mapper, (result) => result.status === 'failed')
-          : {
-              results: await mapWithConcurrency(records, concurrency, mapper),
-              finalConcurrency: concurrency,
-              windows: 1,
-            };
+          if (pending.length > 0 && attempt < maxRetries) {
+            await sleepWithSignal(200 * (2 ** attempt), signal);
+          }
+        }
 
-        const settled = batchRun.results;
+        const settled = requests.map((request, requestIndex) => {
+          const cached = cacheHits.get(requestIndex);
+          if (cached) {
+            return cached.run;
+          }
+
+          const executed = settledByRequestIndex.get(requestIndex);
+          if (executed) {
+            return executed;
+          }
+
+          const record = recordByRequestIndex.get(requestIndex);
+          return {
+            id: record?.id ?? `unknown-${requestIndex + 1}`,
+            nodeId: request.nodeId,
+            status: 'failed' as const,
+            promptChars: request.prompt.length,
+            promptPreview: compactPromptPreview(request.prompt),
+            error: 'Missing sub-agent execution result.',
+            cacheHit: false as const,
+          };
+        });
+
         const usageTotals = settled.reduce<UsageTotals>((totals, entry) => {
           if (entry.status !== 'completed' || !entry.usage) {
             return totals;
@@ -582,25 +808,35 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
         const maxPromptChars = promptSizes.length > 0 ? Math.max(...promptSizes) : 0;
         const oversized = settled.filter((entry) => (entry.promptChars ?? 0) > SUBAGENT_PROMPT_SOFT_LIMIT_CHARS);
 
-        const latest = await readCoordinationState(statePath);
-        for (const result of settled) {
-          const current = latest.subAgents.find((entry) => entry.id === result.id);
-          if (!current) {
-            continue;
+        if (allRecords.length > 0) {
+          const latest = await readCoordinationState(statePath);
+          for (const result of settled) {
+            const current = latest.subAgents.find((entry) => entry.id === result.id);
+            if (!current) {
+              continue;
+            }
+
+            current.status = result.status;
+            current.finishedAt = now();
+            current.promptPreview = result.promptPreview;
+            current.usage = result.usage;
+            current.usageReported = result.usageReported;
+            if (result.status === 'completed') {
+              current.outputPreview = result.outputPreview;
+              current.mergePayload = result.mergePayload;
+              current.error = undefined;
+            } else {
+              current.outputPreview = undefined;
+              current.mergePayload = undefined;
+              current.usage = undefined;
+              current.usageReported = undefined;
+              current.error = result.error;
+            }
           }
 
-          current.status = result.status;
-          current.finishedAt = now();
-          if (result.status === 'completed') {
-            current.outputPreview = result.outputPreview;
-            current.error = undefined;
-          } else {
-            current.error = result.error;
-          }
+          latest.updatedAt = now();
+          await writeCoordinationState(statePath, latest);
         }
-
-        latest.updatedAt = now();
-        await writeCoordinationState(statePath, latest);
 
         const failedCount = settled.filter((entry) => entry.status === 'failed').length;
         const failedNodeIds = settled
@@ -611,12 +847,22 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
           concurrency,
           adaptiveConcurrency,
           minConcurrency,
-          finalConcurrency: batchRun.finalConcurrency,
-          windows: batchRun.windows,
+          maxRetries,
+          status: breakerTripped ? 'escalated_error' : undefined,
+          reason: breakerTripped ? 'identical_subagent_batch_failures_repeated' : undefined,
+          identicalFailureCap: breakerTripped ? SUBAGENT_BATCH_IDENTICAL_FAILURE_CAP : undefined,
+          consecutiveIdenticalFailures: breakerTripped ? consecutiveIdenticalFailures : undefined,
+          actionRequired: breakerTripped ? 'manual_intervention_or_backoff_before_retry' : undefined,
+          finalConcurrency,
+          windows,
           completed: settled.length - failedCount,
           failed: failedCount,
           failedNodeIds,
           usage: usageTotals,
+          cacheHitCount: cacheHits.size,
+          cacheMissCount: misses.length,
+          cachedNodeIds: Array.from(cacheHits.values()).map((entry) => entry.record.nodeId ?? entry.record.id),
+          dispatchedNodeIds,
           decomposition: {
             totalPromptChars,
             averagePromptChars: settled.length > 0 ? Math.round(totalPromptChars / settled.length) : 0,
@@ -696,9 +942,32 @@ function usageOrZero(usage: { input: number; output: number; cost: number } | un
   };
 }
 
+function validateSubAgentToolArgs(
+  toolName: SubAgentToolName,
+  schema: typeof subAgentSpawnArgsSchema | typeof subAgentSpawnBatchArgsSchema,
+  args: Record<string, unknown>,
+): { ok: true } | { ok: false; message: string } {
+  try {
+    validateToolCall(
+      [{ name: toolName, description: `${toolName} validation`, parameters: schema }],
+      { type: 'toolCall', id: `validate-${toolName}`, name: toolName, arguments: args },
+    );
+    return { ok: true };
+  } catch (error) {
+    const details = (error instanceof Error ? error.message : String(error))
+      .replace(/\b([a-zA-Z0-9_]+(?:\/[a-zA-Z0-9_]+)+)\b/g, (match) => match.replace(/\//g, '.'));
+    const message = `${toolName} argument validation failed before spawn: ${details}`;
+    console.warn(`[coordination-tools] ${message}`);
+    return { ok: false, message };
+  }
+}
+
 async function buildSubAgentRequestFromToolArgs(
   cwd: string,
   toolArgs: Record<string, unknown>,
+  options?: {
+    fileReadCache?: AgentToolsetOptions['fileReadCache'];
+  },
 ): Promise<SubAgentRequest> {
   const packet = normalizeSubAgentContextPacket(toolArgs.contextPacket);
   const legacyPrompt = optionalString(toolArgs.prompt) ?? '';
@@ -710,6 +979,10 @@ async function buildSubAgentRequestFromToolArgs(
   const prompt = await enrichDelegationPromptWithFileSnippets(
     cwd,
     buildSubAgentPrompt(legacyPrompt, packet),
+    {
+      providedSnippets: packet?.fileSnippets,
+      fileReadCache: options?.fileReadCache,
+    },
   );
 
   return {
@@ -757,6 +1030,7 @@ function normalizeSubAgentContextPacket(value: unknown): SubAgentContextPacket |
     relevantContext: optionalStringArray(value.relevantContext),
     requiredOutputSchema: optionalString(value.requiredOutputSchema),
     evidenceRequirements: optionalStringArray(value.evidenceRequirements),
+    fileSnippets: normalizeFileSnippets(value.fileSnippets),
   };
 }
 
@@ -979,12 +1253,27 @@ function sanitizeCoordinationStateForPersistence(state: CoordinationState): Coor
     subAgents: state.subAgents.map((record) => ({
       ...record,
       prompt: sanitizePersistedText(record.prompt, COORDINATION_PERSIST_PROMPT_MAX_CHARS),
+      promptPreview: record.promptPreview
+        ? sanitizePersistedText(record.promptPreview, SUBAGENT_PROMPT_PREVIEW_MAX_CHARS)
+        : record.promptPreview,
       outputPreview: record.outputPreview
         ? sanitizePersistedText(record.outputPreview, COORDINATION_PERSIST_OUTPUT_MAX_CHARS)
         : record.outputPreview,
       error: record.error
         ? sanitizePersistedText(record.error, COORDINATION_PERSIST_OUTPUT_MAX_CHARS)
         : record.error,
+      mergePayload: record.mergePayload
+        ? {
+            ...record.mergePayload,
+            summary: sanitizePersistedText(record.mergePayload.summary, COORDINATION_PERSIST_OUTPUT_MAX_CHARS),
+            actions: record.mergePayload.actions.map((item) => sanitizePersistedText(item, 320)).slice(0, 24),
+            risks: record.mergePayload.risks.map((item) => sanitizePersistedText(item, 320)).slice(0, 24),
+            openQuestions: record.mergePayload.openQuestions.map((item) => sanitizePersistedText(item, 320)).slice(0, 24),
+            patchIntent: record.mergePayload.patchIntent
+              .map((item) => sanitizePersistedText(item, 320))
+              .slice(0, 24),
+          }
+        : record.mergePayload,
     })),
   };
 }
@@ -1097,8 +1386,12 @@ function normalizeSubAgentRecords(value: unknown): SubAgentRunRecord[] {
       reasoning: normalizeReasoning(entry.reasoning),
       startedAt: optionalString(entry.startedAt) ?? now(),
       finishedAt: optionalString(entry.finishedAt),
+      promptPreview: optionalString(entry.promptPreview),
       outputPreview: optionalString(entry.outputPreview),
       error: optionalString(entry.error),
+      usage: normalizeUsageTotals(entry.usage),
+      usageReported: asBoolean(entry.usageReported),
+      mergePayload: normalizeCachedSubAgentMergePayload(entry.mergePayload),
     });
   }
 
@@ -1108,6 +1401,66 @@ function normalizeSubAgentRecords(value: unknown): SubAgentRunRecord[] {
 function normalizeSubAgentStatus(value: unknown): SubAgentRunRecord['status'] | undefined {
   if (value === 'running' || value === 'completed' || value === 'failed') {
     return value;
+  }
+
+  return undefined;
+}
+
+function normalizeUsageTotals(value: unknown): UsageTotals | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+
+  const input = asNumber(value.input);
+  const output = asNumber(value.output);
+  const cost = asNumber(value.cost);
+  if (input === undefined || output === undefined || cost === undefined) {
+    return undefined;
+  }
+
+  return { input, output, cost };
+}
+
+function normalizeCachedSubAgentMergePayload(value: unknown): CachedSubAgentMergePayload | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+
+  const summary = optionalString(value.summary);
+  if (!summary) {
+    return undefined;
+  }
+
+  return {
+    summary,
+    actions: optionalStringArray(value.actions) ?? [],
+    evidence: normalizeSubAgentEvidence(value.evidence),
+    risks: optionalStringArray(value.risks) ?? [],
+    openQuestions: optionalStringArray(value.openQuestions) ?? [],
+    patchIntent: Array.isArray(value.patchIntent)
+      ? normalizeStringList(value.patchIntent)
+      : normalizeStringList([value.patchIntent]),
+    artifact: value.artifact,
+  };
+}
+
+function findLatestCompletedSubAgentByNodeId(records: SubAgentRunRecord[], nodeId: string): SubAgentRunRecord | undefined {
+  const normalizedNodeId = nodeId.trim();
+  if (!normalizedNodeId) {
+    return undefined;
+  }
+
+  for (let index = records.length - 1; index >= 0; index -= 1) {
+    const record = records[index];
+    if (record.status !== 'completed') {
+      continue;
+    }
+
+    if ((record.nodeId ?? '').trim() !== normalizedNodeId) {
+      continue;
+    }
+
+    return record;
   }
 
   return undefined;
@@ -1173,6 +1526,14 @@ function optionalString(value: unknown): string | undefined {
   return trimmed.length > 0 ? trimmed : undefined;
 }
 
+function asNumber(value: unknown): number | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return undefined;
+  }
+
+  return value;
+}
+
 function optionalStringArray(value: unknown): string[] | undefined {
   if (!Array.isArray(value)) {
     return undefined;
@@ -1205,18 +1566,49 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
 
-async function enrichDelegationPromptWithFileSnippets(cwd: string, prompt: string): Promise<string> {
+async function enrichDelegationPromptWithFileSnippets(
+  cwd: string,
+  prompt: string,
+  options?: {
+    providedSnippets?: SubAgentFileSnippet[];
+    fileReadCache?: AgentToolsetOptions['fileReadCache'];
+  },
+): Promise<string> {
   const trimmed = prompt.trim();
   if (!trimmed || trimmed.includes(SUBAGENT_CONTEXT_MARKER)) {
     return prompt;
   }
 
-  const filePaths = extractCandidateFilePaths(trimmed);
-  if (filePaths.length === 0) {
-    return prompt;
+  const providedSnippets = normalizeFileSnippets(options?.providedSnippets) ?? [];
+  const snippetByPath = new Map<string, SubAgentFileSnippet>();
+  for (const snippet of providedSnippets) {
+    const normalizedPath = normalizePromptPath(snippet.path);
+    if (!normalizedPath || snippetByPath.has(normalizedPath)) {
+      continue;
+    }
+    snippetByPath.set(normalizedPath, {
+      path: normalizedPath,
+      content: trimText(snippet.content.trim(), SUBAGENT_CONTEXT_MAX_CHARS_PER_FILE),
+    });
   }
 
-  const snippets = await collectFileSnippets(cwd, filePaths);
+  const extractedPaths = extractCandidateFilePaths(trimmed);
+  const missingPaths = extractedPaths.filter((filePath) => !snippetByPath.has(filePath));
+  if (missingPaths.length > 0 && snippetByPath.size < SUBAGENT_CONTEXT_MAX_FILES) {
+    const fallbackSnippets = await collectFileSnippets(cwd, missingPaths, {
+      fileReadCache: options?.fileReadCache,
+    });
+    for (const snippet of fallbackSnippets) {
+      if (snippetByPath.size >= SUBAGENT_CONTEXT_MAX_FILES) {
+        break;
+      }
+      if (!snippetByPath.has(snippet.path)) {
+        snippetByPath.set(snippet.path, snippet);
+      }
+    }
+  }
+
+  const snippets = [...snippetByPath.values()].slice(0, SUBAGENT_CONTEXT_MAX_FILES);
   if (snippets.length === 0) {
     return prompt;
   }
@@ -1247,7 +1639,7 @@ function extractCandidateFilePaths(prompt: string): string[] {
       continue;
     }
 
-    const normalized = candidate.replace(/^\.\//, '');
+    const normalized = normalizePromptPath(candidate);
     if (normalized) {
       unique.add(normalized);
     }
@@ -1256,7 +1648,37 @@ function extractCandidateFilePaths(prompt: string): string[] {
   return [...unique];
 }
 
-async function collectFileSnippets(cwd: string, filePaths: string[]): Promise<Array<{ path: string; content: string }>> {
+function normalizeFileSnippets(value: unknown): SubAgentFileSnippet[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+
+  const snippets: SubAgentFileSnippet[] = [];
+  for (const entry of value) {
+    if (!isRecord(entry)) {
+      continue;
+    }
+
+    const path = normalizePromptPath(entry.path);
+    const content = optionalString(entry.content);
+    if (!path || content === undefined) {
+      continue;
+    }
+
+    snippets.push({ path, content });
+  }
+
+  return snippets.length > 0 ? snippets : undefined;
+}
+
+async function collectFileSnippets(
+  cwd: string,
+  filePaths: string[],
+  options?: {
+    fileReadCache?: AgentToolsetOptions['fileReadCache'];
+  },
+): Promise<SubAgentFileSnippet[]> {
+  const revision = await resolveRevision(cwd);
   const candidates = filePaths.map((filePath, index) => ({ filePath, index }));
   const results = await mapWithConcurrency(candidates, SUBAGENT_SNIPPET_READ_CONCURRENCY, async (candidate) => {
     const absolutePath = resolve(cwd, candidate.filePath);
@@ -1264,16 +1686,49 @@ async function collectFileSnippets(cwd: string, filePaths: string[]): Promise<Ar
       return undefined;
     }
 
+    const relativePath = toPosixPath(relative(cwd, absolutePath));
     try {
-      const content = await readFile(absolutePath, 'utf-8');
+      const cache = options?.fileReadCache;
+      if (isSessionFileReadCache(cache)) {
+        const fullContent = await readFullFileWithCache(absolutePath, { cache });
+        if (fullContent.includes('\u0000')) {
+          return undefined;
+        }
+
+        return {
+          index: candidate.index,
+          path: relativePath,
+          content: trimText(fullContent.trim(), SUBAGENT_CONTEXT_MAX_CHARS_PER_FILE),
+        };
+      }
+
+      const cached = cache?.get({
+        path: absolutePath,
+        revision,
+        startLine: 1,
+        endLine: undefined,
+        maxChars: SUBAGENT_CONTEXT_MAX_CHARS_PER_FILE,
+      });
+      const content = cached ?? await readFile(absolutePath, 'utf-8');
       if (content.includes('\u0000')) {
         return undefined;
       }
 
+      const trimmedContent = trimText(content.trim(), SUBAGENT_CONTEXT_MAX_CHARS_PER_FILE);
+      if (!cached) {
+        cache?.set({
+          path: absolutePath,
+          revision,
+          startLine: 1,
+          endLine: undefined,
+          maxChars: SUBAGENT_CONTEXT_MAX_CHARS_PER_FILE,
+        }, trimmedContent);
+      }
+
       return {
         index: candidate.index,
-        path: toPosixPath(relative(cwd, absolutePath)),
-        content: trimText(content.trim(), SUBAGENT_CONTEXT_MAX_CHARS_PER_FILE),
+        path: relativePath,
+        content: trimmedContent,
       };
     } catch {
       return undefined;
@@ -1285,6 +1740,45 @@ async function collectFileSnippets(cwd: string, filePaths: string[]): Promise<Ar
     .sort((a, b) => a.index - b.index)
     .slice(0, SUBAGENT_CONTEXT_MAX_FILES)
     .map((entry) => ({ path: entry.path, content: entry.content }));
+}
+
+function isSessionFileReadCache(cache: AgentToolsetOptions['fileReadCache'] | undefined): cache is SessionFileReadCache {
+  return cache instanceof Map;
+}
+
+function normalizePromptPath(path: unknown): string | undefined {
+  if (typeof path !== 'string') {
+    return undefined;
+  }
+
+  const trimmed = path.trim().replace(/^\.\//, '');
+  return trimmed.length > 0 ? toPosixPath(trimmed) : undefined;
+}
+
+const revisionByCwd = new Map<string, string>();
+
+async function resolveRevision(cwd: string): Promise<string> {
+  const existing = revisionByCwd.get(cwd);
+  if (existing) {
+    return existing;
+  }
+
+  try {
+    const { runCommand } = await import('./command-tools/command-runner.js');
+    const result = await runCommand('git', ['rev-parse', 'HEAD'], {
+      cwd,
+      timeoutMs: 5_000,
+    });
+    const revision = result.exitCode === 0
+      ? result.stdout.trim()
+      : '';
+    const normalized = revision || 'no-git-revision';
+    revisionByCwd.set(cwd, normalized);
+    return normalized;
+  } catch {
+    revisionByCwd.set(cwd, 'no-git-revision');
+    return 'no-git-revision';
+  }
 }
 
 function isWithinDirectory(path: string, cwd: string): boolean {
@@ -1358,6 +1852,37 @@ async function mapWithConcurrency<T, U>(
 
   await Promise.all(workers);
   return results;
+}
+
+async function sleepWithSignal(ms: number, signal?: AbortSignal): Promise<void> {
+  if (ms <= 0) {
+    return;
+  }
+
+  await new Promise<void>((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      cleanup();
+      resolve();
+    }, ms);
+
+    const onAbort = () => {
+      cleanup();
+      reject(new Error('Operation aborted'));
+    };
+
+    const cleanup = () => {
+      clearTimeout(timeout);
+      signal?.removeEventListener('abort', onAbort);
+    };
+
+    if (signal?.aborted) {
+      cleanup();
+      reject(new Error('Operation aborted'));
+      return;
+    }
+
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
 }
 
 async function mapWithAdaptiveConcurrency<T, U>(

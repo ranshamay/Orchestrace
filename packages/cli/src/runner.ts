@@ -3,7 +3,7 @@
  *
  * Usage: node --import tsx runner.ts <sessionId> <workspaceRoot>
  *
- * Reads session config from the event store (first session:created event).
+ * Reads session config from the event store (latest session:created event).
  * Writes all orchestration events to the event store.
  * Handles SIGTERM for graceful cancellation.
  * Writes heartbeat events every 5 seconds.
@@ -12,13 +12,25 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { execFile, type ExecFileException } from 'node:child_process';
+import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { orchestrate, PromptSectionName, renderPromptSections } from '@orchestrace/core';
-import type { DagEvent, TaskGraph } from '@orchestrace/core';
-import { PiAiAdapter, ProviderAuthManager } from '@orchestrace/provider';
+import { promisify } from 'node:util';
+import {
+  orchestrate,
+  PromptSectionName,
+  renderPromptSections,
+  classifyTrivialTaskPrompt,
+  classifyTaskEffort,
+  extractSingleCommandFromPrompt,
+  resolveTrivialTaskGateConfig,
+} from '@orchestrace/core';
+import type { DagEvent, TaskGraph, TaskOutput, TaskRouteCategory, TaskEffort } from '@orchestrace/core';
+import { PiAiAdapter, ProviderAuthManager, type LlmToolCall } from '@orchestrace/provider';
 import {
   DEFAULT_AGENT_TOOL_POLICY_VERSION,
   createAgentToolset,
+  createFileReadCache,
   type SubAgentRequest,
   type SubAgentResult,
 } from '@orchestrace/tools';
@@ -31,6 +43,35 @@ import {
   shouldEmitLlmStatus,
   type LlmStatusEmissionState,
 } from './ui-server/llm-status-emission.js';
+import {
+  THINKING_CIRCUIT_BREAKER_NUDGE,
+  createThinkingCircuitBreakerState,
+  isThinkingCycleEvent,
+  resetThinkingCircuitBreaker,
+  shouldResetThinkingCircuitBreakerOnEvent,
+  updateThinkingCircuitBreaker,
+} from './thinking-circuit-breaker.js';
+import {
+  deriveRoutingCoercionAudit,
+  enforceSafeShellDispatch,
+  resolveTaskRouteForSource,
+  stripRetryContinuationContext,
+  type RoutingCoercionAudit,
+} from './task-routing.js';
+import {
+  SessionLifecycle,
+  SessionLifecycleError,
+  type SessionLifecyclePhase,
+} from './session-lifecycle.js';
+import {
+  appendCleanupErrors,
+  formatLifecyclePhaseFailure,
+} from './runner-lifecycle-diagnostics.js';
+import {
+  resolveRunnerPolicy,
+  type ResolutionConflict,
+} from './runner-config-resolution.js';
+import { parseAndSanitizeVerifyCommands } from './verify-commands.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -45,6 +86,47 @@ const TOOL_EVENT_PREVIEW_MAX_CHARS = resolvePositiveIntEnv(
   32_000,
 );
 const TRACE_LOG_STREAM_DELTAS = resolveBooleanEnv(process.env.ORCHESTRACE_TRACE_LOG_STREAM_DELTAS, true);
+const AUTO_CHECKPOINT_ENABLED = resolveBooleanEnv(process.env.ORCHESTRACE_AUTO_CHECKPOINT, true);
+const AUTO_CHECKPOINT_EVERY_N_EDITS = resolvePositiveIntEnv(process.env.ORCHESTRACE_AUTO_CHECKPOINT_EVERY_N_EDITS, 3);
+const AUTO_CHECKPOINT_GIT_TIMEOUT_MS = resolvePositiveIntEnv(process.env.ORCHESTRACE_AUTO_CHECKPOINT_GIT_TIMEOUT_MS, 15_000);
+const SESSION_DELIVERY_REQUIRED = resolveBooleanEnv(process.env.ORCHESTRACE_SESSION_DELIVERY_REQUIRED, true);
+const SESSION_DELIVERY_GIT_TIMEOUT_MS = resolvePositiveIntEnv(process.env.ORCHESTRACE_SESSION_DELIVERY_GIT_TIMEOUT_MS, 120_000);
+const SESSION_DELIVERY_API_TIMEOUT_MS = resolvePositiveIntEnv(process.env.ORCHESTRACE_SESSION_DELIVERY_API_TIMEOUT_MS, 20_000);
+const CHECKPOINT_STASH_PREFIX = 'orchestrace-checkpoint';
+const CHECKPOINT_METADATA_FILE = 'checkpoint.json';
+const execFileAsync = promisify(execFile);
+
+type CheckpointLifecycleState = 'idle' | 'active' | 'completed' | 'failed' | 'cancelled' | 'interrupted';
+
+interface CheckpointMetadata {
+  sessionId: string;
+  workspacePath: string;
+  state: CheckpointLifecycleState;
+  createdAt: string;
+  updatedAt: string;
+  headShaBefore?: string;
+  stashRef?: string;
+  stashMessage?: string;
+  checkpointName?: string;
+  finalizedAt?: string;
+  hasUncommittedChanges?: boolean;
+  hasStagedChanges?: boolean;
+  hasUntrackedChanges?: boolean;
+  dirtySummary?: string[];
+  notes?: string;
+}
+
+interface PullRequestInfo {
+  number: number;
+  url: string;
+  created: boolean;
+}
+
+interface GitHubApiResponse {
+  ok: boolean;
+  status: number;
+  body: unknown;
+}
 
 // ---------------------------------------------------------------------------
 // Main
@@ -70,13 +152,13 @@ async function main(): Promise<void> {
 
   // Read session config from event store
   const events = await eventStore.read(sessionId);
-  const firstEvent = events.find((e) => e.type === 'session:created');
-  if (!firstEvent || firstEvent.type !== 'session:created') {
+  const createdEvent = [...events].reverse().find((e) => e.type === 'session:created');
+  if (!createdEvent || createdEvent.type !== 'session:created') {
     console.error(`No session:created event found for session ${sessionId}`);
     process.exit(1);
   }
 
-  const config: SessionConfig = firstEvent.payload.config;
+  const config: SessionConfig = createdEvent.payload.config;
   const controller = new AbortController();
 
   // Write runner metadata (PID)
@@ -97,9 +179,11 @@ async function main(): Promise<void> {
 
   // Handle SIGTERM for gracellation
   let cancelled = false;
-  process.on('SIGTERM', () => {
+  const handleSigterm = () => {
     cancelled = true;
     controller.abort();
+    resetThinkingCircuitBreaker(thinkingCircuitBreaker);
+    void markCheckpointInterrupted(iso(), 'Received SIGTERM before session completion.');
     const llmStatus = makeLlmStatus('cancelled', 'Cancelled by user.');
     lastLlmStatusEmission = {
       key: llmStatusIdentityKey(llmStatus),
@@ -107,18 +191,59 @@ async function main(): Promise<void> {
     };
     void emit({ time: iso(), type: 'session:llm-status-change', payload: { llmStatus } });
     void emit({ time: iso(), type: 'session:status-change', payload: { status: 'cancelled' } });
-  });
+  };
+  process.on('SIGTERM', handleSigterm);
 
-  // Shared context store for this session
+  // Shared context and file-read cache for this session
   const sharedContextStore = new InMemorySharedContextStore();
+  const fileReadCache = createFileReadCache();
   let lastLlmStatusEmission: LlmStatusEmissionState | undefined;
+  const thinkingCircuitBreaker = createThinkingCircuitBreakerState();
 
   // Local state for graph progress tracking
   const agentGraph: SessionAgentGraphNode[] = [];
   const pendingNodeIds = new Map<string, string[]>();
+  const promptForRoutingAndEffort = stripRetryContinuationContext(config.prompt);
+  const resolvedRoute = resolveTaskRouteForSource(
+    promptForRoutingAndEffort,
+    config.source,
+    process.env.ORCHESTRACE_TASK_ROUTE,
+  ).result;
+  const dispatch = enforceSafeShellDispatch(promptForRoutingAndEffort, resolvedRoute, config.source);
+  const route = dispatch.route;
+  const effortClassification = classifyTaskEffort(promptForRoutingAndEffort);
+  const taskEffort: TaskEffort = (process.env.ORCHESTRACE_TASK_EFFORT as TaskEffort) || effortClassification.effort;
+  let successfulEditFileResultsSinceCheckpoint = 0;
+  const todoDoneCheckpointed = new Set<string>();
+  let checkpointInFlight = false;
 
   // Build single-task graph
-  const graph = buildSingleTaskGraph(sessionId, config.prompt);
+  const graph = buildSingleTaskGraph(sessionId, config.prompt, route.category);
+
+  /**
+   * Standardized precedence for runner policy settings:
+   * config (if valid) > env (if valid) > default.
+   *
+   * When config and env are both valid but differ, config wins and we emit warnings.
+   */
+  const runnerPolicy = resolveRunnerPolicy({
+    configQuickStartMode: config.quickStartMode,
+    envQuickStartMode: process.env.ORCHESTRACE_QUICK_START_MODE,
+    configQuickStartMaxPreDelegationToolCalls: config.quickStartMaxPreDelegationToolCalls,
+    envQuickStartMaxPreDelegationToolCalls: process.env.ORCHESTRACE_QUICK_START_MAX_PRE_DELEGATION_TOOL_CALLS,
+    configPlanningNoToolGuardMode: config.planningNoToolGuardMode,
+    envPlanningNoToolGuardMode: process.env.ORCHESTRACE_PLANNING_NO_TOOL_GUARD_MODE,
+  });
+  const quickStartMode = runnerPolicy.quickStartMode.value;
+  const quickStartMaxPreDelegationToolCalls = runnerPolicy.quickStartMaxPreDelegationToolCalls.value;
+  const planningNoToolGuardMode = runnerPolicy.planningNoToolGuardMode.value;
+  const checkpointFilePath = join(workspaceRoot, '.orchestrace', 'sessions', sessionId, CHECKPOINT_METADATA_FILE);
+  const checkpointName = `${CHECKPOINT_STASH_PREFIX}:${sessionId}:${Date.now()}`;
+  const checkpointState = {
+    status: 'idle' as CheckpointLifecycleState,
+    metadata: undefined as CheckpointMetadata | undefined,
+    finalized: false,
+  };
 
   // Helper to emit events
   async function emit(event: SessionEventInput): Promise<void> {
@@ -129,25 +254,1237 @@ async function main(): Promise<void> {
     }
   }
 
+  function emitRoutingCoercionAudit(input: RoutingCoercionAudit & {
+    source?: 'user' | 'observer';
+  }): void {
+    const source = input.source ?? 'undefined';
+    void emit({
+      time: iso(),
+      type: 'session:dag-event',
+      payload: {
+        event: {
+          time: iso(),
+          runId: sessionId,
+          type: 'task:routing',
+          taskId: 'task',
+          message: `Routing coercion audit: type=${input.coercionType}; originalRoute=${input.originalRoute}; finalRoute=${input.finalRoute}; source=${source}; risk=${input.risk}; reason=${input.reason}`,
+        },
+      },
+    });
+  }
+
+  const lifecycle = new SessionLifecycle('VALIDATING');
+
+  function lifecycleDetailForPhase(phase: SessionLifecyclePhase): string {
+    switch (phase) {
+      case 'VALIDATING': return 'Validating prompt/session configuration.';
+      case 'SETTING_UP': return 'Setting up runtime resources.';
+      case 'DISPATCHING': return 'Dispatching execution strategy.';
+      case 'EXECUTING': return 'Executing selected route.';
+      case 'COMPLETING': return 'Finalizing outputs and status.';
+      case 'CLEANING_UP': return 'Cleaning up runner resources.';
+      case 'COMPLETED': return 'Run completed successfully.';
+      case 'FAILED': return 'Run failed.';
+      case 'CANCELLED': return 'Run cancelled.';
+      default: return `Lifecycle phase: ${phase}`;
+    }
+  }
+
+  async function emitLifecyclePhaseChange(phase: SessionLifecyclePhase): Promise<void> {
+    const detail = lifecycleDetailForPhase(phase);
+    const state: LlmSessionState = phase === 'FAILED'
+      ? 'failed'
+      : phase === 'CANCELLED'
+        ? 'cancelled'
+        : phase === 'COMPLETED'
+          ? 'completed'
+          : phase === 'VALIDATING'
+            ? 'analyzing'
+            : phase === 'COMPLETING'
+              ? 'validating'
+              : 'implementing';
+
+    const llmStatus = makeLlmStatus(state, detail, undefined, 'task', 'implementation');
+    lastLlmStatusEmission = {
+      key: llmStatusIdentityKey(llmStatus),
+      emittedAt: parseTimestamp(llmStatus.updatedAt),
+    };
+    await emit({ time: iso(), type: 'session:llm-status-change', payload: { llmStatus } });
+
+    await emit({
+      time: iso(),
+      type: 'session:dag-event',
+      payload: {
+        event: {
+          time: iso(),
+          runId: sessionId,
+          type: 'task:started',
+          taskId: 'task',
+          message: `Lifecycle phase: ${phase}`,
+        },
+      },
+    });
+  }
+
+  async function enterLifecyclePhase(
+    phase: SessionLifecyclePhase,
+    options: { precondition?: () => boolean | Promise<boolean>; preconditionMessage?: string } = {},
+  ): Promise<void> {
+    await lifecycle.enterPhase(phase, options);
+    await emitLifecyclePhaseChange(phase);
+  }
+
+  lifecycle.registerCleanup('SETTING_UP', 'remove-sigterm-listener', () => {
+    process.off('SIGTERM', handleSigterm);
+  });
+  lifecycle.registerCleanup('SETTING_UP', 'clear-heartbeat-interval', () => {
+    clearInterval(heartbeatInterval);
+  });
+  lifecycle.registerCleanup('SETTING_UP', 'abort-controller', () => {
+    controller.abort();
+  });
+
+  void emit({
+    time: iso(),
+    type: 'session:dag-event',
+    payload: {
+      event: {
+        time: iso(),
+        runId: sessionId,
+        type: 'task:routing',
+        taskId: 'task',
+        message: `Route selected: ${route.category} (${route.strategy}, source=${route.source}, confidence=${route.confidence.toFixed(2)})`,
+      },
+    },
+  });
+
+  const routingCoercionAudit = deriveRoutingCoercionAudit(resolvedRoute, dispatch);
+  if (routingCoercionAudit) {
+    emitRoutingCoercionAudit({
+      ...routingCoercionAudit,
+      source: config.source,
+    });
+  }
+
+  void emit({
+    time: iso(),
+    type: 'session:dag-event',
+    payload: {
+      event: {
+        time: iso(),
+        runId: sessionId,
+        type: 'task:routing',
+        taskId: 'task',
+        message: `Effort classified: ${taskEffort} (${effortClassification.reason})`,
+      },
+    },
+  });
+
+  function formatRunnerPolicyConflictWarning(conflict: ResolutionConflict<unknown>): string {
+    return [
+      `Configuration conflict for ${conflict.settingKey}:`,
+      `config value (${String(conflict.configValue)}) differs from`,
+      `${conflict.envVarName} (${String(conflict.envValue)}).`,
+      'Using config value per precedence policy: config > env > default.',
+    ].join(' ');
+  }
+
+  async function emitRunnerPolicyConflictWarnings(): Promise<void> {
+    const conflicts = [
+      runnerPolicy.quickStartMode.conflict,
+      runnerPolicy.quickStartMaxPreDelegationToolCalls.conflict,
+      runnerPolicy.planningNoToolGuardMode.conflict,
+    ];
+
+    for (const conflict of conflicts) {
+      if (!conflict) {
+        continue;
+      }
+      const warning = formatRunnerPolicyConflictWarning(conflict);
+      console.warn(`[runner] ${warning}`);
+      await emit({
+        time: iso(),
+        type: 'session:dag-event',
+        payload: {
+          event: {
+            time: iso(),
+            runId: sessionId,
+            type: 'task:routing',
+            taskId: 'task',
+            message: warning,
+          },
+        },
+      });
+    }
+  }
+
+  await emitRunnerPolicyConflictWarnings();
+
+  async function runGit(args: string[]): Promise<string> {
+    const { stdout } = await execFileAsync('git', args, {
+      cwd: config.workspacePath,
+      timeout: 30_000,
+      maxBuffer: 1024 * 1024,
+    });
+    return stdout;
+  }
+
+  async function runGitSafe(args: string[]): Promise<{ ok: boolean; stdout: string; stderr: string; error?: string }> {
+    try {
+      const { stdout, stderr } = await execFileAsync('git', args, {
+        cwd: config.workspacePath,
+        timeout: AUTO_CHECKPOINT_GIT_TIMEOUT_MS,
+      });
+      return { ok: true, stdout, stderr };
+    } catch (err) {
+      return { ok: false, stdout: '', stderr: '', error: errorMsg(err) };
+    }
+  }
+
+  async function runGitSafeWithTimeout(
+    args: string[],
+    timeout: number,
+  ): Promise<{ ok: boolean; stdout: string; stderr: string; error?: string }> {
+    try {
+      const { stdout, stderr } = await execFileAsync('git', args, {
+        cwd: config.workspacePath,
+        timeout,
+      });
+      return { ok: true, stdout, stderr };
+    } catch (err) {
+      return { ok: false, stdout: '', stderr: '', error: errorMsg(err) };
+    }
+  }
+
+  const sessionHeadAtStart = await getGitHeadSha();
+  let deliveryFinalized = false;
+  const committedCheckpointShas: string[] = [];
+  /** Tracks per-task commit boundaries for structured PR commits. */
+  const taskCommitRanges: Array<{
+    todoId: string;
+    todoTitle: string;
+    fromSha: string;
+    toSha: string;
+  }> = [];
+
+  async function maybeCheckpoint(reason: 'edit-threshold' | 'todo-completed' | 'terminal', opts?: {
+    todoId?: string;
+    todoTitle?: string;
+  }): Promise<void> {
+    if (!AUTO_CHECKPOINT_ENABLED) return;
+    if (checkpointInFlight) return;
+    checkpointInFlight = true;
+
+    const messageContext = opts?.todoTitle?.trim() || opts?.todoId?.trim() || reason;
+    const commitMessage = `checkpoint: ${compact(messageContext, 120)}`;
+
+    try {
+      const add = await runGitSafe(['add', '-A']);
+      if (!add.ok) {
+        await emit({
+          time: iso(),
+          type: 'session:checkpoint',
+          payload: {
+            status: 'failed',
+            reason,
+            message: commitMessage,
+            trigger: {
+              threshold: AUTO_CHECKPOINT_EVERY_N_EDITS,
+              editCountSinceLast: successfulEditFileResultsSinceCheckpoint,
+              todoId: opts?.todoId,
+              todoTitle: opts?.todoTitle,
+            },
+            error: (add.error ?? add.stderr) || 'git add failed',
+          },
+        });
+        return;
+      }
+
+      const hasStaged = await runGitSafe(['diff', '--cached', '--quiet']);
+      if (hasStaged.ok) {
+        await emit({
+          time: iso(),
+          type: 'session:checkpoint',
+          payload: {
+            status: 'skipped',
+            reason,
+            message: commitMessage,
+            trigger: {
+              threshold: AUTO_CHECKPOINT_EVERY_N_EDITS,
+              editCountSinceLast: successfulEditFileResultsSinceCheckpoint,
+              todoId: opts?.todoId,
+              todoTitle: opts?.todoTitle,
+            },
+          },
+        });
+        successfulEditFileResultsSinceCheckpoint = 0;
+        return;
+      }
+
+      const commit = await runGitSafe(['commit', '-m', commitMessage]);
+      if (!commit.ok) {
+        await emit({
+          time: iso(),
+          type: 'session:checkpoint',
+          payload: {
+            status: 'failed',
+            reason,
+            message: commitMessage,
+            trigger: {
+              threshold: AUTO_CHECKPOINT_EVERY_N_EDITS,
+              editCountSinceLast: successfulEditFileResultsSinceCheckpoint,
+              todoId: opts?.todoId,
+              todoTitle: opts?.todoTitle,
+            },
+            error: (commit.error ?? commit.stderr) || 'git commit failed',
+          },
+        });
+        return;
+      }
+
+      const fullHead = await runGitSafe(['rev-parse', 'HEAD']);
+      if (fullHead.ok) {
+        const fullSha = fullHead.stdout.trim();
+        if (fullSha) {
+          committedCheckpointShas.push(fullSha);
+
+          // Record per-task boundary when a todo-completed checkpoint succeeds
+          if (reason === 'todo-completed' && opts?.todoId) {
+            const prevTaskEnd = taskCommitRanges.length > 0
+              ? taskCommitRanges[taskCommitRanges.length - 1].toSha
+              : sessionHeadAtStart;
+            taskCommitRanges.push({
+              todoId: opts.todoId,
+              todoTitle: opts.todoTitle ?? opts.todoId,
+              fromSha: prevTaskEnd ?? fullSha,
+              toSha: fullSha,
+            });
+          }
+        }
+      }
+
+      const head = await runGitSafe(['rev-parse', '--short', 'HEAD']);
+      await emit({
+        time: iso(),
+        type: 'session:checkpoint',
+        payload: {
+          status: 'committed',
+          reason,
+          message: commitMessage,
+          trigger: {
+            threshold: AUTO_CHECKPOINT_EVERY_N_EDITS,
+            editCountSinceLast: successfulEditFileResultsSinceCheckpoint,
+            todoId: opts?.todoId,
+            todoTitle: opts?.todoTitle,
+          },
+          commit: {
+            hash: head.ok ? head.stdout.trim() : undefined,
+            summary: commit.stdout.trim() || commit.stderr.trim() || undefined,
+          },
+        },
+      });
+      successfulEditFileResultsSinceCheckpoint = 0;
+    } finally {
+      checkpointInFlight = false;
+    }
+  }
+
+  async function getGitHeadSha(): Promise<string | undefined> {
+    try {
+      const stdout = await runGit(['rev-parse', 'HEAD']);
+      const sha = stdout.trim();
+      return sha ? sha : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  async function getWorktreeDirtySummary(): Promise<{
+    hasUncommittedChanges: boolean;
+    hasStagedChanges: boolean;
+    hasUntrackedChanges: boolean;
+    dirtySummary: string[];
+  }> {
+    const [unstaged, staged, untracked] = await Promise.all([
+      runGit(['diff', '--name-status']).catch(() => ''),
+      runGit(['diff', '--cached', '--name-status']).catch(() => ''),
+      runGit(['ls-files', '--others', '--exclude-standard']).catch(() => ''),
+    ]);
+    const unstagedLines = unstaged.split('\n').map((line) => line.trim()).filter(Boolean);
+    const stagedLines = staged.split('\n').map((line) => line.trim()).filter(Boolean);
+    const untrackedLines = untracked.split('\n').map((line) => line.trim()).filter(Boolean);
+    return {
+      hasUncommittedChanges: unstagedLines.length > 0,
+      hasStagedChanges: stagedLines.length > 0,
+      hasUntrackedChanges: untrackedLines.length > 0,
+      dirtySummary: [...unstagedLines, ...stagedLines, ...untrackedLines.map((line) => `?? ${line}`)].slice(0, 200),
+    };
+  }
+
+  /**
+   * Deterministic code-change detection: compares session start HEAD against
+   * current HEAD and checks for any uncommitted/staged/untracked changes.
+   * Returns an authoritative verdict on whether the session produced code changes.
+   */
+  async function detectSessionCodeChanges(): Promise<{
+    hasChanges: boolean;
+    commitCount: number;
+    diffSummary: string;
+    changedFiles: string[];
+  }> {
+    // First: commit any remaining dirty changes so nothing is lost
+    const dirty = await getWorktreeDirtySummary();
+    if (dirty.hasUncommittedChanges || dirty.hasStagedChanges || dirty.hasUntrackedChanges) {
+      await runGitSafe(['add', '-A']);
+      const hasStaged = await runGitSafe(['diff', '--cached', '--quiet']);
+      if (!hasStaged.ok) {
+        await runGitSafe(['commit', '-m', 'checkpoint: final uncommitted changes']);
+        const fullHead = await runGitSafe(['rev-parse', 'HEAD']);
+        if (fullHead.ok && fullHead.stdout.trim()) {
+          committedCheckpointShas.push(fullHead.stdout.trim());
+        }
+      }
+    }
+
+    const currentHead = await getGitHeadSha();
+    if (!currentHead || !sessionHeadAtStart) {
+      // Fallback: if we can't determine SHAs, check committed checkpoint tracking
+      return {
+        hasChanges: committedCheckpointShas.length > 0,
+        commitCount: committedCheckpointShas.length,
+        diffSummary: '',
+        changedFiles: [],
+      };
+    }
+
+    if (currentHead === sessionHeadAtStart && committedCheckpointShas.length === 0) {
+      return { hasChanges: false, commitCount: 0, diffSummary: '', changedFiles: [] };
+    }
+
+    // Count commits between start and current HEAD
+    let commitCount = 0;
+    const countRes = await runGitSafeWithTimeout(
+      ['rev-list', '--count', `${sessionHeadAtStart}..${currentHead}`],
+      SESSION_DELIVERY_GIT_TIMEOUT_MS,
+    );
+    if (countRes.ok) {
+      const parsed = Number.parseInt(countRes.stdout.trim(), 10);
+      if (Number.isFinite(parsed) && parsed > 0) commitCount = parsed;
+    }
+    if (commitCount <= 0 && committedCheckpointShas.length > 0) {
+      commitCount = committedCheckpointShas.length;
+    }
+
+    if (commitCount <= 0) {
+      return { hasChanges: false, commitCount: 0, diffSummary: '', changedFiles: [] };
+    }
+
+    // Get diff summary for LLM context
+    const diffStatRes = await runGitSafeWithTimeout(
+      ['diff', '--stat', `${sessionHeadAtStart}..${currentHead}`],
+      SESSION_DELIVERY_GIT_TIMEOUT_MS,
+    );
+    const diffSummary = diffStatRes.ok ? diffStatRes.stdout.trim() : '';
+
+    const diffNameRes = await runGitSafeWithTimeout(
+      ['diff', '--name-only', `${sessionHeadAtStart}..${currentHead}`],
+      SESSION_DELIVERY_GIT_TIMEOUT_MS,
+    );
+    const changedFiles = diffNameRes.ok
+      ? diffNameRes.stdout.trim().split('\n').filter(Boolean)
+      : [];
+
+    return { hasChanges: true, commitCount, diffSummary, changedFiles };
+  }
+
+  /**
+   * Uses the LLM to generate meaningful PR metadata: branch name, title,
+   * description, and per-task commit messages.
+   */
+  async function generatePrMetadata(context: {
+    prompt: string;
+    diffSummary: string;
+    changedFiles: string[];
+    commitCount: number;
+    taskRanges: Array<{ todoId: string; todoTitle: string; changedFiles: string[] }>;
+  }): Promise<{
+    branchName: string;
+    prTitle: string;
+    prDescription: string;
+    taskCommitMessages: Array<{ todoId: string; message: string }>;
+    fallbackCommitMessage: string;
+  }> {
+    const taskSection = context.taskRanges.length > 0
+      ? [
+        '',
+        '## Tasks Completed',
+        ...context.taskRanges.map((t, i) =>
+          `${i + 1}. "${t.todoTitle}" (files: ${t.changedFiles.slice(0, 10).join(', ')}${t.changedFiles.length > 10 ? ` +${t.changedFiles.length - 10} more` : ''})`,
+        ),
+      ].join('\n')
+      : '';
+
+    const isObserverSession = config.source === 'observer';
+    const observerPrefixNote = isObserverSession
+      ? '- IMPORTANT: Prepend "[Observer fix] " to the prTitle (e.g., "[Observer fix] feat: fix linting issue"). This marks the PR as auto-generated by the observer.'
+      : '';
+
+    const metadataPrompt = [
+      'You are generating metadata for a pull request. Respond ONLY with a valid JSON object, no markdown fences, no extra text.',
+      '',
+      '## Original Task',
+      context.prompt,
+      '',
+      '## Changes Summary',
+      `Files changed (${context.changedFiles.length}): ${context.changedFiles.slice(0, 30).join(', ')}`,
+      '',
+      context.diffSummary ? `Diff stats:\n${context.diffSummary}` : '',
+      '',
+      `Total commits: ${context.commitCount}`,
+      taskSection,
+      '',
+      '## Instructions',
+      'Generate a JSON object with these exact keys:',
+      '- "branchName": a short kebab-case git branch name (no spaces, max 60 chars, no special chars except hyphens). Prefix with "feat/", "fix/", "refactor/", or "chore/" as appropriate.',
+      `- "prTitle": a concise, descriptive PR title (max 80 chars). Use conventional commit style (e.g., "feat: add user auth flow"). ${observerPrefixNote}`,
+      '- "prDescription": a detailed markdown PR description covering: what changed, why, and key implementation details. Include a brief summary and a bullet list of notable changes.',
+      ...(context.taskRanges.length > 0
+        ? [
+          '- "taskCommitMessages": an array of objects, one per task in the same order, each with:',
+          '  - "todoId": the task ID (match exactly from the tasks list above)',
+          '  - "message": a conventional-commit-style commit message for that task (max 72 chars). Be specific about what the task accomplished.',
+        ]
+        : []),
+      '- "fallbackCommitMessage": a meaningful single-line commit message for the overall change (max 72 chars). Use conventional commit style.',
+      '',
+      'Respond with ONLY the JSON object.',
+    ].join('\n');
+
+    try {
+      const agent = await llm.spawnAgent({
+        provider: config.provider,
+        model: config.model,
+        systemPrompt: 'You are a precise JSON generator. Output only valid JSON, nothing else.',
+        timeoutMs: 30_000,
+        apiKey: await authManager.resolveApiKey(config.provider),
+        refreshApiKey: () => authManager.resolveApiKey(config.provider),
+      });
+
+      const result = await agent.complete(metadataPrompt);
+      const parsed = parsePrMetadataResponse(result.text, context.taskRanges, isObserverSession);
+      if (parsed) return parsed;
+    } catch (err) {
+      console.warn(`[runner] LLM PR metadata generation failed: ${errorMsg(err)}. Using fallback.`);
+    }
+
+    // Fallback: generate reasonable defaults from the prompt
+    const slug = config.prompt
+      .toLowerCase()
+      .replace(/[^a-z0-9\s-]/g, '')
+      .trim()
+      .split(/\s+/)
+      .slice(0, 5)
+      .join('-')
+      .slice(0, 50);
+
+    const fallbackPrTitle = compact(config.prompt, 80);
+    const prTitle = isObserverSession && !fallbackPrTitle.startsWith('[Observer fix]')
+      ? `[Observer fix] ${fallbackPrTitle}`.slice(0, 80)
+      : fallbackPrTitle;
+
+    return {
+      branchName: `feat/${slug || `session-${sessionId.slice(0, 8)}`}`,
+      prTitle,
+      prDescription: [
+        `## Summary`,
+        compact(config.prompt, 200),
+        '',
+        `## Changes`,
+        ...context.changedFiles.slice(0, 20).map((f) => `- \`${f}\``),
+        context.changedFiles.length > 20 ? `- ... and ${context.changedFiles.length - 20} more files` : '',
+      ].join('\n'),
+      taskCommitMessages: context.taskRanges.map((t) => ({
+        todoId: t.todoId,
+        message: compact(t.todoTitle, 72),
+      })),
+      fallbackCommitMessage: compact(config.prompt, 72),
+    };
+  }
+
+  /**
+   * Rewrites session checkpoint commits into per-task commits, each with an
+   * LLM-generated message, then pushes and creates a PR.
+   */
+  async function ensureRemoteDeliveryForCommittedSession(): Promise<void> {
+    if (deliveryFinalized) return;
+
+    // Deterministic code-change gate
+    const changes = await detectSessionCodeChanges();
+    if (!changes.hasChanges) return;
+
+    if (!SESSION_DELIVERY_REQUIRED) {
+      throw new Error(
+        'Session created committed code changes, but ORCHESTRACE_SESSION_DELIVERY_REQUIRED is disabled. Re-enable delivery to enforce mandatory PR creation.',
+      );
+    }
+
+    deliveryFinalized = true;
+
+    // Resolve per-task changed files for LLM context
+    const taskRangesWithFiles = await Promise.all(
+      taskCommitRanges.map(async (range) => {
+        const filesRes = await runGitSafeWithTimeout(
+          ['diff', '--name-only', `${range.fromSha}..${range.toSha}`],
+          SESSION_DELIVERY_GIT_TIMEOUT_MS,
+        );
+        return {
+          todoId: range.todoId,
+          todoTitle: range.todoTitle,
+          changedFiles: filesRes.ok ? filesRes.stdout.trim().split('\n').filter(Boolean) : [],
+        };
+      }),
+    );
+
+    // Use LLM to generate meaningful PR metadata + per-task commit messages
+    const prMeta = await generatePrMetadata({
+      prompt: config.prompt,
+      diffSummary: changes.diffSummary,
+      changedFiles: changes.changedFiles,
+      commitCount: changes.commitCount,
+      taskRanges: taskRangesWithFiles,
+    });
+
+    // Rewrite history: one commit per task
+    if (sessionHeadAtStart && taskCommitRanges.length > 0) {
+      // Build message map from LLM output
+      const messageMap = new Map<string, string>();
+      for (const tcm of prMeta.taskCommitMessages) {
+        messageMap.set(tcm.todoId, tcm.message);
+      }
+
+      // Reset to session start, then replay per-task ranges
+      const resetRes = await runGitSafeWithTimeout(
+        ['reset', '--soft', sessionHeadAtStart],
+        SESSION_DELIVERY_GIT_TIMEOUT_MS,
+      );
+      if (resetRes.ok) {
+        // Commit once per task range by cherry-picking the diff
+        for (const range of taskCommitRanges) {
+          const message = messageMap.get(range.todoId) ?? compact(range.todoTitle, 72);
+
+          // Apply all changes from this task's range
+          const patchRes = await runGitSafeWithTimeout(
+            ['diff', `${range.fromSha}..${range.toSha}`],
+            SESSION_DELIVERY_GIT_TIMEOUT_MS,
+          );
+          if (patchRes.ok && patchRes.stdout.trim()) {
+            const applyRes = await runGitSafeWithTimeout(
+              ['apply', '--index', '--allow-empty', '-'],
+              SESSION_DELIVERY_GIT_TIMEOUT_MS,
+            );
+            // If apply fails, try checkout-based approach
+            if (!applyRes.ok) {
+              await runGitSafeWithTimeout(
+                ['checkout', range.toSha, '--', '.'],
+                SESSION_DELIVERY_GIT_TIMEOUT_MS,
+              );
+              await runGitSafe(['add', '-A']);
+            }
+          } else {
+            // Fallback: checkout the tree state at toSha
+            await runGitSafeWithTimeout(
+              ['checkout', range.toSha, '--', '.'],
+              SESSION_DELIVERY_GIT_TIMEOUT_MS,
+            );
+            await runGitSafe(['add', '-A']);
+          }
+
+          const hasStaged = await runGitSafe(['diff', '--cached', '--quiet']);
+          if (!hasStaged.ok) {
+            const commitRes = await runGitSafeWithTimeout(
+              ['commit', '-m', message],
+              SESSION_DELIVERY_GIT_TIMEOUT_MS,
+            );
+            if (!commitRes.ok) {
+              // If per-task commit fails, bail to single-commit fallback
+              console.warn(`[runner] Per-task commit failed for ${range.todoId}, falling back to single commit.`);
+              await runGitSafeWithTimeout(['reset', '--soft', sessionHeadAtStart], SESSION_DELIVERY_GIT_TIMEOUT_MS);
+              break;
+            }
+          }
+        }
+
+        // Ensure final tree matches the original session end
+        const finalHead = await getGitHeadSha();
+        const lastRange = taskCommitRanges[taskCommitRanges.length - 1];
+        if (finalHead !== lastRange.toSha) {
+          // There may be trailing changes after the last task (terminal checkpoint)
+          const currentHead = committedCheckpointShas[committedCheckpointShas.length - 1];
+          if (currentHead && currentHead !== finalHead) {
+            await runGitSafeWithTimeout(['checkout', currentHead, '--', '.'], SESSION_DELIVERY_GIT_TIMEOUT_MS);
+            await runGitSafe(['add', '-A']);
+            const trailingStaged = await runGitSafe(['diff', '--cached', '--quiet']);
+            if (!trailingStaged.ok) {
+              await runGitSafeWithTimeout(
+                ['commit', '-m', prMeta.fallbackCommitMessage],
+                SESSION_DELIVERY_GIT_TIMEOUT_MS,
+              );
+            }
+          }
+        }
+      }
+    } else if (sessionHeadAtStart && changes.commitCount >= 1) {
+      // No task ranges: squash all into one commit with LLM message
+      if (changes.commitCount > 1) {
+        const resetRes = await runGitSafeWithTimeout(
+          ['reset', '--soft', sessionHeadAtStart],
+          SESSION_DELIVERY_GIT_TIMEOUT_MS,
+        );
+        if (resetRes.ok) {
+          const commitRes = await runGitSafeWithTimeout(
+            ['commit', '-m', prMeta.fallbackCommitMessage],
+            SESSION_DELIVERY_GIT_TIMEOUT_MS,
+          );
+          if (!commitRes.ok) {
+            throw new Error(`Failed to create squash commit: ${(commitRes.error ?? commitRes.stderr) || 'git commit failed'}`);
+          }
+        }
+      } else {
+        await runGitSafeWithTimeout(
+          ['commit', '--amend', '-m', prMeta.fallbackCommitMessage],
+          SESSION_DELIVERY_GIT_TIMEOUT_MS,
+        );
+      }
+    }
+
+    const baseBranch = await resolveBaseBranch();
+
+    // Create branch with LLM-generated name
+    const branchRes = await runGitSafeWithTimeout(
+      ['checkout', '-B', prMeta.branchName],
+      SESSION_DELIVERY_GIT_TIMEOUT_MS,
+    );
+    if (!branchRes.ok) {
+      // Fallback to generated branch name if LLM name conflicts
+      const fallbackBranch = `orchestrace/session-${sessionId.slice(0, 8)}-${Date.now().toString(36)}`;
+      const fallbackRes = await runGitSafeWithTimeout(
+        ['checkout', '-B', fallbackBranch],
+        SESSION_DELIVERY_GIT_TIMEOUT_MS,
+      );
+      if (!fallbackRes.ok) {
+        throw new Error(`Unable to create delivery branch: ${(fallbackRes.error ?? fallbackRes.stderr) || 'git checkout failed'}`);
+      }
+      prMeta.branchName = fallbackBranch;
+    }
+
+    const pushRes = await runGitSafeWithTimeout(
+      ['push', '--set-upstream', 'origin', prMeta.branchName],
+      SESSION_DELIVERY_GIT_TIMEOUT_MS,
+    );
+    if (!pushRes.ok) {
+      throw new Error(`git push failed for ${prMeta.branchName}: ${(pushRes.error ?? pushRes.stderr) || 'unknown error'}`);
+    }
+
+    const remoteRes = await runGitSafeWithTimeout(['remote', 'get-url', 'origin'], SESSION_DELIVERY_GIT_TIMEOUT_MS);
+    if (!remoteRes.ok) {
+      throw new Error(`Unable to resolve origin remote URL: ${(remoteRes.error ?? remoteRes.stderr) || 'origin missing'}`);
+    }
+
+    const remote = parseGitHubRemote(remoteRes.stdout.trim());
+    if (!remote) {
+      throw new Error(`Origin remote is not a supported GitHub remote: ${remoteRes.stdout.trim()}`);
+    }
+
+    const token = await githubAuthManager.resolveApiKey('github').catch(() => undefined);
+    if (!token) {
+      throw new Error('GitHub auth is not configured. Connect GitHub in Settings before finishing a committed session.');
+    }
+
+    const pr = await ensurePullRequest({
+      host: remote.host,
+      owner: remote.owner,
+      repo: remote.repo,
+      headBranch: prMeta.branchName,
+      baseBranch,
+      token,
+      title: prMeta.prTitle,
+      body: prMeta.prDescription,
+    });
+
+    const deliveryMessage = pr.created
+      ? `Committed session changes were pushed to origin/${prMeta.branchName} and PR #${pr.number} was created: ${pr.url}`
+      : `Committed session changes were pushed to origin/${prMeta.branchName} and existing PR #${pr.number} was reused: ${pr.url}`;
+
+    await emit({
+      time: iso(),
+      type: 'session:chat-message',
+      payload: {
+        message: {
+          role: 'system',
+          content: deliveryMessage,
+          time: iso(),
+        },
+      },
+    });
+  }
+
+  async function resolveBaseBranch(): Promise<string> {
+    const remoteHead = await runGitSafeWithTimeout(['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'], SESSION_DELIVERY_GIT_TIMEOUT_MS);
+    if (remoteHead.ok) {
+      const ref = remoteHead.stdout.trim();
+      if (ref.startsWith('origin/')) {
+        const branch = ref.slice('origin/'.length).trim();
+        if (branch) {
+          return branch;
+        }
+      }
+    }
+
+    for (const candidate of ['main', 'master']) {
+      const head = await runGitSafeWithTimeout(['ls-remote', '--heads', 'origin', candidate], SESSION_DELIVERY_GIT_TIMEOUT_MS);
+      if (head.ok && head.stdout.trim()) {
+        return candidate;
+      }
+    }
+
+    return 'main';
+  }
+
+  async function ensurePullRequest(params: {
+    host: string;
+    owner: string;
+    repo: string;
+    headBranch: string;
+    baseBranch: string;
+    token: string;
+    title: string;
+    body: string;
+  }): Promise<PullRequestInfo> {
+    const createRes = await callGitHubApi(params, 'POST', `/repos/${params.owner}/${params.repo}/pulls`, {
+      title: params.title,
+      body: params.body,
+      head: params.headBranch,
+      base: params.baseBranch,
+      maintainer_can_modify: true,
+    });
+
+    if (createRes.ok) {
+      const created = createRes.body as { number?: unknown; html_url?: unknown };
+      const number = typeof created.number === 'number' ? created.number : undefined;
+      const url = typeof created.html_url === 'string' ? created.html_url : undefined;
+      if (!number || !url) {
+        throw new Error('GitHub create PR response was missing number or html_url.');
+      }
+      return { number, url, created: true };
+    }
+
+    if (createRes.status === 422) {
+      const headQuery = encodeURIComponent(`${params.owner}:${params.headBranch}`);
+      const existingRes = await callGitHubApi(
+        params,
+        'GET',
+        `/repos/${params.owner}/${params.repo}/pulls?state=open&head=${headQuery}&base=${encodeURIComponent(params.baseBranch)}`,
+      );
+      if (existingRes.ok && Array.isArray(existingRes.body) && existingRes.body.length > 0) {
+        const existing = existingRes.body[0] as { number?: unknown; html_url?: unknown };
+        const number = typeof existing.number === 'number' ? existing.number : undefined;
+        const url = typeof existing.html_url === 'string' ? existing.html_url : undefined;
+        if (number && url) {
+          return { number, url, created: false };
+        }
+      }
+    }
+
+    throw new Error(`Unable to create pull request: ${formatGitHubApiError(createRes)}`);
+  }
+
+  async function callGitHubApi(
+    params: { host: string; token: string },
+    method: 'GET' | 'POST',
+    path: string,
+    body?: Record<string, unknown>,
+  ): Promise<GitHubApiResponse> {
+    const apiBase = buildGitHubApiBaseUrl(params.host);
+    const response = await fetch(`${apiBase}${path}`, {
+      method,
+      headers: {
+        Accept: 'application/vnd.github+json',
+        Authorization: `Bearer ${params.token}`,
+        'Content-Type': 'application/json',
+        'User-Agent': 'orchestrace-runner',
+        'X-GitHub-Api-Version': '2022-11-28',
+      },
+      body: body ? JSON.stringify(body) : undefined,
+      signal: AbortSignal.timeout(SESSION_DELIVERY_API_TIMEOUT_MS),
+    });
+
+    const contentType = response.headers.get('content-type') ?? '';
+    let responseBody: unknown;
+    if (contentType.includes('application/json')) {
+      responseBody = await response.json().catch(() => undefined);
+    } else {
+      responseBody = await response.text().catch(() => undefined);
+    }
+
+    return {
+      ok: response.ok,
+      status: response.status,
+      body: responseBody,
+    };
+  }
+
+  async function writeCheckpointMetadata(metadata: CheckpointMetadata): Promise<void> {
+    const dir = join(workspaceRoot, '.orchestrace', 'sessions', sessionId);
+    await mkdir(dir, { recursive: true });
+    const tempPath = `${checkpointFilePath}.tmp`;
+    await writeFile(tempPath, `${JSON.stringify(metadata, null, 2)}\n`, 'utf8');
+    await rename(tempPath, checkpointFilePath);
+  }
+
+  async function readCheckpointMetadata(): Promise<CheckpointMetadata | undefined> {
+    try {
+      const raw = await readFile(checkpointFilePath, 'utf8');
+      const parsed = JSON.parse(raw) as Partial<CheckpointMetadata>;
+      if (!parsed || typeof parsed !== 'object') {
+        return undefined;
+      }
+      if (typeof parsed.sessionId !== 'string' || typeof parsed.workspacePath !== 'string' || typeof parsed.state !== 'string') {
+        return undefined;
+      }
+      return parsed as CheckpointMetadata;
+    } catch {
+      return undefined;
+    }
+  }
+
+  function isMutatingToolCall(event: Extract<DagEvent, { type: 'task:tool-call' }>): boolean {
+    if (event.status !== 'started') return false;
+    const tool = event.toolName.trim();
+    const mutatingTools = new Set([
+      'write_file',
+      'write_files',
+      'edit_file',
+      'edit_files',
+      'run_command',
+      'run_command_batch',
+      'github_api',
+    ]);
+    if (mutatingTools.has(tool)) return true;
+    return tool.startsWith('functions.write_')
+      || tool.startsWith('functions.edit_')
+      || tool === 'functions.run_command'
+      || tool === 'functions.run_command_batch'
+      || tool === 'functions.github_api';
+  }
+
+  async function ensureCheckpointForMutatingBatch(trigger: Extract<DagEvent, { type: 'task:tool-call' }>, at: string): Promise<void> {
+    if (!isMutatingToolCall(trigger)) {
+      return;
+    }
+    if (checkpointState.status !== 'idle') {
+      return;
+    }
+
+    checkpointState.status = 'active';
+    const headShaBefore = await getGitHeadSha();
+    const stashMessage = checkpointName;
+    let stashRef: string | undefined;
+    try {
+      // Non-destructive checkpoint: capture current state without altering the worktree.
+      const stashCommit = (await runGit(['stash', 'create', stashMessage])).trim();
+      if (stashCommit) {
+        await runGit(['stash', 'store', '-m', stashMessage, stashCommit]);
+        const stashList = await runGit(['stash', 'list']);
+        const stashLine = stashList.split('\n').find((line) => line.includes(stashMessage));
+        stashRef = stashLine?.split(':', 1)[0]?.trim() ?? stashCommit;
+      }
+    } catch (error) {
+      console.warn(`[runner] Failed to create pre-edit checkpoint for ${sessionId}: ${errorMsg(error)}`);
+      checkpointState.status = 'idle';
+      return;
+    }
+
+    const metadata: CheckpointMetadata = {
+      sessionId,
+      workspacePath: config.workspacePath,
+      state: 'active',
+      createdAt: at,
+      updatedAt: at,
+      headShaBefore,
+      stashRef,
+      stashMessage,
+      checkpointName,
+      notes: `Created from tool ${trigger.toolName}.`,
+    };
+
+    try {
+      await writeCheckpointMetadata(metadata);
+      checkpointState.metadata = metadata;
+    } catch (error) {
+      console.warn(`[runner] Failed to persist checkpoint metadata for ${sessionId}: ${errorMsg(error)}`);
+    }
+  }
+
+  async function finalizeCheckpoint(state: Extract<CheckpointLifecycleState, 'completed' | 'failed' | 'cancelled'>, at: string): Promise<void> {
+    if (checkpointState.finalized) {
+      return;
+    }
+    checkpointState.finalized = true;
+
+    const existing = checkpointState.metadata ?? await readCheckpointMetadata();
+    if (!existing) {
+      return;
+    }
+
+    const dirty = await getWorktreeDirtySummary().catch(() => ({
+      hasUncommittedChanges: false,
+      hasStagedChanges: false,
+      hasUntrackedChanges: false,
+      dirtySummary: [] as string[],
+    }));
+
+    const next: CheckpointMetadata = {
+      ...existing,
+      state,
+      updatedAt: at,
+      finalizedAt: at,
+      hasUncommittedChanges: dirty.hasUncommittedChanges,
+      hasStagedChanges: dirty.hasStagedChanges,
+      hasUntrackedChanges: dirty.hasUntrackedChanges,
+      dirtySummary: dirty.dirtySummary,
+    };
+
+    checkpointState.status = state;
+    checkpointState.metadata = next;
+    await writeCheckpointMetadata(next).catch((error) => {
+      console.warn(`[runner] Failed to finalize checkpoint metadata for ${sessionId}: ${errorMsg(error)}`);
+    });
+  }
+
+  async function markCheckpointInterrupted(at: string, detail: string): Promise<void> {
+    const existing = checkpointState.metadata ?? await readCheckpointMetadata();
+    if (!existing) {
+      return;
+    }
+
+    const dirty = await getWorktreeDirtySummary().catch(() => ({
+      hasUncommittedChanges: false,
+      hasStagedChanges: false,
+      hasUntrackedChanges: false,
+      dirtySummary: [] as string[],
+    }));
+
+    const next: CheckpointMetadata = {
+      ...existing,
+      state: 'interrupted',
+      updatedAt: at,
+      hasUncommittedChanges: dirty.hasUncommittedChanges,
+      hasStagedChanges: dirty.hasStagedChanges,
+      hasUntrackedChanges: dirty.hasUntrackedChanges,
+      dirtySummary: dirty.dirtySummary,
+      notes: detail,
+    };
+
+    checkpointState.status = 'interrupted';
+    checkpointState.metadata = next;
+    await writeCheckpointMetadata(next).catch((error) => {
+      console.warn(`[runner] Failed to mark checkpoint interrupted for ${sessionId}: ${errorMsg(error)}`);
+    });
+
+    }
+
   try {
-    const outputs = await orchestrate(graph, {
+    await emitLifecyclePhaseChange('VALIDATING');
+    await enterLifecyclePhase('SETTING_UP', {
+      precondition: () => Boolean(config.prompt && config.prompt.trim()) && Boolean(config.workspacePath && config.workspacePath.trim()),
+      preconditionMessage: 'Prompt and workspacePath are required before setup.',
+    });
+
+    const trivialTaskGate = resolveTrivialTaskGateConfig({
+      enabled: config.enableTrivialTaskGate,
+      maxPromptLength: config.trivialTaskMaxPromptLength,
+    });
+    const trivialClassification = classifyTrivialTaskPrompt(promptForRoutingAndEffort, trivialTaskGate);
+    console.info(
+      `[runner:${sessionId}] trivial-task-gate enabled=${trivialTaskGate.enabled} isTrivial=${trivialClassification.isTrivial} reasons=${trivialClassification.reasons.join(',')}`,
+    );
+
+    const trivialCommand = trivialClassification.isTrivial
+      ? extractSingleCommandFromPrompt(promptForRoutingAndEffort)
+      : undefined;
+
+    if (trivialClassification.isTrivial && trivialCommand) {
+      const t = iso();
+      const llmStatus = makeLlmStatus('using-tools', 'Executing lightweight trivial command.', undefined, 'task', 'implementation');
+      lastLlmStatusEmission = {
+        key: llmStatusIdentityKey(llmStatus),
+        emittedAt: parseTimestamp(llmStatus.updatedAt),
+      };
+      await emit({ time: t, type: 'session:llm-status-change', payload: { llmStatus } });
+
+      const lightweightToolset = createAgentToolset({
+        cwd: config.workspacePath,
+        phase: 'implementation',
+        taskType: 'custom',
+        graphId: graph.id,
+        taskId: 'task',
+        provider: config.provider,
+        model: config.model,
+        adaptiveConcurrency: config.adaptiveConcurrency,
+        batchConcurrency: config.batchConcurrency,
+        batchMinConcurrency: config.batchMinConcurrency,
+        resolveGithubToken: () => githubAuthManager.resolveApiKey('github'),
+      });
+
+      const toolCallId = `lightweight-${randomUUID()}`;
+      const toolCall: LlmToolCall = {
+        id: toolCallId,
+        name: 'run_command',
+        arguments: { command: trivialCommand },
+      };
+
+      const started: Extract<DagEvent, { type: 'task:tool-call' }> = {
+        type: 'task:tool-call',
+        taskId: 'task',
+        phase: 'implementation',
+        attempt: 1,
+        toolCallId,
+        toolName: 'run_command',
+        status: 'started',
+        input: JSON.stringify({ command: trivialCommand }),
+      };
+      const startedUiEvent = toUiEvent(sessionId, started, t);
+      if (startedUiEvent) {
+        await emit({ time: t, type: 'session:dag-event', payload: { event: startedUiEvent } });
+      }
+
+      const toolResult = await lightweightToolset.executeTool(toolCall, controller.signal);
+      const resultEvent: Extract<DagEvent, { type: 'task:tool-call' }> = {
+        ...started,
+        status: 'result',
+        output: toolResult.content,
+        isError: toolResult.isError,
+      };
+      const resultUiEvent = toUiEvent(sessionId, resultEvent, iso());
+      if (resultUiEvent) {
+        await emit({ time: iso(), type: 'session:dag-event', payload: { event: resultUiEvent } });
+      }
+
+      const outputText = toolResult.content;
+      await emit({
+        time: iso(),
+        type: 'session:output-set',
+        payload: { output: { text: outputText } },
+      });
+
+      await maybeCheckpoint('terminal');
+      let deliveryError: string | undefined;
+      try {
+        await ensureRemoteDeliveryForCommittedSession();
+      } catch (error) {
+        deliveryError = errorMsg(error);
+      }
+
+      await enterLifecyclePhase('COMPLETING');
+
+      if (toolResult.isError || deliveryError) {
+        const errorLines = [toolResult.isError ? outputText : undefined, deliveryError ? `Remote delivery failed: ${deliveryError}` : undefined]
+          .filter((line): line is string => Boolean(line));
+        const errorText = errorLines.join('\n');
+        await emit({ time: iso(), type: 'session:error-change', payload: { error: errorText } });
+        const failedStatus = makeLlmStatus(
+          'failed',
+          errorText,
+          toolResult.isError ? 'tool_runtime' : 'delivery_failure',
+          'task',
+          'implementation',
+        );
+        lastLlmStatusEmission = {
+          key: llmStatusIdentityKey(failedStatus),
+          emittedAt: parseTimestamp(failedStatus.updatedAt),
+        };
+        await emit({ time: iso(), type: 'session:llm-status-change', payload: { llmStatus: failedStatus } });
+        await emit({ time: iso(), type: 'session:status-change', payload: { status: 'failed' } });
+        await finalizeCheckpoint('failed', iso());
+        await lifecycle.cleanup();
+        await lifecycle.complete('FAILED');
+        await emitLifecyclePhaseChange('FAILED');
+        process.exit(1);
+      }
+
+      const completedStatus = makeLlmStatus('completed', 'Lightweight trivial command completed.', undefined, 'task', 'implementation');
+      lastLlmStatusEmission = {
+        key: llmStatusIdentityKey(completedStatus),
+        emittedAt: parseTimestamp(completedStatus.updatedAt),
+      };
+      await emit({ time: iso(), type: 'session:llm-status-change', payload: { llmStatus: completedStatus } });
+      await emit({ time: iso(), type: 'session:status-change', payload: { status: 'completed' } });
+      await emit({
+        time: iso(),
+        type: 'session:chat-message',
+        payload: { message: { role: 'assistant', content: outputText, time: iso() } },
+      });
+      await finalizeCheckpoint('completed', iso());
+      await lifecycle.cleanup();
+      await lifecycle.complete('COMPLETED');
+      await emitLifecyclePhaseChange('COMPLETED');
+      process.exit(0);
+    }
+
+    await enterLifecyclePhase('DISPATCHING', {
+      precondition: () => {
+        // Defense-in-depth: shell execution is only reachable when both the
+        // source-aware guard and prompt command validation already succeeded.
+        if (route.category === 'shell_command') {
+          return Boolean(dispatch.shell.ok && dispatch.shell.command);
+        }
+        return Boolean(config.provider && config.model);
+      },
+      preconditionMessage: route.category === 'shell_command'
+        ? 'Shell dispatch selected but no safe command was resolved.'
+        : 'LLM dispatch requires provider/model configuration.',
+    });
+
+    await enterLifecyclePhase('EXECUTING');
+
+    const outputs = route.category === 'shell_command'
+      ? await runShellCommandRoute(dispatch.shell.command!, config.workspacePath)
+      : await orchestrate(graph, {
       llm,
       cwd: config.workspacePath,
       planOutputDir: join(config.workspacePath, '.orchestrace', 'plans'),
       promptVersion: process.env.ORCHESTRACE_PROMPT_VERSION,
       policyVersion: process.env.ORCHESTRACE_POLICY_VERSION ?? DEFAULT_AGENT_TOOL_POLICY_VERSION,
-      defaultModel: { provider: config.provider, model: config.model },
-      planningSystemPrompt: buildSystemPrompt(config, 'planning'),
-      implementationSystemPrompt: buildSystemPrompt(config, 'implementation'),
+      enableTrivialTaskGate: trivialTaskGate.enabled,
+      trivialTaskMaxPromptLength: trivialTaskGate.maxPromptLength,
+      defaultModel: {
+        provider: config.implementationProvider ?? config.provider,
+        model: config.implementationModel ?? config.model,
+      },
+      defaultPlanningModel: {
+        provider: config.planningProvider ?? config.provider,
+        model: config.planningModel ?? config.model,
+      },
+      defaultImplementationModel: {
+        provider: config.implementationProvider ?? config.provider,
+        model: config.implementationModel ?? config.model,
+      },
+      planningSystemPrompt: buildSystemPrompt(config, 'planning', taskEffort),
+      implementationSystemPrompt: buildSystemPrompt(config, 'implementation', taskEffort),
+      quickStartMode,
+      quickStartMaxPreDelegationToolCalls,
+      planningNoToolGuardMode,
+      taskEffort,
       maxParallel: 1,
       requirePlanApproval: !config.autoApprove,
       onPlanApproval: async () => config.autoApprove,
       signal: controller.signal,
       resolveApiKey: async (providerId) => authManager.resolveApiKey(providerId),
 
-      createToolset: ({ phase, task, graphId, provider: activeProvider, model: activeModel, reasoning }) => createAgentToolset({
+      createToolset: ({ phase, task, graphId, provider: activeProvider, model: activeModel, reasoning, taskRequiresWrites }) => createAgentToolset({
         cwd: config.workspacePath,
         phase,
+        taskRequiresWrites,
         taskType: task.type,
         graphId,
         taskId: task.id,
@@ -159,6 +1496,7 @@ async function main(): Promise<void> {
         batchMinConcurrency: config.batchMinConcurrency,
         resolveGithubToken: () => githubAuthManager.resolveApiKey('github'),
         sharedContextStore,
+        fileReadCache,
         agentId: `orchestrator::${task.id}`,
         runSubAgent: async (request, _signal) => {
           const subProvider = request.provider ?? activeProvider;
@@ -186,6 +1524,7 @@ async function main(): Promise<void> {
           const subToolset = createAgentToolset({
             cwd: config.workspacePath,
             phase,
+            taskRequiresWrites,
             taskId: `${task.id}::subagent::${request.nodeId ?? toolCallId}`,
             taskType: task.type,
             graphId,
@@ -197,6 +1536,7 @@ async function main(): Promise<void> {
             batchMinConcurrency: config.batchMinConcurrency,
             resolveGithubToken: () => githubAuthManager.resolveApiKey('github'),
             sharedContextStore,
+            fileReadCache,
             agentId: `subagent::${task.id}::subagent::${request.nodeId ?? toolCallId}`,
           });
 
@@ -253,6 +1593,25 @@ async function main(): Promise<void> {
 
         logDagEventTrace(sessionId, event);
 
+        if (isThinkingCycleEvent(event)) {
+          const shouldEmitNudge = updateThinkingCircuitBreaker(thinkingCircuitBreaker, event);
+          if (shouldEmitNudge) {
+            void emit({
+              time: t,
+              type: 'session:chat-message',
+              payload: {
+                message: {
+                  role: 'system',
+                  content: THINKING_CIRCUIT_BREAKER_NUDGE,
+                  time: t,
+                },
+              },
+            });
+          }
+        } else if (shouldResetThinkingCircuitBreakerOnEvent(event)) {
+          resetThinkingCircuitBreaker(thinkingCircuitBreaker);
+        }
+
         // LLM status
         const llmStatus = deriveLlmStatus(event, t);
         if (llmStatus && shouldEmitLlmStatus(llmStatus, lastLlmStatusEmission, t)) {
@@ -276,14 +1635,24 @@ async function main(): Promise<void> {
         }
 
         // Checklist / graph from tool events (parsed from tool input)
-        if (event.type === 'task:tool-call' && event.status === 'started' && event.input) {
-          handleToolCallChecklist(event);
-          handleToolCallAgentGraph(event);
+        if (event.type === 'task:tool-call' && event.status === 'started') {
+          void ensureCheckpointForMutatingBatch(event, t);
+          if (event.input) {
+            handleToolCallChecklist(event);
+            handleToolCallAgentGraph(event);
+          }
         }
 
         // Graph progress from sub-agent tool calls
         if (event.type === 'task:tool-call') {
           handleGraphProgress(event);
+
+          if (event.status === 'result' && !event.isError && event.toolName === 'edit_file') {
+            successfulEditFileResultsSinceCheckpoint += 1;
+            if (successfulEditFileResultsSinceCheckpoint >= AUTO_CHECKPOINT_EVERY_N_EDITS) {
+              void maybeCheckpoint('edit-threshold');
+            }
+          }
         }
 
         // Task status
@@ -294,9 +1663,14 @@ async function main(): Promise<void> {
     });
 
     if (cancelled) {
-      clearInterval(heartbeatInterval);
+      await finalizeCheckpoint('cancelled', iso());
+      await lifecycle.cleanup();
+      await lifecycle.complete('CANCELLED');
+      await emitLifecyclePhaseChange('CANCELLED');
       process.exit(130);
     }
+
+    await enterLifecyclePhase('COMPLETING');
 
     // Completion
     const allOutputs = [...outputs.values()];
@@ -311,14 +1685,29 @@ async function main(): Promise<void> {
       failureType: failedOutput?.failureType,
     };
 
+    resetThinkingCircuitBreaker(thinkingCircuitBreaker);
     await emit({ time: t, type: 'session:output-set', payload: { output } });
+    await maybeCheckpoint('terminal');
+    let deliveryError: string | undefined;
+    try {
+      await ensureRemoteDeliveryForCommittedSession();
+    } catch (error) {
+      deliveryError = errorMsg(error);
+    }
 
-    if (failed) {
-      const error = failedOutput?.error ?? 'Execution failed';
+    const terminalFailed = failed || Boolean(deliveryError);
+
+    if (terminalFailed) {
+      const error = [failedOutput?.error ?? (failed ? 'Execution failed' : undefined), deliveryError ? `Remote delivery failed: ${deliveryError}` : undefined]
+        .filter((line): line is string => Boolean(line))
+        .join('\n') || 'Execution failed';
+      const failureType = failedOutput?.failureType ?? (deliveryError ? 'delivery_failure' : undefined);
       await emit({ time: t, type: 'session:error-change', payload: { error } });
-      const llmStatus = makeLlmStatus('failed', failedOutput?.failureType
-        ? `${failedOutput.failureType}: ${failedOutput.error || 'Execution failed.'}`
-        : (failedOutput?.error || 'Execution failed.'), failedOutput?.failureType);
+      const llmStatus = makeLlmStatus(
+        'failed',
+        failureType ? `${failureType}: ${error}` : error,
+        failureType,
+      );
       lastLlmStatusEmission = {
         key: llmStatusIdentityKey(llmStatus),
         emittedAt: parseTimestamp(llmStatus.updatedAt),
@@ -335,31 +1724,67 @@ async function main(): Promise<void> {
       await emit({ time: t, type: 'session:status-change', payload: { status: 'completed' } });
     }
 
+    await finalizeCheckpoint(terminalFailed ? 'failed' : 'completed', t);
+
     // Write assistant response as chat message
     if (primaryOutput?.response) {
       await emit({ time: t, type: 'session:chat-message', payload: { message: { role: 'assistant', content: primaryOutput.response, time: t } } });
     }
 
-    clearInterval(heartbeatInterval);
-    process.exit(failed ? 1 : 0);
+    await lifecycle.cleanup();
+    if (terminalFailed) {
+      await lifecycle.complete('FAILED');
+      await emitLifecyclePhaseChange('FAILED');
+    } else {
+      await lifecycle.complete('COMPLETED');
+      await emitLifecyclePhaseChange('COMPLETED');
+    }
+
+    process.exit(terminalFailed ? 1 : 0);
   } catch (error) {
     if (cancelled) {
-      clearInterval(heartbeatInterval);
+      await markCheckpointInterrupted(iso(), 'Interrupted during cancellation path.');
+      await lifecycle.cleanup();
+      await lifecycle.complete('CANCELLED');
+      await emitLifecyclePhaseChange('CANCELLED');
       process.exit(130);
     }
 
     const t = iso();
-    const errorText = errorMsg(error);
-    await emit({ time: t, type: 'session:error-change', payload: { error: errorText } });
-    const llmStatus = makeLlmStatus('failed', errorText);
+    const lifecyclePhase = lifecycle.phase;
+    const lifecycleError = error instanceof SessionLifecycleError
+      ? error
+      : await lifecycle.failAt(lifecyclePhase, errorMsg(error), error);
+    const errorText = formatLifecyclePhaseFailure(lifecycleError.phase, errorMsg(error));
+    resetThinkingCircuitBreaker(thinkingCircuitBreaker);
+    await maybeCheckpoint('terminal');
+    let deliveryError: string | undefined;
+    try {
+      await ensureRemoteDeliveryForCommittedSession();
+    } catch (deliveryFailure) {
+      deliveryError = errorMsg(deliveryFailure);
+    }
+    const finalError = deliveryError
+      ? `${errorText}\nRemote delivery failed: ${deliveryError}`
+      : errorText;
+
+    const cleanupErrors = lifecycle.diagnostics.cleanupErrors;
+    const errorWithCleanup = appendCleanupErrors(finalError, cleanupErrors);
+
+    await emit({ time: t, type: 'session:error-change', payload: { error: errorWithCleanup } });
+    const llmStatus = makeLlmStatus('failed', errorWithCleanup, deliveryError ? 'delivery_failure' : lifecycleError.type);
     lastLlmStatusEmission = {
       key: llmStatusIdentityKey(llmStatus),
       emittedAt: parseTimestamp(llmStatus.updatedAt),
     };
     await emit({ time: t, type: 'session:llm-status-change', payload: { llmStatus } });
     await emit({ time: t, type: 'session:status-change', payload: { status: 'failed' } });
+    await finalizeCheckpoint('failed', t);
 
-    clearInterval(heartbeatInterval);
+    await lifecycle.cleanup();
+    await lifecycle.complete('FAILED');
+    await emitLifecyclePhaseChange('FAILED');
+
     process.exit(1);
   }
 
@@ -467,6 +1892,14 @@ async function main(): Promise<void> {
         const status = normalizeTodoStatus(args.status);
         if (status) {
           void emit({ time: iso(), type: 'session:todo-item-toggled', payload: { itemId: id, done: status === 'done', status } });
+          if (status === 'done') {
+            if (!todoDoneCheckpointed.has(id)) {
+              todoDoneCheckpointed.add(id);
+              void maybeCheckpoint('todo-completed', { todoId: id, todoTitle: str(args.title) || undefined });
+            }
+          } else {
+            todoDoneCheckpointed.delete(id);
+          }
         }
       }
     } catch {
@@ -584,6 +2017,80 @@ function str(value: unknown): string {
 function compact(text: string, maxChars: number): string {
   const c = text.replace(/\s+/g, ' ').trim();
   return c.length <= maxChars ? c : `${c.slice(0, Math.max(0, maxChars - 3))}...`;
+}
+
+interface ParsedGitHubRemote {
+  host: string;
+  owner: string;
+  repo: string;
+}
+
+function parseGitHubRemote(remoteUrl: string): ParsedGitHubRemote | undefined {
+  const trimmed = remoteUrl.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+
+  const sshMatch = trimmed.match(/^git@([^:]+):(.+)$/);
+  if (sshMatch) {
+    return normalizeGitHubRemote(sshMatch[1], sshMatch[2]);
+  }
+
+  const sshProtocolMatch = trimmed.match(/^ssh:\/\/git@([^/]+)\/(.+)$/);
+  if (sshProtocolMatch) {
+    return normalizeGitHubRemote(sshProtocolMatch[1], sshProtocolMatch[2]);
+  }
+
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol === 'https:' || parsed.protocol === 'http:') {
+      return normalizeGitHubRemote(parsed.hostname, parsed.pathname.replace(/^\/+/, ''));
+    }
+  } catch {
+    return undefined;
+  }
+
+  return undefined;
+}
+
+function normalizeGitHubRemote(host: string, path: string): ParsedGitHubRemote | undefined {
+  const cleanHost = host.trim().toLowerCase();
+  const cleanPath = path.trim().replace(/\.git$/, '').replace(/^\/+/, '');
+  const parts = cleanPath.split('/').filter(Boolean);
+  if (parts.length < 2) {
+    return undefined;
+  }
+
+  return {
+    host: cleanHost,
+    owner: parts[0],
+    repo: parts[1],
+  };
+}
+
+function buildGitHubApiBaseUrl(host: string): string {
+  const normalizedHost = host.trim().toLowerCase();
+  if (normalizedHost === 'github.com') {
+    return 'https://api.github.com';
+  }
+  return `https://${normalizedHost}/api/v3`;
+}
+
+function formatGitHubApiError(response: GitHubApiResponse): string {
+  const statusPart = `HTTP ${response.status}`;
+  if (response.body && typeof response.body === 'object' && !Array.isArray(response.body)) {
+    const body = response.body as Record<string, unknown>;
+    const message = typeof body.message === 'string' ? body.message : undefined;
+    if (message) {
+      return `${statusPart}: ${message}`;
+    }
+  }
+
+  if (typeof response.body === 'string' && response.body.trim()) {
+    return `${statusPart}: ${response.body.trim()}`;
+  }
+
+  return statusPart;
 }
 
 function previewToolPayload(value: string | undefined): string {
@@ -706,17 +2213,44 @@ function deriveLlmStatus(event: DagEvent, t: string): SessionLlmStatus | undefin
       return makeLlmStatus('completed', 'Run completed successfully.', undefined, 'taskId' in event ? event.taskId : undefined, 'implementation');
     case 'task:failed':
     case 'graph:failed':
-      return makeLlmStatus('failed',
-        event.type === 'task:failed' && event.failureType ? `${event.failureType}: ${event.error}` : event.error,
+      return makeLlmStatus(
+        'failed',
+        event.type === 'task:failed'
+          ? `${event.failureType ? `${event.failureType}: ` : ''}${event.error} (attempt ${event.attempt}/${event.maxRetries + 1}, ${event.totalDurationMs}ms elapsed)`
+          : event.error,
         event.type === 'task:failed' ? event.failureType : undefined,
-        'taskId' in event ? event.taskId : undefined);
+        'taskId' in event ? event.taskId : undefined,
+      );
     default:
       return undefined;
   }
 }
 
-function toUiEvent(runId: string, event: DagEvent, t: string): { time: string; runId: string; type: string; taskId?: string; failureType?: string; message: string } | undefined {
-  const base = { time: t, runId, type: event.type, taskId: 'taskId' in event ? event.taskId : undefined, failureType: event.type === 'task:failed' ? event.failureType : undefined };
+function toUiEvent(
+  runId: string,
+  event: DagEvent,
+  t: string,
+): {
+  time: string;
+  runId: string;
+  type: string;
+  taskId?: string;
+  failureType?: string;
+  attempt?: number;
+  maxRetries?: number;
+  totalDurationMs?: number;
+  message: string;
+} | undefined {
+  const base = {
+    time: t,
+    runId,
+    type: event.type,
+    taskId: 'taskId' in event ? event.taskId : undefined,
+    failureType: event.type === 'task:failed' ? event.failureType : undefined,
+    attempt: event.type === 'task:failed' ? event.attempt : undefined,
+    maxRetries: event.type === 'task:failed' ? event.maxRetries : undefined,
+    totalDurationMs: event.type === 'task:failed' ? event.totalDurationMs : undefined,
+  };
   const tag = (msg: string) => `[run:${runId}] ${msg}`;
 
   switch (event.type) {
@@ -737,7 +2271,12 @@ function toUiEvent(runId: string, event: DagEvent, t: string): { time: string; r
     case 'task:started': return { ...base, message: tag(`${event.taskId}: started`) };
     case 'task:validating': return { ...base, message: tag(`${event.taskId}: validating`) };
     case 'task:completed': return { ...base, message: tag(`${event.taskId}: completed`) };
-    case 'task:failed': return { ...base, message: tag(`${event.taskId}: failed${event.failureType ? ` [${event.failureType}]` : ''} (${event.error})`) };
+    case 'task:failed': return {
+      ...base,
+      message: tag(
+        `${event.taskId}: failed${event.failureType ? ` [${event.failureType}]` : ''} (${event.error}) attempt ${event.attempt}/${event.maxRetries + 1}, elapsed ${event.totalDurationMs}ms`,
+      ),
+    };
     case 'graph:completed': return { ...base, message: tag(`graph completed (${event.outputs.size} outputs)`) };
     case 'graph:failed': return { ...base, message: tag(`graph failed (${event.error})`) };
     case 'task:retrying': return { ...base, message: tag(`${event.taskId}: retrying ${event.attempt}/${event.maxRetries}`) };
@@ -745,11 +2284,10 @@ function toUiEvent(runId: string, event: DagEvent, t: string): { time: string; r
   }
 }
 
-function buildSingleTaskGraph(id: string, prompt: string): TaskGraph {
-  const raw = process.env.ORCHESTRACE_VERIFY_COMMANDS;
-  const commands = raw
-    ? raw.split(';').map((s) => s.trim()).filter(Boolean)
-    : ['pnpm typecheck', 'pnpm test'];
+function buildSingleTaskGraph(id: string, prompt: string, routeCategory: TaskRouteCategory = 'code_change'): TaskGraph {
+  const commands = parseAndSanitizeVerifyCommands(process.env.ORCHESTRACE_VERIFY_COMMANDS);
+  const nodeType = routeCategory === 'refactor' ? 'refactor' : 'code';
+  const validationCommands = routeCategory === 'investigation' ? [] : commands;
 
   return {
     id: `ui-${id}`,
@@ -757,49 +2295,104 @@ function buildSingleTaskGraph(id: string, prompt: string): TaskGraph {
     nodes: [{
       id: 'task',
       name: 'Execute UI prompt',
-      type: 'code',
+      type: nodeType,
       prompt,
       dependencies: [],
-      validation: { commands, maxRetries: 2, retryDelayMs: 0 },
+      validation: { commands: validationCommands, maxRetries: 2, retryDelayMs: 0 },
+      meta: { routeCategory },
     }],
   };
 }
 
-function buildSystemPrompt(config: SessionConfig, phase: 'planning' | 'implementation'): string {
+async function runShellCommandRoute(command: string, cwd: string): Promise<Map<string, TaskOutput>> {
+  const startedAt = Date.now();
+  try {
+    const { stdout, stderr } = await execFileAsync('sh', ['-lc', command], { cwd });
+    const text = `${stdout ?? ''}${stderr ?? ''}`.trim();
+    return new Map([
+      ['task', {
+        taskId: 'task',
+        status: 'completed',
+        response: text || `Command executed: ${command}`,
+        durationMs: Date.now() - startedAt,
+        retries: 0,
+      }],
+    ]);
+  } catch (error) {
+    const err = error as ExecFileException;
+    const details = `${err.stdout ?? ''}${err.stderr ?? ''}`.trim();
+    return new Map([
+      ['task', {
+        taskId: 'task',
+        status: 'failed',
+        response: details || undefined,
+        durationMs: Date.now() - startedAt,
+        retries: 0,
+        error: err.message,
+      }],
+    ]);
+  }
+}
+
+function buildSystemPrompt(config: SessionConfig, phase: 'planning' | 'implementation', effort: TaskEffort = 'high'): string {
+  const isLowEffort = effort === 'trivial' || effort === 'low';
+
   const phaseRules = phase === 'planning'
     ? [
-      'Produce a concrete implementation plan with explicit staged execution and validation steps.',
+      'Create an implementation plan scaled to the task complexity.',
       'Do not perform direct code edits in planning mode.',
-      'Planning output must be highly granular and atomic: each task should represent one action and one completion outcome.',
-      'Split broad, multi-area, or multi-step tasks into smaller independent tasks before finalizing.',
-      'Each planned task must include explicit dependencies, concrete done criteria, and at least one verification command.',
-      'Planning must produce and maintain todo_set and agent_graph_set state.',
+      'Each planned task must include explicit done criteria and a verification command.',
+      'Planning must produce todo_set and agent_graph_set state.',
       'todo_set items must include numeric weight values and the total todo weight must sum to 100.',
       'agent_graph_set nodes must include numeric weight values and the total node weight must sum to 100.',
-      'Planning must use subagent_spawn or subagent_spawn_batch for focused parallel research and delegate only relevant context.',
-      'For independent nodes, use subagent_spawn_batch so work runs in parallel.',
-      'For multi-file inspection, use read_files with concurrency to reduce latency; avoid repeated single-file reads when possible.',
-      'Pass nodeId for each sub-agent request so graph status stays current.',
-      'Keep todo and dependency graph state synchronized.',
+      '',
+      '## Sub-agent delegation (your choice)',
+      'subagent_spawn / subagent_spawn_batch are available for delegating focused research and investigation.',
+      'YOU decide whether and how many sub-agents to use based on the task scope:',
+      '- Simple tasks: skip sub-agents, do the investigation yourself',
+      '- Moderate tasks: 1-2 sub-agents for focused parallel research if it helps',
+      '- Complex tasks: spawn as many sub-agents as needed to cover independent investigation areas',
+      'When using sub-agents, prefer subagent_spawn_batch for independent parallel work.',
+      'When using sub-agents, pass nodeId referencing agent_graph_set nodes so progress tracking works.',
+      'Keep parent orientation lightweight and push detailed file reading/search into sub-agent scopes when you do delegate.',
+      '',
+      `Task effort: ${effort}. Scale planning depth accordingly.`,
       'Do not ask the user to continue after partial progress; continue autonomously until completion or a concrete blocker is reached.',
       'For transient tool or sub-agent failures (timeouts, aborts, rate limits), retry automatically before surfacing a blocker.',
     ]
     : [
       'Execute approved work with minimal, scoped edits and verify outcomes.',
       'Read before editing, and use tool output to adapt after failures.',
-      'Read todo_get and agent_graph_get before coding, then keep todo_update current while implementing.',
-      'Use subagent_spawn or subagent_spawn_batch to execute parallelizable slices with minimal relevant context per agent.',
-      'For independent nodes, use subagent_spawn_batch so work runs in parallel.',
-      'For multi-file inspection, use read_files with concurrency to reduce latency; avoid repeated single-file reads when possible.',
-      'Pass nodeId for each sub-agent request so graph status stays current.',
+      ...(isLowEffort
+        ? []
+        : [
+          'Read todo_get and agent_graph_get before coding, then keep todo_update current while implementing.',
+        ]),
+      '',
+      '## Sub-agent delegation (your choice)',
+      'subagent_spawn / subagent_spawn_batch are available for parallel implementation.',
+      'YOU decide whether to use sub-agents based on the remaining work:',
+      '- Simple tasks: implement directly, no sub-agents needed',
+      '- Multi-file changes: spawn sub-agents to parallelize independent slices',
+      'When using sub-agents, prefer subagent_spawn_batch for independent parallel work.',
+      'When using sub-agents, pass nodeId so progress tracking stays current.',
+      'For multi-file inspection, use read_files with concurrency to reduce latency.',
+      '',
+      `Task effort: ${effort}. Scale coordination overhead accordingly.`,
       'Use github_api for GitHub REST/GraphQL operations; do not use gh CLI.',
       'Iterate until validation passes or a true blocker is reached.',
       'After each push or PR update, query remote CI/check status with github_api and keep fixing/re-pushing until checks pass or a true blocker is reached.',
-      'Do not stop at green checks alone: verify PR mergeability, required checks, and review state via github_api, then keep iterating until the PR is merge-ready or a true blocker is reached.',
-      'Always run `git fetch origin` before checking remote branch state, merge status, or pushing. Never trust local tracking refs without fetching first.',
+      'Always run `git fetch origin` before checking remote branch state, merge status, or pushing.',
       'Do not ask the user to continue after partial progress; continue autonomously until completion or a concrete blocker is reached.',
       'For transient tool or sub-agent failures (timeouts, aborts, rate limits), retry automatically before surfacing a blocker.',
     ];
+
+  const phaseProvider = phase === 'planning'
+    ? (config.planningProvider ?? config.provider)
+    : (config.implementationProvider ?? config.provider);
+  const phaseModel = phase === 'planning'
+    ? (config.planningModel ?? config.model)
+    : (config.implementationModel ?? config.model);
 
   return renderPromptSections([
     { name: PromptSectionName.Identity, lines: [
@@ -814,7 +2407,7 @@ function buildSystemPrompt(config: SessionConfig, phase: 'planning' | 'implement
     { name: PromptSectionName.PhaseRules, lines: phaseRules },
     { name: PromptSectionName.SessionContext, lines: [
       `Workspace: ${config.workspacePath}`,
-      `Provider/Model: ${config.provider}/${config.model}`,
+      `Provider/Model: ${phaseProvider}/${phaseModel}`,
       `Original task prompt: ${config.prompt}`,
     ] },
   ]);
@@ -849,12 +2442,22 @@ async function completeWithRetry(
 ): Promise<{ text: string; usage?: { input: number; output: number; cost: number } }> {
   let lastError: unknown;
   for (let attempt = 1; attempt <= SUBAGENT_RETRY_MAX_ATTEMPTS; attempt++) {
+    const startedAt = Date.now();
     try {
       return await agent.complete(prompt, signal);
     } catch (err) {
       lastError = err;
-      if (attempt >= SUBAGENT_RETRY_MAX_ATTEMPTS || !isRetryable(err)) throw err;
-      await new Promise<void>((r) => setTimeout(r, SUBAGENT_RETRY_BASE_DELAY_MS * attempt));
+      const elapsedMs = Date.now() - startedAt;
+      const retryable = isRetryable(err);
+      const exhausted = attempt >= SUBAGENT_RETRY_MAX_ATTEMPTS;
+      const retryDelayMs = retryable && !exhausted ? SUBAGENT_RETRY_BASE_DELAY_MS * attempt : 0;
+
+      console.warn(
+        `[runner] Sub-agent LLM attempt failed (attempt=${attempt}/${SUBAGENT_RETRY_MAX_ATTEMPTS}, elapsedMs=${elapsedMs}, retryable=${retryable}, retryDelayMs=${retryDelayMs}): ${errorMsg(err)}`,
+      );
+
+      if (exhausted || !retryable) throw err;
+      await new Promise<void>((r) => setTimeout(r, retryDelayMs));
     }
   }
   throw lastError instanceof Error ? lastError : new Error(errorMsg(lastError));
@@ -894,6 +2497,66 @@ function parseResultJson(text: string): Record<string, unknown> | undefined {
     } catch { /* next */ }
   }
   return undefined;
+}
+
+export function parsePrMetadataResponse(
+  text: string,
+  taskRanges: Array<{ todoId: string; todoTitle: string }>,
+  isObserverSession?: boolean,
+): {
+  branchName: string;
+  prTitle: string;
+  prDescription: string;
+  taskCommitMessages: Array<{ todoId: string; message: string }>;
+  fallbackCommitMessage: string;
+} | undefined {
+  const parsed = parseResultJson(text);
+  if (!parsed) return undefined;
+
+  const branchName = typeof parsed.branchName === 'string' ? parsed.branchName.trim() : '';
+  let prTitle = typeof parsed.prTitle === 'string' ? parsed.prTitle.trim() : '';
+  const prDescription = typeof parsed.prDescription === 'string' ? parsed.prDescription.trim() : '';
+  const fallbackCommitMessage = typeof parsed.fallbackCommitMessage === 'string'
+    ? parsed.fallbackCommitMessage.trim()
+    : (typeof parsed.commitMessage === 'string' ? parsed.commitMessage.trim() : '');
+
+  if (!branchName || !prTitle || !fallbackCommitMessage) return undefined;
+
+  // Sanitize branch name: only allow alphanumeric, hyphens, slashes, dots
+  const safeBranch = branchName.replace(/[^a-zA-Z0-9/._-]/g, '-').replace(/-{2,}/g, '-').slice(0, 60);
+
+  // Add [Observer fix] prefix if this is an observer session and the prefix is not already present
+  if (isObserverSession && !prTitle.startsWith('[Observer fix]')) {
+    prTitle = `[Observer fix] ${prTitle}`.slice(0, 80);
+  }
+
+  // Parse per-task commit messages
+  const rawTaskMessages = Array.isArray(parsed.taskCommitMessages) ? parsed.taskCommitMessages : [];
+  const taskCommitMessages: Array<{ todoId: string; message: string }> = [];
+  const parsedMap = new Map<string, string>();
+  for (const item of rawTaskMessages) {
+    if (!item || typeof item !== 'object') continue;
+    const r = item as Record<string, unknown>;
+    const todoId = typeof r.todoId === 'string' ? r.todoId.trim() : '';
+    const message = typeof r.message === 'string' ? r.message.trim() : '';
+    if (todoId && message) parsedMap.set(todoId, message.slice(0, 120));
+  }
+
+  // Ensure one message per task range, falling back to todoTitle
+  for (const range of taskRanges) {
+    taskCommitMessages.push({
+      todoId: range.todoId,
+      message: parsedMap.get(range.todoId) ?? compact(range.todoTitle, 72),
+    });
+  }
+
+  return {
+    branchName: safeBranch,
+    prTitle: prTitle.slice(0, 120),
+    prDescription: prDescription || prTitle,
+    taskCommitMessages,
+    fallbackCommitMessage: fallbackCommitMessage.slice(0, 120),
+  };
 }
 
 function strList(value: unknown): string[] {
@@ -985,7 +2648,10 @@ function normalizeTodoStatus(value: unknown): 'todo' | 'in_progress' | 'done' | 
 // Run
 // ---------------------------------------------------------------------------
 
-void main().catch((err) => {
-  console.error('[runner] Fatal error:', err);
-  process.exit(1);
-});
+// Only run main if this is the actual CLI entry point, not when imported as a module (e.g., for testing)
+if (process.argv[2] && process.argv[3]) {
+  void main().catch((err) => {
+    console.error('[runner] Fatal error:', err);
+    process.exit(1);
+  });
+}

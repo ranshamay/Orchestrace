@@ -13,6 +13,7 @@ import {
   type Workspace,
   fetchObserverStatus,
   fetchObserverFindings,
+  fetchObserverFailedSessions,
   fetchModels,
   enableObserver,
   disableObserver,
@@ -20,6 +21,7 @@ import {
   triggerObserverAnalysis,
   type ObserverStatusResponse,
   type ObserverFinding,
+  type ObserverFailedSessionMonitor,
 } from '../../../lib/api';
 import type { SettingsSaveToastState } from '../overlays/SettingsSaveToast';
 import { ModelAutocomplete } from '../ModelAutocomplete';
@@ -39,15 +41,108 @@ const ASSESSMENT_CATEGORY_OPTIONS: Array<{ value: AssessmentCategory; label: str
   { value: 'test-coverage', label: 'Test Coverage' },
 ];
 
+function useConnectedDefaultProviderModels(params: {
+  connectedDefaultProviders: ProviderInfo[];
+  provider: string;
+  model: string;
+  setModel: (next: string) => void;
+}) {
+  const {
+    connectedDefaultProviders,
+    provider,
+    model,
+    setModel,
+  } = params;
+
+  const [models, setModels] = useState<string[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [resolvedFor, setResolvedFor] = useState('');
+
+  useEffect(() => {
+    if (!provider) {
+      setLoading(false);
+      setResolvedFor('');
+      setModels([]);
+      return;
+    }
+
+    if (!connectedDefaultProviders.some((entry) => entry.id === provider)) {
+      setLoading(false);
+      setResolvedFor('');
+      setModels([]);
+      return;
+    }
+
+    let cancelled = false;
+    setLoading(true);
+    setResolvedFor('');
+    void fetchModels(provider)
+      .then((response) => {
+        if (cancelled) {
+          return;
+        }
+
+        setModels(response.models);
+        setLoading(false);
+        setResolvedFor(provider);
+      })
+      .catch(() => {
+        if (cancelled) {
+          return;
+        }
+
+        setModels([]);
+        setLoading(false);
+        setResolvedFor(provider);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [connectedDefaultProviders, provider]);
+
+  useEffect(() => {
+    if (!provider) {
+      return;
+    }
+
+    if (loading) {
+      return;
+    }
+
+    if (resolvedFor !== provider) {
+      return;
+    }
+
+    if (models.length === 0) {
+      return;
+    }
+
+    if (model.length > 0 && models.includes(model)) {
+      return;
+    }
+
+    setModel(models[0]);
+  }, [loading, model, models, provider, resolvedFor, setModel]);
+
+  return { models, loading };
+}
+
 type Props = {
   providers: ProviderInfo[];
   providerStatuses: Array<{ provider: string; source: string }>;
   workspaces: Workspace[];
   activeWorkspaceId: string;
-  defaultProvider: string;
-  defaultModel: string;
-  setDefaultProvider: (next: string) => void;
-  setDefaultModel: (next: string) => void;
+  defaultPlanningProvider: string;
+  defaultPlanningModel: string;
+  defaultImplementationProvider: string;
+  defaultImplementationModel: string;
+  defaultPlanningNoToolGuardMode: 'enforce' | 'warn';
+  setDefaultPlanningProvider: (next: string) => void;
+  setDefaultPlanningModel: (next: string) => void;
+  setDefaultImplementationProvider: (next: string) => void;
+  setDefaultImplementationModel: (next: string) => void;
+  setDefaultPlanningNoToolGuardMode: (next: 'enforce' | 'warn') => void;
   observerShowFindings: boolean;
   setObserverShowFindings: (next: boolean) => void;
   onSettingsSaveStatus: (state: Exclude<SettingsSaveToastState, 'idle'>, message: string) => void;
@@ -58,10 +153,16 @@ export function SettingsTabView({
   providerStatuses,
   workspaces,
   activeWorkspaceId,
-  defaultProvider,
-  defaultModel,
-  setDefaultProvider,
-  setDefaultModel,
+  defaultPlanningProvider,
+  defaultPlanningModel,
+  defaultImplementationProvider,
+  defaultImplementationModel,
+  defaultPlanningNoToolGuardMode,
+  setDefaultPlanningProvider,
+  setDefaultPlanningModel,
+  setDefaultImplementationProvider,
+  setDefaultImplementationModel,
+  setDefaultPlanningNoToolGuardMode,
   observerShowFindings,
   setObserverShowFindings,
   onSettingsSaveStatus,
@@ -76,9 +177,6 @@ export function SettingsTabView({
   const [providerAuthSessions, setProviderAuthSessions] = useState<Record<string, ProviderAuthSession>>({});
   const [providerAuthPromptInputs, setProviderAuthPromptInputs] = useState<Record<string, string>>({});
   const [providersCollapsed, setProvidersCollapsed] = useState(false);
-  const [defaultProviderModels, setDefaultProviderModels] = useState<string[]>([]);
-  const [defaultProviderModelsLoading, setDefaultProviderModelsLoading] = useState(false);
-  const [defaultProviderModelsResolvedFor, setDefaultProviderModelsResolvedFor] = useState('');
 
   const connectedDefaultProviders = useMemo(() => {
     const connectedProviderIds = new Set(
@@ -90,6 +188,20 @@ export function SettingsTabView({
   useEffect(() => {
     setDisplayProviderStatuses(providerStatuses);
   }, [providerStatuses]);
+
+  const planningDefaults = useConnectedDefaultProviderModels({
+    connectedDefaultProviders,
+    provider: defaultPlanningProvider,
+    model: defaultPlanningModel,
+    setModel: setDefaultPlanningModel,
+  });
+
+  const implementationDefaults = useConnectedDefaultProviderModels({
+    connectedDefaultProviders,
+    provider: defaultImplementationProvider,
+    model: defaultImplementationModel,
+    setModel: setDefaultImplementationModel,
+  });
 
   useEffect(() => {
     const sessionEntries = Object.entries(providerAuthSessionIds);
@@ -244,98 +356,6 @@ export function SettingsTabView({
     };
   }, [deviceAuthSession, deviceAuthSessionId]);
 
-  useEffect(() => {
-    if (!defaultProvider) {
-      setDefaultProviderModelsLoading(false);
-      setDefaultProviderModelsResolvedFor('');
-      setDefaultProviderModels([]);
-      return;
-    }
-
-    if (!connectedDefaultProviders.some((provider) => provider.id === defaultProvider)) {
-      setDefaultProviderModelsLoading(false);
-      setDefaultProviderModelsResolvedFor('');
-      setDefaultProviderModels([]);
-      return;
-    }
-
-    let cancelled = false;
-    setDefaultProviderModelsLoading(true);
-    setDefaultProviderModelsResolvedFor('');
-    void fetchModels(defaultProvider)
-      .then((response) => {
-        if (cancelled) {
-          return;
-        }
-
-        setDefaultProviderModels(response.models);
-        setDefaultProviderModelsLoading(false);
-        setDefaultProviderModelsResolvedFor(defaultProvider);
-      })
-      .catch(() => {
-        if (cancelled) {
-          return;
-        }
-
-        setDefaultProviderModels([]);
-        setDefaultProviderModelsLoading(false);
-        setDefaultProviderModelsResolvedFor(defaultProvider);
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [connectedDefaultProviders, defaultProvider]);
-
-  useEffect(() => {
-    if (!defaultProvider) {
-      return;
-    }
-
-    if (connectedDefaultProviders.some((provider) => provider.id === defaultProvider)) {
-      return;
-    }
-
-    setDefaultProvider('');
-  }, [connectedDefaultProviders, defaultProvider, setDefaultProvider]);
-
-  useEffect(() => {
-    if (!defaultProvider) {
-      if (defaultModel) {
-        setDefaultModel('');
-      }
-      return;
-    }
-
-    if (defaultProviderModelsLoading) {
-      return;
-    }
-
-    if (defaultProviderModelsResolvedFor !== defaultProvider) {
-      return;
-    }
-
-    if (defaultProviderModels.length === 0) {
-      if (defaultModel) {
-        setDefaultModel('');
-      }
-      return;
-    }
-
-    if (defaultModel.length > 0 && defaultProviderModels.includes(defaultModel)) {
-      return;
-    }
-
-    setDefaultModel(defaultProviderModels[0]);
-  }, [
-    defaultModel,
-    defaultProvider,
-    defaultProviderModels,
-    defaultProviderModelsLoading,
-    defaultProviderModelsResolvedFor,
-    setDefaultModel,
-  ]);
-
   return (
     <div className="h-full overflow-auto p-8 dark:bg-slate-950">
       <h2 className="mb-5 flex items-center gap-2 text-2xl font-bold text-slate-800 dark:text-slate-100">
@@ -346,48 +366,113 @@ export function SettingsTabView({
       <div className="mb-6 rounded-lg border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-700 dark:bg-slate-900">
         <h3 className="mb-3 text-xs font-bold uppercase tracking-widest text-slate-500 dark:text-slate-400">Defaults</h3>
         <div className="mb-3 text-xs text-slate-600 dark:text-slate-300">
-          Configure the default provider and model for <span className="font-semibold">new sessions</span>. If a default is not set, the existing fallback selection is used.
+          Configure separate planning and implementation model defaults for <span className="font-semibold">new sessions</span>. If a default is not set, the existing fallback selection is used.
         </div>
-        <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
-          <label className="flex flex-col gap-1 text-sm text-slate-700 dark:text-slate-200">
-            <span className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">Default provider</span>
-            <select
-              className="rounded border border-slate-200 px-2 py-1.5 text-sm dark:border-slate-700 dark:bg-slate-900"
-              value={defaultProvider}
-              onChange={(event) => {
-                setDefaultProvider(event.target.value);
-              }}
-            >
-              <option value="">Use automatic fallback</option>
-              {connectedDefaultProviders.length === 0 && (
-                <option value="" disabled>No connected providers</option>
-              )}
-              {connectedDefaultProviders.map((provider) => (
-                <option key={provider.id} value={provider.id}>{provider.id}</option>
-              ))}
-            </select>
-          </label>
-          <label className="flex flex-col gap-1 text-sm text-slate-700 dark:text-slate-200">
-            <span className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">Default model</span>
-            <ModelAutocomplete
-              models={defaultProviderModels}
-              value={defaultModel}
-              onChange={setDefaultModel}
-              placeholder={defaultProvider ? 'Search models…' : 'Select provider first'}
-              disabled={!defaultProvider || defaultProviderModels.length === 0}
-            />
-          </label>
-        </div>
-        {defaultProvider && defaultProviderModels.length === 0 && (
-          <div className="mt-3 text-xs text-amber-700 dark:text-amber-300">
-            No models available for the selected provider (or provider is not connected).
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+          <div className="rounded border border-slate-200 p-3 dark:border-slate-700">
+            <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">Planning Phase</div>
+            <div className="grid grid-cols-1 gap-2">
+              <label className="flex flex-col gap-1 text-sm text-slate-700 dark:text-slate-200">
+                <span className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">Provider</span>
+                <select
+                  className="rounded border border-slate-200 px-2 py-1.5 text-sm dark:border-slate-700 dark:bg-slate-900"
+                  value={defaultPlanningProvider}
+                  onChange={(event) => {
+                    setDefaultPlanningProvider(event.target.value);
+                  }}
+                >
+                  <option value="">Use automatic fallback</option>
+                  {connectedDefaultProviders.length === 0 && (
+                    <option value="" disabled>No connected providers</option>
+                  )}
+                  {connectedDefaultProviders.map((provider) => (
+                    <option key={provider.id} value={provider.id}>{provider.id}</option>
+                  ))}
+                </select>
+              </label>
+              <label className="flex flex-col gap-1 text-sm text-slate-700 dark:text-slate-200">
+                <span className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">Model</span>
+                <ModelAutocomplete
+                  models={planningDefaults.models}
+                  value={defaultPlanningModel}
+                  onChange={setDefaultPlanningModel}
+                  placeholder={defaultPlanningProvider ? 'Search models…' : 'Select provider first'}
+                  disabled={!defaultPlanningProvider || planningDefaults.models.length === 0}
+                />
+              </label>
+            </div>
+            {defaultPlanningProvider && planningDefaults.models.length === 0 && !planningDefaults.loading && (
+              <div className="mt-2 text-xs text-amber-700 dark:text-amber-300">
+                No models available for the selected planning provider (or provider is not connected).
+              </div>
+            )}
           </div>
-        )}
+
+          <div className="rounded border border-slate-200 p-3 dark:border-slate-700">
+            <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">Implementation Phase</div>
+            <div className="grid grid-cols-1 gap-2">
+              <label className="flex flex-col gap-1 text-sm text-slate-700 dark:text-slate-200">
+                <span className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">Provider</span>
+                <select
+                  className="rounded border border-slate-200 px-2 py-1.5 text-sm dark:border-slate-700 dark:bg-slate-900"
+                  value={defaultImplementationProvider}
+                  onChange={(event) => {
+                    setDefaultImplementationProvider(event.target.value);
+                  }}
+                >
+                  <option value="">Use automatic fallback</option>
+                  {connectedDefaultProviders.length === 0 && (
+                    <option value="" disabled>No connected providers</option>
+                  )}
+                  {connectedDefaultProviders.map((provider) => (
+                    <option key={provider.id} value={provider.id}>{provider.id}</option>
+                  ))}
+                </select>
+              </label>
+              <label className="flex flex-col gap-1 text-sm text-slate-700 dark:text-slate-200">
+                <span className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">Model</span>
+                <ModelAutocomplete
+                  models={implementationDefaults.models}
+                  value={defaultImplementationModel}
+                  onChange={setDefaultImplementationModel}
+                  placeholder={defaultImplementationProvider ? 'Search models…' : 'Select provider first'}
+                  disabled={!defaultImplementationProvider || implementationDefaults.models.length === 0}
+                />
+              </label>
+            </div>
+            {defaultImplementationProvider && implementationDefaults.models.length === 0 && !implementationDefaults.loading && (
+              <div className="mt-2 text-xs text-amber-700 dark:text-amber-300">
+                No models available for the selected implementation provider (or provider is not connected).
+              </div>
+            )}
+          </div>
+        </div>
         {connectedDefaultProviders.length === 0 && (
           <div className="mt-3 text-xs text-amber-700 dark:text-amber-300">
             Connect at least one provider below to select a default provider.
           </div>
         )}
+
+        <div className="mt-4 rounded border border-slate-200 p-3 dark:border-slate-700">
+          <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">Planning Guard</div>
+          <div className="mb-2 text-xs text-slate-600 dark:text-slate-300">
+            Choose whether no-tool planning guardrails should abort attempts or only emit warnings.
+          </div>
+          <label className="flex flex-col gap-1 text-sm text-slate-700 dark:text-slate-200">
+            <span className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">No-tool guard mode</span>
+            <select
+              className="rounded border border-slate-200 px-2 py-1.5 text-sm dark:border-slate-700 dark:bg-slate-900"
+              value={defaultPlanningNoToolGuardMode}
+              onChange={(event) => {
+                const next = event.target.value === 'warn' ? 'warn' : 'enforce';
+                setDefaultPlanningNoToolGuardMode(next);
+              }}
+            >
+              <option value="enforce">Enforce (abort stalled planning attempts)</option>
+              <option value="warn">Warn only (never abort from no-tool guards)</option>
+            </select>
+          </label>
+        </div>
       </div>
 
       <div className="mb-6 rounded-lg border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-700 dark:bg-slate-900">
@@ -730,12 +815,15 @@ function ObserverSection({
 }: ObserverSectionProps) {
   const [status, setStatus] = useState<ObserverStatusResponse | null>(null);
   const [findings, setFindings] = useState<ObserverFinding[]>([]);
+  const [failedSessions, setFailedSessions] = useState<ObserverFailedSessionMonitor[]>([]);
   const [loading, setLoading] = useState(true);
   const [toggling, setToggling] = useState(false);
   const [triggering, setTriggering] = useState(false);
   const [triggerResult, setTriggerResult] = useState<{ analyzed: number; findings: number; spawned: number } | null>(null);
   const [editProvider, setEditProvider] = useState('');
   const [editModel, setEditModel] = useState('');
+  const [editLogWatcherProvider, setEditLogWatcherProvider] = useState('');
+  const [editLogWatcherModel, setEditLogWatcherModel] = useState('');
   const [editFixProvider, setEditFixProvider] = useState('');
   const [editFixModel, setEditFixModel] = useState('');
   const [editCooldown, setEditCooldown] = useState('');
@@ -759,27 +847,39 @@ function ObserverSection({
 
   const refresh = useCallback(async () => {
     try {
-      const [statusRes, findingsRes] = await Promise.all([
+      const [statusRes, findingsRes, failedSessionsRes] = await Promise.all([
         fetchObserverStatus(),
         fetchObserverFindings(),
+        fetchObserverFailedSessions(),
       ]);
       setStatus(statusRes);
       setFindings(findingsRes.findings);
+      setFailedSessions(failedSessionsRes.sessions);
 
       const firstConnectedProviderId = connectedProviders[0]?.id ?? '';
       const nextAnalysisProvider = connectedProviders.some((provider) => provider.id === statusRes.config.provider)
         ? statusRes.config.provider
+        : firstConnectedProviderId;
+      const nextLogWatcherProvider = connectedProviders.some((provider) => provider.id === statusRes.config.logWatcherProvider)
+        ? statusRes.config.logWatcherProvider
         : firstConnectedProviderId;
       const nextFixProvider = connectedProviders.some((provider) => provider.id === statusRes.config.fixProvider)
         ? statusRes.config.fixProvider
         : firstConnectedProviderId;
       const providerSelectionNormalized =
         nextAnalysisProvider !== statusRes.config.provider
+        || nextLogWatcherProvider !== statusRes.config.logWatcherProvider
         || nextFixProvider !== statusRes.config.fixProvider;
 
       // Init edit fields from server config
       setEditProvider(nextAnalysisProvider);
       setEditModel(nextAnalysisProvider === statusRes.config.provider ? statusRes.config.model : '');
+      setEditLogWatcherProvider(nextLogWatcherProvider);
+      setEditLogWatcherModel(
+        nextLogWatcherProvider === statusRes.config.logWatcherProvider
+          ? statusRes.config.logWatcherModel
+          : '',
+      );
       setEditFixProvider(nextFixProvider);
       setEditFixModel(nextFixProvider === statusRes.config.fixProvider ? statusRes.config.fixModel : '');
       setEditCooldown(String(Math.round(statusRes.config.analysisCooldownMs / 1000)));
@@ -806,8 +906,10 @@ function ObserverSection({
   useEffect(() => {
     if (connectedProviders.length === 0) {
       setEditProvider('');
+      setEditLogWatcherProvider('');
       setEditFixProvider('');
       setEditModel('');
+      setEditLogWatcherModel('');
       setEditFixModel('');
       setEditMaxPromptChars('');
       setEditMaxSessionsPerBatch('');
@@ -818,6 +920,11 @@ function ObserverSection({
     }
 
     setEditProvider((current) => (
+      connectedProviders.some((provider) => provider.id === current)
+        ? current
+        : connectedProviders[0].id
+    ));
+    setEditLogWatcherProvider((current) => (
       connectedProviders.some((provider) => provider.id === current)
         ? current
         : connectedProviders[0].id
@@ -887,6 +994,24 @@ function ObserverSection({
   }, [editProvider, providerModels]);
 
   useEffect(() => {
+    if (!editLogWatcherProvider) {
+      return;
+    }
+
+    const models = providerModels[editLogWatcherProvider] ?? [];
+    if (models.length === 0) {
+      setEditLogWatcherModel('');
+      return;
+    }
+
+    setEditLogWatcherModel((current) => (
+      current.length > 0 && models.includes(current)
+        ? current
+        : models[0]
+    ));
+  }, [editLogWatcherProvider, providerModels]);
+
+  useEffect(() => {
     if (!editFixProvider) {
       return;
     }
@@ -945,7 +1070,15 @@ function ObserverSection({
   };
 
   const handleSaveConfig = useCallback(async () => {
-    if (!editProvider || !editFixProvider || !editModel || !editFixModel || editAssessmentCategories.length === 0) {
+    if (
+      !editProvider
+      || !editLogWatcherProvider
+      || !editFixProvider
+      || !editModel
+      || !editLogWatcherModel
+      || !editFixModel
+      || editAssessmentCategories.length === 0
+    ) {
       return;
     }
 
@@ -964,6 +1097,8 @@ function ObserverSection({
       await updateObserverConfig({
         provider: editProvider,
         model: editModel,
+        logWatcherProvider: editLogWatcherProvider,
+        logWatcherModel: editLogWatcherModel,
         fixProvider: editFixProvider,
         fixModel: editFixModel,
         analysisCooldownMs,
@@ -981,6 +1116,8 @@ function ObserverSection({
   }, [
     editAssessmentCategories,
     editCooldown,
+    editLogWatcherModel,
+    editLogWatcherProvider,
     editMaxPromptChars,
     editMaxSessionsPerBatch,
     editRateLimitCooldown,
@@ -1017,6 +1154,7 @@ function ObserverSection({
   const enabled = status?.config.enabled ?? false;
   const running = status?.state.running ?? false;
   const analysisModels = editProvider ? (providerModels[editProvider] ?? []) : [];
+  const logWatcherModels = editLogWatcherProvider ? (providerModels[editLogWatcherProvider] ?? []) : [];
   const fixModels = editFixProvider ? (providerModels[editFixProvider] ?? []) : [];
   const canSaveConfig =
     configDirty
@@ -1024,8 +1162,10 @@ function ObserverSection({
     && editAssessmentCategories.length > 0
     && connectedProviders.length > 0
     && editProvider.length > 0
+    && editLogWatcherProvider.length > 0
     && editFixProvider.length > 0
     && editModel.length > 0
+    && editLogWatcherModel.length > 0
     && editFixModel.length > 0
     && editMaxPromptChars.length > 0
     && editMaxSessionsPerBatch.length > 0
@@ -1035,6 +1175,8 @@ function ObserverSection({
   const configSignature = useMemo(() => JSON.stringify({
     provider: editProvider,
     model: editModel,
+    logWatcherProvider: editLogWatcherProvider,
+    logWatcherModel: editLogWatcherModel,
     fixProvider: editFixProvider,
     fixModel: editFixModel,
     analysisCooldownMs: Math.max(10, Number(editCooldown) || 60) * 1000,
@@ -1049,6 +1191,8 @@ function ObserverSection({
   }), [
     editAssessmentCategories,
     editCooldown,
+    editLogWatcherModel,
+    editLogWatcherProvider,
     editFixModel,
     editFixProvider,
     editMaxPromptChars,
@@ -1194,6 +1338,37 @@ function ObserverSection({
                 />
               </label>
               <label className="flex flex-col gap-1 text-xs text-slate-700 dark:text-slate-200">
+                <span className="text-[10px] uppercase tracking-wide text-slate-500 dark:text-slate-400">Log Watcher Provider</span>
+                <select
+                  className="rounded border border-slate-200 px-2 py-1.5 text-xs dark:border-slate-700 dark:bg-slate-900"
+                  value={editLogWatcherProvider}
+                  onChange={(event) => {
+                    setEditLogWatcherProvider(event.target.value);
+                    setEditLogWatcherModel('');
+                    markDirty();
+                  }}
+                  disabled={connectedProviders.length === 0}
+                >
+                  {connectedProviders.length === 0 && <option value="">No connected providers</option>}
+                  {connectedProviders.map((provider) => (
+                    <option key={provider.id} value={provider.id}>{provider.id}</option>
+                  ))}
+                </select>
+              </label>
+              <label className="flex flex-col gap-1 text-xs text-slate-700 dark:text-slate-200">
+                <span className="text-[10px] uppercase tracking-wide text-slate-500 dark:text-slate-400">Log Watcher Model</span>
+                <ModelAutocomplete
+                  models={logWatcherModels}
+                  value={editLogWatcherModel}
+                  onChange={(model) => {
+                    setEditLogWatcherModel(model);
+                    markDirty();
+                  }}
+                  placeholder="Search models…"
+                  disabled={logWatcherModels.length === 0}
+                />
+              </label>
+              <label className="flex flex-col gap-1 text-xs text-slate-700 dark:text-slate-200">
                 <span className="text-[10px] uppercase tracking-wide text-slate-500 dark:text-slate-400">Fix Session Provider</span>
                 <select
                   className="rounded border border-slate-200 px-2 py-1.5 text-xs dark:border-slate-700 dark:bg-slate-900"
@@ -1309,6 +1484,43 @@ function ObserverSection({
                   : canSaveConfig
                     ? 'Changes are saved automatically.'
                     : 'Complete required fields to save changes.'}
+              </div>
+            )}
+          </div>
+
+          {/* Failed session monitor */}
+          <div className="mb-4 rounded border border-slate-200 p-3 dark:border-slate-700">
+            <h4 className="mb-2 text-[11px] font-bold uppercase tracking-wide text-slate-500 dark:text-slate-400">Failed Sessions Monitor</h4>
+            {failedSessions.length === 0 ? (
+              <div className="text-[11px] text-slate-500 dark:text-slate-400">
+                No failed user sessions detected.
+              </div>
+            ) : (
+              <div className="max-h-64 space-y-2 overflow-y-auto">
+                {failedSessions.map((session) => (
+                  <div key={session.sessionId} className="rounded border border-slate-200 p-2 text-xs dark:border-slate-700">
+                    <div className="mb-1 flex flex-wrap items-center gap-2">
+                      <span className={`rounded px-1.5 py-0.5 text-[9px] font-semibold uppercase ${session.observer.analyzed ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300' : 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300'}`}>
+                        {session.observer.analyzed ? 'analyzed' : 'queued'}
+                      </span>
+                      <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[9px] font-semibold uppercase text-slate-700 dark:bg-slate-800 dark:text-slate-300">
+                        {session.workspaceName}
+                      </span>
+                      <span className="font-mono text-[10px] text-slate-500 dark:text-slate-400">{session.sessionId.slice(0, 12)}</span>
+                    </div>
+                    <div className="line-clamp-2 text-slate-700 dark:text-slate-200">{session.prompt}</div>
+                    <div className="mt-1 flex flex-wrap gap-2 text-[10px] text-slate-500 dark:text-slate-400">
+                      <span>findings: {session.observer.findings}</span>
+                      <span>pending: {session.observer.fixStatusCounts.pending}</span>
+                      <span>spawned: {session.observer.fixStatusCounts.spawned}</span>
+                      <span>completed: {session.observer.fixStatusCounts.completed}</span>
+                      <span>failed: {session.observer.fixStatusCounts.failed}</span>
+                      {session.observer.latestFindingAt && (
+                        <span>last finding: {new Date(session.observer.latestFindingAt).toLocaleTimeString()}</span>
+                      )}
+                    </div>
+                  </div>
+                ))}
               </div>
             )}
           </div>

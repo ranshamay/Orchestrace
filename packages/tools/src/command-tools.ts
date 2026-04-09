@@ -1,3 +1,5 @@
+import { readdir, readFile, stat } from 'node:fs/promises';
+import { extname, join } from 'node:path';
 import { Type } from '@mariozechner/pi-ai';
 import type { AgentToolsetOptions, RegisteredAgentTool } from './types.js';
 import { resolveWorkspacePath, toWorkspaceRelative } from './path-utils.js';
@@ -37,22 +39,84 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
         name: 'search_files',
         description: 'Search file contents using ripgrep within the workspace.',
         parameters: Type.Object({
-          query: Type.String({ description: 'Regex or plain-text search pattern passed to ripgrep.' }),
+          query: Type.String({ description: 'Search text/pattern passed to ripgrep. Treated as a literal string unless regex=true.' }),
+          regex: Type.Optional(Type.Boolean({ description: 'When true, interpret query as regex. Defaults to false (literal search via --fixed-strings).' })),
           path: Type.Optional(Type.String({ description: 'Relative path to search inside. Defaults to workspace root.' })),
           glob: Type.Optional(Type.String({ description: 'Optional glob include filter, e.g. src/**/*.ts' })),
+          queryMode: Type.Optional(Type.Union([
+            Type.Literal('regex'),
+            Type.Literal('literal'),
+          ], {
+            description: 'How to interpret query: regex (default) or literal fixed-string search.',
+          })),
         }),
       },
       execute: async (toolArgs, signal) => {
-        const query = asRequiredString(toolArgs.query, 'query');
-        const path = asString(toolArgs.path) ?? '.';
-        const glob = asString(toolArgs.glob);
-        const target = resolveWorkspacePath(options.cwd, path);
-        const relTarget = toWorkspaceRelative(options.cwd, target);
-
-        const args = ['-n', '--no-heading', '--color', 'never', query, relTarget];
-        if (glob) {
-          args.push('--glob', glob);
+        const queryValidation = validateSearchQuery(toolArgs.query);
+        if (!queryValidation.ok) {
+          return {
+            content: queryValidation.error,
+            isError: true,
+          };
         }
+
+        const queryModeValidation = validateQueryMode(asString(toolArgs.queryMode));
+        if (!queryModeValidation.ok) {
+          return {
+            content: queryModeValidation.error,
+            isError: true,
+          };
+        }
+
+        const regexFlag = typeof toolArgs.regex === 'boolean' ? toolArgs.regex : undefined;
+        const useRegex = queryModeValidation.value !== undefined
+          ? queryModeValidation.value === 'regex'
+          : regexFlag ?? false;
+
+        if (useRegex) {
+          const regexValidation = validateRegexQuery(queryValidation.value);
+          if (!regexValidation.ok) {
+            return {
+              content: regexValidation.error,
+              isError: true,
+            };
+          }
+        }
+
+        const globValidation = validateSearchGlob(toolArgs.glob);
+        if (!globValidation.ok) {
+          return {
+            content: globValidation.error,
+            isError: true,
+          };
+        }
+
+        const requestedPath = asString(toolArgs.path) ?? '.';
+        const target = resolveWorkspacePath(options.cwd, requestedPath);
+        const relTarget = toWorkspaceRelative(options.cwd, target);
+        const targetKind = await getPathKind(target);
+
+        if (targetKind === 'missing') {
+          return {
+            content: `(skipped invalid search path: ${relTarget})`,
+          };
+        }
+
+        if (globValidation.value && targetKind === 'file') {
+          return {
+            content: 'Invalid glob usage: glob can only be used when path points to a directory.',
+            isError: true,
+          };
+        }
+
+        const args = ['-n', '--no-heading', '--color', 'never', '-e', queryValidation.value];
+        if (!useRegex) {
+          args.push('--fixed-strings');
+        }
+        if (globValidation.value) {
+          args.push('--glob', globValidation.value);
+        }
+        args.push('--', relTarget);
 
         const result = await runCommand('rg', args, {
           cwd: options.cwd,
@@ -65,6 +129,38 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
             content: 'ripgrep (rg) is required but was not found in PATH.',
             isError: true,
           };
+        }
+
+        if (result.exitCode === 2 && useRegex) {
+          return {
+            content: 'Invalid regex query.',
+            isError: true,
+          };
+        }
+
+        const stderr = result.stderr.trim();
+        const hasPathError = hasRipgrepPathError(stderr);
+
+        if (hasPathError) {
+          try {
+            const fallback = await fallbackSearchFromFs({
+              cwd: options.cwd,
+              target,
+              relTarget,
+              query: queryValidation.value,
+              useRegex,
+              glob: globValidation.value,
+              maxChars: options.maxOutputChars ?? 16000,
+            });
+            return {
+              content: fallback,
+            };
+          } catch (error) {
+            return {
+              content: error instanceof Error ? error.message : String(error),
+              isError: true,
+            };
+          }
         }
 
         if (result.exitCode === 1 && result.stdout.trim().length === 0) {
@@ -132,6 +228,81 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
           content: output.length > 0 ? output : '(clean working tree)',
           isError: result.exitCode !== 0,
         };
+      },
+    },
+    {
+      tool: {
+        name: 'url_fetch',
+        description: 'Fetch a URL over HTTP(S) and return status, headers, and response body.',
+        parameters: Type.Object({
+          url: Type.String({ description: 'Absolute HTTP(S) URL to fetch.' }),
+          method: Type.Optional(Type.String({ description: 'HTTP method to use. Defaults to GET.' })),
+          headers: Type.Optional(Type.String({ description: 'Optional JSON string object of request headers.' })),
+          body: Type.Optional(Type.String({ description: 'Optional request body as text. Not allowed for GET/HEAD.' })),
+        }),
+      },
+      execute: async (toolArgs, signal) => {
+        const url = normalizeHttpUrl(asRequiredString(toolArgs.url, 'url'));
+        const method = (asString(toolArgs.method) ?? 'GET').trim().toUpperCase();
+        const headersText = asString(toolArgs.headers);
+        const body = asString(toolArgs.body);
+
+        if (!['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'].includes(method)) {
+          return {
+            content: `Unsupported HTTP method: ${method}`,
+            isError: true,
+          };
+        }
+
+        if ((method === 'GET' || method === 'HEAD') && body !== undefined) {
+          return {
+            content: `HTTP ${method} request must not include body.`,
+            isError: true,
+          };
+        }
+
+        let headers: Record<string, string> | undefined;
+        try {
+          headers = headersText ? parseStringRecord(headersText, 'headers') : undefined;
+        } catch (error) {
+          return {
+            content: error instanceof Error ? error.message : String(error),
+            isError: true,
+          };
+        }
+
+        try {
+          const response = await fetch(url, {
+            method,
+            headers,
+            body,
+            signal,
+          });
+
+          const text = await response.text();
+          const contentType = response.headers.get('content-type') ?? '';
+          const data = parseBodyByContentType(text, contentType);
+          const content = truncateText(JSON.stringify({
+            ok: response.ok,
+            status: response.status,
+            statusText: response.statusText,
+            url: response.url,
+            method,
+            contentType,
+            headers: Object.fromEntries(response.headers.entries()),
+            data,
+          }, null, 2), options.maxOutputChars ?? 24000);
+
+          return {
+            content,
+            isError: !response.ok,
+          };
+        } catch (error) {
+          return {
+            content: `URL fetch failed: ${error instanceof Error ? error.message : String(error)}`,
+            isError: true,
+          };
+        }
       },
     },
   ];
@@ -533,6 +704,272 @@ function parseJson(raw: string, field: string): unknown {
   } catch {
     throw new Error(`Invalid JSON in ${field}.`);
   }
+}
+
+type PathKind = 'missing' | 'file' | 'directory';
+
+async function getPathKind(path: string): Promise<PathKind> {
+  try {
+    const info = await stat(path);
+    if (info.isDirectory()) {
+      return 'directory';
+    }
+    if (info.isFile()) {
+      return 'file';
+    }
+    return 'missing';
+  } catch {
+    return 'missing';
+  }
+}
+
+type ValidationResult<T> =
+  | { ok: true; value: T }
+  | { ok: false; error: string };
+
+function validateSearchQuery(rawQuery: unknown): ValidationResult<string> {
+  if (typeof rawQuery !== 'string') {
+    return {
+      ok: false,
+      error: 'Missing query',
+    };
+  }
+
+  if (rawQuery.trim().length === 0) {
+    return {
+      ok: false,
+      error: 'Invalid query: query must not be empty.',
+    };
+  }
+
+  if (rawQuery.includes('\u0000')) {
+    return {
+      ok: false,
+      error: 'Invalid query: null bytes are not allowed.',
+    };
+  }
+
+  return { ok: true, value: rawQuery.trim() };
+}
+
+function validateQueryMode(rawMode: string | undefined): ValidationResult<'regex' | 'literal' | undefined> {
+  if (rawMode === undefined) {
+    return { ok: true, value: undefined };
+  }
+
+  if (rawMode !== 'regex' && rawMode !== 'literal') {
+    return {
+      ok: false,
+      error: "Invalid queryMode. Expected 'regex' or 'literal'.",
+    };
+  }
+
+  return { ok: true, value: rawMode };
+}
+
+function validateRegexQuery(query: string): ValidationResult<string> {
+  try {
+    // Validate deterministically before invoking rg to avoid runtime stderr noise.
+    // eslint-disable-next-line no-new
+    new RegExp(query);
+    return { ok: true, value: query };
+  } catch {
+    return {
+      ok: false,
+      error: 'Invalid regex query.',
+    };
+  }
+}
+
+function validateSearchGlob(rawGlob: unknown): ValidationResult<string | undefined> {
+  if (rawGlob === undefined) {
+    return { ok: true, value: undefined };
+  }
+
+  if (typeof rawGlob !== 'string') {
+    return {
+      ok: false,
+      error: 'Invalid glob: expected a string value.',
+    };
+  }
+
+  const glob = rawGlob.trim();
+  if (glob.length === 0) {
+    return {
+      ok: false,
+      error: 'Invalid glob: expected a non-empty string when provided.',
+    };
+  }
+
+  if (glob.includes('\u0000')) {
+    return {
+      ok: false,
+      error: 'Invalid glob: null bytes are not allowed.',
+    };
+  }
+
+  return { ok: true, value: glob.replace(/\\/g, '/') };
+}
+
+function hasRipgrepPathError(stderr: string): boolean {
+  return /\bNo such file or directory\b|\bos error 2\b/i.test(stderr);
+}
+
+interface FallbackSearchInput {
+  cwd: string;
+  target: string;
+  relTarget: string;
+  query: string;
+  useRegex: boolean;
+  glob?: string;
+  maxChars: number;
+}
+
+async function fallbackSearchFromFs(input: FallbackSearchInput): Promise<string> {
+  const files = await collectSearchCandidateFiles(input.target, input.glob);
+  if (files.length === 0) {
+    return `(skipped invalid search path: ${input.relTarget})`;
+  }
+
+  const lines: string[] = [];
+  const matcher = createLineMatcher(input.query, input.useRegex);
+
+  for (const filePath of files) {
+    const content = await readFile(filePath, 'utf-8');
+    const rows = content.split(/\r?\n/);
+    for (let i = 0; i < rows.length; i += 1) {
+      const line = rows[i] ?? '';
+      if (matcher(line)) {
+        const relFile = toWorkspaceRelative(input.cwd, filePath).replace(/\\/g, '/');
+        lines.push(`${relFile}:${i + 1}:${line}`);
+      }
+    }
+  }
+
+  if (lines.length === 0) {
+    return '(no matches)';
+  }
+
+  return truncateText(lines.join('\n'), input.maxChars);
+}
+
+function createLineMatcher(query: string, useRegex: boolean): (line: string) => boolean {
+  if (!useRegex) {
+    return (line) => line.includes(query);
+  }
+
+  let pattern: RegExp;
+  try {
+    pattern = new RegExp(query);
+  } catch {
+    throw new Error('Invalid regex query.');
+  }
+
+  return (line) => pattern.test(line);
+}
+
+async function collectSearchCandidateFiles(target: string, glob: string | undefined): Promise<string[]> {
+  const kind = await getPathKind(target);
+  if (kind === 'missing') {
+    return [];
+  }
+
+  if (kind === 'file') {
+    if (!glob || matchesSimpleGlob(target, glob)) {
+      return [target];
+    }
+    return [];
+  }
+
+  const files: string[] = [];
+  const stack = [target];
+
+  while (stack.length > 0) {
+    const current = stack.pop();
+    if (!current) {
+      continue;
+    }
+
+    const entries = await readdir(current, { withFileTypes: true });
+    for (const entry of entries) {
+      const fullPath = join(current, entry.name);
+      if (entry.isDirectory()) {
+        stack.push(fullPath);
+      } else if (entry.isFile()) {
+        if (!glob || matchesSimpleGlob(fullPath, glob)) {
+          files.push(fullPath);
+        }
+      }
+    }
+  }
+
+  files.sort((a, b) => a.localeCompare(b));
+  return files;
+}
+
+function matchesSimpleGlob(filePath: string, glob: string): boolean {
+  const normalizedGlob = glob.trim().toLowerCase();
+  if (normalizedGlob.length === 0) {
+    return true;
+  }
+
+  if (normalizedGlob.startsWith('*.') && !normalizedGlob.includes('/')) {
+    return extname(filePath).toLowerCase() === normalizedGlob.slice(1);
+  }
+
+  if (!normalizedGlob.includes('*')) {
+    return filePath.replace(/\\/g, '/').toLowerCase().includes(normalizedGlob.replace(/\\/g, '/'));
+  }
+
+  return true;
+}
+
+function parseStringRecord(raw: string, field: string): Record<string, string> {
+  const parsed = parseJson(raw, field);
+  if (!isRecord(parsed)) {
+    throw new Error(`Invalid ${field}: expected a JSON object.`);
+  }
+
+  const result: Record<string, string> = {};
+  for (const [key, value] of Object.entries(parsed)) {
+    if (typeof value !== 'string') {
+      throw new Error(`Invalid ${field}.${key}: expected a string value.`);
+    }
+    result[key] = value;
+  }
+
+  return result;
+}
+
+function normalizeHttpUrl(rawUrl: string): string {
+  let parsed: URL;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    throw new Error('Invalid url: expected an absolute HTTP(S) URL.');
+  }
+
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new Error('Invalid url: only http:// and https:// are supported.');
+  }
+
+  return parsed.toString();
+}
+
+function parseBodyByContentType(text: string, contentType: string): unknown {
+  if (!text) {
+    return '';
+  }
+
+  if (contentType.includes('application/json')) {
+    try {
+      return JSON.parse(text);
+    } catch {
+      return text;
+    }
+  }
+
+  return text;
 }
 
 async function formatGithubResponse(response: Response): Promise<Record<string, unknown>> {

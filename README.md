@@ -53,7 +53,7 @@ pnpm --filter @orchestrace/cli dev workspace select another-repo
 # Run a plan
 pnpm --filter @orchestrace/cli dev run examples/feature-plan.json
 
-# Run a single prompt task with the generalized flow
+# Run a single prompt task with automatic routing (shell/investigation/code)
 pnpm --filter @orchestrace/cli dev task "Add structured logging to the scheduler"
 
 # Authenticate a provider (interactive)
@@ -149,6 +149,21 @@ pnpm install
 pnpm build
 pnpm test
 ```
+
+### Monorepo internal package resolution
+
+Internal `@orchestrace/*` packages publish `main`/`types` from `dist/`, so build outputs must exist before strict typecheck/test flows in dependent packages.
+
+- Use the root workflow in clean environments:
+
+```bash
+pnpm install
+pnpm build
+pnpm typecheck
+pnpm test
+```
+
+- Package-level `typecheck`/`test` scripts include `pretypecheck`/`pretest` hooks that build that package and its internal workspace dependencies first (via `pnpm --filter <pkg>... build`).
 
 ## License
 
