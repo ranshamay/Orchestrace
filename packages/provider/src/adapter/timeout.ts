@@ -1,4 +1,4 @@
-const DEFAULT_TIMEOUT_MS = 120_000;
+const DEFAULT_TIMEOUT_MS = 180_000;
 
 export function resolveTimeoutMs(overrideMs?: number): number {
   if (Number.isFinite(overrideMs) && (overrideMs as number) > 0) {

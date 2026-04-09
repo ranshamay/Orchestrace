@@ -12,7 +12,14 @@ import type {
 import { createContext, normalizeModelEndpoint } from './adapter/context.js';
 import { executeWithOptionalTools } from './adapter/tools.js';
 import { resolveTimeoutMs, mapTimeoutError } from './adapter/timeout.js';
-import { resolveEmptyResponseRetries } from './adapter/retry.js';
+import {
+  computeRetryDelayMs,
+  isFutileRetryFailure,
+  isRetryableTransientFailure,
+  resolveEmptyResponseRetries,
+  resolveTransientFailureRetries,
+  sleepWithSignal,
+} from './adapter/retry.js';
 import { summarizePromptInput, logFailureDump } from './adapter/failure.js';
 import { mergeUsage } from './adapter/usage.js';
 import { classifyLlmFailure, createLlmFailureError } from './adapter/failure-classifier.js';
@@ -37,8 +44,11 @@ export class PiAiAdapter implements LlmAdapter {
         let hasUsage = false;
         let activeApiKey = request.apiKey;
         let authRetryUsed = false;
-        const maxRetries = resolveEmptyResponseRetries();
-        const maxAttempts = maxRetries + 1;
+        const emptyResponseRetries = resolveEmptyResponseRetries();
+        const transientRetries = resolveTransientFailureRetries();
+        const maxAttempts = Math.max(emptyResponseRetries, transientRetries) + 1;
+        const completionSignal = signal ?? request.signal;
+
         for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
           const context = createContext(request, prompt);
           const options: Record<string, unknown> = {};
