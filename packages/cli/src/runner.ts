@@ -156,6 +156,19 @@ interface GitHubApiResponse {
 // sub-agent failure types are imported from runner-subagent-failure.ts
 
 // ---------------------------------------------------------------------------
+// EPIPE resilience — when the parent UI server restarts, the pipe reader
+// disappears. Without this, writes to stdout/stderr would emit uncaught
+// errors and crash the runner.
+// ---------------------------------------------------------------------------
+for (const stream of [process.stdout, process.stderr]) {
+  stream.on('error', (err: NodeJS.ErrnoException) => {
+    if (err.code === 'EPIPE' || err.code === 'ERR_STREAM_DESTROYED') return; // swallow
+    // Re-throw unexpected errors so they aren't silently swallowed
+    throw err;
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 

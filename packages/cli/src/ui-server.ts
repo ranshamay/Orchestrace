@@ -597,7 +597,13 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       }
     }
 
-    console.log(`[orchestrace][event-store] Restored ${restored}/${sessionIds.length} sessions from event logs.`);
+    const reconnected = [...workSessions.values()].filter((s) => s.status === 'running').length;
+    const totalRestored = restored;
+    if (reconnected > 0) {
+      console.log(`[orchestrace][event-store] Restored ${totalRestored}/${sessionIds.length} sessions from event logs (${reconnected} running — reconnected to live runners).`);
+    } else {
+      console.log(`[orchestrace][event-store] Restored ${totalRestored}/${sessionIds.length} sessions from event logs.`);
+    }
     return restored;
   }
 
@@ -1981,6 +1987,17 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         return;
       }
 
+      // -- Health endpoint for deployment tooling ---
+      if (req.method === 'GET' && pathname === '/api/health') {
+        const runningSessions = [...workSessions.values()].filter((s) => s.status === 'running').length;
+        sendJson(res, isDraining() ? 503 : 200, {
+          status: isDraining() ? 'draining' : 'ok',
+          sessions: { total: workSessions.size, running: runningSessions },
+          uptime: process.uptime(),
+        });
+        return;
+      }
+
       if (req.method === 'GET' && pathname === '/api/workspaces/readiness') {
         const provider = asString(url.searchParams.get('provider'))
           || process.env.ORCHESTRACE_DEFAULT_PROVIDER
@@ -2326,6 +2343,10 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       }
 
       if (req.method === 'POST' && pathname === '/api/work/start') {
+        if (isDraining()) {
+          sendJson(res, 503, { error: 'Server is shutting down. Please retry after restart.' });
+          return;
+        }
         const body = await readJsonBody(req);
         const workspaceId = asString(body.workspaceId);
         const prompt = body.prompt;
@@ -2432,6 +2453,10 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       }
 
       if (req.method === 'POST' && pathname === '/api/work/retry') {
+        if (isDraining()) {
+          sendJson(res, 503, { error: 'Server is shutting down. Please retry after restart.' });
+          return;
+        }
         const body = await readJsonBody(req);
         const id = asString(body.id);
 
@@ -2945,6 +2970,10 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       }
 
       if (req.method === 'POST' && pathname === '/api/work/chat/send-stream') {
+        if (isDraining()) {
+          sendJson(res, 503, { error: 'Server is shutting down. Please retry after restart.' });
+          return;
+        }
         const body = await readJsonBody(req);
         const id = asString(body.id);
         const message = asString(body.message);
@@ -3374,6 +3403,10 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       }
 
       if (req.method === 'POST' && pathname === '/api/work/chat/send') {
+        if (isDraining()) {
+          sendJson(res, 503, { error: 'Server is shutting down. Please retry after restart.' });
+          return;
+        }
         const body = await readJsonBody(req);
         const id = asString(body.id);
         const message = asString(body.message);
@@ -3820,6 +3853,9 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     }
   });
 
+  // -- Graceful shutdown state ------------------------------------------------
+  let draining = false;
+
   await new Promise<void>((resolvePromise) => {
     server.listen(port, '127.0.0.1', () => {
       console.log(`UI server listening on http://127.0.0.1:${port}`);
@@ -3829,6 +3865,54 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       resolvePromise();
     });
   });
+
+  // -- Graceful shutdown on SIGTERM / SIGINT ----------------------------------
+  const gracefulShutdown = (signal: string) => {
+    if (draining) return; // already shutting down
+    draining = true;
+
+    const runningSessions = [...workSessions.values()].filter((s) => s.status === 'running');
+    console.log(
+      `\n[orchestrace] Received ${signal} — shutting down gracefully.` +
+      (runningSessions.length > 0
+        ? ` ${runningSessions.length} runner(s) will continue in the background and reconnect on next startup.`
+        : ''),
+    );
+
+    // Notify all SSE clients that the server is shutting down so UIs can show a reconnect state
+    const shutdownPayload = { reason: signal, time: now() };
+    for (const clients of workStreamClients.values()) {
+      for (const client of clients) {
+        try { sendSse(client, 'server-shutdown', shutdownPayload); } catch { /* ignore */ }
+      }
+    }
+    for (const client of sessionStatusStreamClients) {
+      try { sendSse(client, 'server-shutdown', shutdownPayload); } catch { /* ignore */ }
+    }
+    for (const client of logStreamClients) {
+      try { sendSse(client, 'server-shutdown', shutdownPayload); } catch { /* ignore */ }
+    }
+
+    // Close the HTTP server (stops accepting new connections, drains inflight)
+    server.close(() => {
+      console.log('[orchestrace] Server closed. Exiting.');
+      process.exit(0);
+    });
+
+    // Force exit after 10s if draining hangs
+    setTimeout(() => {
+      console.warn('[orchestrace] Graceful shutdown timed out after 10s — forcing exit.');
+      process.exit(1);
+    }, 10_000).unref();
+  };
+
+  process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+  process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+
+  /** Check whether the server is draining (shutting down). Used by request handlers to reject new work. */
+  function isDraining(): boolean {
+    return draining;
+  }
 
   server.on('close', () => {
     void uiStatePersistence.flush();

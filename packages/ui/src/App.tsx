@@ -375,7 +375,7 @@ export default function App() {
     const payload = {
       activeTab,
       observerShowFindings,
-      defaultDeliveryStrategy: deliveryStrategy,
+      defaultDeliveryStrategy: defaultLlmControls.deliveryStrategy,
       planningNoToolGuardMode,
       adaptiveConcurrency,
       batchConcurrency,
@@ -404,7 +404,7 @@ export default function App() {
     batchConcurrency,
     batchMinConcurrency,
     bootstrapComplete,
-    deliveryStrategy,
+    defaultLlmControls.deliveryStrategy,
     onSettingsSaveStatus,
     observerShowFindings,
     planningNoToolGuardMode,
