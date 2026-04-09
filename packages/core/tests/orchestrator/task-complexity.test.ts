@@ -93,9 +93,15 @@ describe('task effort classifier', () => {
     expect(classifyTaskEffort(longPrompt).effort).toBe('high');
   });
 
-  it('returns reason for classification', () => {
+    it('returns reason for classification', () => {
     const result = classifyTaskEffort('echo hello');
     expect(result.reason).toBeTruthy();
     expect(result.promptLength).toBeGreaterThan(0);
+  });
+
+  it('classifies explicit planning prompts as medium effort', () => {
+    const result = classifyTaskEffort('we want to perform sso via google, lets plan it, including authenticated apis');
+    expect(result.effort).toBe('medium');
+    expect(result.reason).toContain('planning');
   });
 });

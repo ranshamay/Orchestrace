@@ -303,6 +303,16 @@ const MULTI_AREA_MARKERS = [
 
 const LOW_EFFORT_SHELL_OK = /^(echo|pwd|ls|cat|head|tail|whoami|date|uname|node\s+--version|npm\s+-v|pnpm\s+-v|git\s+(status|log|branch|diff))(\s|$)/i;
 const LOW_EFFORT_SIMPLE_EDIT = /^(fix|change|update|add|remove|rename|set|toggle)\s+/i;
+const EXPLICIT_PLANNING_INTENT_MARKERS = [
+  "let's plan",
+  'lets plan',
+  'plan it',
+  'create a plan',
+  'implementation plan',
+  'planning doc',
+  'plan this',
+];
+
 
 /**
  * Classify the effort level of a task prompt.
@@ -314,12 +324,21 @@ export function classifyTaskEffort(prompt: string): TaskEffortClassification {
   const normalized = raw.replace(/\s+/g, ' ').toLowerCase();
   const len = normalized.length;
 
-  // Empty prompt
+    // Empty prompt
   if (!normalized) {
     return { effort: 'low', reason: 'Empty prompt; defaulting to low effort.', promptLength: 0 };
   }
 
+  if (EXPLICIT_PLANNING_INTENT_MARKERS.some((marker) => normalized.includes(marker))) {
+    return {
+      effort: 'medium',
+      reason: 'Prompt explicitly requests planning before implementation.',
+      promptLength: len,
+    };
+  }
+
   // Trivial: very short shell commands or informational queries
+
   if (len <= 120) {
     const stripped = normalized
       .replace(/^please\s+/, '')
