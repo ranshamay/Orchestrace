@@ -8,10 +8,11 @@
   },
   "scripts": {
     "build": "tsc",
+    "pretypecheck": "pnpm --filter @orchestrace/cli... build",
     "typecheck": "tsc --noEmit",
     "dev": "tsx src/index.ts",
     "clean": "rm -rf dist"
-  },
+  }
   "dependencies": {
     "@mariozechner/pi-ai": "^0.64.0",
     "@orchestrace/context": "workspace:*",

@@ -7,10 +7,12 @@
   "types": "./dist/index.d.ts",
   "scripts": {
     "build": "tsc",
+    "pretypecheck": "pnpm --filter @orchestrace/provider... build",
     "typecheck": "tsc --noEmit",
+    "pretest": "pnpm --filter @orchestrace/provider... build",
     "test": "vitest run",
     "clean": "rm -rf dist"
-  },
+  }
   "dependencies": {
     "@mariozechner/pi-ai": "^0.64.0"
   },

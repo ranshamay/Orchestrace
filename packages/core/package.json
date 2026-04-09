@@ -7,10 +7,12 @@
   "types": "./dist/index.d.ts",
   "scripts": {
     "build": "tsc",
+    "pretypecheck": "pnpm --filter @orchestrace/core... build",
     "typecheck": "tsc --noEmit",
+    "pretest": "pnpm --filter @orchestrace/core... build",
     "test": "vitest run",
     "clean": "rm -rf dist"
-  },
+  }
   "dependencies": {
     "@orchestrace/provider": "workspace:*"
   },

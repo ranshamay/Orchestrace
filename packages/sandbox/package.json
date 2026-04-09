@@ -7,10 +7,12 @@
   "types": "./dist/index.d.ts",
   "scripts": {
     "build": "tsc",
+    "pretypecheck": "pnpm --filter @orchestrace/sandbox... build",
     "typecheck": "tsc --noEmit",
+    "pretest": "pnpm --filter @orchestrace/sandbox... build",
     "test": "vitest run",
     "clean": "rm -rf dist"
-  },
+  }
   "devDependencies": {
     "typescript": "^5.6.0",
     "vitest": "^2.0.0"

@@ -7,10 +7,12 @@
   "types": "./dist/index.d.ts",
   "scripts": {
     "build": "tsc",
+    "pretypecheck": "pnpm --filter @orchestrace/context... build",
     "typecheck": "tsc --noEmit",
+    "pretest": "pnpm --filter @orchestrace/context... build",
     "test": "vitest run",
     "clean": "rm -rf dist"
-  },
+  }
   "dependencies": {
     "@orchestrace/provider": "workspace:*",
     "js-tiktoken": "^1.0.18"
