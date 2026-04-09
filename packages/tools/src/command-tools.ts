@@ -28,6 +28,9 @@ const MAX_COMMAND_BATCH_CONCURRENCY = 64;
 const MAX_COMMAND_BATCH_ITEMS = 200;
 const DEFAULT_COMMAND_BATCH_MAX_CHARS_PER_COMMAND = 8000;
 const DEFAULT_COMMAND_BATCH_MIN_CONCURRENCY = 1;
+const DEFAULT_SEARCH_MAX_CHARS = 64000;
+const LEGACY_TRUNCATION_MARKER = '\n... (truncated)';
+const TRUNCATION_MARKER = '\n... (truncated; narrow the query/path or raise maxOutputChars and re-run to continue)';
 
 function resolveShellExecutable(): string {
   const envShell = process.env.SHELL?.trim();
@@ -195,7 +198,7 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
               query,
               useRegex,
               glob: globValidation.value,
-              maxChars: options.maxOutputChars ?? 16000,
+                            maxChars: options.maxOutputChars ?? DEFAULT_SEARCH_MAX_CHARS,
             });
                         return {
               content: fallback,
@@ -222,7 +225,9 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
           }
         }
 
-                const output = formatCommandOutput(result, options.maxOutputChars ?? 16000);
+                                const output = withSearchContinuationHint(
+          formatCommandOutput(result, options.maxOutputChars ?? DEFAULT_SEARCH_MAX_CHARS),
+        );
         const hasMatches = result.stdout.trim().length > 0;
 
         // Prefer successful match output when available. ripgrep may emit stderr
@@ -271,7 +276,7 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
               query,
               useRegex,
               glob: globValidation.value,
-              maxChars: options.maxOutputChars ?? 16000,
+                            maxChars: options.maxOutputChars ?? DEFAULT_SEARCH_MAX_CHARS,
             });
                         return {
               content: fallback,
@@ -1386,7 +1391,13 @@ function truncateText(text: string, maxChars: number): string {
     return text;
   }
 
-  return `${text.slice(0, maxChars)}\n... (truncated)`;
+  return `${text.slice(0, maxChars)}${TRUNCATION_MARKER}`;
+}
+
+function withSearchContinuationHint(content: string): string {
+  return content.endsWith(LEGACY_TRUNCATION_MARKER)
+    ? `${content.slice(0, -LEGACY_TRUNCATION_MARKER.length)}${TRUNCATION_MARKER}`
+    : content;
 }
 
 interface CommandBatchRequest {

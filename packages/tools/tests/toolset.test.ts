@@ -453,9 +453,9 @@ describe('batch filesystem tools', () => {
       },
     });
 
-    expect(result.isError).toBeFalsy();
-    expect(result.content.endsWith('\n... (truncated)')).toBe(true);
-    expect(result.content.length).toBe(250 + '\n... (truncated)'.length);
+        expect(result.isError).toBeFalsy();
+    expect(result.content.startsWith('entry-1')).toBe(true);
+    expect(result.content).toContain('\n... (truncated; re-run read_file with a higher maxChars or with startLine/endLine to continue from this region)');
   });
 
   it('read_files supports adaptive concurrency metadata', async () => {
@@ -592,7 +592,7 @@ describe('search_files tool', () => {
     expect(result.content).not.toContain('regex.txt:1:call(value)');
   });
 
-    it('returns (no matches) when nothing matches', async () => {
+      it('returns (no matches) when nothing matches', async () => {
     const cwd = await makeWorkspace();
     const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
 
@@ -609,6 +609,35 @@ describe('search_files tool', () => {
     expect(result.content).toBe('(no matches)');
     expect(result.details).toBeUndefined();
 
+  });
+
+  it('adds continuation guidance when search output is truncated by maxOutputChars', async () => {
+    const cwd = await makeWorkspace();
+    await writeFile(
+      join(cwd, 'src', 'many-matches.txt'),
+      Array.from({ length: 200 }, (_, index) => `token-${index + 1}`).join('\n') + '\n',
+      'utf-8',
+    );
+
+    const toolset = createAgentToolset({
+      cwd,
+      phase: 'planning',
+      taskType: 'code',
+      maxOutputChars: 220,
+    });
+
+    const result = await toolset.executeTool({
+      id: 'truncated-search',
+      name: 'search_files',
+      arguments: {
+        query: 'token-',
+        path: 'src/many-matches.txt',
+      },
+    });
+
+        expect(result.isError).toBeFalsy();
+    expect(result.content).toContain('1:token-1');
+    expect(result.content).toContain('\n... (truncated; narrow the query/path or raise maxOutputChars and re-run to continue)');
   });
 
     it('keeps successful match payload non-error when ripgrep returns non-zero with stdout matches', async () => {

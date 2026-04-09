@@ -12,11 +12,11 @@ interface FilesystemToolOptions extends AgentToolsetOptions {
   includeWriteTools: boolean;
 }
 
-const DEFAULT_READ_MAX_CHARS = 20000;
-const DEFAULT_READ_BATCH_MAX_CHARS = 8000;
+const DEFAULT_READ_MAX_CHARS = 120000;
+const DEFAULT_READ_BATCH_MAX_CHARS = 24000;
 const READ_LARGE_FILE_THRESHOLD_BYTES = 256 * 1024;
 const READ_STREAM_CHUNK_SIZE_BYTES = 64 * 1024;
-const TRUNCATION_MARKER = '\n... (truncated)';
+const TRUNCATION_MARKER = '\n... (truncated; re-run read_file with a higher maxChars or with startLine/endLine to continue from this region)';
 const DEFAULT_BATCH_READ_CONCURRENCY = 16;
 
 const DEFAULT_BATCH_WRITE_CONCURRENCY = 12;
@@ -630,9 +630,11 @@ function sliceTextByLines(content: string, startLine: number, endLine?: number):
 }
 
 function formatTruncatedSlice(content: string, maxChars: number): string {
-  return content.length > maxChars
-    ? `${content.slice(0, maxChars)}${TRUNCATION_MARKER}`
-    : content;
+  if (content.length <= maxChars) {
+    return content;
+  }
+
+  return `${content.slice(0, maxChars)}${TRUNCATION_MARKER}`;
 }
 
 
