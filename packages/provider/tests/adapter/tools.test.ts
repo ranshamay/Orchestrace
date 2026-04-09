@@ -185,7 +185,8 @@ describe('executeWithOptionalTools', () => {
     expect(genericRetryPrompt).toBeUndefined();
   });
 
-    it('splits duplicate-path edit_files batches into sequential single-file edit_files calls', async () => {
+        it('deduplicates duplicate-path edit_files batches into per-path grouped calls', async () => {
+
     const consumeStreamMock = vi.mocked(consumeStream);
 
     const firstResponse = makeAssistantMessage([
@@ -210,19 +211,24 @@ describe('executeWithOptionalTools', () => {
     consumeStreamMock.mockResolvedValueOnce(firstResponse as never);
     consumeStreamMock.mockResolvedValueOnce(finalResponse as never);
 
-    const executeTool = vi.fn()
+        const executeTool = vi.fn()
       .mockResolvedValueOnce({
         isError: false,
-        content: JSON.stringify({ total: 1, successes: 1, failures: 0, files: [{ path: 'src/a.ts', ok: true }] }),
+        content: JSON.stringify({
+          total: 2,
+          successes: 2,
+          failures: 0,
+          files: [
+            { path: 'src/a.ts', ok: true },
+            { path: 'src/a.ts', ok: true },
+          ],
+        }),
       })
       .mockResolvedValueOnce({
         isError: false,
         content: JSON.stringify({ total: 1, successes: 1, failures: 0, files: [{ path: 'src/b.ts', ok: true }] }),
-      })
-      .mockResolvedValueOnce({
-        isError: false,
-        content: JSON.stringify({ total: 1, successes: 1, failures: 0, files: [{ path: 'src/a.ts', ok: true }] }),
       });
+
 
     const context: TestContext = {
       messages: [],
@@ -240,25 +246,26 @@ describe('executeWithOptionalTools', () => {
       onUsage: () => {},
     });
 
-    expect(executeTool).toHaveBeenCalledTimes(3);
+        expect(executeTool).toHaveBeenCalledTimes(2);
 
     const firstCall = executeTool.mock.calls[0]?.[0];
     const secondCall = executeTool.mock.calls[1]?.[0];
-    const thirdCall = executeTool.mock.calls[2]?.[0];
 
     expect(firstCall.name).toBe('edit_files');
     expect(secondCall.name).toBe('edit_files');
-    expect(thirdCall.name).toBe('edit_files');
 
-    expect(firstCall.arguments.files).toEqual([{ path: 'src/a.ts', oldText: 'one', newText: 'ONE' }]);
+    expect(firstCall.arguments.files).toEqual([
+      { path: 'src/a.ts', oldText: 'one', newText: 'ONE' },
+      { path: 'src/a.ts', oldText: 'three', newText: 'THREE' },
+    ]);
     expect(secondCall.arguments.files).toEqual([{ path: 'src/b.ts', oldText: 'two', newText: 'TWO' }]);
-    expect(thirdCall.arguments.files).toEqual([{ path: 'src/a.ts', oldText: 'three', newText: 'THREE' }]);
+
 
     expect(firstCall.arguments.concurrency).toBe(4);
     expect(firstCall.arguments.adaptiveConcurrency).toBe(true);
     expect(firstCall.arguments.minConcurrency).toBe(1);
 
-    const toolResult = context.messages.find((message) => message.role === 'toolResult');
+        const toolResult = context.messages.find((message) => message.role === 'toolResult') as (TestMessage & { details?: unknown }) | undefined;
     expect(toolResult?.isError).toBe(false);
     const parsed = JSON.parse(String(toolResult?.content?.[0]?.text ?? '{}')) as {
       total: number;
@@ -269,7 +276,18 @@ describe('executeWithOptionalTools', () => {
     expect(parsed.total).toBe(3);
     expect(parsed.successes).toBe(3);
     expect(parsed.failures).toBe(0);
-    expect(parsed.files.map((entry) => entry.path)).toEqual(['src/a.ts', 'src/b.ts', 'src/a.ts']);
+    expect(parsed.files.map((entry) => entry.path)).toEqual(['src/a.ts', 'src/a.ts', 'src/b.ts']);
+
+    expect(toolResult?.details).toMatchObject({
+      dedupedByPath: true,
+      uniquePaths: 2,
+      originalEntries: 3,
+      perPath: [
+        { path: 'src/a.ts', editCount: 2, ok: true },
+        { path: 'src/b.ts', editCount: 1, ok: true },
+      ],
+    });
+
   });
 
   it('uses deterministic remediation guidance for duplicate-path edit_files errors', async () => {

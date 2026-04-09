@@ -356,7 +356,48 @@ describe('batch filesystem tools', () => {
     expect(parsedVerify.files[1].content).toContain('value = 1');
   });
 
+    it('edit_files rejects duplicate paths before writing and does not mutate file', async () => {
+    const cwd = await makeWorkspace();
+    const toolset = createAgentToolset({ cwd, phase: 'implementation', taskType: 'code' });
+
+    const seed = await toolset.executeTool({
+      id: '1',
+      name: 'write_file',
+      arguments: {
+        path: 'src/dup.ts',
+        content: 'export const value = 1;\n',
+      },
+    });
+    expect(seed.isError).toBeFalsy();
+
+    const duplicateBatch = await toolset.executeTool({
+      id: '2',
+      name: 'edit_files',
+      arguments: {
+        files: [
+          { path: 'src/dup.ts', oldText: 'value = 1', newText: 'value = 11' },
+          { path: 'src/dup.ts', oldText: 'value = 11', newText: 'value = 111' },
+        ],
+      },
+    });
+
+    expect(duplicateBatch.isError).toBe(true);
+    expect(duplicateBatch.content).toContain('Duplicate paths are not allowed');
+
+    const verify = await toolset.executeTool({
+      id: '3',
+      name: 'read_file',
+      arguments: { path: 'src/dup.ts' },
+    });
+
+    expect(verify.isError).toBeFalsy();
+    expect(verify.content).toContain('value = 1');
+    expect(verify.content).not.toContain('value = 11');
+    expect(verify.content).not.toContain('value = 111');
+  });
+
   it('edit_files applies replacements in parallel and reports partial failures', async () => {
+
     const cwd = await makeWorkspace();
     const toolset = createAgentToolset({ cwd, phase: 'implementation', taskType: 'code' });
 

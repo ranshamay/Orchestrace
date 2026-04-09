@@ -293,6 +293,21 @@ function hasDuplicateEditPaths(editFiles: Array<Record<string, unknown>>): boole
   return false;
 }
 
+function groupEditsByPath(editFiles: Array<Record<string, unknown>>): Array<{ path: string; edits: Array<Record<string, unknown>> }> {
+  const grouped = new Map<string, Array<Record<string, unknown>>>();
+  for (const edit of editFiles) {
+    const path = String(edit.path);
+    const existing = grouped.get(path);
+    if (existing) {
+      existing.push(edit);
+    } else {
+      grouped.set(path, [edit]);
+    }
+  }
+
+  return [...grouped.entries()].map(([path, edits]) => ({ path, edits }));
+}
+
 async function executeDedupedEditFilesBatch(params: {
   toolset: LlmToolset;
   toolCall: ToolCall;
@@ -302,17 +317,19 @@ async function executeDedupedEditFilesBatch(params: {
 }): Promise<ToolExecutionPayload> {
   const { toolset, toolCall, toolArgs, editFiles, signal } = params;
 
+  const groupedEdits = groupEditsByPath(editFiles);
   const aggregateFiles: unknown[] = [];
   const aggregateDetails: unknown[] = [];
+  const perPath: Array<{ path: string; editCount: number; ok: boolean; errors?: string[] }> = [];
   let total = 0;
   let successes = 0;
   let failures = 0;
   let hadError = false;
 
-  for (const edit of editFiles) {
+  for (const group of groupedEdits) {
     const perFileArgs: Record<string, unknown> = {
       ...toolArgs,
-      files: [edit],
+      files: group.edits,
     };
 
     const result = await executeToolWithSubagentBatchRetry({
@@ -335,13 +352,29 @@ async function executeDedupedEditFilesBatch(params: {
       if (Array.isArray(parsed.files)) {
         aggregateFiles.push(...parsed.files);
       }
+      perPath.push({
+        path: group.path,
+        editCount: group.edits.length,
+        ok: !(result.isError ?? false),
+      });
+      continue;
+    }
+
+    total += group.edits.length;
+    if (result.isError ?? false) {
+      failures += group.edits.length;
     } else {
-      total += 1;
-      if (result.isError ?? false) {
-        failures += 1;
-      } else {
-        successes += 1;
-      }
+      successes += group.edits.length;
+    }
+
+    perPath.push({
+      path: group.path,
+      editCount: group.edits.length,
+      ok: !(result.isError ?? false),
+      errors: result.isError ? [result.content] : undefined,
+    });
+
+    for (const edit of group.edits) {
       aggregateFiles.push({
         path: typeof edit.path === 'string' ? edit.path : 'unknown',
         ok: !(result.isError ?? false),
@@ -360,9 +393,16 @@ async function executeDedupedEditFilesBatch(params: {
   return {
     content: JSON.stringify(payload, null, 2),
     isError: hadError,
-    details: aggregateDetails.length > 0 ? { splitBatch: true, results: aggregateDetails } : { splitBatch: true },
+    details: {
+      dedupedByPath: true,
+      uniquePaths: groupedEdits.length,
+      originalEntries: editFiles.length,
+      perPath,
+      ...(aggregateDetails.length > 0 ? { results: aggregateDetails } : {}),
+    },
   };
 }
+
 
 function parseEditFilesBatchResult(content: string): {
   total: number;
