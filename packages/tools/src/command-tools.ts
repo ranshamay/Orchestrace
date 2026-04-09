@@ -1,3 +1,5 @@
+import { readdir, readFile } from 'node:fs/promises';
+import { extname, join } from 'node:path';
 import { Type } from '@mariozechner/pi-ai';
 import type { AgentToolsetOptions, RegisteredAgentTool } from './types.js';
 import { resolveWorkspacePath, toWorkspaceRelative } from './path-utils.js';
@@ -51,9 +53,9 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
       },
       execute: async (toolArgs, signal) => {
         const query = asRequiredString(toolArgs.query, 'query');
-        const path = asString(toolArgs.path) ?? '.';
+        const requestedPath = asString(toolArgs.path) ?? '.';
         const regexFlag = typeof toolArgs.regex === 'boolean' ? toolArgs.regex : undefined;
-        const glob = asString(toolArgs.glob);
+        const glob = normalizeGlob(asString(toolArgs.glob));
         const queryModeRaw = asString(toolArgs.queryMode);
 
         if (queryModeRaw !== undefined && queryModeRaw !== 'regex' && queryModeRaw !== 'literal') {
@@ -67,8 +69,15 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
           ? queryModeRaw === 'regex'
           : regexFlag ?? false;
 
-        const target = resolveWorkspacePath(options.cwd, path);
+        const target = resolveWorkspacePath(options.cwd, requestedPath);
         const relTarget = toWorkspaceRelative(options.cwd, target);
+        const targetKind = await getPathKind(target);
+
+        if (targetKind === 'missing') {
+          return {
+            content: `(skipped invalid search path: ${relTarget})`,
+          };
+        }
 
         const args = ['-n', '--no-heading', '--color', 'never'];
         if (!useRegex) {
@@ -93,16 +102,31 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
         }
 
         const stderr = result.stderr.trim();
-        const hasPathError = /\bNo such file or directory\b|\bos error 2\b/i.test(stderr);
+        const hasPathError = hasRipgrepPathError(stderr);
 
-        if (result.exitCode === 1 && result.stdout.trim().length === 0 && !hasPathError) {
+        if (hasPathError) {
+          const fallback = await fallbackSearchFromFs({
+            cwd: options.cwd,
+            target,
+            relTarget,
+            query,
+            useRegex,
+            glob,
+            maxChars: options.maxOutputChars ?? 16000,
+          });
+          return {
+            content: fallback,
+          };
+        }
+
+        if (result.exitCode === 1 && result.stdout.trim().length === 0) {
           return { content: '(no matches)' };
         }
 
         const output = formatCommandOutput(result, options.maxOutputChars ?? 16000);
         return {
           content: output,
-          isError: result.exitCode > 1 || hasPathError,
+          isError: result.exitCode > 1,
         };
       },
     },
@@ -625,6 +649,137 @@ function parseJson(raw: string, field: string): unknown {
   } catch {
     throw new Error(`Invalid JSON in ${field}.`);
   }
+}
+
+type PathKind = 'missing' | 'file' | 'directory';
+
+async function getPathKind(path: string): Promise<PathKind> {
+  try {
+    const entries = await readdir(path, { withFileTypes: true });
+    return entries ? 'directory' : 'directory';
+  } catch {
+    try {
+      await readFile(path, 'utf-8');
+      return 'file';
+    } catch {
+      return 'missing';
+    }
+  }
+}
+
+function normalizeGlob(glob: string | undefined): string | undefined {
+  if (!glob) {
+    return undefined;
+  }
+
+  return glob.replace(/\\/g, '/');
+}
+
+function hasRipgrepPathError(stderr: string): boolean {
+  return /\bNo such file or directory\b|\bos error 2\b/i.test(stderr);
+}
+
+interface FallbackSearchInput {
+  cwd: string;
+  target: string;
+  relTarget: string;
+  query: string;
+  useRegex: boolean;
+  glob?: string;
+  maxChars: number;
+}
+
+async function fallbackSearchFromFs(input: FallbackSearchInput): Promise<string> {
+  const files = await collectSearchCandidateFiles(input.target, input.glob);
+  if (files.length === 0) {
+    return `(skipped invalid search path: ${input.relTarget})`;
+  }
+
+  const lines: string[] = [];
+  const matcher = createLineMatcher(input.query, input.useRegex);
+
+  for (const filePath of files) {
+    const content = await readFile(filePath, 'utf-8');
+    const rows = content.split(/\r?\n/);
+    for (let i = 0; i < rows.length; i += 1) {
+      const line = rows[i] ?? '';
+      if (matcher(line)) {
+        const relFile = toWorkspaceRelative(input.cwd, filePath).replace(/\\/g, '/');
+        lines.push(`${relFile}:${i + 1}:${line}`);
+      }
+    }
+  }
+
+  if (lines.length === 0) {
+    return '(no matches)';
+  }
+
+  return truncateText(lines.join('\n'), input.maxChars);
+}
+
+function createLineMatcher(query: string, useRegex: boolean): (line: string) => boolean {
+  if (!useRegex) {
+    return (line) => line.includes(query);
+  }
+
+  const pattern = new RegExp(query);
+  return (line) => pattern.test(line);
+}
+
+async function collectSearchCandidateFiles(target: string, glob: string | undefined): Promise<string[]> {
+  const kind = await getPathKind(target);
+  if (kind === 'missing') {
+    return [];
+  }
+
+  if (kind === 'file') {
+    if (!glob || matchesSimpleGlob(target, glob)) {
+      return [target];
+    }
+    return [];
+  }
+
+  const files: string[] = [];
+  const stack = [target];
+
+  while (stack.length > 0) {
+    const current = stack.pop();
+    if (!current) {
+      continue;
+    }
+
+    const entries = await readdir(current, { withFileTypes: true });
+    for (const entry of entries) {
+      const fullPath = join(current, entry.name);
+      if (entry.isDirectory()) {
+        stack.push(fullPath);
+      } else if (entry.isFile()) {
+        if (!glob || matchesSimpleGlob(fullPath, glob)) {
+          files.push(fullPath);
+        }
+      }
+    }
+  }
+
+  files.sort((a, b) => a.localeCompare(b));
+  return files;
+}
+
+function matchesSimpleGlob(filePath: string, glob: string): boolean {
+  const normalizedGlob = glob.trim().toLowerCase();
+  if (normalizedGlob.length === 0) {
+    return true;
+  }
+
+  if (normalizedGlob.startsWith('*.') && !normalizedGlob.includes('/')) {
+    return extname(filePath).toLowerCase() === normalizedGlob.slice(1);
+  }
+
+  if (!normalizedGlob.includes('*')) {
+    return filePath.replace(/\\/g, '/').toLowerCase().includes(normalizedGlob.replace(/\\/g, '/'));
+  }
+
+  return true;
 }
 
 function parseStringRecord(raw: string, field: string): Record<string, string> {

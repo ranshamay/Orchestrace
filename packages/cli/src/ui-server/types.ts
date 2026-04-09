@@ -7,7 +7,6 @@ export interface UiServerOptions {
 }
 
 export type WorkState = 'running' | 'completed' | 'failed' | 'cancelled';
-export type ExecutionContext = 'workspace' | 'git-worktree';
 export type SessionCreationReason = 'start' | 'retry';
 
 export type LlmSessionState =
@@ -152,17 +151,6 @@ export interface SessionRecoveryInfo {
   time: string;
 }
 
-export type SessionWorktreePathSessionIdRelation = 'match' | 'mismatch' | 'none';
-
-export interface SessionWorkspaceAssignmentProvenance {
-  assignmentSource: 'workspace-root' | 'selected-worktree' | 'fallback-worktree' | 'auto-created-worktree';
-  reusedExistingWorktree?: boolean;
-  cleanupApplied?: boolean;
-  cleanupDefaultBranch?: string;
-  workspacePathSessionIdRelation?: SessionWorktreePathSessionIdRelation;
-  workspacePathSessionId?: string;
-}
-
 export interface WorkSession {
   id: string;
   workspaceId: string;
@@ -180,9 +168,6 @@ export interface WorkSession {
   planningNoToolGuardMode: 'enforce' | 'warn';
   quickStartMode?: boolean;
   quickStartMaxPreDelegationToolCalls?: number;
-  executionContext: ExecutionContext;
-  selectedWorktreePath?: string;
-  useWorktree: boolean;
   adaptiveConcurrency: boolean;
   batchConcurrency: number;
   batchMinConcurrency: number;
@@ -190,7 +175,6 @@ export interface WorkSession {
   trivialTaskMaxPromptLength: number;
   worktreePath?: string;
   worktreeBranch?: string;
-  workspaceAssignment?: SessionWorkspaceAssignmentProvenance;
   creationReason: SessionCreationReason;
   sourceSessionId?: string;
   source?: 'user' | 'observer';
@@ -229,9 +213,6 @@ export interface PersistedWorkSession {
   planningNoToolGuardMode?: 'enforce' | 'warn';
   quickStartMode?: boolean;
   quickStartMaxPreDelegationToolCalls?: number;
-  executionContext?: ExecutionContext;
-  selectedWorktreePath?: string;
-  useWorktree?: boolean;
   adaptiveConcurrency?: boolean;
   batchConcurrency?: number;
   batchMinConcurrency?: number;
@@ -239,7 +220,6 @@ export interface PersistedWorkSession {
   trivialTaskMaxPromptLength?: number;
   worktreePath?: string;
   worktreeBranch?: string;
-  workspaceAssignment?: SessionWorkspaceAssignmentProvenance;
   creationReason?: SessionCreationReason;
   sourceSessionId?: string;
   createdAt: string;
@@ -263,9 +243,6 @@ export interface UiPreferences {
   defaultImplementationProvider: string;
   defaultImplementationModel: string;
   planningNoToolGuardMode: 'enforce' | 'warn';
-  executionContext: ExecutionContext;
-  selectedWorktreePath?: string;
-  useWorktree: boolean;
   adaptiveConcurrency: boolean;
   batchConcurrency: number;
   batchMinConcurrency: number;
@@ -283,9 +260,6 @@ export interface PersistedUiPreferences {
   defaultImplementationProvider?: string;
   defaultImplementationModel?: string;
   planningNoToolGuardMode?: 'enforce' | 'warn';
-  executionContext?: ExecutionContext;
-  selectedWorktreePath?: string;
-  useWorktree?: boolean;
   adaptiveConcurrency?: boolean;
   batchConcurrency?: number;
   batchMinConcurrency?: number;
