@@ -501,6 +501,21 @@ export async function orchestrate(
           context.signal?.removeEventListener('abort', abortPlanningAttemptOnParentCancel);
         }
 
+        if (!planningResult) {
+          return {
+            taskId: node.id,
+            status: 'failed',
+            tokenDumpDir: taskTokenDumpDir,
+            error: 'Planning attempt completed without a result.',
+            failureType: 'unknown',
+            durationMs: Date.now() - start,
+            retries: planningAttempt - 1,
+            usage,
+            replay,
+          };
+        }
+        const completedPlanningResult = planningResult;
+
         const completedPlanningAttempt: ReplayAttemptRecord = {
           phase: 'planning',
           attempt: planningAttempt,
@@ -509,10 +524,10 @@ export async function orchestrate(
           provider: planningModel.provider,
           model: planningModel.model,
           reasoning: planningModel.reasoning,
-          stopReason: planningResult.metadata?.stopReason,
-          endpoint: planningResult.metadata?.endpoint,
-          usage: planningResult.usage,
-          textPreview: createTextPreview(planningResult.text),
+          stopReason: completedPlanningResult.metadata?.stopReason,
+          endpoint: completedPlanningResult.metadata?.endpoint,
+          usage: completedPlanningResult.usage,
+          textPreview: createTextPreview(completedPlanningResult.text),
           toolCalls: planningToolCalls,
         };
         replay.attempts.push(completedPlanningAttempt);
@@ -524,7 +539,7 @@ export async function orchestrate(
           record: completedPlanningAttempt,
         });
 
-        mergeUsage(usage, planningResult.usage);
+        mergeUsage(usage, completedPlanningResult.usage);
         await appendTokenDump(planningTokenDumpPath, {
           graphId: graph.id,
           taskId: node.id,
@@ -532,7 +547,7 @@ export async function orchestrate(
           attempt: planningAttempt,
           provider: planningModel.provider,
           model: planningModel.model,
-          usage: planningResult.usage,
+          usage: completedPlanningResult.usage,
         });
 
         if (createToolset) {
@@ -613,12 +628,13 @@ export async function orchestrate(
           replay,
         };
       }
+      const resolvedPlanningResult = planningResult;
 
       persistedPlanPath = await persistPlan({
         baseDir: planOutputDir ?? join(cwd, '.orchestrace', 'plans'),
         graphId: graph.id,
         node,
-        plan: planningResult.text,
+        plan: resolvedPlanningResult.text,
       });
       emit({ type: 'task:plan-persisted', taskId: node.id, path: persistedPlanPath });
 
@@ -629,7 +645,7 @@ export async function orchestrate(
           return {
             taskId: node.id,
             status: 'failed',
-            plan: planningResult.text,
+            plan: resolvedPlanningResult.text,
             planPath: persistedPlanPath,
             tokenDumpDir: taskTokenDumpDir,
             error: 'Plan approval is required but no approval handler was provided.',
@@ -642,7 +658,7 @@ export async function orchestrate(
 
         const approved = await onPlanApproval({
           task: node,
-          plan: planningResult.text,
+          plan: resolvedPlanningResult.text,
           planPath: persistedPlanPath,
         });
 
@@ -650,7 +666,7 @@ export async function orchestrate(
           return {
             taskId: node.id,
             status: 'failed',
-            plan: planningResult.text,
+            plan: resolvedPlanningResult.text,
             planPath: persistedPlanPath,
             tokenDumpDir: taskTokenDumpDir,
             error: 'Plan was rejected by user approval gate.',
