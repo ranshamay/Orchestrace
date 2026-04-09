@@ -362,9 +362,10 @@ export class SessionObserver {
         systemPrompt: REALTIME_OBSERVER_SYSTEM_PROMPT,
         prompt,
         signal: this.abortController.signal,
-        apiKey,
-                refreshApiKey: () => this.resolveApiKey(provider),
-        allowAuthRefreshRetry: false,
+                apiKey,
+        refreshApiKey: () => this.resolveApiKey(provider),
+        allowAuthRefreshRetry: true,
+
 
       });
 

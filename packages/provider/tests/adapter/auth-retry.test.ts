@@ -61,7 +61,7 @@ describe('PiAiAdapter auth refresh retry', () => {
     expect(executeMock).toHaveBeenCalledTimes(1);
   });
 
-  it('refreshes credentials once and retries once only when explicitly enabled', async () => {
+    it('refreshes credentials once and retries once only when explicitly enabled', async () => {
     const executeMock = vi.mocked(executeWithOptionalTools);
     executeMock.mockRejectedValueOnce(new Error('401 IDE token expired: unauthorized: token expired'));
     executeMock.mockResolvedValueOnce(makeAssistantTextResponse('Recovered after refresh.') as never);
@@ -90,8 +90,32 @@ describe('PiAiAdapter auth refresh retry', () => {
     expect(secondCall.options.apiKey).toBe('fresh-token');
   });
 
+  it('does not refresh more than once when retried auth request fails again', async () => {
+    const executeMock = vi.mocked(executeWithOptionalTools);
+    executeMock.mockRejectedValue(new Error('401 IDE token expired: unauthorized: token expired'));
+
+    const refreshApiKey = vi.fn(async () => 'fresh-token');
+
+    const adapter = new PiAiAdapter();
+    const agent = await adapter.spawnAgent({
+      provider: 'github-copilot',
+      model: 'gpt-5.3-codex',
+      systemPrompt: 'system',
+      apiKey: 'stale-token',
+      refreshApiKey,
+      allowAuthRefreshRetry: true,
+    });
+
+    await expect(agent.complete('hello')).rejects.toMatchObject({
+      name: 'LlmFailureError',
+      failureType: 'auth',
+    });
+    expect(refreshApiKey).toHaveBeenCalledTimes(1);
+    expect(executeMock).toHaveBeenCalledTimes(2);
+  });
 
   it('retries timeout once and succeeds without session-level replay pressure', async () => {
+
     process.env.ORCHESTRACE_LLM_TRANSIENT_RETRY_ATTEMPTS = '1';
 
     const executeMock = vi.mocked(executeWithOptionalTools);

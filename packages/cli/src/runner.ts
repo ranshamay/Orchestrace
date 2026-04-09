@@ -928,9 +928,10 @@ async function main(): Promise<void> {
         model: config.model,
         systemPrompt: 'You are a precise JSON generator. Output only valid JSON, nothing else.',
         timeoutMs: 30_000,
-        apiKey: await authManager.resolveApiKey(config.provider),
-                refreshApiKey: () => authManager.resolveApiKey(config.provider, { allowRefresh: false }),
-        allowAuthRefreshRetry: false,
+                apiKey: await authManager.resolveApiKey(config.provider),
+        refreshApiKey: () => authManager.resolveApiKey(config.provider),
+        allowAuthRefreshRetry: true,
+
 
       });
 
@@ -1786,9 +1787,10 @@ async function main(): Promise<void> {
               systemPrompt: resolveSubAgentSystemPrompt(request),
               signal: subSignal,
               toolset: subToolset,
-              apiKey: await authManager.resolveApiKey(subProvider),
-                            refreshApiKey: () => authManager.resolveApiKey(subProvider, { allowRefresh: false }),
-              allowAuthRefreshRetry: false,
+                            apiKey: await authManager.resolveApiKey(subProvider),
+              refreshApiKey: () => authManager.resolveApiKey(subProvider),
+              allowAuthRefreshRetry: true,
+
 
             });
 
