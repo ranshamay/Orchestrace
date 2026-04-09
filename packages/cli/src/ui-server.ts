@@ -4954,6 +4954,8 @@ function resolveUiPreferencesDefaults(): UiPreferences {
   const defaultImplementationProvider = resolveDefaultImplementationProviderPreferenceDefault(defaultProvider);
   const defaultImplementationModel = resolveDefaultImplementationModelPreferenceDefault(defaultModel);
   const planningNoToolGuardMode = resolvePlanningNoToolGuardModeDefault();
+  const executionContext: UiPreferences['executionContext'] = 'workspace';
+  const useWorktree = false;
   return {
     activeTab: resolveUiTabDefault(),
     observerShowFindings: resolveObserverShowFindingsDefault(),
@@ -4964,6 +4966,8 @@ function resolveUiPreferencesDefaults(): UiPreferences {
     defaultImplementationProvider,
     defaultImplementationModel,
     planningNoToolGuardMode,
+    executionContext,
+    useWorktree,
     adaptiveConcurrency: resolveAdaptiveConcurrencyDefault(),
     batchConcurrency,
     batchMinConcurrency,
@@ -5003,6 +5007,11 @@ function normalizeUiPreferences(value: unknown, fallback: UiPreferences): UiPref
   const planningNoToolGuardMode = normalizePlanningNoToolGuardMode(value.planningNoToolGuardMode)
     ?? (parseBooleanSetting(value.planningNoToolWarnOnly) ? 'warn' : undefined)
     ?? fallback.planningNoToolGuardMode;
+  const executionContext = value.executionContext === 'git-worktree' || value.executionContext === 'workspace'
+    ? value.executionContext
+    : fallback.executionContext;
+  const useWorktree = parseBooleanSetting(value.useWorktree)
+    ?? (executionContext === 'git-worktree');
 
   return {
     activeTab: normalizeUiTab(value.activeTab) ?? fallback.activeTab,
@@ -5014,6 +5023,8 @@ function normalizeUiPreferences(value: unknown, fallback: UiPreferences): UiPref
     defaultImplementationProvider,
     defaultImplementationModel,
     planningNoToolGuardMode,
+    executionContext,
+    useWorktree,
     adaptiveConcurrency: parseBooleanSetting(value.adaptiveConcurrency) ?? fallback.adaptiveConcurrency,
     batchConcurrency,
     batchMinConcurrency,
@@ -7083,11 +7094,12 @@ async function ensureSessionWorkspaceReady(
   uiStatePersistence: { schedule: () => void; flush: () => Promise<void> },
 ): Promise<void> {
   if (existsSync(session.workspacePath)) {
-    const runtimePath = await resolveWorkspaceRuntimePath(session.workspacePath);
-    session.workspacePath = runtimePath.workspacePath;
-    session.worktreePath = runtimePath.workspacePath;
-    if (runtimePath.warning) {
-      console.warn(`[ui-server] ${runtimePath.warning}`);
+    const runtimeCheck = await validateWorkspaceRuntime(session.workspacePath);
+    session.workspacePath = runtimeCheck.normalizedPath;
+    session.worktreePath = runtimeCheck.normalizedPath;
+    const warning = formatMissingSourceDirsWarning(runtimeCheck.normalizedPath, runtimeCheck.missingExpectedDirs);
+    if (warning) {
+      console.warn(`[ui-server] ${warning}`);
     }
     return;
   }
@@ -7100,21 +7112,23 @@ async function ensureSessionWorkspaceReady(
     branchName: session.worktreeBranch,
   });
 
-  const runtimePath = await resolveWorkspaceRuntimePath(managedWorktree.worktreePath);
-  session.workspacePath = runtimePath.workspacePath;
+  const runtimeCheck = await validateWorkspaceRuntime(managedWorktree.worktreePath);
+  const runtimePath = runtimeCheck.normalizedPath;
+  session.workspacePath = runtimePath;
   session.workspaceName = workspace.name;
-  session.worktreePath = runtimePath.workspacePath;
+  session.worktreePath = runtimePath;
   session.worktreeBranch = managedWorktree.branchName;
   session.cleanupWorktree = async () => {
     await cleanupSessionWorktree({
       repoRoot: workspace.path,
       sessionId: session.id,
-      worktreePath: runtimePath.workspacePath,
+      worktreePath: runtimePath,
       branchName: managedWorktree.branchName,
     });
   };
-  if (runtimePath.warning) {
-    console.warn(`[ui-server] ${runtimePath.warning}`);
+  const warning = formatMissingSourceDirsWarning(runtimeCheck.normalizedPath, runtimeCheck.missingExpectedDirs);
+  if (warning) {
+    console.warn(`[ui-server] ${warning}`);
   }
   session.updatedAt = now();
   uiStatePersistence.schedule();
