@@ -56,6 +56,15 @@ import {
   resolveTaskRouteForSource,
   stripRetryContinuationContext,
 } from './task-routing.js';
+import {
+  SessionLifecycle,
+  SessionLifecycleError,
+  type SessionLifecyclePhase,
+} from './session-lifecycle.js';
+import {
+  appendCleanupErrors,
+  formatLifecyclePhaseFailure,
+} from './runner-lifecycle-diagnostics.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -164,7 +173,7 @@ async function main(): Promise<void> {
 
   // Handle SIGTERM for gracellation
   let cancelled = false;
-  process.on('SIGTERM', () => {
+  const handleSigterm = () => {
     cancelled = true;
     controller.abort();
     resetThinkingCircuitBreaker(thinkingCircuitBreaker);
@@ -176,7 +185,8 @@ async function main(): Promise<void> {
     };
     void emit({ time: iso(), type: 'session:llm-status-change', payload: { llmStatus } });
     void emit({ time: iso(), type: 'session:status-change', payload: { status: 'cancelled' } });
-  });
+  };
+  process.on('SIGTERM', handleSigterm);
 
   // Shared context and file-read cache for this session
   const sharedContextStore = new InMemorySharedContextStore();
@@ -226,6 +236,77 @@ async function main(): Promise<void> {
       console.error(`[runner] Failed to emit event:`, err);
     }
   }
+
+  const lifecycle = new SessionLifecycle('VALIDATING');
+
+  function lifecycleDetailForPhase(phase: SessionLifecyclePhase): string {
+    switch (phase) {
+      case 'VALIDATING': return 'Validating prompt/session configuration.';
+      case 'SETTING_UP': return 'Setting up runtime resources.';
+      case 'DISPATCHING': return 'Dispatching execution strategy.';
+      case 'EXECUTING': return 'Executing selected route.';
+      case 'COMPLETING': return 'Finalizing outputs and status.';
+      case 'CLEANING_UP': return 'Cleaning up runner resources.';
+      case 'COMPLETED': return 'Run completed successfully.';
+      case 'FAILED': return 'Run failed.';
+      case 'CANCELLED': return 'Run cancelled.';
+      default: return `Lifecycle phase: ${phase}`;
+    }
+  }
+
+  async function emitLifecyclePhaseChange(phase: SessionLifecyclePhase): Promise<void> {
+    const detail = lifecycleDetailForPhase(phase);
+    const state: LlmSessionState = phase === 'FAILED'
+      ? 'failed'
+      : phase === 'CANCELLED'
+        ? 'cancelled'
+        : phase === 'COMPLETED'
+          ? 'completed'
+          : phase === 'VALIDATING'
+            ? 'analyzing'
+            : phase === 'COMPLETING'
+              ? 'validating'
+              : 'implementing';
+
+    const llmStatus = makeLlmStatus(state, detail, undefined, 'task', 'implementation');
+    lastLlmStatusEmission = {
+      key: llmStatusIdentityKey(llmStatus),
+      emittedAt: parseTimestamp(llmStatus.updatedAt),
+    };
+    await emit({ time: iso(), type: 'session:llm-status-change', payload: { llmStatus } });
+
+    await emit({
+      time: iso(),
+      type: 'session:dag-event',
+      payload: {
+        event: {
+          time: iso(),
+          runId: sessionId,
+          type: 'task:started',
+          taskId: 'task',
+          message: `Lifecycle phase: ${phase}`,
+        },
+      },
+    });
+  }
+
+  async function enterLifecyclePhase(
+    phase: SessionLifecyclePhase,
+    options: { precondition?: () => boolean | Promise<boolean>; preconditionMessage?: string } = {},
+  ): Promise<void> {
+    await lifecycle.enterPhase(phase, options);
+    await emitLifecyclePhaseChange(phase);
+  }
+
+  lifecycle.registerCleanup('SETTING_UP', 'remove-sigterm-listener', () => {
+    process.off('SIGTERM', handleSigterm);
+  });
+  lifecycle.registerCleanup('SETTING_UP', 'clear-heartbeat-interval', () => {
+    clearInterval(heartbeatInterval);
+  });
+  lifecycle.registerCleanup('SETTING_UP', 'abort-controller', () => {
+    controller.abort();
+  });
 
   void emit({
     time: iso(),
@@ -1135,6 +1216,12 @@ async function main(): Promise<void> {
     }
 
   try {
+    await emitLifecyclePhaseChange('VALIDATING');
+    await enterLifecyclePhase('SETTING_UP', {
+      precondition: () => Boolean(config.prompt && config.prompt.trim()) && Boolean(config.workspacePath && config.workspacePath.trim()),
+      preconditionMessage: 'Prompt and workspacePath are required before setup.',
+    });
+
     const trivialTaskGate = resolveTrivialTaskGateConfig({
       enabled: config.enableTrivialTaskGate,
       maxPromptLength: config.trivialTaskMaxPromptLength,
@@ -1220,6 +1307,8 @@ async function main(): Promise<void> {
         deliveryError = errorMsg(error);
       }
 
+      await enterLifecyclePhase('COMPLETING');
+
       if (toolResult.isError || deliveryError) {
         const errorLines = [toolResult.isError ? outputText : undefined, deliveryError ? `Remote delivery failed: ${deliveryError}` : undefined]
           .filter((line): line is string => Boolean(line));
@@ -1239,7 +1328,9 @@ async function main(): Promise<void> {
         await emit({ time: iso(), type: 'session:llm-status-change', payload: { llmStatus: failedStatus } });
         await emit({ time: iso(), type: 'session:status-change', payload: { status: 'failed' } });
         await finalizeCheckpoint('failed', iso());
-        clearInterval(heartbeatInterval);
+        await lifecycle.cleanup();
+        await lifecycle.complete('FAILED');
+        await emitLifecyclePhaseChange('FAILED');
         process.exit(1);
       }
 
@@ -1256,9 +1347,25 @@ async function main(): Promise<void> {
         payload: { message: { role: 'assistant', content: outputText, time: iso() } },
       });
       await finalizeCheckpoint('completed', iso());
-      clearInterval(heartbeatInterval);
+      await lifecycle.cleanup();
+      await lifecycle.complete('COMPLETED');
+      await emitLifecyclePhaseChange('COMPLETED');
       process.exit(0);
     }
+
+    await enterLifecyclePhase('DISPATCHING', {
+      precondition: () => {
+        if (route.category === 'shell_command') {
+          return Boolean(dispatch.shell.ok && dispatch.shell.command);
+        }
+        return Boolean(config.provider && config.model);
+      },
+      preconditionMessage: route.category === 'shell_command'
+        ? 'Shell dispatch selected but no safe command was resolved.'
+        : 'LLM dispatch requires provider/model configuration.',
+    });
+
+    await enterLifecyclePhase('EXECUTING');
 
     const outputs = route.category === 'shell_command'
       ? await runShellCommandRoute(dispatch.shell.command!, config.workspacePath)
@@ -1477,9 +1584,13 @@ async function main(): Promise<void> {
 
     if (cancelled) {
       await finalizeCheckpoint('cancelled', iso());
-      clearInterval(heartbeatInterval);
+      await lifecycle.cleanup();
+      await lifecycle.complete('CANCELLED');
+      await emitLifecyclePhaseChange('CANCELLED');
       process.exit(130);
     }
+
+    await enterLifecyclePhase('COMPLETING');
 
     // Completion
     const allOutputs = [...outputs.values()];
@@ -1540,17 +1651,31 @@ async function main(): Promise<void> {
       await emit({ time: t, type: 'session:chat-message', payload: { message: { role: 'assistant', content: primaryOutput.response, time: t } } });
     }
 
-    clearInterval(heartbeatInterval);
+    await lifecycle.cleanup();
+    if (terminalFailed) {
+      await lifecycle.complete('FAILED');
+      await emitLifecyclePhaseChange('FAILED');
+    } else {
+      await lifecycle.complete('COMPLETED');
+      await emitLifecyclePhaseChange('COMPLETED');
+    }
+
     process.exit(terminalFailed ? 1 : 0);
   } catch (error) {
     if (cancelled) {
       await markCheckpointInterrupted(iso(), 'Interrupted during cancellation path.');
-      clearInterval(heartbeatInterval);
+      await lifecycle.cleanup();
+      await lifecycle.complete('CANCELLED');
+      await emitLifecyclePhaseChange('CANCELLED');
       process.exit(130);
     }
 
     const t = iso();
-    const errorText = errorMsg(error);
+    const lifecyclePhase = lifecycle.phase;
+    const lifecycleError = error instanceof SessionLifecycleError
+      ? error
+      : await lifecycle.failAt(lifecyclePhase, errorMsg(error), error);
+    const errorText = formatLifecyclePhaseFailure(lifecycleError.phase, errorMsg(error));
     resetThinkingCircuitBreaker(thinkingCircuitBreaker);
     await maybeCheckpoint('terminal');
     let deliveryError: string | undefined;
@@ -1562,8 +1687,12 @@ async function main(): Promise<void> {
     const finalError = deliveryError
       ? `${errorText}\nRemote delivery failed: ${deliveryError}`
       : errorText;
-    await emit({ time: t, type: 'session:error-change', payload: { error: finalError } });
-    const llmStatus = makeLlmStatus('failed', finalError, deliveryError ? 'delivery_failure' : undefined);
+
+    const cleanupErrors = lifecycle.diagnostics.cleanupErrors;
+    const errorWithCleanup = appendCleanupErrors(finalError, cleanupErrors);
+
+    await emit({ time: t, type: 'session:error-change', payload: { error: errorWithCleanup } });
+    const llmStatus = makeLlmStatus('failed', errorWithCleanup, deliveryError ? 'delivery_failure' : lifecycleError.type);
     lastLlmStatusEmission = {
       key: llmStatusIdentityKey(llmStatus),
       emittedAt: parseTimestamp(llmStatus.updatedAt),
@@ -1572,7 +1701,10 @@ async function main(): Promise<void> {
     await emit({ time: t, type: 'session:status-change', payload: { status: 'failed' } });
     await finalizeCheckpoint('failed', t);
 
-    clearInterval(heartbeatInterval);
+    await lifecycle.cleanup();
+    await lifecycle.complete('FAILED');
+    await emitLifecyclePhaseChange('FAILED');
+
     process.exit(1);
   }
 
