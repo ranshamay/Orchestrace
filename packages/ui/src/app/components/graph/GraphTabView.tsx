@@ -3,6 +3,7 @@ import type { FailureType, LlmSessionStatus, NodeTokenStream, ComposerMode } fro
 import { composerModeBadgeClass, composerModeDescription } from '../../utils/composer';
 import { EntityGraphCard } from './EntityGraphCard';
 import { TodoChecklistCard } from './TodoChecklistCard';
+import { CodeChangesCard } from './CodeChangesCard';
 import { ObserverPanel } from '../observer/ObserverPanel';
 import { LogWatcherPanel } from '../observer/LogWatcherPanel';
 
@@ -93,6 +94,10 @@ export function GraphTabView({
           selectedFailureType={selectedFailureType}
           selectedLlmStatus={selectedLlmStatus}
           nodeTokenStreams={nodeTokenStreams}
+          selectedSession={selectedSession}
+          selectedSessionRunning={selectedSessionRunning}
+        />
+        <CodeChangesCard
           selectedSession={selectedSession}
           selectedSessionRunning={selectedSessionRunning}
         />

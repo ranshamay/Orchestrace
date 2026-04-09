@@ -149,6 +149,30 @@ export interface WorkSessionsResponse {
   sessions: WorkSession[];
 }
 
+export type WorkSessionDiffFileStatus = 'added' | 'modified' | 'deleted' | 'renamed' | 'copied' | 'unmerged' | 'unknown';
+
+export interface WorkSessionDiffFile {
+  path: string;
+  status: WorkSessionDiffFileStatus;
+  previousPath?: string;
+}
+
+export interface WorkSessionDiffResponse {
+  id: string;
+  baseBranch: string;
+  comparedPath: string;
+  hasChanges: boolean;
+  files: WorkSessionDiffFile[];
+  stats: {
+    files: number;
+    additions: number;
+    deletions: number;
+  };
+  diff: string;
+  generatedAt: string;
+  truncated: boolean;
+}
+
 export interface AgentTodo {
   id: string;
   text: string;
@@ -301,6 +325,10 @@ export async function fetchWorkTools(
     params.set('mode', mode);
   }
   return readJson(await fetch(`${API_BASE}/work/tools?${params.toString()}`));
+}
+
+export async function fetchWorkDiff(id: string): Promise<WorkSessionDiffResponse> {
+  return readJson(await fetch(`${API_BASE}/work/diff?id=${encodeURIComponent(id)}`));
 }
 
 export async function startWork(payload: {
