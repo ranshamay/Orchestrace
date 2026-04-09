@@ -28,6 +28,7 @@ export function useSessionActions(params: SessionActionsParams) {
     workPlanningModel,
     workProvider,
     workModel,
+    defaultAgentModels,
     deliveryStrategy,
     planningNoToolGuardMode,
     autoApprove,
@@ -63,6 +64,19 @@ export function useSessionActions(params: SessionActionsParams) {
           prompt: runPrompt,
           provider: workProvider,
           model: workModel,
+          agentModels: {
+            ...defaultAgentModels,
+            planner: {
+              ...(defaultAgentModels.planner ?? {}),
+              provider: workPlanningProvider,
+              model: workPlanningModel,
+            },
+            implementer: {
+              ...(defaultAgentModels.implementer ?? {}),
+              provider: workProvider,
+              model: workModel,
+            },
+          },
           planningProvider: workPlanningProvider,
           planningModel: workPlanningModel,
           implementationProvider: workProvider,
@@ -118,6 +132,7 @@ export function useSessionActions(params: SessionActionsParams) {
     workPlanningProvider,
     workModel,
     workProvider,
+    defaultAgentModels,
     workWorkspaceId,
   ]);
 

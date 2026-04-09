@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import {
+  type AgentModels,
   type UiPreferences,
   fetchGithubAuthStatus,
   fetchProviders,
@@ -37,6 +38,7 @@ export function useBootstrapData() {
     planningModel: '',
     implementationProvider: '',
     implementationModel: '',
+    agentModels: {},
     deliveryStrategy: 'pr-only',
     planningNoToolGuardMode: 'enforce',
     workspaceId: '',
@@ -120,6 +122,7 @@ export function useBootstrapData() {
           observerShowFindings: false,
           defaultProvider: '',
           defaultModel: '',
+          defaultAgentModels: {},
           defaultPlanningProvider: '',
           defaultPlanningModel: '',
           defaultImplementationProvider: '',
@@ -167,6 +170,27 @@ export function useBootstrapData() {
         const defaultImplementationModel = typeof preferences.defaultImplementationModel === 'string'
           ? preferences.defaultImplementationModel.trim()
           : defaultModel;
+        const defaultAgentModels: AgentModels = {
+          ...(preferences.defaultAgentModels ?? {}),
+          planner: {
+            ...(preferences.defaultAgentModels?.planner ?? {}),
+            provider: typeof preferences.defaultAgentModels?.planner?.provider === 'string'
+              ? preferences.defaultAgentModels.planner.provider.trim()
+              : defaultPlanningProvider,
+            model: typeof preferences.defaultAgentModels?.planner?.model === 'string'
+              ? preferences.defaultAgentModels.planner.model.trim()
+              : defaultPlanningModel,
+          },
+          implementer: {
+            ...(preferences.defaultAgentModels?.implementer ?? {}),
+            provider: typeof preferences.defaultAgentModels?.implementer?.provider === 'string'
+              ? preferences.defaultAgentModels.implementer.provider.trim()
+              : defaultImplementationProvider,
+            model: typeof preferences.defaultAgentModels?.implementer?.model === 'string'
+              ? preferences.defaultAgentModels.implementer.model.trim()
+              : defaultImplementationModel,
+          },
+        };
         const defaultWorkspace = workspacesState?.activeWorkspaceId || workspacesState?.workspaces[0]?.id || '';
 
         const initialControls: SessionLlmControls = {
@@ -174,6 +198,7 @@ export function useBootstrapData() {
           planningModel: defaultPlanningModel,
           implementationProvider: defaultImplementationProvider,
           implementationModel: defaultImplementationModel,
+          agentModels: defaultAgentModels,
           deliveryStrategy: preferences.defaultDeliveryStrategy === 'merge-after-ci' ? 'merge-after-ci' : 'pr-only',
           planningNoToolGuardMode: preferences.planningNoToolGuardMode === 'warn' ? 'warn' : 'enforce',
           workspaceId: defaultWorkspace,

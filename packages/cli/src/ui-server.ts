@@ -58,6 +58,7 @@ import type {
   SessionChatMessage,
   SessionChatThread,
   SessionCheckpointInfo,
+  SessionAgentModels,
   SessionLlmStatus,
   SessionRecoveryInfo,
   UiDagEvent,
@@ -380,6 +381,15 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
 
         const c = materialized.config;
         const legacyConfig = c as unknown as Record<string, unknown>;
+        const resolvedAgentModels = resolveSessionAgentModels({
+          provider: c.provider,
+          model: c.model,
+          planningProvider: c.planningProvider,
+          planningModel: c.planningModel,
+          implementationProvider: c.implementationProvider,
+          implementationModel: c.implementationModel,
+          agentModels: c.agentModels,
+        });
         const session: WorkSession = {
           id: c.id,
           workspaceId: c.workspaceId,
@@ -387,12 +397,13 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           workspacePath: c.workspacePath,
           prompt: c.prompt,
           promptParts: c.promptParts,
-          provider: c.implementationProvider ?? c.provider,
-          model: c.implementationModel ?? c.model,
-          planningProvider: c.planningProvider ?? c.provider,
-          planningModel: c.planningModel ?? c.model,
-          implementationProvider: c.implementationProvider ?? c.provider,
-          implementationModel: c.implementationModel ?? c.model,
+          provider: resolvedAgentModels.implementationProvider,
+          model: resolvedAgentModels.implementationModel,
+          agentModels: resolvedAgentModels.agentModels,
+          planningProvider: resolvedAgentModels.planningProvider,
+          planningModel: resolvedAgentModels.planningModel,
+          implementationProvider: resolvedAgentModels.implementationProvider,
+          implementationModel: resolvedAgentModels.implementationModel,
           deliveryStrategy: normalizeSessionDeliveryStrategy(c.deliveryStrategy),
           autoApprove: c.autoApprove,
           planningNoToolGuardMode: normalizePlanningNoToolGuardMode(c.planningNoToolGuardMode)
@@ -1054,6 +1065,15 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
   }
 
   function toSessionConfig(session: WorkSession): SessionConfig {
+    const resolvedAgentModels = resolveSessionAgentModels({
+      provider: session.provider,
+      model: session.model,
+      planningProvider: session.planningProvider,
+      planningModel: session.planningModel,
+      implementationProvider: session.implementationProvider,
+      implementationModel: session.implementationModel,
+      agentModels: session.agentModels,
+    });
     return {
       id: session.id,
       workspaceId: session.workspaceId,
@@ -1061,12 +1081,13 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       workspacePath: session.workspacePath,
       prompt: session.executionPromptOverride ?? session.prompt,
       promptParts: session.promptParts ? cloneChatContentParts(session.promptParts) : undefined,
-      provider: session.provider,
-      model: session.model,
-      planningProvider: session.planningProvider,
-      planningModel: session.planningModel,
-      implementationProvider: session.implementationProvider,
-      implementationModel: session.implementationModel,
+      provider: resolvedAgentModels.implementationProvider,
+      model: resolvedAgentModels.implementationModel,
+      agentModels: resolvedAgentModels.agentModels,
+      planningProvider: resolvedAgentModels.planningProvider,
+      planningModel: resolvedAgentModels.planningModel,
+      implementationProvider: resolvedAgentModels.implementationProvider,
+      implementationModel: resolvedAgentModels.implementationModel,
       deliveryStrategy: session.deliveryStrategy,
       autoApprove: session.autoApprove,
       planningNoToolGuardMode: session.planningNoToolGuardMode,
@@ -1592,6 +1613,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     promptParts?: SessionChatContentPart[];
     provider: string;
     model: string;
+    agentModels?: SessionAgentModels;
     planningProvider?: string;
     planningModel?: string;
     implementationProvider?: string;
@@ -1628,10 +1650,19 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     details?: Record<string, unknown>;
   }> {
     const promptParts = cloneChatContentParts(request.promptParts ?? []);
-    const implementationProvider = asString(request.implementationProvider) || request.provider;
-    const implementationModel = asString(request.implementationModel) || request.model;
-    const planningProvider = asString(request.planningProvider) || implementationProvider;
-    const planningModel = asString(request.planningModel) || implementationModel;
+    const resolvedAgentModels = resolveSessionAgentModels({
+      provider: request.provider,
+      model: request.model,
+      planningProvider: request.planningProvider,
+      planningModel: request.planningModel,
+      implementationProvider: request.implementationProvider,
+      implementationModel: request.implementationModel,
+      agentModels: request.agentModels,
+    });
+    const implementationProvider = resolvedAgentModels.implementationProvider;
+    const implementationModel = resolvedAgentModels.implementationModel;
+    const planningProvider = resolvedAgentModels.planningProvider;
+    const planningModel = resolvedAgentModels.planningModel;
     const deliveryStrategy = normalizeSessionDeliveryStrategy(
       request.deliveryStrategy ?? uiPreferences.defaultDeliveryStrategy,
     );
@@ -1713,6 +1744,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       promptParts: promptParts.length > 0 ? cloneChatContentParts(promptParts) : undefined,
       provider: implementationProvider,
       model: implementationModel,
+      agentModels: resolvedAgentModels.agentModels,
       planningProvider,
       planningModel,
       implementationProvider,
@@ -2350,15 +2382,27 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         const workspaceId = asString(body.workspaceId);
         const prompt = body.prompt;
         const promptParts = parseChatContentParts(body.promptParts);
+        const requestedAgentModels = normalizeSessionAgentModels(body.agentModels);
         const legacyProvider = asString(body.provider);
-        const implementationProvider = asString(body.implementationProvider)
+        const implementationProvider = asString(requestedAgentModels.implementer?.provider)
+          || asString(body.implementationProvider)
           || legacyProvider
+          || asString(process.env.ORCHESTRACE_IMPLEMENTER_PROVIDER)
           || process.env.ORCHESTRACE_DEFAULT_PROVIDER
           || 'anthropic';
-        const planningProvider = asString(body.planningProvider) || implementationProvider;
+        const planningProvider = asString(requestedAgentModels.planner?.provider)
+          || asString(body.planningProvider)
+          || asString(process.env.ORCHESTRACE_PLANNER_PROVIDER)
+          || implementationProvider;
         const legacyRequestedModel = asString(body.model);
-        const requestedImplementationModel = asString(body.implementationModel) || legacyRequestedModel;
-        const requestedPlanningModel = asString(body.planningModel) || requestedImplementationModel;
+        const requestedImplementationModel = asString(requestedAgentModels.implementer?.model)
+          || asString(body.implementationModel)
+          || asString(process.env.ORCHESTRACE_IMPLEMENTER_MODEL)
+          || legacyRequestedModel;
+        const requestedPlanningModel = asString(requestedAgentModels.planner?.model)
+          || asString(body.planningModel)
+          || asString(process.env.ORCHESTRACE_PLANNER_MODEL)
+          || requestedImplementationModel;
 
         const implementationModelResolution = resolveWorkStartModel({
           provider: implementationProvider,
@@ -2418,6 +2462,19 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           promptParts,
           provider: implementationProvider,
           model: implementationModelResolution.model,
+          agentModels: normalizeSessionAgentModels(body.agentModels, {
+            ...requestedAgentModels,
+            planner: {
+              ...requestedAgentModels.planner,
+              provider: planningProvider,
+              model: planningModelResolution.model,
+            },
+            implementer: {
+              ...requestedAgentModels.implementer,
+              provider: implementationProvider,
+              model: implementationModelResolution.model,
+            },
+          }),
           planningProvider,
           planningModel: planningModelResolution.model,
           implementationProvider,
@@ -4329,6 +4386,15 @@ function sanitizePersistedText(text: string, maxChars: number): string {
 }
 
 function toPersistedSession(session: WorkSession): PersistedWorkSession {
+  const resolvedAgentModels = resolveSessionAgentModels({
+    provider: session.provider,
+    model: session.model,
+    planningProvider: session.planningProvider,
+    planningModel: session.planningModel,
+    implementationProvider: session.implementationProvider,
+    implementationModel: session.implementationModel,
+    agentModels: session.agentModels,
+  });
   return {
     id: session.id,
     workspaceId: session.workspaceId,
@@ -4349,12 +4415,13 @@ function toPersistedSession(session: WorkSession): PersistedWorkSession {
         };
       })
       : undefined,
-    provider: session.provider,
-    model: session.model,
-    planningProvider: session.planningProvider,
-    planningModel: session.planningModel,
-    implementationProvider: session.implementationProvider,
-    implementationModel: session.implementationModel,
+    provider: resolvedAgentModels.implementationProvider,
+    model: resolvedAgentModels.implementationModel,
+    agentModels: resolvedAgentModels.agentModels,
+    planningProvider: resolvedAgentModels.planningProvider,
+    planningModel: resolvedAgentModels.planningModel,
+    implementationProvider: resolvedAgentModels.implementationProvider,
+    implementationModel: resolvedAgentModels.implementationModel,
     deliveryStrategy: session.deliveryStrategy,
     autoApprove: session.autoApprove,
     planningNoToolGuardMode: session.planningNoToolGuardMode,
@@ -4400,16 +4467,26 @@ function hydratePersistedSession(session: PersistedWorkSession): WorkSession {
     resumedError,
     persistedLlmStatus,
   );
+  const resolvedAgentModels = resolveSessionAgentModels({
+    provider: asString(session.provider),
+    model: asString(session.model),
+    planningProvider: asString(session.planningProvider),
+    planningModel: asString(session.planningModel),
+    implementationProvider: asString(session.implementationProvider),
+    implementationModel: asString(session.implementationModel),
+    agentModels: session.agentModels,
+  });
 
   return {
     ...session,
-    planningProvider: asString(session.planningProvider) || asString(session.provider),
-    planningModel: asString(session.planningModel) || asString(session.model),
-    implementationProvider: asString(session.implementationProvider) || asString(session.provider),
-    implementationModel: asString(session.implementationModel) || asString(session.model),
+    planningProvider: resolvedAgentModels.planningProvider,
+    planningModel: resolvedAgentModels.planningModel,
+    implementationProvider: resolvedAgentModels.implementationProvider,
+    implementationModel: resolvedAgentModels.implementationModel,
     deliveryStrategy: normalizeSessionDeliveryStrategy(session.deliveryStrategy),
-    provider: asString(session.implementationProvider) || asString(session.provider),
-    model: asString(session.implementationModel) || asString(session.model),
+    provider: resolvedAgentModels.implementationProvider,
+    model: resolvedAgentModels.implementationModel,
+    agentModels: resolvedAgentModels.agentModels,
     promptParts: promptParts.length > 0 ? promptParts : undefined,
     planningNoToolGuardMode: normalizePlanningNoToolGuardMode(session.planningNoToolGuardMode)
       ?? resolvePlanningNoToolGuardModeDefault(),
@@ -5071,6 +5148,130 @@ function normalizeSessionDeliveryStrategy(raw: unknown): SessionDeliveryStrategy
   return 'pr-only';
 }
 
+const AGENT_MODEL_ROLES = ['router', 'planner', 'implementer', 'reviewer', 'investigator'] as const;
+
+type AgentModelRole = (typeof AGENT_MODEL_ROLES)[number];
+
+function normalizeReasoningLevel(value: unknown): 'minimal' | 'low' | 'medium' | 'high' | undefined {
+  const normalized = asString(value).trim().toLowerCase();
+  if (normalized === 'minimal' || normalized === 'low' || normalized === 'medium' || normalized === 'high') {
+    return normalized;
+  }
+
+  return undefined;
+}
+
+function normalizeAgentModelConfig(value: unknown): { provider?: string; model?: string; reasoning?: 'minimal' | 'low' | 'medium' | 'high' } | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+
+  const provider = asString(value.provider).trim();
+  const model = asString(value.model).trim();
+  const reasoning = normalizeReasoningLevel(value.reasoning);
+  if (!provider && !model && !reasoning) {
+    return undefined;
+  }
+
+  return {
+    ...(provider ? { provider } : {}),
+    ...(model ? { model } : {}),
+    ...(reasoning ? { reasoning } : {}),
+  };
+}
+
+function mergeAgentModelConfig(
+  value: unknown,
+  fallback?: { provider?: string; model?: string; reasoning?: 'minimal' | 'low' | 'medium' | 'high' },
+): { provider?: string; model?: string; reasoning?: 'minimal' | 'low' | 'medium' | 'high' } | undefined {
+  const normalized = normalizeAgentModelConfig(value);
+  const provider = normalized?.provider ?? fallback?.provider;
+  const model = normalized?.model ?? fallback?.model;
+  const reasoning = normalized?.reasoning ?? fallback?.reasoning;
+  if (!provider && !model && !reasoning) {
+    return undefined;
+  }
+
+  return {
+    ...(provider ? { provider } : {}),
+    ...(model ? { model } : {}),
+    ...(reasoning ? { reasoning } : {}),
+  };
+}
+
+function normalizeSessionAgentModels(
+  value: unknown,
+  fallback: SessionAgentModels = {},
+): SessionAgentModels {
+  const source = isRecord(value) ? value : {};
+  const normalized: SessionAgentModels = {};
+  for (const role of AGENT_MODEL_ROLES) {
+    const merged = mergeAgentModelConfig(source[role], fallback[role]);
+    if (merged) {
+      normalized[role] = merged;
+    }
+  }
+
+  return normalized;
+}
+
+function resolveSessionAgentModels(params: {
+  provider: string;
+  model: string;
+  planningProvider?: string;
+  planningModel?: string;
+  implementationProvider?: string;
+  implementationModel?: string;
+  agentModels?: SessionAgentModels;
+}): {
+  agentModels: SessionAgentModels;
+  planningProvider: string;
+  planningModel: string;
+  implementationProvider: string;
+  implementationModel: string;
+} {
+  const implementationProvider = asString(params.implementationProvider).trim() || asString(params.provider).trim();
+  const implementationModel = asString(params.implementationModel).trim() || asString(params.model).trim();
+  const planningProvider = asString(params.planningProvider).trim() || implementationProvider;
+  const planningModel = asString(params.planningModel).trim() || implementationModel;
+
+  const normalizedAgentModels = normalizeSessionAgentModels(params.agentModels, {
+    planner: {
+      provider: planningProvider,
+      model: planningModel,
+    },
+    implementer: {
+      provider: implementationProvider,
+      model: implementationModel,
+    },
+  });
+
+  const resolvedPlanningProvider = asString(normalizedAgentModels.planner?.provider).trim() || planningProvider;
+  const resolvedPlanningModel = asString(normalizedAgentModels.planner?.model).trim() || planningModel;
+  const resolvedImplementationProvider = asString(normalizedAgentModels.implementer?.provider).trim() || implementationProvider;
+  const resolvedImplementationModel = asString(normalizedAgentModels.implementer?.model).trim() || implementationModel;
+
+  return {
+    agentModels: {
+      ...normalizedAgentModels,
+      planner: {
+        ...normalizedAgentModels.planner,
+        provider: resolvedPlanningProvider,
+        model: resolvedPlanningModel,
+      },
+      implementer: {
+        ...normalizedAgentModels.implementer,
+        provider: resolvedImplementationProvider,
+        model: resolvedImplementationModel,
+      },
+    },
+    planningProvider: resolvedPlanningProvider,
+    planningModel: resolvedPlanningModel,
+    implementationProvider: resolvedImplementationProvider,
+    implementationModel: resolvedImplementationModel,
+  };
+}
+
 function resolveUiPreferencesDefaults(): UiPreferences {
   const batchConcurrency = resolveBatchConcurrencyDefault();
   const batchMinConcurrency = Math.min(batchConcurrency, resolveBatchMinConcurrencyDefault());
@@ -5080,15 +5281,44 @@ function resolveUiPreferencesDefaults(): UiPreferences {
   const defaultPlanningModel = resolveDefaultPlanningModelPreferenceDefault(defaultModel);
   const defaultImplementationProvider = resolveDefaultImplementationProviderPreferenceDefault(defaultProvider);
   const defaultImplementationModel = resolveDefaultImplementationModelPreferenceDefault(defaultModel);
+  const defaultRouterProvider = resolveDefaultRouterProviderPreferenceDefault(defaultImplementationProvider);
+  const defaultRouterModel = resolveDefaultRouterModelPreferenceDefault(defaultImplementationModel);
+  const defaultReviewerProvider = resolveDefaultReviewerProviderPreferenceDefault(defaultImplementationProvider);
+  const defaultReviewerModel = resolveDefaultReviewerModelPreferenceDefault(defaultImplementationModel);
+  const defaultInvestigatorProvider = resolveDefaultInvestigatorProviderPreferenceDefault(defaultImplementationProvider);
+  const defaultInvestigatorModel = resolveDefaultInvestigatorModelPreferenceDefault(defaultImplementationModel);
   const defaultDeliveryStrategy = resolveDefaultDeliveryStrategyPreferenceDefault();
   const planningNoToolGuardMode = resolvePlanningNoToolGuardModeDefault();
   const executionContext: UiPreferences['executionContext'] = 'workspace';
   const useWorktree = false;
+  const defaultAgentModels = normalizeSessionAgentModels({
+    router: {
+      provider: defaultRouterProvider,
+      model: defaultRouterModel,
+    },
+    planner: {
+      provider: defaultPlanningProvider,
+      model: defaultPlanningModel,
+    },
+    implementer: {
+      provider: defaultImplementationProvider,
+      model: defaultImplementationModel,
+    },
+    reviewer: {
+      provider: defaultReviewerProvider,
+      model: defaultReviewerModel,
+    },
+    investigator: {
+      provider: defaultInvestigatorProvider,
+      model: defaultInvestigatorModel,
+    },
+  });
   return {
     activeTab: resolveUiTabDefault(),
     observerShowFindings: resolveObserverShowFindingsDefault(),
     defaultProvider: defaultImplementationProvider,
     defaultModel: defaultImplementationModel,
+    defaultAgentModels,
     defaultPlanningProvider,
     defaultPlanningModel,
     defaultImplementationProvider,
@@ -5133,6 +5363,11 @@ function normalizeUiPreferences(value: unknown, fallback: UiPreferences): UiPref
     value.defaultImplementationModel,
     legacyDefaultModel || fallback.defaultImplementationModel,
   );
+  const defaultAgentModels = normalizeSessionAgentModels(value.defaultAgentModels, fallback.defaultAgentModels);
+  const resolvedPlanningProvider = asString(defaultAgentModels.planner?.provider).trim() || defaultPlanningProvider;
+  const resolvedPlanningModel = asString(defaultAgentModels.planner?.model).trim() || defaultPlanningModel;
+  const resolvedImplementationProvider = asString(defaultAgentModels.implementer?.provider).trim() || defaultImplementationProvider;
+  const resolvedImplementationModel = asString(defaultAgentModels.implementer?.model).trim() || defaultImplementationModel;
   const defaultDeliveryStrategy = normalizeSessionDeliveryStrategy(
     value.defaultDeliveryStrategy ?? value.deliveryStrategy,
   );
@@ -5148,12 +5383,25 @@ function normalizeUiPreferences(value: unknown, fallback: UiPreferences): UiPref
   return {
     activeTab: normalizeUiTab(value.activeTab) ?? fallback.activeTab,
     observerShowFindings: parseBooleanSetting(value.observerShowFindings) ?? fallback.observerShowFindings,
-    defaultProvider: defaultImplementationProvider,
-    defaultModel: defaultImplementationModel,
-    defaultPlanningProvider,
-    defaultPlanningModel,
-    defaultImplementationProvider,
-    defaultImplementationModel,
+    defaultProvider: resolvedImplementationProvider,
+    defaultModel: resolvedImplementationModel,
+    defaultAgentModels: {
+      ...defaultAgentModels,
+      planner: {
+        ...defaultAgentModels.planner,
+        provider: resolvedPlanningProvider,
+        model: resolvedPlanningModel,
+      },
+      implementer: {
+        ...defaultAgentModels.implementer,
+        provider: resolvedImplementationProvider,
+        model: resolvedImplementationModel,
+      },
+    },
+    defaultPlanningProvider: resolvedPlanningProvider,
+    defaultPlanningModel: resolvedPlanningModel,
+    defaultImplementationProvider: resolvedImplementationProvider,
+    defaultImplementationModel: resolvedImplementationModel,
     defaultDeliveryStrategy,
     planningNoToolGuardMode,
     executionContext,
@@ -5199,6 +5447,30 @@ function resolveDefaultImplementationProviderPreferenceDefault(fallback: string)
 
 function resolveDefaultImplementationModelPreferenceDefault(fallback: string): string {
   return asString(process.env.ORCHESTRACE_UI_DEFAULT_IMPLEMENTATION_MODEL) || fallback;
+}
+
+function resolveDefaultRouterProviderPreferenceDefault(fallback: string): string {
+  return asString(process.env.ORCHESTRACE_UI_DEFAULT_ROUTER_PROVIDER) || fallback;
+}
+
+function resolveDefaultRouterModelPreferenceDefault(fallback: string): string {
+  return asString(process.env.ORCHESTRACE_UI_DEFAULT_ROUTER_MODEL) || fallback;
+}
+
+function resolveDefaultReviewerProviderPreferenceDefault(fallback: string): string {
+  return asString(process.env.ORCHESTRACE_UI_DEFAULT_REVIEWER_PROVIDER) || fallback;
+}
+
+function resolveDefaultReviewerModelPreferenceDefault(fallback: string): string {
+  return asString(process.env.ORCHESTRACE_UI_DEFAULT_REVIEWER_MODEL) || fallback;
+}
+
+function resolveDefaultInvestigatorProviderPreferenceDefault(fallback: string): string {
+  return asString(process.env.ORCHESTRACE_UI_DEFAULT_INVESTIGATOR_PROVIDER) || fallback;
+}
+
+function resolveDefaultInvestigatorModelPreferenceDefault(fallback: string): string {
+  return asString(process.env.ORCHESTRACE_UI_DEFAULT_INVESTIGATOR_MODEL) || fallback;
 }
 
 function resolveDefaultDeliveryStrategyPreferenceDefault(): SessionDeliveryStrategy {
@@ -6659,6 +6931,15 @@ function computeSessionProgress(session: WorkSession, todos: AgentTodoItem[]): {
 function serializeWorkSession(session: WorkSession, todos: AgentTodoItem[] = []): Record<string, unknown> {
   const serializedAgentGraph = serializeAgentGraphWithProgressInvariant(session);
   const progress = computeSessionProgress(session, todos);
+  const resolvedAgentModels = resolveSessionAgentModels({
+    provider: session.provider,
+    model: session.model,
+    planningProvider: session.planningProvider,
+    planningModel: session.planningModel,
+    implementationProvider: session.implementationProvider,
+    implementationModel: session.implementationModel,
+    agentModels: session.agentModels,
+  });
   return {
     id: session.id,
     workspaceId: session.workspaceId,
@@ -6679,12 +6960,13 @@ function serializeWorkSession(session: WorkSession, todos: AgentTodoItem[] = [])
         };
       })
       : undefined,
-    provider: session.provider,
-    model: session.model,
-    planningProvider: session.planningProvider,
-    planningModel: session.planningModel,
-    implementationProvider: session.implementationProvider,
-    implementationModel: session.implementationModel,
+    provider: resolvedAgentModels.implementationProvider,
+    model: resolvedAgentModels.implementationModel,
+    agentModels: resolvedAgentModels.agentModels,
+    planningProvider: resolvedAgentModels.planningProvider,
+    planningModel: resolvedAgentModels.planningModel,
+    implementationProvider: resolvedAgentModels.implementationProvider,
+    implementationModel: resolvedAgentModels.implementationModel,
     deliveryStrategy: session.deliveryStrategy,
     autoApprove: session.autoApprove,
     planningNoToolGuardMode: session.planningNoToolGuardMode,

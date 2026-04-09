@@ -7,18 +7,41 @@ import type {
   TaskOutput,
   RunnerConfig,
   ModelConfig,
-  ReplayFailureType,
   ReplayAttemptRecord,
   ReplayToolCallRecord,
   TaskReplayRecord,
 } from '../dag/types.js';
 import type { TaskExecutionContext } from '../dag/scheduler.js';
 import { runDag } from '../dag/scheduler.js';
-import { validate } from '../validation/validator.js';
-import { PromptSectionName, renderPromptSections, type PromptSection } from '../prompt/sections.js';
-import type { LlmAdapter, LlmToolCallEvent, LlmToolset } from '@orchestrace/provider';
+import type { LlmAdapter, LlmToolset } from '@orchestrace/provider';
 import { classifyTrivialTaskNode, classifyTaskEffort, resolveTrivialTaskGateConfig } from './task-complexity.js';
 import type { TaskEffort } from './task-complexity.js';
+import {
+  PLANNING_FIRST_TOOL_RETRY_DIRECTIVE,
+  buildRoleTaskPrompt,
+  buildRoleSystemPrompt,
+} from './role-config.js';
+import { executeImplementerRole, executeRole, spawnRoleAgent } from './role-executor.js';
+import {
+  resolveReplayFailureType,
+  shouldRetryAfterCompletionFailure,
+} from './completion-retry-policy.js';
+import {
+  buildPlanningContractError,
+  createPlanningContractFailureSignature,
+} from './planning-contract.js';
+import {
+  type PlanningNoToolGuardMode,
+  PLANNING_NO_TOOL_INITIAL_CUTOFF_MS,
+  PLANNING_NO_TOOL_PROGRESS_CHECK_INTERVAL_MS,
+  PLANNING_NO_TOOL_PROGRESS_NUDGE,
+  PLANNING_NO_TOOL_PROGRESS_TIMEOUT_MS,
+  PLANNING_PRE_FIRST_TOOL_TOKEN_ABORT_BUDGET,
+  PLANNING_PRE_FIRST_TOOL_TOKEN_NUDGE_BUDGET,
+  createPlanningNoProgressAbortError,
+  isPlanningNoProgressAbortError,
+  normalizePlanningNoToolGuardMode,
+} from './planning-no-progress-guard.js';
 
 export interface PlanApprovalRequest {
   task: TaskNode;
@@ -88,24 +111,9 @@ export interface OrchestratorConfig extends RunnerConfig {
   taskEffort?: TaskEffort;
 }
 
-type OrchestratorPhase = 'planning' | 'implementation';
-type PlanningNoToolGuardMode = 'enforce' | 'warn';
-
 const DEFAULT_ORCHESTRATOR_PROMPT_VERSION = 'orchestrator-prompts-v2';
 const MAX_PLANNING_ATTEMPTS = 3;
 const PLANNING_RETRY_BASE_DELAY_MS = 2_000;
-const RETRY_CONTEXT_MAX_CHARS = 2_000;
-const PLANNING_NO_TOOL_PROGRESS_TIMEOUT_MS = 5 * 60_000;
-const PLANNING_NO_TOOL_PROGRESS_CHECK_INTERVAL_MS = 1_000;
-const DEFAULT_PLANNING_NO_TOOL_GUARD_MODE: PlanningNoToolGuardMode = 'enforce';
-const PLANNING_NO_TOOL_PROGRESS_NUDGE =
-  'Planning did not make tool progress. Use a concrete tool call to advance the plan.';
-const PLANNING_NO_PROGRESS_ABORT_SENTINEL = '__orchestrace_planning_no_progress__';
-const PLANNING_NO_TOOL_INITIAL_CUTOFF_MS = 20_000;
-const PLANNING_PRE_FIRST_TOOL_TOKEN_NUDGE_BUDGET = 2_000;
-const PLANNING_PRE_FIRST_TOOL_TOKEN_ABORT_BUDGET = 3_000;
-const PLANNING_FIRST_TOOL_RETRY_DIRECTIVE =
-  'You must now call a tool. Start by running: pwd (or an equivalent workspace-inspection tool), then continue the task.';
 const PLANNING_NO_TOOL_STAGNATION_ABORT_ATTEMPTS = 2;
 const PLANNING_CONTRACT_STAGNATION_ABORT_ATTEMPTS = 2;
 const PLANNING_CONTRACT_STAGNATION_ERROR_PREFIX =
@@ -186,14 +194,6 @@ export async function orchestrate(
     };
     const planningModel: ModelConfig = node.model ?? defaultPlanningModel ?? fallbackModel;
     const implementationModel: ModelConfig = node.model ?? defaultImplementationModel ?? fallbackModel;
-    const planningApiKey = await resolveApiKey?.(planningModel.provider);
-    const implementationApiKey = await resolveApiKey?.(implementationModel.provider);
-    const planningRefreshApiKey = resolveApiKey
-      ? async () => resolveApiKey(planningModel.provider)
-      : undefined;
-    const implementationRefreshApiKey = resolveApiKey
-      ? async () => resolveApiKey(implementationModel.provider)
-      : undefined;
 
     const usage = { input: 0, output: 0, cost: 0 };
     const replay: TaskReplayRecord = {
@@ -235,15 +235,18 @@ export async function orchestrate(
     const resolvedPlanningNoToolGuardMode = normalizePlanningNoToolGuardMode(planningNoToolGuardMode);
 
     if (!shouldSkipPlanning) {
-      const planningAgent = await llm.spawnAgent({
-        provider: planningModel.provider,
-        model: planningModel.model,
-        reasoning: planningModel.reasoning,
+      const planningAgent = await spawnRoleAgent({
+        llm,
+        role: 'planner',
+        task: node,
+        graphId: graph.id,
+        cwd,
+        model: planningModel,
         systemPrompt:
           planningSystemPrompt
           ?? systemPrompt
-          ?? buildPhaseSystemPrompt({
-            phase: 'planning',
+          ?? buildRoleSystemPrompt({
+            role: 'planner',
             task: node,
             graphId: graph.id,
             cwd,
@@ -252,21 +255,9 @@ export async function orchestrate(
             reasoning: planningModel.reasoning,
           }),
         signal: context.signal,
-        toolset: createToolset?.({
-          phase: 'planning',
-          task: node,
-          graphId: graph.id,
-          cwd,
-          provider: planningModel.provider,
-          model: planningModel.model,
-          reasoning: planningModel.reasoning,
-          taskRequiresWrites,
-        }),
-                apiKey: planningApiKey,
-        refreshApiKey: planningRefreshApiKey,
-        allowAuthRefreshRetry: true,
-
-
+        createToolset,
+        resolveApiKey,
+        taskRequiresWrites,
       });
 
       emit({ type: 'task:planning', taskId: node.id });
@@ -277,7 +268,13 @@ export async function orchestrate(
       let consecutivePlanningContractStagnationAttempts = 0;
 
       for (let planningAttempt = 1; planningAttempt <= MAX_PLANNING_ATTEMPTS; planningAttempt++) {
-        const planningPrompt = buildPlanningPrompt(node, context.depOutputs, planningAttempt, effort);
+        const planningPrompt = buildRoleTaskPrompt({
+          role: 'planner',
+          node,
+          depOutputs: context.depOutputs,
+          attempt: planningAttempt,
+          effort,
+        });
         planningToolCalls = [];
         const planningAttemptStart = new Date().toISOString();
         planningResult = undefined;
@@ -358,17 +355,15 @@ export async function orchestrate(
         }, noProgressCheckIntervalMs);
 
         try {
-          planningResult = await planningAgent.complete(planningPrompt, planningAttemptController.signal, {
-            onTextDelta: (delta) => {
-              emit({
-                type: 'task:stream-delta',
-                taskId: node.id,
-                phase: 'planning',
-                attempt: planningAttempt,
-                delta,
-              });
-            },
-            onUsage: (streamUsage) => {
+          planningResult = await executeRole({
+            role: 'planner',
+            agent: planningAgent,
+            taskId: node.id,
+            prompt: planningPrompt,
+            attempt: planningAttempt,
+            signal: planningAttemptController.signal,
+            emit,
+            onUsage: (streamUsage: { input: number; output: number; cost: number }) => {
               if (sawPlanningToolCall) {
                 return;
               }
@@ -404,26 +399,12 @@ export async function orchestrate(
                 }
               }
             },
-            onToolCall: (event) => {
+            onToolCall: (_event, replayRecord) => {
               planningLastToolProgressAt = Date.now();
               sawPlanningToolCall = true;
               planningNoToolInitialWarningEmitted = false;
               planningNoToolProgressWarningEmitted = false;
-              planningToolCalls.push(toReplayToolCallRecord(event));
-              emit({
-                type: 'task:tool-call',
-                taskId: node.id,
-                phase: 'planning',
-                attempt: planningAttempt,
-                toolCallId: event.toolCallId,
-                toolName: event.toolName,
-                status: event.type,
-                input: event.arguments,
-                                output: event.result,
-                isError: event.isError,
-                details: event.details,
-              });
-
+              planningToolCalls.push(replayRecord);
             },
           });
         } catch (error) {
@@ -695,15 +676,18 @@ export async function orchestrate(
       };
     }
 
-    const implAgent = await llm.spawnAgent({
-      provider: implementationModel.provider,
-      model: implementationModel.model,
-      reasoning: implementationModel.reasoning,
+    const implAgent = await spawnRoleAgent({
+      llm,
+      role: 'implementer',
+      task: node,
+      graphId: graph.id,
+      cwd,
+      model: implementationModel,
       systemPrompt:
         implementationSystemPrompt
         ?? systemPrompt
-        ?? buildPhaseSystemPrompt({
-          phase: 'implementation',
+        ?? buildRoleSystemPrompt({
+          role: 'implementer',
           task: node,
           graphId: graph.id,
           cwd,
@@ -712,21 +696,9 @@ export async function orchestrate(
           reasoning: implementationModel.reasoning,
         }),
       signal: context.signal,
-      toolset: createToolset?.({
-        phase: 'implementation',
-        task: node,
-        graphId: graph.id,
-        cwd,
-        provider: implementationModel.provider,
-        model: implementationModel.model,
-        reasoning: implementationModel.reasoning,
-        taskRequiresWrites,
-      }),
-            apiKey: implementationApiKey,
-      refreshApiKey: implementationRefreshApiKey,
-      allowAuthRefreshRetry: true,
-
-
+      createToolset,
+      resolveApiKey,
+      taskRequiresWrites,
     });
 
     const taskRetryBudget = Math.max(0, node.validation?.maxRetries ?? 0);
@@ -735,220 +707,26 @@ export async function orchestrate(
       maxImplementationAttempts ?? taskRetryBudget + 1,
     );
 
-    let lastResponse = '';
-    let lastFailureType: ReplayFailureType | undefined;
-    let lastValidationError = '';
-    let lastValidationResults = undefined as TaskOutput['validationResults'];
-
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      emit({
-        type: 'task:implementation-attempt',
-        taskId: node.id,
-        attempt,
-        maxAttempts,
-      });
-
-      const implementationPrompt = buildImplementationPrompt({
-        node,
-        depOutputs: context.depOutputs,
-        approvedPlan: planningResult?.text,
-        attempt,
-        previousResponse: lastResponse,
-        previousFailureType: lastFailureType,
-        previousValidationError: lastValidationError,
-        effort,
-      });
-
-      const implementationToolCalls: ReplayToolCallRecord[] = [];
-      const implementationAttemptStart = new Date().toISOString();
-      let implResult;
-      try {
-        implResult = await implAgent.complete(implementationPrompt, context.signal, {
-          onTextDelta: (delta) => {
-            emit({
-              type: 'task:stream-delta',
-              taskId: node.id,
-              phase: 'implementation',
-              attempt,
-              delta,
-            });
-          },
-          onToolCall: (event) => {
-            implementationToolCalls.push(toReplayToolCallRecord(event));
-            emit({
-              type: 'task:tool-call',
-              taskId: node.id,
-              phase: 'implementation',
-              attempt,
-              toolCallId: event.toolCallId,
-              toolName: event.toolName,
-              status: event.type,
-              input: event.arguments,
-                            output: event.result,
-              isError: event.isError,
-              details: event.details,
-            });
-
-          },
-        });
-      } catch (error) {
-        const failureType = resolveReplayFailureType(error);
-        const implementationError = error instanceof Error ? error.message : String(error);
-        const failedImplementationAttempt: ReplayAttemptRecord = {
-          phase: 'implementation',
-          attempt,
-          startedAt: implementationAttemptStart,
-          completedAt: new Date().toISOString(),
-          provider: implementationModel.provider,
-          model: implementationModel.model,
-          reasoning: implementationModel.reasoning,
-          error: implementationError,
-          failureType,
-          toolCalls: implementationToolCalls,
-        };
-        replay.attempts.push(failedImplementationAttempt);
-        emit({
-          type: 'task:replay-attempt',
-          taskId: node.id,
-          phase: 'implementation',
-          attempt,
-          record: failedImplementationAttempt,
-        });
-
-        if (attempt < maxAttempts && shouldRetryAfterCompletionFailure(failureType)) {
-          lastFailureType = failureType;
-          lastValidationError = buildCompletionFailureRetryHint({
-            failureType,
-            errorMessage: implementationError,
-          });
-          emit({
-            type: 'task:verification-failed',
-            taskId: node.id,
-            attempt,
-            error: `Retrying after ${failureType} failure: ${implementationError}`,
-          });
-          await delay(PLANNING_RETRY_BASE_DELAY_MS * (2 ** (attempt - 1)));
-          continue;
-        }
-
-        return {
-          taskId: node.id,
-          status: 'failed',
-          plan: planningResult.text,
-          planPath: persistedPlanPath,
-          tokenDumpDir: taskTokenDumpDir,
-          response: lastResponse,
-          error: implementationError,
-          failureType,
-          durationMs: Date.now() - start,
-          retries: attempt - 1,
-          usage,
-          replay,
-        };
-      }
-
-      const completedImplementationAttempt: ReplayAttemptRecord = {
-        phase: 'implementation',
-        attempt,
-        startedAt: implementationAttemptStart,
-        completedAt: new Date().toISOString(),
-        provider: implementationModel.provider,
-        model: implementationModel.model,
-        reasoning: implementationModel.reasoning,
-        stopReason: implResult.metadata?.stopReason,
-        endpoint: implResult.metadata?.endpoint,
-        usage: implResult.usage,
-        textPreview: createTextPreview(implResult.text),
-        toolCalls: implementationToolCalls,
-      };
-      replay.attempts.push(completedImplementationAttempt);
-      emit({
-        type: 'task:replay-attempt',
-        taskId: node.id,
-        phase: 'implementation',
-        attempt,
-        record: completedImplementationAttempt,
-      });
-
-      mergeUsage(usage, implResult.usage);
-      await appendTokenDump(implementationTokenDumpPath, {
-        graphId: graph.id,
-        taskId: node.id,
-        agent: 'implementation',
-        attempt,
-        provider: implementationModel.provider,
-        model: implementationModel.model,
-        usage: implResult.usage,
-      });
-      lastResponse = implResult.text;
-
-      const output: TaskOutput = {
-        taskId: node.id,
-        status: 'completed',
-        plan: planningResult?.text,
-        planPath: persistedPlanPath,
-        tokenDumpDir: taskTokenDumpDir,
-        response: implResult.text,
-        filesChanged: implResult.filesChanged,
-        durationMs: Date.now() - start,
-        retries: attempt - 1,
-        usage,
-        replay,
-      };
-
-      if (!node.validation) {
-        return output;
-      }
-
-      emit({ type: 'task:validating', taskId: node.id });
-      const validationResults = await validate(output, node.validation, cwd);
-      output.validationResults = validationResults;
-      lastValidationResults = validationResults;
-      const allPassed = validationResults.every((result) => result.passed);
-      completedImplementationAttempt.validation = {
-        passed: allPassed,
-        commandResults: validationResults.map((result) => ({
-          command: result.command,
-          passed: result.passed,
-          output: result.output,
-          durationMs: result.durationMs,
-        })),
-      };
-
-      if (allPassed) {
-        return output;
-      }
-
-      lastFailureType = 'validation';
-      completedImplementationAttempt.failureType = 'validation';
-      lastValidationError = validationResults
-        .filter((result) => !result.passed)
-        .map((result) => `${result.command}: ${result.output}`)
-        .join('\n');
-
-      emit({
-        type: 'task:verification-failed',
-        taskId: node.id,
-        attempt,
-        error: lastValidationError,
-      });
-    }
-
-    return {
-      taskId: node.id,
-      status: 'failed',
-      plan: planningResult?.text,
+    return executeImplementerRole({
+      task: node,
+      graphId: graph.id,
+      depOutputs: context.depOutputs,
+      approvedPlan: planningResult?.text,
       planPath: persistedPlanPath,
-      tokenDumpDir: taskTokenDumpDir,
-      response: lastResponse,
-      validationResults: lastValidationResults,
-      error: lastValidationError || 'Implementation did not satisfy validation criteria.',
-      failureType: lastFailureType ?? 'validation',
-      durationMs: Date.now() - start,
-      retries: maxAttempts - 1,
+      effort,
+      implementationModel,
+      implAgent,
+      signal: context.signal,
+      cwd,
+      emit,
+      startTimeMs: start,
+      taskTokenDumpDir,
+      implementationTokenDumpPath,
       usage,
       replay,
-    };
+      maxAttempts,
+      appendTokenDump,
+    });
   };
 
   return runDag(managedRetryGraph, executor, {
@@ -986,325 +764,6 @@ async function appendTokenDump(
   };
 
   await appendFile(path, `${JSON.stringify(payload)}\n`, 'utf-8');
-}
-
-function buildPlanningPrompt(
-  node: TaskNode,
-  depOutputs: Map<string, TaskOutput>,
-  attempt = 1,
-  effort: TaskEffort = 'high',
-): string {
-  const depContext = buildDependencyContext(depOutputs);
-  const retryDirective = attempt > 1
-    ? [
-        `Planning attempt: ${attempt}`,
-        'Previous planning attempt did not satisfy execution requirements.',
-        PLANNING_FIRST_TOOL_RETRY_DIRECTIVE,
-      ]
-    : [];
-
-  const sections: PromptSection[] = [
-    {
-      name: PromptSectionName.Goal,
-      lines: [
-        'Create an implementation plan for the following task.',
-        'Scale your planning depth to match the task complexity — simple tasks need minimal plans, complex tasks need detailed multi-stage plans.',
-        'Within the first 1-2 thinking cycles, make a concrete tool call to gather grounding context before extended narration.',
-        'Before each tool call and after each tool result, narrate your reasoning briefly: what you learned, what you plan to do next, and why.',
-      ],
-    },
-    {
-      name: PromptSectionName.Autonomy,
-      lines: [
-        'If a tool call fails, use the error details to correct arguments and retry instead of aborting.',
-        'Each planned task must include a concrete target, explicit done criteria, and at least one verification command.',
-        '',
-        '## Required coordination tools',
-        '- todo_set (required) to create a concrete todo list',
-        '- todo_set items must include numeric weight per item, and the total weight must sum to exactly 100',
-        '- todo_set item ids must be unique, and dependsOn can only reference ids from the same todo_set payload',
-        '- todo_set item status values must be exactly one of: todo, in_progress, done',
-        '- agent_graph_set (required) to define the execution structure',
-        '- agent_graph_set nodes must include numeric weight per node, and the total node weight must sum to exactly 100',
-        '- agent_graph_set node ids must be unique; use descriptive ids (avoid generic n1/n2 labels)',
-        '',
-        '## Sub-agent delegation (your choice)',
-        '- subagent_spawn / subagent_spawn_batch are available for delegating work to focused sub-agents',
-        '- YOU decide whether to use sub-agents and how many, based on the task at hand',
-        '- For simple, well-scoped changes: skip sub-agents, do the work yourself — fewer moving parts means faster results',
-        '- For broad, multi-area work: spawn sub-agents freely to parallelize investigation and implementation',
-        '- For medium-scope work: use your judgment — 1 sub-agent for a focused slice is fine, 0 is also fine',
-        '- When you do use sub-agents, use subagent_spawn_batch for independent parallel work (not sequential subagent_spawn calls)',
-        '- When you do use sub-agents, pass nodeId values mapping to agent_graph_set node ids so progress tracking works',
-        '- Delegate only task-relevant context to each sub-agent; keep their scope focused',
-        '',
-        '## Effort guidance',
-        `- This task has been classified as **${effort}** effort`,
-        '- Match your planning depth, coordination overhead, and sub-agent usage to this level',
-        '- A "low" task might need a 1-item todo and a single-node graph with no sub-agents',
-        '- A "high" task might need detailed multi-stage waves, many todos, and several parallel sub-agents',
-      ],
-    },
-    {
-      name: PromptSectionName.OutputContract,
-      lines: [
-        'Your plan must include (scale detail to effort level):',
-        '1) what needs to change and why',
-        '2) files likely to change',
-        '3) verification strategy with explicit commands',
-        '4) execution structure (stages/waves if the task warrants them)',
-        '5) Next Follow-up Suggestions section with 1-3 numbered, concrete next actions',
-      ],
-    },
-    {
-      name: PromptSectionName.TaskContext,
-      lines: [
-        `Task ID: ${node.id}`,
-        `Task Name: ${node.name}`,
-        `Task Type: ${node.type}`,
-        `Task Effort: ${effort}`,
-        '',
-        'Task Prompt:',
-        node.prompt,
-      ],
-    },
-    {
-      name: PromptSectionName.DependencyContext,
-      lines: [depContext],
-    },
-  ];
-
-  if (retryDirective.length > 0) {
-    sections.push({
-      name: PromptSectionName.RetryContext,
-      lines: retryDirective,
-    });
-  }
-
-  return renderPromptSections(sections);
-}
-
-function buildImplementationPrompt(params: {
-  node: TaskNode;
-  depOutputs: Map<string, TaskOutput>;
-  approvedPlan?: string;
-  attempt: number;
-  previousResponse: string;
-  previousFailureType?: ReplayFailureType;
-  previousValidationError: string;
-  effort?: TaskEffort;
-}): string {
-  const {
-    node,
-    depOutputs,
-    approvedPlan,
-    attempt,
-    previousResponse,
-    previousFailureType,
-    previousValidationError,
-    effort = 'high',
-  } = params;
-
-  const depContext = buildDependencyContext(depOutputs);
-  const retryContext =
-    attempt > 1
-      ? [
-          '',
-          'Previous attempt failure type:',
-          previousFailureType ?? '(unknown)',
-          '',
-          'Previous attempt response:',
-          truncateForRetry(previousResponse) || '(no response)',
-          '',
-          'Validation failures to fix:',
-          truncateForRetry(previousValidationError) || '(missing validation details)',
-          '',
-          PLANNING_FIRST_TOOL_RETRY_DIRECTIVE,
-        ].join('\n')
-      : '';
-
-  const isLowEffort = effort === 'trivial' || effort === 'low';
-
-  const sections: PromptSection[] = [
-    {
-      name: PromptSectionName.Goal,
-      lines: [
-        'Execute the approved plan and implement the requested changes.',
-        'You must satisfy validation criteria before considering the task complete.',
-        'Scale your execution depth to match the task — simple tasks should be completed quickly, complex tasks may need sub-agents.',
-        'Before each tool call and after each tool result, narrate your reasoning briefly.',
-      ],
-    },
-    {
-      name: PromptSectionName.Autonomy,
-      lines: [
-        'If a tool call fails, read the error details, adjust arguments, and retry the tool call.',
-        'Read relevant files before editing. Keep edits minimal and focused.',
-        ...(isLowEffort
-          ? []
-          : [
-              'Follow the todo list from planning (read todo_get) and update via todo_update as you progress.',
-              'Check agent_graph_get for the execution structure.',
-            ]),
-        '',
-        '## Sub-agent delegation (your choice)',
-        '- subagent_spawn / subagent_spawn_batch are available for delegating work in parallel',
-        '- YOU decide whether to use sub-agents based on the work remaining',
-        '- For simple, contained changes: do the work yourself — no sub-agents needed',
-        '- For broad, multi-file changes: spawn sub-agents to parallelize implementation',
-        '- When you do use sub-agents, use subagent_spawn_batch for independent parallel work',
-        '- When you do use sub-agents, pass nodeId so the execution graph stays current',
-        '- Delegate only task-relevant context; keep each sub-agent focused',
-        '',
-        `## Effort: ${effort}`,
-        '- Match your coordination overhead to this level',
-        ...(isLowEffort
-          ? ['- This is a simple task — implement directly, skip sub-agents, minimal ceremony']
-          : [
-              '- Ensure all todos are done before finishing',
-              '- If the task explicitly requires repository delivery, complete branch/commit/push and PR open/update via github_api (never gh CLI).',
-              '- If repository delivery is not requested, or no code changes were made, do not force PR creation; finish with validated results and evidence.',
-              '- If git/PR automation is in scope and fails, read the exact error, retry with corrected command/flags, and continue.',
-            ]),
-      ],
-    },
-    {
-      name: PromptSectionName.TaskContext,
-      lines: [
-        `Attempt: ${attempt}`,
-        `Task ID: ${node.id}`,
-        `Task Name: ${node.name}`,
-        '',
-        'Original task prompt:',
-        node.prompt,
-      ],
-    },
-    {
-      name: PromptSectionName.ApprovedPlan,
-      lines: [approvedPlan ?? 'No pre-approved plan available. Execute directly and conservatively for this trivial task.'],
-    },
-    {
-      name: PromptSectionName.DependencyContext,
-      lines: [depContext],
-    },
-    {
-      name: PromptSectionName.OutputContract,
-      lines: [
-        'End your implementation response with "Next Follow-up Suggestions" and 1-3 numbered, concrete next actions.',
-      ],
-    },
-  ];
-
-  if (retryContext) {
-    sections.push({
-      name: PromptSectionName.RetryContext,
-      lines: [retryContext],
-    });
-  }
-
-  return renderPromptSections(sections);
-}
-
-function buildPhaseSystemPrompt(params: {
-  phase: OrchestratorPhase;
-  task: TaskNode;
-  graphId: string;
-  cwd: string;
-  provider: string;
-  model: string;
-  reasoning?: 'minimal' | 'low' | 'medium' | 'high';
-}): string {
-  const { phase, task, graphId, cwd, provider, model, reasoning } = params;
-
-  const phaseRules =
-    phase === 'planning'
-      ? [
-          'Produce a concrete, execution-ready plan before implementation.',
-          'Do not edit files in planning mode.',
-          'Keep todo and dependency graph state synchronized as you reason.',
-          'Planning output must be atomic: each planned task should be one action, one artifact, and one verification path.',
-          'Before finalizing, split any multi-action task into separate todo and graph nodes.',
-          'Each todo and graph node must include explicit dependency ids and deterministic done criteria.',
-          'todo_set must define weighted planning breakdown where item weights sum to 100.',
-          'todo_set ids must be unique and dependsOn references must resolve to known todo_set ids.',
-          'todo_set status values must be exactly todo, in_progress, or done.',
-          'agent_graph_set must define weighted implementation breakdown where node weights sum to 100.',
-          'agent_graph_set ids must be unique and dependency ids must resolve within the same payload.',
-          'subagent delegation must include nodeId values that map to agent_graph_set node ids when delegation is used.',
-          'Planning must include successful todo_set and agent_graph_set tool calls.',
-          'Focused tasks touching fewer than 3 known-module files may skip planning sub-agent delegation when todo_set and agent_graph_set are satisfied.',
-          'Planning must include successful subagent_spawn or subagent_spawn_batch calls with focused context per sub-agent.',
-          'Quick-start mode for well-scoped tasks: keep parent pre-delegation orientation to at most 3-4 tool calls and delegate within the first 2-3 calls whenever possible.',
-          'Keep parent orientation lightweight and push detailed file reading/search into delegated sub-agent scopes.',
-          'Prefer smallest safe units for parallelism; independent atomic tasks should be separated into parallelizable nodes.',
-          'Planning responses must end with 1-3 concrete next follow-up suggestions.',
-          'Return a plan that another agent could execute deterministically.',
-        ]
-      : [
-          'Execute the approved plan and deliver validated code changes.',
-          'Read relevant files before editing and keep edits minimal in scope.',
-          'Use todo and agent graph state as the execution backbone, updating progress continuously.',
-          'Use subagent_spawn or subagent_spawn_batch for parallelizable slices and delegate only relevant context to each sub-agent.',
-          'search_files uses regex; characters like ( and ) need escaping as \\( and \\).',
-          'Do not stop until todo list is done and agent graph nodes are completed or a real blocker remains.',
-          'If repository delivery is requested by the task, complete git finish-up: feature branch, commit, push, and PR creation/update via github_api (never gh CLI).',
-          'If you performed a push or PR update, query remote CI/check status via github_api and keep fixing/re-pushing until checks pass or a true blocker is reached.',
-          'When PR delivery is in scope, do not stop at green checks alone: verify PR mergeability, required checks, and review state via github_api before considering it done.',
-          'When git/PR finish-up is in scope and fails, retry using the failure reason and continue from the same point.',
-          'Implementation responses must end with 1-3 concrete next follow-up suggestions.',
-          'Run verification and iterate until checks pass or a true blocker is reached.',
-          'When blocked, report the blocker clearly and propose the best next step.',
-        ];
-
-  return renderPromptSections([
-    {
-      name: PromptSectionName.Identity,
-      lines: [
-        `You are an autonomous Orchestrace ${phase} agent for software tasks.`,
-        'Operate safely, truthfully, and with high execution reliability.',
-        'Think out loud: before every action, explain your reasoning, what you observed, what you plan to do next, and why.',
-        'Narrate your thought process continuously so the user can follow your chain of thought in real time.',
-        'When making decisions (e.g., choosing a tool, splitting tasks, picking an approach), explain the tradeoffs you considered.',
-      ],
-    },
-    {
-      name: PromptSectionName.AutonomyContract,
-      lines: [
-        'Never claim an action completed unless tool output confirms it.',
-        'If context is missing, gather it with available tools before deciding.',
-        'Prefer deterministic steps over speculative changes.',
-      ],
-    },
-    {
-      name: PromptSectionName.PhaseRules,
-      lines: phaseRules,
-    },
-    {
-      name: PromptSectionName.ExecutionContext,
-      lines: [
-        `Graph ID: ${graphId}`,
-        `Task ID: ${task.id}`,
-        `Task Name: ${task.name}`,
-        `Task Type: ${task.type}`,
-        `Workspace: ${cwd}`,
-        `Model: ${provider}/${model}`,
-        `Reasoning: ${reasoning ?? 'default'}`,
-      ],
-    },
-  ]);
-}
-
-function buildDependencyContext(depOutputs: Map<string, TaskOutput>): string {
-  if (depOutputs.size === 0) {
-    return 'No dependency outputs.';
-  }
-
-  return [
-    'Dependency outputs:',
-    ...[...depOutputs.entries()].map(
-      ([id, output]) => `- ${id}: ${output.response ?? '(no textual output)'}`,
-    ),
-  ].join('\n');
 }
 
 function sanitizeForPath(input: string): string {
@@ -1358,11 +817,6 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function truncateForRetry(text: string): string {
-  if (text.length <= RETRY_CONTEXT_MAX_CHARS) return text;
-  return text.slice(0, RETRY_CONTEXT_MAX_CHARS) + `\n... [truncated ${text.length - RETRY_CONTEXT_MAX_CHARS} chars]`;
-}
-
 function resolveTaskRequiresWrites(task: TaskNode): boolean {
   const routeCategory = readTaskMetaString(task, 'routeCategory');
   const routeStrategy = readTaskMetaString(task, 'routeStrategy');
@@ -1378,42 +832,6 @@ function readTaskMetaString(task: TaskNode, key: string): string | undefined {
   return typeof value === 'string' ? value : undefined;
 }
 
-function createPlanningNoProgressAbortError(): Error {
-  const error = new Error(PLANNING_NO_PROGRESS_ABORT_SENTINEL);
-  (error as Error & { failureType?: ReplayFailureType }).failureType = 'empty_response';
-  return error;
-}
-
-function createPlanningContractFailureSignature(error: string): string {
-  return error
-    .toLowerCase()
-    .replace(/\s+/g, ' ')
-    .replace(/attempt\s+\d+/g, 'attempt')
-    .trim();
-}
-
-function normalizePlanningNoToolGuardMode(value: unknown): PlanningNoToolGuardMode {
-  return value === 'warn' ? 'warn' : DEFAULT_PLANNING_NO_TOOL_GUARD_MODE;
-}
-
-function isPlanningNoProgressAbortError(error: unknown): boolean {
-  return error instanceof Error && error.message === PLANNING_NO_PROGRESS_ABORT_SENTINEL;
-}
-
-function toReplayToolCallRecord(event: LlmToolCallEvent): ReplayToolCallRecord {
-  return {
-    time: new Date().toISOString(),
-    toolCallId: event.toolCallId,
-    toolName: event.toolName,
-    status: event.type,
-    input: event.arguments,
-        output: event.result,
-    isError: event.isError,
-    details: event.details,
-  };
-}
-
-
 function createTextPreview(text: string, maxChars = 600): string {
   const compact = text.replace(/\s+/g, ' ').trim();
   if (!compact) {
@@ -1421,526 +839,6 @@ function createTextPreview(text: string, maxChars = 600): string {
   }
 
   return compact.length > maxChars ? `${compact.slice(0, maxChars - 3)}...` : compact;
-}
-
-function resolveReplayFailureType(error: unknown): ReplayFailureType {
-  if (error && typeof error === 'object' && 'failureType' in error) {
-    const raw = (error as { failureType?: unknown }).failureType;
-    if (isReplayFailureType(raw)) {
-      return raw;
-    }
-  }
-
-  const message = error instanceof Error ? error.message : String(error);
-  const normalized = message.toLowerCase();
-  if (/(timed?\s*out|timeout|etimedout|abort)/.test(normalized)) {
-    return 'timeout';
-  }
-
-  if (/(rate\s*limit|too many requests|quota|\b429\b)/.test(normalized)) {
-    return 'rate_limit';
-  }
-
-  if (/(unauthorized|forbidden|invalid api key|auth|\b401\b|\b403\b)/.test(normalized)) {
-    return 'auth';
-  }
-
-  if (/(invalid tool call|schema|validatetoolcall|invalid arguments|tool arguments)/.test(normalized)) {
-    return 'tool_schema';
-  }
-
-  if (/(circuit breaker tripped|identical subagent batch failures repeated|manual intervention or explicit backoff is required)/.test(normalized)) {
-    return 'validation';
-  }
-
-  if (/(tool execution failed|unknown tool|blocked command|not allowed while mode|tool failed)/.test(normalized)) {
-    return 'tool_runtime';
-  }
-
-  if (/(empty response|no text output|zero tokens)/.test(normalized)) {
-    return 'empty_response';
-  }
-
-  return 'unknown';
-}
-
-function isReplayFailureType(value: unknown): value is ReplayFailureType {
-  return value === 'timeout'
-    || value === 'auth'
-    || value === 'rate_limit'
-    || value === 'tool_schema'
-    || value === 'tool_runtime'
-    || value === 'validation'
-    || value === 'empty_response'
-    || value === 'unknown';
-}
-
-function shouldRetryAfterCompletionFailure(failureType: ReplayFailureType): boolean {
-  return failureType === 'timeout'
-    || failureType === 'rate_limit'
-    || failureType === 'tool_runtime'
-    || failureType === 'empty_response';
-}
-
-function buildCompletionFailureRetryHint(params: {
-  failureType: ReplayFailureType;
-  errorMessage: string;
-}): string {
-  switch (params.failureType) {
-    case 'timeout':
-      return [
-        'Previous attempt failed due to timeout.',
-        'Reduce scope per step, keep tool outputs concise, and continue from current state.',
-        `Failure detail: ${params.errorMessage}`,
-      ].join('\n');
-    case 'rate_limit':
-      return [
-        'Previous attempt hit rate limits.',
-        'Retry with fewer consecutive tool calls and prioritize essential steps first.',
-        `Failure detail: ${params.errorMessage}`,
-      ].join('\n');
-    case 'tool_runtime':
-      return [
-        'Previous attempt failed during tool execution.',
-        'Inspect prior tool-call errors, fix arguments/paths, and retry only needed tools.',
-        `Failure detail: ${params.errorMessage}`,
-      ].join('\n');
-    case 'empty_response':
-      return [
-        'Previous attempt returned empty model output.',
-        'Retry with concise reasoning and continue implementation from known plan context.',
-        `Failure detail: ${params.errorMessage}`,
-      ].join('\n');
-    default:
-      return `Previous attempt failed: ${params.errorMessage}`;
-  }
-}
-
-function buildPlanningContractError(
-  toolCalls: ReplayToolCallRecord[],
-  options?: {
-    task?: TaskNode;
-    quickStartMode?: boolean;
-    quickStartMaxPreDelegationToolCalls?: number;
-    taskEffort?: TaskEffort;
-  },
-): string | undefined {
-  const effort = options?.taskEffort ?? 'high';
-
-  // Low/trivial effort skips planning entirely, so never reaches this.
-  // Medium/high: require todo_set + agent_graph_set as structural scaffolding.
-  const requiredTools = ['todo_set', 'agent_graph_set'];
-  const missing = requiredTools.filter((toolName) => !hasSuccessfulToolCall(toolCalls, toolName));
-
-  const contractIssues: string[] = [];
-  if (missing.length > 0) {
-    contractIssues.push(`Missing successful coordination tool call(s): ${missing.join(', ')}.`);
-  }
-
-  // Validate format of todo_set if it was called
-  const todoSetResult = latestSuccessfulToolCall(toolCalls, 'todo_set');
-  if (todoSetResult) {
-    const todoValidation = validateWeightedListPayload(
-      resolveToolCallInputForValidation(toolCalls, 'todo_set', todoSetResult),
-      'items',
-    );
-    if (todoValidation.sum === undefined) {
-      contractIssues.push('todo_set must include numeric weight for each item.');
-    } else if (!isWeightTotalValid(todoValidation.sum)) {
-      contractIssues.push(`todo_set item weights must sum to 100 (received ${formatWeightTotal(todoValidation.sum)}).`);
-    }
-
-    for (const issue of todoValidation.issues) {
-      contractIssues.push(`todo_set ${issue}`);
-    }
-  }
-
-  // Validate format of agent_graph_set if it was called
-  const graphSetResult = latestSuccessfulToolCall(toolCalls, 'agent_graph_set');
-  if (graphSetResult) {
-    const graphValidation = validateWeightedListPayload(
-      resolveToolCallInputForValidation(toolCalls, 'agent_graph_set', graphSetResult),
-      'nodes',
-    );
-    if (graphValidation.sum === undefined) {
-      contractIssues.push('agent_graph_set must include numeric weight for each node.');
-    } else if (!isWeightTotalValid(graphValidation.sum)) {
-      contractIssues.push(`agent_graph_set node weights must sum to 100 (received ${formatWeightTotal(graphValidation.sum)}).`);
-    }
-
-    for (const issue of graphValidation.issues) {
-      contractIssues.push(`agent_graph_set ${issue}`);
-    }
-  }
-
-  // Validate that sub-agent nodeIds map to graph nodes when both are used
-  const hasSubAgentDelegation = hasSuccessfulToolCall(toolCalls, 'subagent_spawn')
-    || hasSuccessfulToolCall(toolCalls, 'subagent_spawn_batch');
-  const graphNodeIds = graphSetResult
-    ? validateWeightedListPayload(
-        resolveToolCallInputForValidation(toolCalls, 'agent_graph_set', graphSetResult),
-        'nodes',
-      ).ids
-    : new Set<string>();
-  if (graphNodeIds.size > 0 && hasSubAgentDelegation) {
-    const delegatedNodeIds = collectSubAgentNodeIds(toolCalls);
-    const mappedNodes = [...graphNodeIds].filter((nodeId) => delegatedNodeIds.has(nodeId));
-    if (mappedNodes.length === 0) {
-      contractIssues.push('subagent delegation must include nodeId values that map to agent_graph_set node ids.');
-    }
-  }
-
-  if (contractIssues.length === 0) {
-    return undefined;
-  }
-
-  return [
-    'Planning contract not satisfied.',
-    ...contractIssues,
-    `Task effort: ${effort}. Planning must publish todo_set + agent_graph_set before implementation can begin. Sub-agent delegation is your choice — use it when it helps, skip it when the task is simple.`,
-  ].join(' ');
-}
-
-function isFocusedTaskForZeroPlanningSubagents(task: TaskNode): boolean {
-  const prompt = task.prompt ?? '';
-  const affectedFiles = extractPromptFilePaths(prompt);
-  if (affectedFiles.length === 0 || affectedFiles.length >= 3) {
-    return false;
-  }
-
-  const hasKnownModuleReference = affectedFiles.some((filePath) => /(^|\/)(packages\/|src\/|apps\/|services\/)/i.test(filePath))
-    || /\b(ui-server\.ts|runner\.ts|orchestrator\.ts)\b/i.test(prompt);
-  if (!hasKnownModuleReference) {
-    return false;
-  }
-
-  return /\b(behavior|change|fix|enforce|update|adjust|modify|regression|policy|logic)\b/i.test(prompt);
-}
-
-function extractPromptFilePaths(prompt: string): string[] {
-  const lines = prompt.split(/\r?\n/);
-  const paths = new Set<string>();
-  let inRelevantFilesSection = false;
-
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (/^#{1,6}\s+/.test(trimmed) && !/^#{1,6}\s+relevant files\b/i.test(trimmed)) {
-      inRelevantFilesSection = false;
-    }
-
-    if (/^(?:#{1,6}\s+)?relevant files\b:?/i.test(trimmed)) {
-      inRelevantFilesSection = true;
-      continue;
-    }
-
-    if (inRelevantFilesSection) {
-      const bulletMatch = trimmed.match(/^(?:[-*•]|\d+\.)\s+`?([A-Za-z0-9._\/-]+\.[A-Za-z0-9_-]+)`?/);
-      if (bulletMatch?.[1]) {
-        paths.add(normalizePromptPath(bulletMatch[1]));
-      }
-    }
-  }
-
-  const inlinePathRegex = /(?:^|[\s`"'])([A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)+\.[A-Za-z0-9_-]+)(?=$|[\s`"',):;])/g;
-  for (const match of prompt.matchAll(inlinePathRegex)) {
-    const path = match[1]?.trim();
-    if (path) {
-      paths.add(normalizePromptPath(path));
-    }
-  }
-
-  return [...paths];
-}
-
-function normalizePromptPath(filePath: string): string {
-  return filePath.replace(/^\.\//, '').trim();
-}
-
-function hasSuccessfulToolCall(toolCalls: ReplayToolCallRecord[], toolName: string): boolean {
-  return toolCalls.some((call) => call.status === 'result' && call.toolName === toolName && !call.isError);
-}
-
-function normalizeQuickStartMaxPreDelegationToolCalls(value: number | undefined): number {
-  if (Number.isFinite(value) && typeof value === 'number' && value >= 0) {
-    return Math.floor(value);
-  }
-
-  return 3;
-}
-
-function assessQuickStartDelegation(
-  toolCalls: ReplayToolCallRecord[],
-  maxPreDelegationToolCalls: number,
-): {
-  hasDelegation: boolean;
-  withinLimit: boolean;
-  preDelegationSuccessfulToolCalls: number;
-} {
-  let successfulToolCallCount = 0;
-
-  for (const call of toolCalls) {
-    if (call.status !== 'result' || call.isError) {
-      continue;
-    }
-
-    const isDelegationCall = call.toolName === 'subagent_spawn' || call.toolName === 'subagent_spawn_batch';
-    if (isDelegationCall) {
-      return {
-        hasDelegation: true,
-        withinLimit: successfulToolCallCount <= maxPreDelegationToolCalls,
-        preDelegationSuccessfulToolCalls: successfulToolCallCount,
-      };
-    }
-
-    successfulToolCallCount += 1;
-  }
-
-  return {
-    hasDelegation: false,
-    withinLimit: false,
-    preDelegationSuccessfulToolCalls: successfulToolCallCount,
-  };
-}
-
-function latestSuccessfulToolCall(
-  toolCalls: ReplayToolCallRecord[],
-  toolName: string,
-): ReplayToolCallRecord | undefined {
-  for (let index = toolCalls.length - 1; index >= 0; index -= 1) {
-    const call = toolCalls[index];
-    if (call.status === 'result' && call.toolName === toolName && !call.isError) {
-      return call;
-    }
-  }
-
-  return undefined;
-}
-
-function resolveToolCallInputForValidation(
-  toolCalls: ReplayToolCallRecord[],
-  toolName: string,
-  successfulResultCall: ReplayToolCallRecord,
-): string | undefined {
-  if (successfulResultCall.input) {
-    return successfulResultCall.input;
-  }
-
-  if (successfulResultCall.toolCallId) {
-    for (let index = toolCalls.length - 1; index >= 0; index -= 1) {
-      const call = toolCalls[index];
-      if (call.toolCallId !== successfulResultCall.toolCallId) {
-        continue;
-      }
-      if (call.toolName !== toolName || call.status !== 'started') {
-        continue;
-      }
-      if (call.input) {
-        return call.input;
-      }
-    }
-  }
-
-  for (let index = toolCalls.length - 1; index >= 0; index -= 1) {
-    const call = toolCalls[index];
-    if (call.toolName === toolName && call.status === 'started' && call.input) {
-      return call.input;
-    }
-  }
-
-  return undefined;
-}
-
-function validateWeightedListPayload(
-  input: string | undefined,
-  listKey: 'items' | 'nodes',
-): {
-  sum: number | undefined;
-  issues: string[];
-  ids: Set<string>;
-} {
-  const issues: string[] = [];
-  const ids = new Set<string>();
-  const dependenciesById = new Map<string, string[]>();
-  let sum = 0;
-
-  if (!input) {
-    return { sum: undefined, issues, ids };
-  }
-
-  try {
-    const parsed = JSON.parse(input) as Record<string, unknown>;
-    const entries = Array.isArray(parsed[listKey]) ? parsed[listKey] : undefined;
-    if (!entries || entries.length === 0) {
-      issues.push('must include at least one entry.');
-      return { sum: undefined, issues, ids };
-    }
-
-    for (let index = 0; index < entries.length; index += 1) {
-      const rawEntry = entries[index];
-      const prefix = `entry #${index + 1}`;
-      if (!rawEntry || typeof rawEntry !== 'object') {
-        issues.push(`${prefix} must be an object.`);
-        continue;
-      }
-
-      const entry = rawEntry as Record<string, unknown>;
-      const rawId = entry.id;
-      const id = typeof rawId === 'string' ? rawId.trim() : '';
-      if (!id) {
-        issues.push(`${prefix} must include a non-empty id.`);
-      } else if (ids.has(id)) {
-        issues.push(`${prefix} uses duplicate id "${id}".`);
-      } else {
-        ids.add(id);
-      }
-
-      const weight = entry.weight;
-      if (typeof weight !== 'number' || !Number.isFinite(weight) || weight <= 0) {
-        issues.push(`${prefix} must include a positive numeric weight.`);
-      } else {
-        sum += weight;
-      }
-
-      if (listKey === 'items') {
-        const status = typeof entry.status === 'string' ? entry.status.trim() : '';
-        if (status !== 'todo' && status !== 'in_progress' && status !== 'done') {
-          issues.push(`${prefix} has invalid status "${status || '<missing>'}"; expected todo, in_progress, or done.`);
-        }
-      }
-
-      const dependencyKey = listKey === 'items' ? 'dependsOn' : 'dependencies';
-      const rawDeps = entry[dependencyKey];
-      const deps = Array.isArray(rawDeps)
-        ? rawDeps
-          .map((value) => typeof value === 'string' ? value.trim() : '')
-          .filter((value) => value.length > 0)
-        : [];
-      if (id) {
-        dependenciesById.set(id, deps);
-      }
-    }
-
-    for (const [id, deps] of dependenciesById.entries()) {
-      for (const dep of deps) {
-        if (dep === id) {
-          issues.push(`entry "${id}" cannot depend on itself.`);
-          continue;
-        }
-        if (!ids.has(dep)) {
-          issues.push(`entry "${id}" references unknown dependency "${dep}".`);
-        }
-      }
-    }
-
-    if (hasDependencyCycle(dependenciesById)) {
-      issues.push('contains a dependency cycle.');
-    }
-
-    return { sum, issues, ids };
-  } catch {
-    return {
-      sum: undefined,
-      ids,
-      issues: ['payload is not valid JSON.'],
-    };
-  }
-}
-
-function hasDependencyCycle(dependenciesById: Map<string, string[]>): boolean {
-  const stateById = new Map<string, 'visiting' | 'visited'>();
-
-  const visit = (nodeId: string): boolean => {
-    const current = stateById.get(nodeId);
-    if (current === 'visiting') {
-      return true;
-    }
-    if (current === 'visited') {
-      return false;
-    }
-
-    stateById.set(nodeId, 'visiting');
-    const deps = dependenciesById.get(nodeId) ?? [];
-    for (const dep of deps) {
-      if (!dependenciesById.has(dep)) {
-        continue;
-      }
-      if (visit(dep)) {
-        return true;
-      }
-    }
-    stateById.set(nodeId, 'visited');
-    return false;
-  };
-
-  for (const nodeId of dependenciesById.keys()) {
-    if (visit(nodeId)) {
-      return true;
-    }
-  }
-
-  return false;
-}
-
-function collectSubAgentNodeIds(toolCalls: ReplayToolCallRecord[]): Set<string> {
-  const nodeIds = new Set<string>();
-
-  for (const call of toolCalls) {
-    // Accept both 'started' and 'result' events since result events may lack input
-    if (call.isError) {
-      continue;
-    }
-
-    if (call.toolName === 'subagent_spawn') {
-      const parsed = parseToolCallInput(call.input);
-      const nodeId = parsed && typeof parsed.nodeId === 'string' ? parsed.nodeId.trim() : '';
-      if (nodeId) {
-        nodeIds.add(nodeId);
-      }
-      continue;
-    }
-
-    if (call.toolName === 'subagent_spawn_batch') {
-      const parsed = parseToolCallInput(call.input);
-      const agents = parsed && Array.isArray(parsed.agents) ? parsed.agents : [];
-      for (const rawAgent of agents) {
-        if (!rawAgent || typeof rawAgent !== 'object') {
-          continue;
-        }
-        const agent = rawAgent as Record<string, unknown>;
-        const nodeId = typeof agent.nodeId === 'string' ? agent.nodeId.trim() : '';
-        if (nodeId) {
-          nodeIds.add(nodeId);
-        }
-      }
-    }
-  }
-
-  return nodeIds;
-}
-
-function parseToolCallInput(input: string | undefined): Record<string, unknown> | undefined {
-  if (!input) {
-    return undefined;
-  }
-
-  try {
-    const parsed = JSON.parse(input);
-    if (parsed && typeof parsed === 'object') {
-      return parsed as Record<string, unknown>;
-    }
-  } catch {
-    return undefined;
-  }
-
-  return undefined;
-}
-
-function isWeightTotalValid(value: number): boolean {
-  return Math.abs(value - 100) <= 0.5;
-}
-
-function formatWeightTotal(value: number): string {
-  return Number.isInteger(value) ? String(value) : value.toFixed(2);
 }
 
 function resolvePromptVersion(params: {

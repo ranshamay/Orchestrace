@@ -148,6 +148,16 @@ Usage:
 Flags:
   --provider <id>               Provider override (e.g. github-copilot, anthropic)
   --model <id>                  Model override for the selected provider
+  --planner-provider <id>       Planner agent provider override
+  --planner-model <id>          Planner agent model override
+  --implementer-provider <id>   Implementer agent provider override
+  --implementer-model <id>      Implementer agent model override
+  --router-provider <id>        Router agent provider override (future role)
+  --router-model <id>           Router agent model override (future role)
+  --reviewer-provider <id>      Reviewer agent provider override (future role)
+  --reviewer-model <id>         Reviewer agent model override (future role)
+  --investigator-provider <id>  Investigator agent provider override (future role)
+  --investigator-model <id>     Investigator agent model override (future role)
   --workspace <id|name|path>    Workspace to run against (and set active)
   --port <number>               Port for UI server (default 4310)
   --hmr                         Enable UI hot reload (default: enabled)
@@ -189,6 +199,11 @@ Environment variables:
   auth.json is preferred and managed by 'orchestrace auth'
   ORCHESTRACE_DEFAULT_PROVIDER   Default LLM provider (default: anthropic)
   ORCHESTRACE_DEFAULT_MODEL      Default model ID
+  ORCHESTRACE_PLANNER_PROVIDER / ORCHESTRACE_PLANNER_MODEL
+  ORCHESTRACE_IMPLEMENTER_PROVIDER / ORCHESTRACE_IMPLEMENTER_MODEL
+  ORCHESTRACE_ROUTER_PROVIDER / ORCHESTRACE_ROUTER_MODEL
+  ORCHESTRACE_REVIEWER_PROVIDER / ORCHESTRACE_REVIEWER_MODEL
+  ORCHESTRACE_INVESTIGATOR_PROVIDER / ORCHESTRACE_INVESTIGATOR_MODEL
   ORCHESTRACE_WORKSPACE          Active workspace identifier/path override
   ORCHESTRACE_UI_HMR             true/false UI hot reload
   ORCHESTRACE_LLM_TIMEOUT_MS     Per-request LLM timeout in milliseconds (default: 120000)
@@ -213,6 +228,16 @@ Environment variables:
   const autoPush = getBooleanFlag(flagArgs, '--push', process.env.ORCHESTRACE_AUTO_PUSH === 'true');
   const providerOverride = getFlagValue(flagArgs, '--provider');
   const modelOverride = getFlagValue(flagArgs, '--model');
+  const plannerProviderOverride = getFlagValue(flagArgs, '--planner-provider');
+  const plannerModelOverride = getFlagValue(flagArgs, '--planner-model');
+  const implementerProviderOverride = getFlagValue(flagArgs, '--implementer-provider');
+  const implementerModelOverride = getFlagValue(flagArgs, '--implementer-model');
+  const routerProviderOverride = getFlagValue(flagArgs, '--router-provider');
+  const routerModelOverride = getFlagValue(flagArgs, '--router-model');
+  const reviewerProviderOverride = getFlagValue(flagArgs, '--reviewer-provider');
+  const reviewerModelOverride = getFlagValue(flagArgs, '--reviewer-model');
+  const investigatorProviderOverride = getFlagValue(flagArgs, '--investigator-provider');
+  const investigatorModelOverride = getFlagValue(flagArgs, '--investigator-model');
   const workspaceOverride = getFlagValue(flagArgs, '--workspace') ?? process.env.ORCHESTRACE_WORKSPACE;
   const portOverride = parseInt(getFlagValue(flagArgs, '--port') ?? '', 10);
   const uiHmr = getUiHmrFlag(flagArgs);
@@ -273,6 +298,16 @@ Environment variables:
       commitMessage,
       providerOverride,
       modelOverride,
+      plannerProviderOverride,
+      plannerModelOverride,
+      implementerProviderOverride,
+      implementerModelOverride,
+      routerProviderOverride,
+      routerModelOverride,
+      reviewerProviderOverride,
+      reviewerModelOverride,
+      investigatorProviderOverride,
+      investigatorModelOverride,
       workspace,
     });
     process.exit(code);
@@ -312,6 +347,16 @@ Environment variables:
       commitMessage,
       providerOverride,
       modelOverride,
+      plannerProviderOverride,
+      plannerModelOverride,
+      implementerProviderOverride,
+      implementerModelOverride,
+      routerProviderOverride,
+      routerModelOverride,
+      reviewerProviderOverride,
+      reviewerModelOverride,
+      investigatorProviderOverride,
+      investigatorModelOverride,
       workspace,
     });
     process.exit(code);
@@ -330,11 +375,33 @@ async function runGraph(
     workspace: WorkspaceEntry;
     providerOverride?: string;
     modelOverride?: string;
+    plannerProviderOverride?: string;
+    plannerModelOverride?: string;
+    implementerProviderOverride?: string;
+    implementerModelOverride?: string;
+    routerProviderOverride?: string;
+    routerModelOverride?: string;
+    reviewerProviderOverride?: string;
+    reviewerModelOverride?: string;
+    investigatorProviderOverride?: string;
+    investigatorModelOverride?: string;
   },
 ): Promise<number> {
   const maxParallel = parseInt(process.env.ORCHESTRACE_MAX_PARALLEL ?? '4', 10);
   const provider = options.providerOverride ?? process.env.ORCHESTRACE_DEFAULT_PROVIDER ?? 'anthropic';
   const model = options.modelOverride ?? process.env.ORCHESTRACE_DEFAULT_MODEL ?? 'claude-sonnet-4-20250514';
+  const implementationProvider = options.implementerProviderOverride
+    ?? process.env.ORCHESTRACE_IMPLEMENTER_PROVIDER
+    ?? provider;
+  const implementationModel = options.implementerModelOverride
+    ?? process.env.ORCHESTRACE_IMPLEMENTER_MODEL
+    ?? model;
+  const planningProvider = options.plannerProviderOverride
+    ?? process.env.ORCHESTRACE_PLANNER_PROVIDER
+    ?? implementationProvider;
+  const planningModel = options.plannerModelOverride
+    ?? process.env.ORCHESTRACE_PLANNER_MODEL
+    ?? implementationModel;
 
   console.log(`\n▶ Running plan: ${graph.name} (${graph.nodes.length} tasks, max ${maxParallel} parallel)`);
   console.log(`Workspace: ${options.workspace.name} (${options.workspace.path})\n`);
@@ -411,7 +478,11 @@ async function runGraph(
   const githubAuthManager = createGithubAuthManager();
   const cwd = options.workspace.path;
 
-  const providersToValidate = new Set<string>([provider]);
+  const providersToValidate = new Set<string>([
+    provider,
+    planningProvider,
+    implementationProvider,
+  ]);
   for (const node of graph.nodes) {
     const nodeProvider = node.model?.provider?.trim();
     if (nodeProvider) {
@@ -435,7 +506,9 @@ async function runGraph(
     promptVersion: process.env.ORCHESTRACE_PROMPT_VERSION,
     policyVersion: process.env.ORCHESTRACE_POLICY_VERSION ?? DEFAULT_AGENT_TOOL_POLICY_VERSION,
     maxParallel,
-    defaultModel: { provider, model },
+    defaultModel: { provider: implementationProvider, model: implementationModel },
+    defaultPlanningModel: { provider: planningProvider, model: planningModel },
+    defaultImplementationModel: { provider: implementationProvider, model: implementationModel },
     onEvent,
     requirePlanApproval: true,
     onPlanApproval: approvalGate,

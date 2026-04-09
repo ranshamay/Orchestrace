@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  type AgentModels,
   type AgentTodo,
   type ChatMessage,
   type SessionObserverState,
@@ -168,16 +169,35 @@ export default function App() {
     planningModel: string;
     implementationProvider: string;
     implementationModel: string;
+    agentModels?: AgentModels;
   }) => {
+    const mergedAgentModels: AgentModels = {
+      ...defaultLlmControls.agentModels,
+      ...(next.agentModels ?? {}),
+      planner: {
+        ...(defaultLlmControls.agentModels?.planner ?? {}),
+        ...(next.agentModels?.planner ?? {}),
+        provider: next.planningProvider,
+        model: next.planningModel,
+      },
+      implementer: {
+        ...(defaultLlmControls.agentModels?.implementer ?? {}),
+        ...(next.agentModels?.implementer ?? {}),
+        provider: next.implementationProvider,
+        model: next.implementationModel,
+      },
+    };
+
     void updateUiPreferences({
       defaultProvider: next.implementationProvider,
       defaultModel: next.implementationModel,
+      defaultAgentModels: mergedAgentModels,
       defaultPlanningProvider: next.planningProvider,
       defaultPlanningModel: next.planningModel,
       defaultImplementationProvider: next.implementationProvider,
       defaultImplementationModel: next.implementationModel,
     }).catch(() => undefined);
-  }, []);
+  }, [defaultLlmControls.agentModels]);
 
   const setDefaultPlanningProvider = useCallback((nextProvider: string) => {
     const normalizedProvider = typeof nextProvider === 'string' ? nextProvider.trim() : '';
@@ -188,6 +208,14 @@ export default function App() {
       ...current,
       planningProvider: normalizedProvider,
       planningModel: resetModel ? '' : current.planningModel,
+      agentModels: {
+        ...current.agentModels,
+        planner: {
+          ...(current.agentModels?.planner ?? {}),
+          provider: normalizedProvider,
+          model: nextModel,
+        },
+      },
     }));
 
     setWorkPlanningProvider(normalizedProvider);
@@ -200,6 +228,14 @@ export default function App() {
           ...existing,
           planningProvider: normalizedProvider,
           planningModel: nextModel,
+          agentModels: {
+            ...(existing.agentModels ?? {}),
+            planner: {
+              ...(existing.agentModels?.planner ?? {}),
+              provider: normalizedProvider,
+              model: nextModel,
+            },
+          },
         };
       }
       return next;
@@ -215,7 +251,18 @@ export default function App() {
 
   const setDefaultPlanningModel = useCallback((nextModel: string) => {
     const normalizedModel = typeof nextModel === 'string' ? nextModel.trim() : '';
-    setDefaultLlmControls((current) => ({ ...current, planningModel: normalizedModel }));
+    setDefaultLlmControls((current) => ({
+      ...current,
+      planningModel: normalizedModel,
+      agentModels: {
+        ...current.agentModels,
+        planner: {
+          ...(current.agentModels?.planner ?? {}),
+          provider: current.planningProvider,
+          model: normalizedModel,
+        },
+      },
+    }));
     setWorkPlanningModel(normalizedModel);
     setLlmControlsBySessionId((current) => {
       const next = { ...current };
@@ -224,6 +271,14 @@ export default function App() {
         next[sessionId] = {
           ...existing,
           planningModel: normalizedModel,
+          agentModels: {
+            ...(existing.agentModels ?? {}),
+            planner: {
+              ...(existing.agentModels?.planner ?? {}),
+              provider: existing.planningProvider,
+              model: normalizedModel,
+            },
+          },
         };
       }
       return next;
@@ -246,6 +301,14 @@ export default function App() {
       ...current,
       implementationProvider: normalizedProvider,
       implementationModel: resetModel ? '' : current.implementationModel,
+      agentModels: {
+        ...current.agentModels,
+        implementer: {
+          ...(current.agentModels?.implementer ?? {}),
+          provider: normalizedProvider,
+          model: nextModel,
+        },
+      },
     }));
 
     setWorkProvider(normalizedProvider);
@@ -258,6 +321,14 @@ export default function App() {
           ...existing,
           implementationProvider: normalizedProvider,
           implementationModel: nextModel,
+          agentModels: {
+            ...(existing.agentModels ?? {}),
+            implementer: {
+              ...(existing.agentModels?.implementer ?? {}),
+              provider: normalizedProvider,
+              model: nextModel,
+            },
+          },
         };
       }
       return next;
@@ -273,7 +344,18 @@ export default function App() {
 
   const setDefaultImplementationModel = useCallback((nextModel: string) => {
     const normalizedModel = typeof nextModel === 'string' ? nextModel.trim() : '';
-    setDefaultLlmControls((current) => ({ ...current, implementationModel: normalizedModel }));
+    setDefaultLlmControls((current) => ({
+      ...current,
+      implementationModel: normalizedModel,
+      agentModels: {
+        ...current.agentModels,
+        implementer: {
+          ...(current.agentModels?.implementer ?? {}),
+          provider: current.implementationProvider,
+          model: normalizedModel,
+        },
+      },
+    }));
     setWorkModel(normalizedModel);
     setLlmControlsBySessionId((current) => {
       const next = { ...current };
@@ -282,6 +364,14 @@ export default function App() {
         next[sessionId] = {
           ...existing,
           implementationModel: normalizedModel,
+          agentModels: {
+            ...(existing.agentModels ?? {}),
+            implementer: {
+              ...(existing.agentModels?.implementer ?? {}),
+              provider: existing.implementationProvider,
+              model: normalizedModel,
+            },
+          },
         };
       }
       return next;
@@ -295,6 +385,115 @@ export default function App() {
     updateActiveLlmControls({ implementationModel: normalizedModel });
   }, [defaultLlmControls.implementationProvider, defaultLlmControls.planningModel, defaultLlmControls.planningProvider, persistPhaseDefaults, setDefaultLlmControls, setLlmControlsBySessionId, setWorkModel, updateActiveLlmControls]);
 
+  const setDefaultAgentRoleProvider = useCallback((
+    role: 'router' | 'reviewer' | 'investigator',
+    nextProvider: string,
+  ) => {
+    const normalizedProvider = typeof nextProvider === 'string' ? nextProvider.trim() : '';
+    const currentRoleConfig = defaultLlmControls.agentModels?.[role] ?? {};
+    const resetModel = normalizedProvider !== (currentRoleConfig.provider ?? '');
+    const nextModel = resetModel ? '' : (currentRoleConfig.model ?? '');
+
+    setDefaultLlmControls((current) => ({
+      ...current,
+      agentModels: {
+        ...current.agentModels,
+        [role]: {
+          ...(current.agentModels?.[role] ?? {}),
+          provider: normalizedProvider,
+          model: nextModel,
+        },
+      },
+    }));
+
+    persistPhaseDefaults({
+      planningProvider: defaultLlmControls.planningProvider,
+      planningModel: defaultLlmControls.planningModel,
+      implementationProvider: defaultLlmControls.implementationProvider,
+      implementationModel: defaultLlmControls.implementationModel,
+      agentModels: {
+        [role]: {
+          ...(defaultLlmControls.agentModels?.[role] ?? {}),
+          provider: normalizedProvider,
+          model: nextModel,
+        },
+      },
+    });
+  }, [
+    defaultLlmControls.agentModels,
+    defaultLlmControls.implementationModel,
+    defaultLlmControls.implementationProvider,
+    defaultLlmControls.planningModel,
+    defaultLlmControls.planningProvider,
+    persistPhaseDefaults,
+    setDefaultLlmControls,
+  ]);
+
+  const setDefaultAgentRoleModel = useCallback((
+    role: 'router' | 'reviewer' | 'investigator',
+    nextModel: string,
+  ) => {
+    const normalizedModel = typeof nextModel === 'string' ? nextModel.trim() : '';
+
+    setDefaultLlmControls((current) => ({
+      ...current,
+      agentModels: {
+        ...current.agentModels,
+        [role]: {
+          ...(current.agentModels?.[role] ?? {}),
+          provider: current.agentModels?.[role]?.provider,
+          model: normalizedModel,
+        },
+      },
+    }));
+
+    persistPhaseDefaults({
+      planningProvider: defaultLlmControls.planningProvider,
+      planningModel: defaultLlmControls.planningModel,
+      implementationProvider: defaultLlmControls.implementationProvider,
+      implementationModel: defaultLlmControls.implementationModel,
+      agentModels: {
+        [role]: {
+          ...(defaultLlmControls.agentModels?.[role] ?? {}),
+          provider: defaultLlmControls.agentModels?.[role]?.provider,
+          model: normalizedModel,
+        },
+      },
+    });
+  }, [
+    defaultLlmControls.agentModels,
+    defaultLlmControls.implementationModel,
+    defaultLlmControls.implementationProvider,
+    defaultLlmControls.planningModel,
+    defaultLlmControls.planningProvider,
+    persistPhaseDefaults,
+    setDefaultLlmControls,
+  ]);
+
+  const setDefaultRouterProvider = useCallback((nextProvider: string) => {
+    setDefaultAgentRoleProvider('router', nextProvider);
+  }, [setDefaultAgentRoleProvider]);
+
+  const setDefaultRouterModel = useCallback((nextModel: string) => {
+    setDefaultAgentRoleModel('router', nextModel);
+  }, [setDefaultAgentRoleModel]);
+
+  const setDefaultReviewerProvider = useCallback((nextProvider: string) => {
+    setDefaultAgentRoleProvider('reviewer', nextProvider);
+  }, [setDefaultAgentRoleProvider]);
+
+  const setDefaultReviewerModel = useCallback((nextModel: string) => {
+    setDefaultAgentRoleModel('reviewer', nextModel);
+  }, [setDefaultAgentRoleModel]);
+
+  const setDefaultInvestigatorProvider = useCallback((nextProvider: string) => {
+    setDefaultAgentRoleProvider('investigator', nextProvider);
+  }, [setDefaultAgentRoleProvider]);
+
+  const setDefaultInvestigatorModel = useCallback((nextModel: string) => {
+    setDefaultAgentRoleModel('investigator', nextModel);
+  }, [setDefaultAgentRoleModel]);
+
   const handleStartNewSessionDraft = useCallback(() => {
     setActiveTab('graph');
     setSessionSelection('');
@@ -303,10 +502,12 @@ export default function App() {
       planningModel: defaultLlmControls.planningModel,
       implementationProvider: defaultLlmControls.implementationProvider,
       implementationModel: defaultLlmControls.implementationModel,
+      agentModels: defaultLlmControls.agentModels,
       deliveryStrategy: defaultLlmControls.deliveryStrategy,
       planningNoToolGuardMode: defaultLlmControls.planningNoToolGuardMode,
     });
   }, [
+    defaultLlmControls.agentModels,
     defaultLlmControls.implementationModel,
     defaultLlmControls.implementationProvider,
     defaultLlmControls.deliveryStrategy,
@@ -350,6 +551,7 @@ export default function App() {
     workPlanningModel,
     workProvider,
     workModel,
+    defaultAgentModels: defaultLlmControls.agentModels,
     deliveryStrategy,
     planningNoToolGuardMode,
     autoApprove,
@@ -376,6 +578,7 @@ export default function App() {
       activeTab,
       observerShowFindings,
       defaultDeliveryStrategy: defaultLlmControls.deliveryStrategy,
+      defaultAgentModels: defaultLlmControls.agentModels,
       planningNoToolGuardMode,
       adaptiveConcurrency,
       batchConcurrency,
@@ -405,6 +608,7 @@ export default function App() {
     batchMinConcurrency,
     bootstrapComplete,
     defaultLlmControls.deliveryStrategy,
+    defaultLlmControls.agentModels,
     onSettingsSaveStatus,
     observerShowFindings,
     planningNoToolGuardMode,
@@ -496,11 +700,18 @@ export default function App() {
     defaultPlanningModel: defaultLlmControls.planningModel,
     defaultImplementationProvider: defaultLlmControls.implementationProvider,
     defaultImplementationModel: defaultLlmControls.implementationModel,
+    defaultAgentModels: defaultLlmControls.agentModels,
     defaultPlanningNoToolGuardMode: defaultLlmControls.planningNoToolGuardMode,
     onSetDefaultPlanningProvider: setDefaultPlanningProvider,
     onSetDefaultPlanningModel: setDefaultPlanningModel,
     onSetDefaultImplementationProvider: setDefaultImplementationProvider,
     onSetDefaultImplementationModel: setDefaultImplementationModel,
+    onSetDefaultRouterProvider: setDefaultRouterProvider,
+    onSetDefaultRouterModel: setDefaultRouterModel,
+    onSetDefaultReviewerProvider: setDefaultReviewerProvider,
+    onSetDefaultReviewerModel: setDefaultReviewerModel,
+    onSetDefaultInvestigatorProvider: setDefaultInvestigatorProvider,
+    onSetDefaultInvestigatorModel: setDefaultInvestigatorModel,
     onSetDefaultPlanningNoToolGuardMode: setDefaultPlanningNoToolGuardMode,
     observerShowFindings,
     onSetObserverShowFindings: setObserverShowFindings,
