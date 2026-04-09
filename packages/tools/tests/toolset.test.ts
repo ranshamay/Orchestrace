@@ -3,6 +3,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createAgentToolset } from '../src/index.js';
+import * as commandRunner from '../src/command-tools/command-runner.js';
+
 
 const tempDirs: string[] = [];
 
@@ -590,7 +592,7 @@ describe('search_files tool', () => {
     expect(result.content).not.toContain('regex.txt:1:call(value)');
   });
 
-  it('returns (no matches) when nothing matches', async () => {
+    it('returns (no matches) when nothing matches', async () => {
     const cwd = await makeWorkspace();
     const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
 
@@ -608,6 +610,66 @@ describe('search_files tool', () => {
     expect(result.details).toBeUndefined();
 
   });
+
+  it('keeps successful match payload non-error when ripgrep returns non-zero with stdout matches', async () => {
+    const cwd = await makeWorkspace();
+    await writeFile(join(cwd, 'src', 'match.ts'), 'validateShellCommandPrompt();\n', 'utf-8');
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+
+    const runCommandSpy = vi.spyOn(commandRunner, 'runCommand').mockResolvedValueOnce({
+      exitCode: 2,
+      stdout: 'src/match.ts:1:validateShellCommandPrompt();\n',
+      stderr: 'rg warning: simulated warning without blocking matches',
+    });
+
+    const result = await toolset.executeTool({
+      id: 'non-zero-with-matches',
+      name: 'search_files',
+      arguments: {
+        query: 'validateShellCommandPrompt',
+        path: 'src',
+      },
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.content).toContain('src/match.ts:1:validateShellCommandPrompt();');
+    expect(result.content).toContain('stderr:\nrg warning: simulated warning without blocking matches');
+
+    runCommandSpy.mockRestore();
+  });
+
+  it('marks search_files as error for genuine command failures without match output', async () => {
+    const cwd = await makeWorkspace();
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+
+    const runCommandSpy = vi.spyOn(commandRunner, 'runCommand').mockResolvedValueOnce({
+      exitCode: 2,
+      stdout: '',
+      stderr: 'rg: simulated command failure',
+    });
+
+    const result = await toolset.executeTool({
+      id: 'non-zero-no-matches',
+      name: 'search_files',
+      arguments: {
+        query: 'value',
+        path: 'src',
+      },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content).toContain('stderr:\nrg: simulated command failure');
+    expect(result.details).toMatchObject({
+      errorType: 'command_failed',
+      toolName: 'search_files',
+      exitCode: 2,
+      command: 'rg',
+      path: 'src',
+    });
+
+    runCommandSpy.mockRestore();
+  });
+
 
   it('treats regression tokens as query text, not file paths', async () => {
     const cwd = await makeWorkspace();
