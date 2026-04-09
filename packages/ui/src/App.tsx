@@ -55,6 +55,7 @@ export default function App() {
     workPlanningProvider, setWorkPlanningProvider,
     workPlanningModel, setWorkPlanningModel,
     workProvider, setWorkProvider, workModel, setWorkModel,
+    deliveryStrategy, setDeliveryStrategy,
     workWorkspaceId, setWorkWorkspaceId, autoApprove, setAutoApprove,
     planningNoToolGuardMode, setPlanningNoToolGuardMode,
     errorMessage, setErrorMessage,
@@ -152,7 +153,9 @@ export default function App() {
   const { setLlmControlsBySessionId, updateActiveLlmControls } = useLlmControls({
     selectedSessionId, selectedSession, defaultLlmControls, setDefaultLlmControls,
     workPlanningProvider, setWorkPlanningProvider, workPlanningModel, setWorkPlanningModel,
-    workProvider, setWorkProvider, workModel, setWorkModel, workWorkspaceId, setWorkWorkspaceId,
+    workProvider, setWorkProvider, workModel, setWorkModel,
+    deliveryStrategy, setDeliveryStrategy,
+    workWorkspaceId, setWorkWorkspaceId,
     planningNoToolGuardMode, setPlanningNoToolGuardMode,
     autoApprove, setAutoApprove,
     adaptiveConcurrency, setAdaptiveConcurrency,
@@ -300,11 +303,13 @@ export default function App() {
       planningModel: defaultLlmControls.planningModel,
       implementationProvider: defaultLlmControls.implementationProvider,
       implementationModel: defaultLlmControls.implementationModel,
+      deliveryStrategy: defaultLlmControls.deliveryStrategy,
       planningNoToolGuardMode: defaultLlmControls.planningNoToolGuardMode,
     });
   }, [
     defaultLlmControls.implementationModel,
     defaultLlmControls.implementationProvider,
+    defaultLlmControls.deliveryStrategy,
     defaultLlmControls.planningNoToolGuardMode,
     defaultLlmControls.planningModel,
     defaultLlmControls.planningProvider,
@@ -345,6 +350,7 @@ export default function App() {
     workPlanningModel,
     workProvider,
     workModel,
+    deliveryStrategy,
     planningNoToolGuardMode,
     autoApprove,
     adaptiveConcurrency, batchConcurrency, batchMinConcurrency,
@@ -369,6 +375,7 @@ export default function App() {
     const payload = {
       activeTab,
       observerShowFindings,
+      defaultDeliveryStrategy: deliveryStrategy,
       planningNoToolGuardMode,
       adaptiveConcurrency,
       batchConcurrency,
@@ -397,6 +404,7 @@ export default function App() {
     batchConcurrency,
     batchMinConcurrency,
     bootstrapComplete,
+    deliveryStrategy,
     onSettingsSaveStatus,
     observerShowFindings,
     planningNoToolGuardMode,
@@ -517,6 +525,7 @@ export default function App() {
     workWorkspaceId,
     workProvider: modalWorkProvider,
     workModel: modalWorkModel,
+    deliveryStrategy,
     autoApprove,
     adaptiveConcurrency,
     batchConcurrency,
@@ -529,6 +538,7 @@ export default function App() {
     onChangeModel: (model) => updateActiveLlmControls(modalTargetsPlanningPhase
       ? { planningModel: model }
       : { implementationModel: model }),
+    onChangeDeliveryStrategy: (next) => updateActiveLlmControls({ deliveryStrategy: next }),
     onChangeAutoApprove: (next) => updateActiveLlmControls({ autoApprove: next }),
     onChangeAdaptiveConcurrency: (next) => updateActiveLlmControls({ adaptiveConcurrency: next }),
     onChangeBatchConcurrency: (next) => updateActiveLlmControls({ batchConcurrency: next }),

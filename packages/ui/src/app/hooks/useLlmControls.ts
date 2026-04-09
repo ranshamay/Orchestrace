@@ -15,6 +15,8 @@ type Params = {
   setWorkProvider: (value: string) => void;
   workModel: string;
   setWorkModel: (value: string) => void;
+  deliveryStrategy: 'pr-only' | 'merge-after-ci';
+  setDeliveryStrategy: (value: 'pr-only' | 'merge-after-ci') => void;
   workWorkspaceId: string;
   setWorkWorkspaceId: (value: string) => void;
   planningNoToolGuardMode: 'enforce' | 'warn';
@@ -43,6 +45,8 @@ export function useLlmControls(params: Params) {
     setWorkProvider,
     workModel,
     setWorkModel,
+    deliveryStrategy,
+    setDeliveryStrategy,
     workWorkspaceId,
     setWorkWorkspaceId,
     planningNoToolGuardMode,
@@ -64,6 +68,7 @@ export function useLlmControls(params: Params) {
     if (workPlanningModel !== controls.planningModel) setWorkPlanningModel(controls.planningModel);
     if (workProvider !== controls.implementationProvider) setWorkProvider(controls.implementationProvider);
     if (workModel !== controls.implementationModel) setWorkModel(controls.implementationModel);
+    if (deliveryStrategy !== controls.deliveryStrategy) setDeliveryStrategy(controls.deliveryStrategy);
     if (workWorkspaceId !== controls.workspaceId) setWorkWorkspaceId(controls.workspaceId);
     if (planningNoToolGuardMode !== controls.planningNoToolGuardMode) {
       setPlanningNoToolGuardMode(controls.planningNoToolGuardMode);
@@ -86,7 +91,9 @@ export function useLlmControls(params: Params) {
     setWorkPlanningProvider,
     setWorkModel,
     setWorkProvider,
+    setDeliveryStrategy,
     setWorkWorkspaceId,
+    deliveryStrategy,
     planningNoToolGuardMode,
     workPlanningModel,
     workPlanningProvider,
@@ -101,6 +108,7 @@ export function useLlmControls(params: Params) {
       planningModel: patch.planningModel ?? workPlanningModel,
       implementationProvider: patch.implementationProvider ?? workProvider,
       implementationModel: patch.implementationModel ?? workModel,
+      deliveryStrategy: patch.deliveryStrategy ?? deliveryStrategy,
       planningNoToolGuardMode: patch.planningNoToolGuardMode ?? planningNoToolGuardMode,
       workspaceId: patch.workspaceId ?? workWorkspaceId,
       autoApprove: patch.autoApprove ?? autoApprove,
@@ -128,6 +136,7 @@ export function useLlmControls(params: Params) {
     workPlanningProvider,
     workModel,
     workProvider,
+    deliveryStrategy,
     workWorkspaceId,
   ]);
 
@@ -158,6 +167,7 @@ export function useLlmControls(params: Params) {
       implementationModel: defaultLlmControls.implementationModel
         || selectedSession.implementationModel
         || selectedSession.model,
+      deliveryStrategy: selectedSession.deliveryStrategy ?? defaultLlmControls.deliveryStrategy,
       planningNoToolGuardMode: selectedSession.planningNoToolGuardMode ?? defaultLlmControls.planningNoToolGuardMode,
       workspaceId: selectedSession.workspaceId || defaultLlmControls.workspaceId,
       autoApprove: selectedSession.autoApprove,

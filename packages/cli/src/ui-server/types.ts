@@ -8,6 +8,7 @@ export interface UiServerOptions {
 
 export type WorkState = 'running' | 'completed' | 'failed' | 'cancelled';
 export type SessionCreationReason = 'start' | 'retry';
+export type SessionDeliveryStrategy = 'pr-only' | 'merge-after-ci';
 export type ExecutionContext = 'workspace' | 'git-worktree';
 export type SessionWorktreePathSessionIdRelation = 'match' | 'mismatch' | 'none';
 
@@ -186,6 +187,7 @@ export interface WorkSession {
   planningModel: string;
   implementationProvider: string;
   implementationModel: string;
+  deliveryStrategy: SessionDeliveryStrategy;
   autoApprove: boolean;
   planningNoToolGuardMode: 'enforce' | 'warn';
   quickStartMode?: boolean;
@@ -235,6 +237,7 @@ export interface PersistedWorkSession {
   planningModel?: string;
   implementationProvider?: string;
   implementationModel?: string;
+  deliveryStrategy?: SessionDeliveryStrategy;
   autoApprove: boolean;
   planningNoToolGuardMode?: 'enforce' | 'warn';
   quickStartMode?: boolean;
@@ -272,6 +275,7 @@ export interface UiPreferences {
   defaultPlanningModel: string;
   defaultImplementationProvider: string;
   defaultImplementationModel: string;
+  defaultDeliveryStrategy: SessionDeliveryStrategy;
   planningNoToolGuardMode: 'enforce' | 'warn';
   executionContext: ExecutionContext;
   selectedWorktreePath?: string;
@@ -292,6 +296,7 @@ export interface PersistedUiPreferences {
   defaultPlanningModel?: string;
   defaultImplementationProvider?: string;
   defaultImplementationModel?: string;
+  defaultDeliveryStrategy?: SessionDeliveryStrategy;
   planningNoToolGuardMode?: 'enforce' | 'warn';
   executionContext?: ExecutionContext;
   selectedWorktreePath?: string;

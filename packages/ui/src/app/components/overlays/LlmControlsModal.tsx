@@ -11,6 +11,7 @@ export type LlmControlsModalProps = {
   workWorkspaceId: string;
   workProvider: string;
   workModel: string;
+  deliveryStrategy: 'pr-only' | 'merge-after-ci';
   autoApprove: boolean;
   adaptiveConcurrency: boolean;
   batchConcurrency: number;
@@ -19,6 +20,7 @@ export type LlmControlsModalProps = {
   onChangeWorkspace: (workspaceId: string) => void;
   onChangeProvider: (provider: string) => void;
   onChangeModel: (model: string) => void;
+  onChangeDeliveryStrategy: (next: 'pr-only' | 'merge-after-ci') => void;
   onChangeAutoApprove: (next: boolean) => void;
   onChangeAdaptiveConcurrency: (next: boolean) => void;
   onChangeBatchConcurrency: (next: number) => void;
@@ -35,6 +37,7 @@ export function LlmControlsModal(props: LlmControlsModalProps) {
     workWorkspaceId,
     workProvider,
     workModel,
+    deliveryStrategy,
     autoApprove,
     adaptiveConcurrency,
     batchConcurrency,
@@ -43,6 +46,7 @@ export function LlmControlsModal(props: LlmControlsModalProps) {
     onChangeWorkspace,
     onChangeProvider,
     onChangeModel,
+    onChangeDeliveryStrategy,
     onChangeAutoApprove,
     onChangeAdaptiveConcurrency,
     onChangeBatchConcurrency,
@@ -121,6 +125,21 @@ export function LlmControlsModal(props: LlmControlsModalProps) {
             placeholder="Search models…"
             className="md:col-span-2"
           />
+
+          <label className="flex flex-col gap-1 rounded border border-slate-200 bg-white px-2 py-1.5 text-xs text-slate-600 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300">
+            <span>Delivery strategy</span>
+            <select
+              className="rounded border border-slate-200 px-2 py-1 text-sm dark:border-slate-700 dark:bg-slate-950"
+              value={deliveryStrategy}
+              onChange={(event) => onChangeDeliveryStrategy(event.target.value === 'merge-after-ci' ? 'merge-after-ci' : 'pr-only')}
+            >
+              <option value="pr-only">Open PR after CI</option>
+              <option value="merge-after-ci">Auto-merge after CI</option>
+            </select>
+            <span className="text-[11px] leading-relaxed text-slate-500 dark:text-slate-400">
+              PR-only keeps the pull request open after checks pass. Auto-merge waits for CI to pass, then merges using the standard merge method.
+            </span>
+          </label>
 
           <label className="md:col-span-2 flex items-center gap-2 rounded border border-slate-200 bg-white px-2 py-1.5 text-sm text-slate-600 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300">
             <input checked={autoApprove} className="h-4 w-4" onChange={(event) => onChangeAutoApprove(event.target.checked)} type="checkbox" />

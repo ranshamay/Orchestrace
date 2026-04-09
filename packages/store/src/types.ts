@@ -115,6 +115,8 @@ export interface SessionConfig {
   planningModel?: string;
   implementationProvider?: string;
   implementationModel?: string;
+  /** Session delivery behavior after push/CI: keep PR open or merge automatically. */
+  deliveryStrategy?: 'pr-only' | 'merge-after-ci';
   autoApprove: boolean;
   /** Planning no-tool guard policy: `enforce` aborts stalled attempts, `warn` emits warnings only. */
   planningNoToolGuardMode?: 'enforce' | 'warn';

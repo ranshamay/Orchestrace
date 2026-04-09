@@ -9,6 +9,7 @@ type Params = {
   workWorkspaceId: string;
   workProvider: string;
   workModel: string;
+  deliveryStrategy: 'pr-only' | 'merge-after-ci';
   autoApprove: boolean;
   adaptiveConcurrency: boolean;
   batchConcurrency: number;
@@ -17,6 +18,7 @@ type Params = {
   onChangeWorkspace: (workspaceId: string) => void;
   onChangeProvider: (provider: string) => void;
   onChangeModel: (model: string) => void;
+  onChangeDeliveryStrategy: (next: 'pr-only' | 'merge-after-ci') => void;
   onChangeAutoApprove: (next: boolean) => void;
   onChangeAdaptiveConcurrency: (next: boolean) => void;
   onChangeBatchConcurrency: (next: number) => void;
@@ -33,6 +35,7 @@ export function buildLlmModalProps(params: Params): LlmControlsModalProps {
     workWorkspaceId: params.workWorkspaceId,
     workProvider: params.workProvider,
     workModel: params.workModel,
+    deliveryStrategy: params.deliveryStrategy,
     autoApprove: params.autoApprove,
     adaptiveConcurrency: params.adaptiveConcurrency,
     batchConcurrency: params.batchConcurrency,
@@ -41,6 +44,7 @@ export function buildLlmModalProps(params: Params): LlmControlsModalProps {
     onChangeWorkspace: params.onChangeWorkspace,
     onChangeProvider: params.onChangeProvider,
     onChangeModel: params.onChangeModel,
+    onChangeDeliveryStrategy: params.onChangeDeliveryStrategy,
     onChangeAutoApprove: params.onChangeAutoApprove,
     onChangeAdaptiveConcurrency: params.onChangeAdaptiveConcurrency,
     onChangeBatchConcurrency: params.onChangeBatchConcurrency,

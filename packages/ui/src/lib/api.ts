@@ -33,6 +33,8 @@ export interface Workspace {
   path: string;
 }
 
+export type SessionDeliveryStrategy = 'pr-only' | 'merge-after-ci';
+
 export interface UiPreferences {
   activeTab: 'graph' | 'settings' | 'logs';
   observerShowFindings: boolean;
@@ -42,6 +44,7 @@ export interface UiPreferences {
   defaultPlanningModel: string;
   defaultImplementationProvider: string;
   defaultImplementationModel: string;
+  defaultDeliveryStrategy: SessionDeliveryStrategy;
   planningNoToolGuardMode: 'enforce' | 'warn';
   adaptiveConcurrency: boolean;
   batchConcurrency: number;
@@ -97,6 +100,7 @@ export interface WorkSession {
   planningModel?: string;
   implementationProvider?: string;
   implementationModel?: string;
+  deliveryStrategy?: SessionDeliveryStrategy;
   autoApprove: boolean;
   planningNoToolGuardMode?: 'enforce' | 'warn';
   adaptiveConcurrency?: boolean;
@@ -348,6 +352,7 @@ export async function startWork(payload: {
   planningModel?: string;
   implementationProvider?: string;
   implementationModel?: string;
+  deliveryStrategy?: SessionDeliveryStrategy;
   autoApprove: boolean;
   planningNoToolGuardMode?: 'enforce' | 'warn';
   adaptiveConcurrency?: boolean;

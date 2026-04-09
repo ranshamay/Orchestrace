@@ -22,6 +22,7 @@ export type SessionActionsParams = {
   workPlanningModel: string;
   workProvider: string;
   workModel: string;
+  deliveryStrategy: 'pr-only' | 'merge-after-ci';
   planningNoToolGuardMode: 'enforce' | 'warn';
   autoApprove: boolean;
   adaptiveConcurrency: boolean;

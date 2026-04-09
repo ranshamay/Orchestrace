@@ -67,6 +67,7 @@ import type {
   WorkState,
   LlmSessionState,
   SessionCreationReason,
+  SessionDeliveryStrategy,
   SessionWorkspaceAssignmentProvenance,
   SessionWorktreePathSessionIdRelation,
 } from './ui-server/types.js';
@@ -363,6 +364,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           planningModel: c.planningModel ?? c.model,
           implementationProvider: c.implementationProvider ?? c.provider,
           implementationModel: c.implementationModel ?? c.model,
+          deliveryStrategy: normalizeSessionDeliveryStrategy(c.deliveryStrategy),
           autoApprove: c.autoApprove,
           planningNoToolGuardMode: normalizePlanningNoToolGuardMode(c.planningNoToolGuardMode)
             ?? resolvePlanningNoToolGuardModeDefault(),
@@ -1029,6 +1031,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       planningModel: session.planningModel,
       implementationProvider: session.implementationProvider,
       implementationModel: session.implementationModel,
+      deliveryStrategy: session.deliveryStrategy,
       autoApprove: session.autoApprove,
       planningNoToolGuardMode: session.planningNoToolGuardMode,
       quickStartMode: session.quickStartMode,
@@ -1556,6 +1559,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     planningModel?: string;
     implementationProvider?: string;
     implementationModel?: string;
+    deliveryStrategy?: SessionDeliveryStrategy;
     autoApprove: boolean;
     planningNoToolGuardMode?: 'enforce' | 'warn';
     quickStartMode?: boolean;
@@ -1591,6 +1595,9 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     const implementationModel = asString(request.implementationModel) || request.model;
     const planningProvider = asString(request.planningProvider) || implementationProvider;
     const planningModel = asString(request.planningModel) || implementationModel;
+    const deliveryStrategy = normalizeSessionDeliveryStrategy(
+      request.deliveryStrategy ?? uiPreferences.defaultDeliveryStrategy,
+    );
 
     const providerStatuses = await authManager.getAllStatus();
     const phaseProviders: Array<{ phase: 'planning' | 'implementation'; provider: string }> = [
@@ -1698,6 +1705,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       planningModel,
       implementationProvider,
       implementationModel,
+      deliveryStrategy,
       autoApprove: request.autoApprove,
       planningNoToolGuardMode,
       quickStartMode,
@@ -2358,6 +2366,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         }
 
         const autoApprove = Boolean(body.autoApprove);
+        const deliveryStrategy = normalizeSessionDeliveryStrategy(body.deliveryStrategy);
         const quickStartMode = parseBooleanSetting(body.quickStartMode)
           ?? parseBooleanSetting(body.quickStart)
           ?? parseBooleanSetting(body.enableQuickStart);
@@ -2386,6 +2395,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           planningModel: planningModelResolution.model,
           implementationProvider,
           implementationModel: implementationModelResolution.model,
+          deliveryStrategy,
           autoApprove,
           planningNoToolGuardMode,
           quickStartMode,
@@ -4246,6 +4256,7 @@ function toPersistedSession(session: WorkSession): PersistedWorkSession {
     planningModel: session.planningModel,
     implementationProvider: session.implementationProvider,
     implementationModel: session.implementationModel,
+    deliveryStrategy: session.deliveryStrategy,
     autoApprove: session.autoApprove,
     planningNoToolGuardMode: session.planningNoToolGuardMode,
     quickStartMode: session.quickStartMode,
@@ -4297,6 +4308,7 @@ function hydratePersistedSession(session: PersistedWorkSession): WorkSession {
     planningModel: asString(session.planningModel) || asString(session.model),
     implementationProvider: asString(session.implementationProvider) || asString(session.provider),
     implementationModel: asString(session.implementationModel) || asString(session.model),
+    deliveryStrategy: normalizeSessionDeliveryStrategy(session.deliveryStrategy),
     provider: asString(session.implementationProvider) || asString(session.provider),
     model: asString(session.implementationModel) || asString(session.model),
     promptParts: promptParts.length > 0 ? promptParts : undefined,
@@ -4951,6 +4963,15 @@ function normalizeSessionCreationReason(raw: unknown): SessionCreationReason {
   return 'start';
 }
 
+function normalizeSessionDeliveryStrategy(raw: unknown): SessionDeliveryStrategy {
+  const value = asString(raw).trim().toLowerCase();
+  if (value === 'merge-after-ci') {
+    return 'merge-after-ci';
+  }
+
+  return 'pr-only';
+}
+
 function resolveUiPreferencesDefaults(): UiPreferences {
   const batchConcurrency = resolveBatchConcurrencyDefault();
   const batchMinConcurrency = Math.min(batchConcurrency, resolveBatchMinConcurrencyDefault());
@@ -4960,6 +4981,7 @@ function resolveUiPreferencesDefaults(): UiPreferences {
   const defaultPlanningModel = resolveDefaultPlanningModelPreferenceDefault(defaultModel);
   const defaultImplementationProvider = resolveDefaultImplementationProviderPreferenceDefault(defaultProvider);
   const defaultImplementationModel = resolveDefaultImplementationModelPreferenceDefault(defaultModel);
+  const defaultDeliveryStrategy = resolveDefaultDeliveryStrategyPreferenceDefault();
   const planningNoToolGuardMode = resolvePlanningNoToolGuardModeDefault();
   const executionContext: UiPreferences['executionContext'] = 'workspace';
   const useWorktree = false;
@@ -4972,6 +4994,7 @@ function resolveUiPreferencesDefaults(): UiPreferences {
     defaultPlanningModel,
     defaultImplementationProvider,
     defaultImplementationModel,
+    defaultDeliveryStrategy,
     planningNoToolGuardMode,
     executionContext,
     useWorktree,
@@ -5011,6 +5034,9 @@ function normalizeUiPreferences(value: unknown, fallback: UiPreferences): UiPref
     value.defaultImplementationModel,
     legacyDefaultModel || fallback.defaultImplementationModel,
   );
+  const defaultDeliveryStrategy = normalizeSessionDeliveryStrategy(
+    value.defaultDeliveryStrategy ?? value.deliveryStrategy,
+  );
   const planningNoToolGuardMode = normalizePlanningNoToolGuardMode(value.planningNoToolGuardMode)
     ?? (parseBooleanSetting(value.planningNoToolWarnOnly) ? 'warn' : undefined)
     ?? fallback.planningNoToolGuardMode;
@@ -5029,6 +5055,7 @@ function normalizeUiPreferences(value: unknown, fallback: UiPreferences): UiPref
     defaultPlanningModel,
     defaultImplementationProvider,
     defaultImplementationModel,
+    defaultDeliveryStrategy,
     planningNoToolGuardMode,
     executionContext,
     useWorktree,
@@ -5073,6 +5100,10 @@ function resolveDefaultImplementationProviderPreferenceDefault(fallback: string)
 
 function resolveDefaultImplementationModelPreferenceDefault(fallback: string): string {
   return asString(process.env.ORCHESTRACE_UI_DEFAULT_IMPLEMENTATION_MODEL) || fallback;
+}
+
+function resolveDefaultDeliveryStrategyPreferenceDefault(): SessionDeliveryStrategy {
+  return normalizeSessionDeliveryStrategy(process.env.ORCHESTRACE_UI_DEFAULT_DELIVERY_STRATEGY);
 }
 
 function resolvePlanningNoToolGuardModeDefault(): 'enforce' | 'warn' {
@@ -6555,6 +6586,7 @@ function serializeWorkSession(session: WorkSession, todos: AgentTodoItem[] = [])
     planningModel: session.planningModel,
     implementationProvider: session.implementationProvider,
     implementationModel: session.implementationModel,
+    deliveryStrategy: session.deliveryStrategy,
     autoApprove: session.autoApprove,
     planningNoToolGuardMode: session.planningNoToolGuardMode,
     quickStartMode: session.quickStartMode,

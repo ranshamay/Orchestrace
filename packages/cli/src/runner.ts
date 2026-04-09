@@ -137,6 +137,12 @@ interface PullRequestInfo {
   created: boolean;
 }
 
+interface PullRequestMergeInfo {
+  sha?: string;
+  merged: boolean;
+  alreadyMerged: boolean;
+}
+
 interface GitHubApiResponse {
   ok: boolean;
   status: number;
@@ -1172,9 +1178,27 @@ async function main(): Promise<void> {
       prUrl: pr.url,
     });
 
-    const deliveryMessage = pr.created
-      ? `Committed session changes were validated, pushed to origin/${prMeta.branchName}, PR #${pr.number} was created, and GitHub CI checks passed: ${pr.url}`
-      : `Committed session changes were validated, pushed to origin/${prMeta.branchName}, existing PR #${pr.number} was reused, and GitHub CI checks passed: ${pr.url}`;
+    const deliveryStrategy = resolveSessionDeliveryStrategy(config.deliveryStrategy);
+    let mergeInfo: PullRequestMergeInfo | undefined;
+    if (deliveryStrategy === 'merge-after-ci') {
+      mergeInfo = await mergePullRequest({
+        host: remote.host,
+        owner: remote.owner,
+        repo: remote.repo,
+        prNumber: pr.number,
+        token,
+        title: prMeta.prTitle,
+      });
+    }
+
+    const deliveryMessage = formatSessionDeliveryMessage({
+      branchName: prMeta.branchName,
+      prNumber: pr.number,
+      prUrl: pr.url,
+      prCreated: pr.created,
+      deliveryStrategy,
+      alreadyMerged: mergeInfo?.alreadyMerged ?? false,
+    });
 
     await emit({
       time: iso(),
@@ -1259,9 +1283,52 @@ async function main(): Promise<void> {
     throw new Error(`Unable to create pull request: ${formatGitHubApiError(createRes)}`);
   }
 
+  async function mergePullRequest(params: {
+    host: string;
+    owner: string;
+    repo: string;
+    prNumber: number;
+    token: string;
+    title: string;
+  }): Promise<PullRequestMergeInfo> {
+    const mergeRes = await callGitHubApi(
+      params,
+      'PUT',
+      `/repos/${params.owner}/${params.repo}/pulls/${params.prNumber}/merge`,
+      {
+        merge_method: 'merge',
+        commit_title: params.title,
+      },
+    );
+
+    if (mergeRes.ok) {
+      const body = mergeRes.body as { sha?: unknown; merged?: unknown };
+      return {
+        sha: typeof body.sha === 'string' ? body.sha : undefined,
+        merged: body.merged === true,
+        alreadyMerged: false,
+      };
+    }
+
+    // Race-safe fallback: PR may already be merged manually after CI passed.
+    const prRes = await callGitHubApi(params, 'GET', `/repos/${params.owner}/${params.repo}/pulls/${params.prNumber}`);
+    if (prRes.ok && prRes.body && typeof prRes.body === 'object' && !Array.isArray(prRes.body)) {
+      const pr = prRes.body as { merged?: unknown; merge_commit_sha?: unknown };
+      if (pr.merged === true) {
+        return {
+          sha: typeof pr.merge_commit_sha === 'string' ? pr.merge_commit_sha : undefined,
+          merged: true,
+          alreadyMerged: true,
+        };
+      }
+    }
+
+    throw new Error(`Unable to merge pull request #${params.prNumber}: ${formatGitHubApiError(mergeRes)}`);
+  }
+
   async function callGitHubApi(
     params: { host: string; token: string },
-    method: 'GET' | 'POST',
+    method: 'GET' | 'POST' | 'PUT',
     path: string,
     body?: Record<string, unknown>,
   ): Promise<GitHubApiResponse> {
@@ -2307,6 +2374,32 @@ function resolveBooleanEnv(raw: string | undefined, fallback: boolean): boolean 
   }
 
   return fallback;
+}
+
+function resolveSessionDeliveryStrategy(raw: unknown): 'pr-only' | 'merge-after-ci' {
+  if (typeof raw === 'string' && raw.trim().toLowerCase() === 'merge-after-ci') {
+    return 'merge-after-ci';
+  }
+  return 'pr-only';
+}
+
+export function formatSessionDeliveryMessage(params: {
+  branchName: string;
+  prNumber: number;
+  prUrl: string;
+  prCreated: boolean;
+  deliveryStrategy: 'pr-only' | 'merge-after-ci';
+  alreadyMerged?: boolean;
+}): string {
+  if (params.deliveryStrategy === 'merge-after-ci') {
+    return params.prCreated
+      ? `Committed session changes were validated, pushed to origin/${params.branchName}, PR #${params.prNumber} was created, GitHub CI checks passed, and PR #${params.prNumber} was merged${params.alreadyMerged ? ' (already merged)' : ''}: ${params.prUrl}`
+      : `Committed session changes were validated, pushed to origin/${params.branchName}, existing PR #${params.prNumber} was reused, GitHub CI checks passed, and PR #${params.prNumber} was merged${params.alreadyMerged ? ' (already merged)' : ''}: ${params.prUrl}`;
+  }
+
+  return params.prCreated
+    ? `Committed session changes were validated, pushed to origin/${params.branchName}, PR #${params.prNumber} was created, and GitHub CI checks passed: ${params.prUrl}`
+    : `Committed session changes were validated, pushed to origin/${params.branchName}, existing PR #${params.prNumber} was reused, and GitHub CI checks passed: ${params.prUrl}`;
 }
 
 function logDagEventTrace(sessionId: string, event: DagEvent): void {

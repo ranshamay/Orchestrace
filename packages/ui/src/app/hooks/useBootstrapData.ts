@@ -37,6 +37,7 @@ export function useBootstrapData() {
     planningModel: '',
     implementationProvider: '',
     implementationModel: '',
+    deliveryStrategy: 'pr-only',
     planningNoToolGuardMode: 'enforce',
     workspaceId: '',
     autoApprove: true,
@@ -49,6 +50,7 @@ export function useBootstrapData() {
   const [workPlanningModel, setWorkPlanningModel] = useState('');
   const [workProvider, setWorkProvider] = useState('');
   const [workModel, setWorkModel] = useState('');
+  const [deliveryStrategy, setDeliveryStrategy] = useState<'pr-only' | 'merge-after-ci'>('pr-only');
   const [workWorkspaceId, setWorkWorkspaceId] = useState('');
   const [planningNoToolGuardMode, setPlanningNoToolGuardMode] = useState<'enforce' | 'warn'>('enforce');
   const [autoApprove, setAutoApprove] = useState(true);
@@ -122,6 +124,7 @@ export function useBootstrapData() {
           defaultPlanningModel: '',
           defaultImplementationProvider: '',
           defaultImplementationModel: '',
+          defaultDeliveryStrategy: 'pr-only',
           planningNoToolGuardMode: 'enforce',
           adaptiveConcurrency: false,
           batchConcurrency: 8,
@@ -171,6 +174,7 @@ export function useBootstrapData() {
           planningModel: defaultPlanningModel,
           implementationProvider: defaultImplementationProvider,
           implementationModel: defaultImplementationModel,
+          deliveryStrategy: preferences.defaultDeliveryStrategy === 'merge-after-ci' ? 'merge-after-ci' : 'pr-only',
           planningNoToolGuardMode: preferences.planningNoToolGuardMode === 'warn' ? 'warn' : 'enforce',
           workspaceId: defaultWorkspace,
           autoApprove: true,
@@ -184,6 +188,7 @@ export function useBootstrapData() {
         setWorkPlanningModel(initialControls.planningModel);
         setWorkProvider(initialControls.implementationProvider);
         setWorkModel(initialControls.implementationModel);
+        setDeliveryStrategy(initialControls.deliveryStrategy);
         setPlanningNoToolGuardMode(initialControls.planningNoToolGuardMode);
         setWorkWorkspaceId(initialControls.workspaceId);
         setAutoApprove(initialControls.autoApprove);
@@ -227,6 +232,8 @@ export function useBootstrapData() {
     setWorkProvider,
     workModel,
     setWorkModel,
+    deliveryStrategy,
+    setDeliveryStrategy,
     workWorkspaceId,
     setWorkWorkspaceId,
     planningNoToolGuardMode,

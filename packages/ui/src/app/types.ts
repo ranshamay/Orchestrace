@@ -51,6 +51,7 @@ export type SessionLlmControls = {
   planningModel: string;
   implementationProvider: string;
   implementationModel: string;
+  deliveryStrategy: 'pr-only' | 'merge-after-ci';
   planningNoToolGuardMode: 'enforce' | 'warn';
   workspaceId: string;
   autoApprove: boolean;
