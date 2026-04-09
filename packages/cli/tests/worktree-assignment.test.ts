@@ -8,7 +8,9 @@ import {
   assertWorkspaceIsClean,
   classifyWorkspacePathSessionIdRelation,
   cleanupReusedWorktree,
+  resolveRunnerTaskRouteEnvValue,
 } from '../src/ui-server.js';
+
 
 const execFileAsync = promisify(execFile);
 
@@ -53,7 +55,7 @@ describe('worktree assignment helpers', () => {
     ).rejects.toThrow(/Workspace is not clean at session start/);
   });
 
-  it('passes when workspace is clean at session start', async () => {
+    it('passes when workspace is clean at session start', async () => {
     await expect(
       assertWorkspaceIsClean('/repo/.worktrees/session-abc', async () => ({
         hasUncommittedChanges: false,
@@ -64,7 +66,20 @@ describe('worktree assignment helpers', () => {
     ).resolves.toBeUndefined();
   });
 
+  it('resolves runner task route env with safe fallback when override is missing/invalid', () => {
+    expect(resolveRunnerTaskRouteEnvValue(undefined)).toBe('code_change');
+    expect(resolveRunnerTaskRouteEnvValue('')).toBe('code_change');
+    expect(resolveRunnerTaskRouteEnvValue('not_a_route')).toBe('code_change');
+  });
+
+  it('preserves valid runner task route overrides', () => {
+    expect(resolveRunnerTaskRouteEnvValue('shell_command')).toBe('shell_command');
+    expect(resolveRunnerTaskRouteEnvValue(' investigation ')).toBe('investigation');
+    expect(resolveRunnerTaskRouteEnvValue('refactor')).toBe('refactor');
+  });
+
   it('cleans reused worktree without checking out default branch directly', async () => {
+
     const repoRoot = await mkdtemp(join(tmpdir(), 'orchestrace-worktree-cleanup-'));
 
     try {
