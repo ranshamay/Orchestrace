@@ -83,11 +83,12 @@ export function createFilesystemTools(options: FilesystemToolOptions): Registere
         description: 'Read multiple files in parallel with optional line slicing per file. Use this for multi-file analysis to reduce latency.',
         parameters: Type.Object({
           files: Type.Array(
-            Type.Object({
+                        Type.Object({
               path: Type.String({ description: 'Relative path to file.' }),
               startLine: Type.Optional(Type.Number({ minimum: 1 })),
               endLine: Type.Optional(Type.Number({ minimum: 1 })),
               maxChars: Type.Optional(Type.Number({ minimum: 200, maximum: 200000 })),
+              required: Type.Optional(Type.Boolean({ description: 'Whether the file is expected to exist. Defaults to true.' })),
             }),
             { minItems: 1, maxItems: MAX_BATCH_ITEMS },
           ),
@@ -111,7 +112,7 @@ export function createFilesystemTools(options: FilesystemToolOptions): Registere
             ?? DEFAULT_BATCH_MIN_CONCURRENCY,
         );
 
-        const mapper = async (request: ReadBatchRequest) => {
+                const mapper = async (request: ReadBatchRequest): Promise<ReadBatchResult> => {
           const target = resolveWorkspacePath(options.cwd, request.path);
           try {
             const content = await readWorkspaceFileSlice(target, {
@@ -125,23 +126,39 @@ export function createFilesystemTools(options: FilesystemToolOptions): Registere
             return {
               path: request.path,
               ok: true,
+              status: 'ok',
+              required: request.required,
               content,
             };
           } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            const isMissing = isMissingFileError(error, message);
+            if (isMissing && !request.required) {
+              return {
+                path: request.path,
+                ok: false,
+                status: 'optional_missing',
+                required: false,
+                error: message,
+              };
+            }
+
             return {
               path: request.path,
               ok: false,
-              error: error instanceof Error ? error.message : String(error),
+              status: isMissing ? 'required_missing' : 'read_error',
+              required: request.required,
+              error: message,
             };
           }
         };
 
-        const batchRun = adaptiveConcurrency
+                const batchRun = adaptiveConcurrency
           ? await mapWithAdaptiveConcurrency(files, {
               initialConcurrency: concurrency,
               minConcurrency,
               maxConcurrency: MAX_BATCH_CONCURRENCY,
-            }, mapper, (entry) => !entry.ok)
+            }, mapper, isReadBatchFailure)
           : {
               results: await mapWithConcurrency(files, concurrency, mapper),
               finalConcurrency: concurrency,
@@ -150,7 +167,9 @@ export function createFilesystemTools(options: FilesystemToolOptions): Registere
 
         const fileResults = batchRun.results;
 
-        const failures = fileResults.filter((entry) => !entry.ok).length;
+        const failures = fileResults.filter(isReadBatchFailure).length;
+        const optionalMissing = fileResults.filter((entry) => entry.status === 'optional_missing').length;
+        const successes = fileResults.filter((entry) => entry.status === 'ok').length;
         return {
           content: JSON.stringify({
             total: fileResults.length,
@@ -159,8 +178,9 @@ export function createFilesystemTools(options: FilesystemToolOptions): Registere
             minConcurrency,
             finalConcurrency: batchRun.finalConcurrency,
             windows: batchRun.windows,
-            successes: fileResults.length - failures,
+            successes,
             failures,
+            optionalMissing,
             files: fileResults,
           }, null, 2),
           isError: failures > 0,
@@ -446,7 +466,20 @@ interface ReadBatchRequest {
   startLine: number;
   endLine?: number;
   maxChars: number;
+  required: boolean;
 }
+
+type ReadBatchStatus = 'ok' | 'optional_missing' | 'required_missing' | 'read_error';
+
+interface ReadBatchResult {
+  path: string;
+  ok: boolean;
+  status: ReadBatchStatus;
+  required: boolean;
+  content?: string;
+  error?: string;
+}
+
 
 interface WriteBatchRequest {
   path: string;
@@ -569,11 +602,12 @@ function asReadBatchRequests(value: unknown): ReadBatchRequest[] {
       throw new Error(`Invalid files[${index}]`);
     }
 
-    return {
+        return {
       path: asRequiredString(entry.path, `files[${index}].path`),
       startLine: asPositiveInteger(entry.startLine) ?? 1,
       endLine: asPositiveInteger(entry.endLine),
       maxChars: asPositiveInteger(entry.maxChars) ?? DEFAULT_READ_BATCH_MAX_CHARS,
+      required: asBoolean(entry.required) ?? true,
     };
   });
 }
@@ -695,9 +729,24 @@ async function mapWithAdaptiveConcurrency<T, U>(
   };
 }
 
+function isReadBatchFailure(result: ReadBatchResult): boolean {
+  return result.status === 'required_missing' || result.status === 'read_error';
+}
+
+function isMissingFileError(error: unknown, message: string): boolean {
+  if (isRecord(error) && typeof error.code === 'string' && error.code === 'ENOENT') {
+    return true;
+  }
+
+  return message.toLowerCase().includes('no such file')
+    || message.toLowerCase().includes('enoent')
+    || message.toLowerCase().includes('not found');
+}
+
 function findDuplicatePaths(paths: readonly string[]): string[] {
   const seen = new Set<string>();
   const duplicates = new Set<string>();
+
 
   for (const path of paths) {
     if (seen.has(path)) {
