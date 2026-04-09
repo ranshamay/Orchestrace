@@ -6564,6 +6564,185 @@ async function gitExec(repoRoot: string, args: string[]): Promise<string> {
   return stdout;
 }
 
+type SessionIdWorkspacePathRelation = {
+  relation: 'match' | 'mismatch' | 'none';
+  pathSessionId?: string;
+};
+
+type SessionPlanningGuardState = {
+  consecutiveNonWriteToolCalls: number;
+  forcedImplementation: boolean;
+};
+
+export function classifyWorkspacePathSessionIdRelation(sessionId: string, workspacePath: string): SessionIdWorkspacePathRelation {
+  const normalizedPath = workspacePath.replace(/\\/g, '/');
+  const match = normalizedPath.match(/(?:^|\/)session-([0-9a-fA-F-]{8,})(?:\/|$)/);
+  const pathSessionId = match?.[1]?.toLowerCase();
+  const normalizedSessionId = sessionId.trim().toLowerCase();
+  if (!pathSessionId) {
+    return { relation: 'none' };
+  }
+  return {
+    relation: pathSessionId === normalizedSessionId ? 'match' : 'mismatch',
+    pathSessionId,
+  };
+}
+
+export async function resolveDefaultBranch(repoRoot: string): Promise<string> {
+  const tryCommands: Array<string[]> = [
+    ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'],
+    ['rev-parse', '--abbrev-ref', 'origin/HEAD'],
+  ];
+
+  for (const args of tryCommands) {
+    try {
+      const raw = (await gitExec(repoRoot, args)).trim();
+      const normalized = raw.replace(/^origin\//, '').trim();
+      if (normalized) {
+        return normalized;
+      }
+    } catch {
+      // Try next strategy.
+    }
+  }
+
+  return 'main';
+}
+
+export async function cleanupReusedWorktree(repoRoot: string, workspacePath: string): Promise<{ defaultBranch: string }> {
+  const defaultBranch = await resolveDefaultBranch(repoRoot);
+  const cleanupTargetRef = await resolveCleanupTargetRef(workspacePath, defaultBranch);
+  // Use detached checkout so cleanup does not try to attach the default branch,
+  // which can already be checked out in another linked worktree.
+  await gitExec(workspacePath, ['checkout', '--detach', '-f', cleanupTargetRef]);
+  await gitExec(workspacePath, ['reset', '--hard', cleanupTargetRef]);
+  await gitExec(workspacePath, ['clean', '-fdx']);
+  return { defaultBranch };
+}
+
+async function resolveCleanupTargetRef(workspacePath: string, defaultBranch: string): Promise<string> {
+  const candidates = [`origin/${defaultBranch}`, defaultBranch, 'HEAD'];
+  for (const candidate of candidates) {
+    try {
+      await gitExec(workspacePath, ['rev-parse', '--verify', candidate]);
+      return candidate;
+    } catch {
+      // Try next candidate.
+    }
+  }
+  return 'HEAD';
+}
+
+export async function assertWorkspaceIsClean(
+  workspacePath: string,
+  summarizeDirty: (workspacePath: string) => Promise<{
+    hasUncommittedChanges: boolean;
+    hasStagedChanges: boolean;
+    hasUntrackedChanges: boolean;
+    dirtySummary: string[];
+  }>,
+): Promise<void> {
+  const dirty = await summarizeDirty(workspacePath);
+  if (!dirty.hasUncommittedChanges && !dirty.hasStagedChanges && !dirty.hasUntrackedChanges) {
+    return;
+  }
+  const details = dirty.dirtySummary.slice(0, 20).join('\n');
+  throw new Error(
+    [
+      `Workspace is not clean at session start: ${workspacePath}`,
+      'Worktree/session assignment requires a clean state before runner launch.',
+      details ? `Detected changes:\n${details}` : undefined,
+    ].filter(Boolean).join('\n'),
+  );
+}
+
+export function getSessionPlanningGuardState(): SessionPlanningGuardState {
+  return {
+    consecutiveNonWriteToolCalls: 0,
+    forcedImplementation: false,
+  };
+}
+
+export function isSimpleSessionTaskPrompt(prompt: string): boolean {
+  const normalized = prompt.toLowerCase();
+  return normalized.includes('single-file')
+    || normalized.includes('single file')
+    || normalized.includes('small')
+    || normalized.includes('one file');
+}
+
+function isWriteToolCallEvent(toolEvent: LlmToolCallEvent): boolean {
+  if (toolEvent.type !== 'started') {
+    return false;
+  }
+
+  const writeToolNames = new Set([
+    'create_file',
+    'edit_file',
+    'apply_patch',
+    'run_in_terminal',
+  ]);
+  return writeToolNames.has((toolEvent.toolName ?? '').toLowerCase());
+}
+
+function resolvePlanningGuardThreshold(): number {
+  return parsePositiveSetting(process.env.ORCHESTRACE_MAX_TOOL_CALLS_WITHOUT_WRITE) ?? 10;
+}
+
+function resolvePlanningBudgetPercent(): number {
+  const parsed = parsePositiveSetting(process.env.ORCHESTRACE_PLANNING_BUDGET_PERCENT) ?? 25;
+  return Math.min(100, Math.max(1, parsed));
+}
+
+export function enforcePlanningToolCallGuard(params: {
+  session: WorkSession;
+  continuationPhase: SessionPromptPhase;
+  toolEvent: LlmToolCallEvent;
+  sessionPlanningGuards: Map<string, SessionPlanningGuardState>;
+  persistEvent: (sessionId: string, event: SessionEventInput) => void | Promise<void>;
+  uiStatePersistence: { schedule: () => void; flush: () => Promise<void> };
+}): SessionPlanningGuardState {
+  const existing = params.sessionPlanningGuards.get(params.session.id) ?? getSessionPlanningGuardState();
+  params.sessionPlanningGuards.set(params.session.id, existing);
+
+  if (params.continuationPhase !== 'planning') {
+    return existing;
+  }
+
+  if (isWriteToolCallEvent(params.toolEvent)) {
+    existing.consecutiveNonWriteToolCalls = 0;
+    return existing;
+  }
+
+  if (params.toolEvent.type === 'started') {
+    existing.consecutiveNonWriteToolCalls += 1;
+  }
+
+  const threshold = resolvePlanningGuardThreshold();
+  if (existing.forcedImplementation || existing.consecutiveNonWriteToolCalls <= threshold) {
+    return existing;
+  }
+
+  existing.forcedImplementation = true;
+  params.session.llmStatus = {
+    ...params.session.llmStatus,
+    state: 'implementing',
+    label: 'Implementing',
+    detail: `Planning guard triggered after ${existing.consecutiveNonWriteToolCalls} non-write tool calls; switching to implementation.`,
+    phase: 'implementation',
+    updatedAt: now(),
+  };
+
+  void params.persistEvent(params.session.id, {
+    time: now(),
+    type: 'session:llm-status-change',
+    payload: { llmStatus: params.session.llmStatus },
+  });
+  params.uiStatePersistence.schedule();
+
+  return existing;
+}
+
 async function inspectGitRecoveryState(workspacePath: string): Promise<SessionRecoveryInfo['git']> {
   const fallback: SessionRecoveryInfo['git'] = {
     cwd: workspacePath,
@@ -7148,13 +7327,14 @@ function buildContextExecutionStateSummary(session: WorkSession, todos: AgentTod
   return lines.join('\n');
 }
 
-function buildSessionSystemPrompt(session: WorkSession, phase: SessionPromptPhase): string {
+export function buildSessionSystemPrompt(session: WorkSession, phase: SessionPromptPhase): string {
   const quickStartMode = session.quickStartMode
     ?? (parseBooleanSetting(process.env.ORCHESTRACE_QUICK_START_MODE) ?? false);
   const quickStartMaxPreDelegationToolCalls = normalizePositiveSetting(
     session.quickStartMaxPreDelegationToolCalls,
     parsePositiveSetting(process.env.ORCHESTRACE_QUICK_START_MAX_PRE_DELEGATION_TOOL_CALLS) ?? 3,
   );
+  const planningBudgetPercent = resolvePlanningBudgetPercent();
 
   const phaseRules =
     phase === 'chat'
@@ -7182,6 +7362,9 @@ function buildSessionSystemPrompt(session: WorkSession, phase: SessionPromptPhas
         ? [
             'Produce a concrete implementation plan with explicit staged execution and validation steps.',
             'Do not perform direct code edits in planning mode.',
+          'For simple single-file tasks, skip sub-agent delegation and proceed with direct plan publication.',
+          `Planning is budgeted: keep planning activity under ${planningBudgetPercent}% of total effort.`,
+          'If session guard thresholds are exceeded, force implementation and continue execution.',
             'Planning output must be highly granular and atomic: each task should represent one action and one completion outcome.',
             'Split broad, multi-area, or multi-step tasks into smaller independent tasks before finalizing.',
             'Each planned task must include explicit dependencies, concrete done criteria, and at least one verification command.',
