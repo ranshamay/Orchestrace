@@ -224,7 +224,7 @@ export class PiAiAdapter implements LlmAdapter {
               prompt: summarizePromptInput(prompt),
             });
 
-            if (attempt < maxAttempts) {
+            if (attempt <= emptyResponseRetries) {
               continue;
             }
 
@@ -262,7 +262,7 @@ export class PiAiAdapter implements LlmAdapter {
               prompt: summarizePromptInput(prompt),
             });
 
-            if (attempt < maxAttempts) {
+            if (attempt <= emptyResponseRetries) {
               continue;
             }
 
