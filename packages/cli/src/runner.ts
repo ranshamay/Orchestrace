@@ -1373,7 +1373,7 @@ async function main(): Promise<void> {
       llm,
       cwd: config.workspacePath,
       planOutputDir: join(config.workspacePath, '.orchestrace', 'plans'),
-      promptVersion: process.env.ORCHESTRACE_PROMPT_VERSION,
+      promptVersion: process.env.ORCHESTRACE_PROMPT_VERSION ?? 'v1',
       policyVersion: process.env.ORCHESTRACE_POLICY_VERSION ?? DEFAULT_AGENT_TOOL_POLICY_VERSION,
       enableTrivialTaskGate: trivialTaskGate.enabled,
       trivialTaskMaxPromptLength: trivialTaskGate.maxPromptLength,
