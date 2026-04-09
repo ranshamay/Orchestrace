@@ -18,6 +18,9 @@ export interface ResolveGithubTokenOptions {
   allowRefresh?: boolean;
 }
 
+export type CommandExecutionMode = 'host' | 'sandbox';
+export type CommandSandboxFallbackPolicy = 'allow_host' | 'fail_closed';
+
 export interface AgentToolsetOptions {
 
   cwd: string;
@@ -34,6 +37,9 @@ export interface AgentToolsetOptions {
   batchConcurrency?: number;
   batchMinConcurrency?: number;
   adaptiveConcurrency?: boolean;
+  commandExecutionMode?: CommandExecutionMode;
+  commandSandboxFallbackPolicy?: CommandSandboxFallbackPolicy;
+  commandSandboxImage?: string;
   permissions?: Partial<AgentToolPermissions>;
   runSubAgent?: (request: SubAgentRequest, signal?: AbortSignal) => Promise<SubAgentResult>;
   modeController?: AgentModeController;
@@ -43,6 +49,7 @@ export interface AgentToolsetOptions {
   agentId?: string;
   fileReadCache?: FileReadCache | SessionFileReadCache;
 }
+
 
 export interface AgentModeController {
   getMode: () => AgentToolPhase;

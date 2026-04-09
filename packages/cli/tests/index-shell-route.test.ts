@@ -23,9 +23,12 @@ describe('index shell route guard', () => {
     expect(execFile).not.toHaveBeenCalled();
     expect(stdoutWrite).not.toHaveBeenCalled();
     expect(stderrWrite).not.toHaveBeenCalled();
-    expect(logError).toHaveBeenCalledTimes(1);
+        expect(logError).toHaveBeenCalledTimes(2);
     expect(logError.mock.calls[0]?.[0]).toContain('[shell-guard] rejected shell execution at cli.runShellCommandRoute');
     expect(logError.mock.calls[0]?.[0]).toContain('markdown/instructional');
+    expect(logError.mock.calls[1]?.[0]).toContain('[command-audit] route=cli.runShellCommandRoute');
+    expect(logError.mock.calls[1]?.[0]).toContain('decision=rejected');
+
   });
 
   it('executes parsed argv for validated command and streams stdout/stderr', async () => {
@@ -50,6 +53,10 @@ describe('index shell route guard', () => {
     expect(execFile).toHaveBeenCalledWith('git', ['status'], { cwd: '/tmp/workspace' });
     expect(stdoutWrite).toHaveBeenCalledWith('ok\n');
     expect(stderrWrite).toHaveBeenCalledWith('warn\n');
-    expect(logError).not.toHaveBeenCalled();
+        expect(logError).toHaveBeenCalledTimes(2);
+    expect(logError.mock.calls[0]?.[0]).toContain('[command-audit] route=cli.runShellCommandRoute');
+    expect(logError.mock.calls[0]?.[0]).toContain('decision=allowed');
+    expect(logError.mock.calls[1]?.[0]).toContain('exitCode=0');
+
   });
 });

@@ -2609,6 +2609,32 @@ function buildSingleTaskGraph(id: string, prompt: string, routeCategory: TaskRou
   };
 }
 
+function formatRunnerShellCommandAudit(input: {
+  route: 'runner.runShellCommandRoute' | 'runner.runShellCommandWithTimeout';
+  decision: 'allowed' | 'rejected';
+  reason?: string;
+  command: string;
+  cwd: string;
+  parsed?: { program: string; args: string[] };
+  timeoutMs?: number;
+  exitCode?: number;
+  error?: string;
+}): string {
+  const fields = [
+    `[command-audit] route=${input.route}`,
+    `decision=${input.decision}`,
+    input.reason ? `reason=${input.reason}` : undefined,
+    `command=${JSON.stringify(input.command)}`,
+    input.parsed ? `program=${JSON.stringify(input.parsed.program)}` : undefined,
+    input.parsed ? `args=${JSON.stringify(input.parsed.args)}` : undefined,
+    `cwd=${JSON.stringify(input.cwd)}`,
+    typeof input.timeoutMs === 'number' ? `timeoutMs=${input.timeoutMs}` : undefined,
+    typeof input.exitCode === 'number' ? `exitCode=${input.exitCode}` : undefined,
+    input.error ? `error=${JSON.stringify(input.error)}` : undefined,
+  ].filter((entry): entry is string => Boolean(entry));
+  return fields.join(' ');
+}
+
 export async function runShellCommandWithTimeoutWithDeps(
   command: string,
   cwd: string,
@@ -2618,6 +2644,14 @@ export async function runShellCommandWithTimeoutWithDeps(
   const validation = validateShellInput(command);
   if (!validation.ok || !validation.parsed) {
     deps.logError(formatShellValidationRejection('runner.runShellCommandWithTimeout', validation.reason));
+    deps.logError(formatRunnerShellCommandAudit({
+      route: 'runner.runShellCommandWithTimeout',
+      decision: 'rejected',
+      reason: validation.reason,
+      command,
+      cwd,
+      timeoutMs: timeout,
+    }));
     return {
       ok: false,
       stdout: '',
@@ -2626,25 +2660,56 @@ export async function runShellCommandWithTimeoutWithDeps(
     };
   }
 
+  deps.logError(formatRunnerShellCommandAudit({
+    route: 'runner.runShellCommandWithTimeout',
+    decision: 'allowed',
+    command,
+    cwd,
+    parsed: validation.parsed,
+    timeoutMs: timeout,
+  }));
+
   try {
     const { stdout, stderr } = await deps.execFile(validation.parsed.program, validation.parsed.args, {
       cwd,
       timeout,
       maxBuffer: 5 * 1024 * 1024,
     });
+    deps.logError(formatRunnerShellCommandAudit({
+      route: 'runner.runShellCommandWithTimeout',
+      decision: 'allowed',
+      command,
+      cwd,
+      parsed: validation.parsed,
+      timeoutMs: timeout,
+      exitCode: 0,
+    }));
     return { ok: true, stdout, stderr };
   } catch (err) {
     const typed = err as ExecFileException;
+    const error = errorMsg(err);
+    deps.logError(formatRunnerShellCommandAudit({
+      route: 'runner.runShellCommandWithTimeout',
+      decision: 'rejected',
+      reason: 'execution_failed',
+      command,
+      cwd,
+      parsed: validation.parsed,
+      timeoutMs: timeout,
+      exitCode: 1,
+      error,
+    }));
     return {
       ok: false,
       stdout: typeof typed.stdout === 'string' ? typed.stdout : '',
       stderr: typeof typed.stderr === 'string' ? typed.stderr : '',
-      error: errorMsg(err),
+      error,
     };
   }
 }
 
 export async function runShellCommandRouteWithDeps(
+
   command: string,
   cwd: string,
   deps: RunnerShellExecutionDependencies,
@@ -2654,6 +2719,13 @@ export async function runShellCommandRouteWithDeps(
 
   if (!validation.ok || !validation.parsed) {
     deps.logError(formatShellValidationRejection('runner.runShellCommandRoute', validation.reason));
+    deps.logError(formatRunnerShellCommandAudit({
+      route: 'runner.runShellCommandRoute',
+      decision: 'rejected',
+      reason: validation.reason,
+      command,
+      cwd,
+    }));
     return new Map([
       ['task', {
         taskId: 'task',
@@ -2666,9 +2738,25 @@ export async function runShellCommandRouteWithDeps(
     ]);
   }
 
+  deps.logError(formatRunnerShellCommandAudit({
+    route: 'runner.runShellCommandRoute',
+    decision: 'allowed',
+    command,
+    cwd,
+    parsed: validation.parsed,
+  }));
+
   try {
     const { stdout, stderr } = await deps.execFile(validation.parsed.program, validation.parsed.args, { cwd });
     const text = `${stdout ?? ''}${stderr ?? ''}`.trim();
+    deps.logError(formatRunnerShellCommandAudit({
+      route: 'runner.runShellCommandRoute',
+      decision: 'allowed',
+      command,
+      cwd,
+      parsed: validation.parsed,
+      exitCode: 0,
+    }));
     return new Map([
       ['task', {
         taskId: 'task',
@@ -2681,6 +2769,16 @@ export async function runShellCommandRouteWithDeps(
   } catch (error) {
     const err = error as ExecFileException;
     const details = `${err.stdout ?? ''}${err.stderr ?? ''}`.trim();
+    deps.logError(formatRunnerShellCommandAudit({
+      route: 'runner.runShellCommandRoute',
+      decision: 'rejected',
+      reason: 'execution_failed',
+      command,
+      cwd,
+      parsed: validation.parsed,
+      exitCode: 1,
+      error: err.message,
+    }));
     return new Map([
       ['task', {
         taskId: 'task',
@@ -2693,6 +2791,7 @@ export async function runShellCommandRouteWithDeps(
     ]);
   }
 }
+
 
 async function runShellCommandRoute(command: string, cwd: string): Promise<Map<string, TaskOutput>> {
   return runShellCommandRouteWithDeps(command, cwd, defaultRunnerShellExecutionDependencies);

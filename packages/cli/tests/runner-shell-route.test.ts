@@ -16,8 +16,11 @@ describe('runner shell execution guard', () => {
     expect(task?.error).toBe('shell_input_validation_failed');
     expect(task?.response).toContain('markdown/instructional');
     expect(execFile).not.toHaveBeenCalled();
-    expect(logError).toHaveBeenCalledTimes(1);
+        expect(logError).toHaveBeenCalledTimes(2);
     expect(logError.mock.calls[0]?.[0]).toContain('[shell-guard] rejected shell execution at runner.runShellCommandRoute');
+    expect(logError.mock.calls[1]?.[0]).toContain('[command-audit] route=runner.runShellCommandRoute');
+    expect(logError.mock.calls[1]?.[0]).toContain('decision=rejected');
+
   });
 
   it('runShellCommandRouteWithDeps executes parsed argv for valid command', async () => {
@@ -33,7 +36,11 @@ describe('runner shell execution guard', () => {
     expect(task?.status).toBe('completed');
     expect(task?.response).toContain('status');
     expect(execFile).toHaveBeenCalledWith('git', ['status'], { cwd: '/tmp/workspace' });
-    expect(logError).not.toHaveBeenCalled();
+        expect(logError).toHaveBeenCalledTimes(2);
+    expect(logError.mock.calls[0]?.[0]).toContain('[command-audit] route=runner.runShellCommandRoute');
+    expect(logError.mock.calls[0]?.[0]).toContain('decision=allowed');
+    expect(logError.mock.calls[1]?.[0]).toContain('exitCode=0');
+
   });
 
   it('runShellCommandWithTimeoutWithDeps rejects invalid prose and never executes process', async () => {
@@ -53,8 +60,11 @@ describe('runner shell execution guard', () => {
     expect(result.ok).toBe(false);
     expect(result.error).toContain('no executable command was found');
     expect(execFile).not.toHaveBeenCalled();
-    expect(logError).toHaveBeenCalledTimes(1);
+        expect(logError).toHaveBeenCalledTimes(2);
     expect(logError.mock.calls[0]?.[0]).toContain('[shell-guard] rejected shell execution at runner.runShellCommandWithTimeout');
+    expect(logError.mock.calls[1]?.[0]).toContain('[command-audit] route=runner.runShellCommandWithTimeout');
+    expect(logError.mock.calls[1]?.[0]).toContain('decision=rejected');
+
   });
 
   it('runShellCommandWithTimeoutWithDeps executes parsed argv with timeout for valid command', async () => {
@@ -72,6 +82,10 @@ describe('runner shell execution guard', () => {
       timeout: 1500,
       maxBuffer: 5 * 1024 * 1024,
     });
-    expect(logError).not.toHaveBeenCalled();
+        expect(logError).toHaveBeenCalledTimes(2);
+    expect(logError.mock.calls[0]?.[0]).toContain('[command-audit] route=runner.runShellCommandWithTimeout');
+    expect(logError.mock.calls[0]?.[0]).toContain('decision=allowed');
+    expect(logError.mock.calls[1]?.[0]).toContain('exitCode=0');
+
   });
 });

@@ -725,6 +725,29 @@ const defaultShellRouteDependencies: ShellRouteDependencies = {
   logError: (message) => console.error(message),
 };
 
+function formatCliShellCommandAudit(input: {
+  decision: 'allowed' | 'rejected';
+  reason?: string;
+  command: string;
+  cwd: string;
+  parsed?: { program: string; args: string[] };
+  exitCode?: number;
+  error?: string;
+}): string {
+  const fields = [
+    '[command-audit] route=cli.runShellCommandRoute',
+    `decision=${input.decision}`,
+    input.reason ? `reason=${input.reason}` : undefined,
+    `command=${JSON.stringify(input.command)}`,
+    input.parsed ? `program=${JSON.stringify(input.parsed.program)}` : undefined,
+    input.parsed ? `args=${JSON.stringify(input.parsed.args)}` : undefined,
+    `cwd=${JSON.stringify(input.cwd)}`,
+    typeof input.exitCode === 'number' ? `exitCode=${input.exitCode}` : undefined,
+    input.error ? `error=${JSON.stringify(input.error)}` : undefined,
+  ].filter((entry): entry is string => Boolean(entry));
+  return fields.join(' ');
+}
+
 export async function runShellCommandRouteWithDeps(
   command: string,
   cwd: string,
@@ -733,8 +756,21 @@ export async function runShellCommandRouteWithDeps(
   const validation = validateShellInput(command);
   if (!validation.ok || !validation.parsed) {
     deps.logError(formatShellValidationRejection('cli.runShellCommandRoute', validation.reason));
+    deps.logError(formatCliShellCommandAudit({
+      decision: 'rejected',
+      reason: validation.reason,
+      command,
+      cwd,
+    }));
     return 1;
   }
+
+  deps.logError(formatCliShellCommandAudit({
+    decision: 'allowed',
+    command,
+    cwd,
+    parsed: validation.parsed,
+  }));
 
   try {
     const { stdout, stderr } = await deps.execFile(validation.parsed.program, validation.parsed.args, { cwd });
@@ -745,13 +781,30 @@ export async function runShellCommandRouteWithDeps(
     if (stderr) {
       deps.stderrWrite(stderr);
     }
+    deps.logError(formatCliShellCommandAudit({
+      decision: 'allowed',
+      command,
+      cwd,
+      parsed: validation.parsed,
+      exitCode: 0,
+    }));
     return 0;
   } catch (error) {
     const details = error instanceof Error ? error.message : String(error);
+    deps.logError(formatCliShellCommandAudit({
+      decision: 'rejected',
+      reason: 'execution_failed',
+      command,
+      cwd,
+      parsed: validation.parsed,
+      exitCode: 1,
+      error: details,
+    }));
     deps.logError(`Shell command failed: ${details}`);
     return 1;
   }
 }
+
 
 async function runShellCommandRoute(command: string, cwd: string): Promise<number> {
   return runShellCommandRouteWithDeps(command, cwd, defaultShellRouteDependencies);

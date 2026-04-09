@@ -2,7 +2,13 @@ import { constants } from 'node:fs';
 import { access, readdir, readFile, realpath, stat } from 'node:fs/promises';
 import { extname, isAbsolute, join } from 'node:path';
 import { Type } from '@mariozechner/pi-ai';
-import type { AgentToolsetOptions, RegisteredAgentTool } from './types.js';
+import type {
+  AgentToolsetOptions,
+  CommandExecutionMode,
+  CommandSandboxFallbackPolicy,
+  RegisteredAgentTool,
+} from './types.js';
+
 import { resolveWorkspacePath, toWorkspaceRelative } from './path-utils.js';
 import { formatCommandOutput, runCommand } from './command-tools/command-runner.js';
 import {
@@ -28,13 +34,10 @@ const MAX_COMMAND_BATCH_CONCURRENCY = 64;
 const MAX_COMMAND_BATCH_ITEMS = 200;
 const DEFAULT_COMMAND_BATCH_MAX_CHARS_PER_COMMAND = 8000;
 const DEFAULT_COMMAND_BATCH_MIN_CONCURRENCY = 1;
-
-function resolveShellExecutable(): string {
-  const envShell = process.env.SHELL?.trim();
-  return envShell && envShell.length > 0 ? envShell : 'sh';
-}
+const DEFAULT_SANDBOX_IMAGE = 'node:22-slim';
 
 interface CommandToolOptions extends AgentToolsetOptions {
+
   includeRunCommandTool: boolean;
   runCommandAllowPrefixes?: string[];
 }
@@ -55,10 +58,278 @@ interface SearchFilesErrorDetails {
   path?: string;
 }
 
+interface CommandExecutionRequest {
+  command: string;
+  cwd: string;
+  timeoutMs: number;
+  signal?: AbortSignal;
+}
+
+
+interface CommandAttemptAuditContext {
+  toolName: 'run_command' | 'run_command_batch';
+  command: string;
+  normalizedCwd: string;
+  requestedPath?: string;
+  graphId?: string;
+  taskId?: string;
+  provider?: string;
+  model?: string;
+  reasoning?: string;
+}
+
+function resolveCommandExecutionMode(options: CommandToolOptions): CommandExecutionMode {
+  const raw = options.commandExecutionMode ?? process.env.ORCHESTRACE_COMMAND_EXECUTION_MODE;
+  if (raw === 'sandbox') {
+    return 'sandbox';
+  }
+  return 'host';
+}
+
+function resolveSandboxFallbackPolicy(options: CommandToolOptions): CommandSandboxFallbackPolicy {
+  const raw = options.commandSandboxFallbackPolicy ?? process.env.ORCHESTRACE_COMMAND_SANDBOX_FALLBACK_POLICY;
+  if (raw === 'fail_closed') {
+    return 'fail_closed';
+  }
+  return 'allow_host';
+}
+
+function resolveSandboxImage(options: CommandToolOptions): string {
+  return options.commandSandboxImage?.trim() || process.env.ORCHESTRACE_COMMAND_SANDBOX_IMAGE?.trim() || DEFAULT_SANDBOX_IMAGE;
+}
+
+function formatCommandAuditRecord(input: {
+  route: 'tools.run_command' | 'tools.run_command_batch';
+  decision: 'allowed' | 'rejected';
+  reason?: string;
+  mode: CommandExecutionMode;
+  fallbackPolicy: CommandSandboxFallbackPolicy;
+  fallbackApplied?: boolean;
+  command: string;
+  parsed?: { program: string; args: string[] };
+  cwd: string;
+  path?: string;
+  graphId?: string;
+  taskId?: string;
+  provider?: string;
+  model?: string;
+  reasoning?: string;
+  exitCode?: number;
+  error?: string;
+}): string {
+  const fields = [
+    '[command-audit] route=' + input.route,
+    `decision=${input.decision}`,
+    `mode=${input.mode}`,
+    `fallbackPolicy=${input.fallbackPolicy}`,
+    input.fallbackApplied ? 'fallbackApplied=true' : undefined,
+    input.reason ? `reason=${input.reason}` : undefined,
+    `command=${JSON.stringify(input.command)}`,
+    input.parsed ? `program=${JSON.stringify(input.parsed.program)}` : undefined,
+    input.parsed ? `args=${JSON.stringify(input.parsed.args)}` : undefined,
+    `cwd=${JSON.stringify(input.cwd)}`,
+    input.path ? `path=${JSON.stringify(input.path)}` : undefined,
+    input.graphId ? `graphId=${JSON.stringify(input.graphId)}` : undefined,
+    input.taskId ? `taskId=${JSON.stringify(input.taskId)}` : undefined,
+    input.provider ? `provider=${JSON.stringify(input.provider)}` : undefined,
+    input.model ? `model=${JSON.stringify(input.model)}` : undefined,
+    input.reasoning ? `reasoning=${JSON.stringify(input.reasoning)}` : undefined,
+    typeof input.exitCode === 'number' ? `exitCode=${input.exitCode}` : undefined,
+    input.error ? `error=${JSON.stringify(input.error)}` : undefined,
+  ].filter((entry): entry is string => Boolean(entry));
+  return fields.join(' ');
+}
+
+function emitCommandAudit(
+  options: CommandToolOptions,
+  input: Parameters<typeof formatCommandAuditRecord>[0],
+): void {
+  const message = formatCommandAuditRecord(input);
+  console.error(message);
+  options.sharedContextStore?.add({
+    content: message,
+    tags: ['command-audit', input.route, input.decision],
+    author: 'command-tools',
+  }, options.graphId);
+}
+
+async function runCommandInSandbox(
+  request: CommandExecutionRequest,
+  image: string,
+): Promise<Awaited<ReturnType<typeof runCommand>>> {
+  const payloadValidation = validateShellCommandPayload(request.command);
+
+  if (!payloadValidation.ok || !payloadValidation.parsed) {
+    return Promise.resolve({
+      exitCode: 1,
+      stdout: '',
+      stderr: payloadValidation.reason ?? 'Invalid sandbox command payload.',
+    });
+  }
+
+  return runCommand('docker', [
+    'run',
+    '--rm',
+    '--network',
+    'none',
+    '--cap-drop',
+    'ALL',
+    '--security-opt',
+    'no-new-privileges',
+    '-v',
+    `${request.cwd}:/workspace:rw`,
+    '-w',
+    '/workspace',
+    image,
+    payloadValidation.parsed.program,
+    ...payloadValidation.parsed.args,
+  ], {
+    cwd: request.cwd,
+    timeoutMs: request.timeoutMs,
+    signal: request.signal,
+  });
+}
+
+async function runValidatedCommand(
+  options: CommandToolOptions,
+  request: CommandExecutionRequest,
+  parsed: { program: string; args: string[] },
+): Promise<{ result: Awaited<ReturnType<typeof runCommand>>; fallbackApplied: boolean; modeUsed: CommandExecutionMode }> {
+  const mode = resolveCommandExecutionMode(options);
+  if (mode === 'host') {
+    return {
+      result: await runCommand(parsed.program, parsed.args, {
+        cwd: request.cwd,
+        timeoutMs: request.timeoutMs,
+        signal: request.signal,
+      }),
+      fallbackApplied: false,
+      modeUsed: 'host',
+    };
+  }
+
+  const sandboxImage = resolveSandboxImage(options);
+  const sandboxResult = await runCommandInSandbox(request, sandboxImage);
+  if (sandboxResult.exitCode !== -1) {
+    return {
+      result: sandboxResult,
+      fallbackApplied: false,
+      modeUsed: 'sandbox',
+    };
+  }
+
+  const fallbackPolicy = resolveSandboxFallbackPolicy(options);
+  if (fallbackPolicy === 'fail_closed') {
+    return {
+      result: {
+        exitCode: 1,
+        stdout: '',
+        stderr: `Sandbox execution unavailable and fallback policy is fail_closed (image=${sandboxImage}).`,
+      },
+      fallbackApplied: false,
+      modeUsed: 'sandbox',
+    };
+  }
+
+  return {
+    result: await runCommand(parsed.program, parsed.args, {
+      cwd: request.cwd,
+      timeoutMs: request.timeoutMs,
+      signal: request.signal,
+    }),
+    fallbackApplied: true,
+    modeUsed: 'host',
+  };
+}
+
+function validateRunCommandInput(
+  options: CommandToolOptions,
+  context: CommandAttemptAuditContext,
+): { ok: true; parsed: { program: string; args: string[] } } | { ok: false; content: string } {
+  if (looksDestructive(context.command)) {
+    const reason = `Blocked potentially destructive command: ${context.command}`;
+    emitCommandAudit(options, {
+      route: context.toolName === 'run_command' ? 'tools.run_command' : 'tools.run_command_batch',
+      decision: 'rejected',
+      reason,
+      mode: resolveCommandExecutionMode(options),
+      fallbackPolicy: resolveSandboxFallbackPolicy(options),
+      command: context.command,
+      cwd: context.normalizedCwd,
+      path: context.requestedPath,
+      graphId: context.graphId,
+      taskId: context.taskId,
+      provider: context.provider,
+      model: context.model,
+      reasoning: context.reasoning,
+    });
+    return { ok: false, content: reason };
+  }
+
+  if (!matchesAllowedPrefix(context.command, options.runCommandAllowPrefixes)) {
+    const allowed = options.runCommandAllowPrefixes?.join(', ') ?? '(none configured)';
+    const reason = `Blocked command outside allowlist: ${context.command}\nAllowed prefixes: ${allowed}`;
+    emitCommandAudit(options, {
+      route: context.toolName === 'run_command' ? 'tools.run_command' : 'tools.run_command_batch',
+      decision: 'rejected',
+      reason,
+      mode: resolveCommandExecutionMode(options),
+      fallbackPolicy: resolveSandboxFallbackPolicy(options),
+      command: context.command,
+      cwd: context.normalizedCwd,
+      path: context.requestedPath,
+      graphId: context.graphId,
+      taskId: context.taskId,
+      provider: context.provider,
+      model: context.model,
+      reasoning: context.reasoning,
+    });
+    return { ok: false, content: reason };
+  }
+
+  const payloadValidation = validateShellCommandPayload(context.command);
+  if (!payloadValidation.ok || !payloadValidation.parsed) {
+    const reason = `${payloadValidation.reason ?? 'Blocked non-command payload.'} Payload: ${context.command}`;
+    emitCommandAudit(options, {
+      route: context.toolName === 'run_command' ? 'tools.run_command' : 'tools.run_command_batch',
+      decision: 'rejected',
+      reason,
+      mode: resolveCommandExecutionMode(options),
+      fallbackPolicy: resolveSandboxFallbackPolicy(options),
+      command: context.command,
+      cwd: context.normalizedCwd,
+      path: context.requestedPath,
+      graphId: context.graphId,
+      taskId: context.taskId,
+      provider: context.provider,
+      model: context.model,
+      reasoning: context.reasoning,
+    });
+    return { ok: false, content: reason };
+  }
+
+  emitCommandAudit(options, {
+    route: context.toolName === 'run_command' ? 'tools.run_command' : 'tools.run_command_batch',
+    decision: 'allowed',
+    mode: resolveCommandExecutionMode(options),
+    fallbackPolicy: resolveSandboxFallbackPolicy(options),
+    command: context.command,
+    parsed: payloadValidation.parsed,
+    cwd: context.normalizedCwd,
+    path: context.requestedPath,
+    graphId: context.graphId,
+    taskId: context.taskId,
+    provider: context.provider,
+    model: context.model,
+    reasoning: context.reasoning,
+  });
+
+  return { ok: true, parsed: payloadValidation.parsed };
+}
 
 export function createCommandTools(options: CommandToolOptions): RegisteredAgentTool[] {
-  const shellExecutable = resolveShellExecutable();
   const tools: RegisteredAgentTool[] = [
+
     {
       tool: {
         name: 'search_files',
@@ -459,48 +730,66 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
             path: Type.Optional(Type.String({ description: 'Optional relative working directory inside workspace.' })),
           }),
         },
-        execute: async (toolArgs, signal) => {
+                execute: async (toolArgs, signal) => {
           const command = asRequiredString(toolArgs.command, 'command');
           const path = asString(toolArgs.path) ?? '.';
           const cwd = resolveWorkspacePath(options.cwd, path);
+          const relativeCwd = toWorkspaceRelative(options.cwd, cwd);
 
-          if (looksDestructive(command)) {
+          const validation = validateRunCommandInput(options, {
+            toolName: 'run_command',
+            command,
+            normalizedCwd: relativeCwd,
+            requestedPath: path,
+            graphId: options.graphId,
+            taskId: options.taskId,
+            provider: options.provider,
+            model: options.model,
+            reasoning: options.reasoning,
+          });
+          if (!validation.ok) {
             return {
-              content: `Blocked potentially destructive command: ${command}`,
+              content: validation.content,
               isError: true,
             };
           }
 
-                    if (!matchesAllowedPrefix(command, options.runCommandAllowPrefixes)) {
-            const allowed = options.runCommandAllowPrefixes?.join(', ') ?? '(none configured)';
-            return {
-              content: `Blocked command outside allowlist: ${command}\nAllowed prefixes: ${allowed}`,
-              isError: true,
-            };
-          }
-
-          const payloadValidation = validateShellCommandPayload(command);
-          if (!payloadValidation.ok) {
-            return {
-              content: `${payloadValidation.reason ?? 'Blocked non-command payload.'} Payload: ${command}`,
-              isError: true,
-            };
-          }
-
-          const result = await runCommand(shellExecutable, ['-lc', command], {
+          const execution = await runValidatedCommand(options, {
+            command,
             cwd,
             timeoutMs: options.commandTimeoutMs ?? 120000,
             signal,
+          }, validation.parsed);
+          const fallbackPolicy = resolveSandboxFallbackPolicy(options);
+
+          emitCommandAudit(options, {
+            route: 'tools.run_command',
+            decision: execution.result.exitCode === 0 ? 'allowed' : 'rejected',
+            mode: execution.modeUsed,
+            fallbackPolicy,
+            fallbackApplied: execution.fallbackApplied,
+            command,
+            parsed: validation.parsed,
+            cwd: relativeCwd,
+            path,
+            graphId: options.graphId,
+            taskId: options.taskId,
+            provider: options.provider,
+            model: options.model,
+            reasoning: options.reasoning,
+            exitCode: execution.result.exitCode,
+            error: execution.result.exitCode !== 0 ? execution.result.stderr : undefined,
           });
 
-          const output = formatCommandOutput(result, options.maxOutputChars ?? 24000);
-          const header = `cwd: ${toWorkspaceRelative(options.cwd, cwd)}\nexitCode: ${result.exitCode}`;
+          const output = formatCommandOutput(execution.result, options.maxOutputChars ?? 24000);
+          const header = `cwd: ${relativeCwd}\nexitCode: ${execution.result.exitCode}`;
 
           return {
             content: `${header}\n${output}`,
-            isError: result.exitCode !== 0,
+            isError: execution.result.exitCode !== 0,
           };
         },
+
       },
       {
         tool: {
@@ -537,11 +826,23 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
           );
           const maxCharsPerCommand = asPositiveInteger(toolArgs.maxCharsPerCommand) ?? DEFAULT_COMMAND_BATCH_MAX_CHARS_PER_COMMAND;
 
-          const mapper = async (entry: CommandBatchRequest, index: number) => {
+                    const mapper = async (entry: CommandBatchRequest, index: number) => {
             const cwd = resolveWorkspacePath(options.cwd, entry.path);
             const relativeCwd = toWorkspaceRelative(options.cwd, cwd);
 
-            if (looksDestructive(entry.command)) {
+            const validation = validateRunCommandInput(options, {
+              toolName: 'run_command_batch',
+              command: entry.command,
+              normalizedCwd: relativeCwd,
+              requestedPath: entry.path,
+              graphId: options.graphId,
+              taskId: options.taskId,
+              provider: options.provider,
+              model: options.model,
+              reasoning: options.reasoning,
+            });
+
+            if (!validation.ok) {
               return {
                 index,
                 command: entry.command,
@@ -549,52 +850,48 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
                 ok: false,
                 blocked: true,
                 exitCode: -1,
-                output: `Blocked potentially destructive command: ${entry.command}`,
+                output: validation.content,
               };
             }
 
-                        if (!matchesAllowedPrefix(entry.command, options.runCommandAllowPrefixes)) {
-              const allowed = options.runCommandAllowPrefixes?.join(', ') ?? '(none configured)';
-              return {
-                index,
-                command: entry.command,
-                cwd: relativeCwd,
-                ok: false,
-                blocked: true,
-                exitCode: -1,
-                output: `Blocked command outside allowlist: ${entry.command}\nAllowed prefixes: ${allowed}`,
-              };
-            }
-
-            const payloadValidation = validateShellCommandPayload(entry.command);
-            if (!payloadValidation.ok) {
-              return {
-                index,
-                command: entry.command,
-                cwd: relativeCwd,
-                ok: false,
-                blocked: true,
-                exitCode: -1,
-                output: `${payloadValidation.reason ?? 'Blocked non-command payload.'} Payload: ${entry.command}`,
-              };
-            }
-
-            const result = await runCommand(shellExecutable, ['-lc', entry.command], {
+            const execution = await runValidatedCommand(options, {
+              command: entry.command,
               cwd,
               timeoutMs: options.commandTimeoutMs ?? 120000,
               signal,
+            }, validation.parsed);
+            const fallbackPolicy = resolveSandboxFallbackPolicy(options);
+
+            emitCommandAudit(options, {
+              route: 'tools.run_command_batch',
+              decision: execution.result.exitCode === 0 ? 'allowed' : 'rejected',
+              mode: execution.modeUsed,
+              fallbackPolicy,
+              fallbackApplied: execution.fallbackApplied,
+              command: entry.command,
+              parsed: validation.parsed,
+              cwd: relativeCwd,
+              path: entry.path,
+              graphId: options.graphId,
+              taskId: options.taskId,
+              provider: options.provider,
+              model: options.model,
+              reasoning: options.reasoning,
+              exitCode: execution.result.exitCode,
+              error: execution.result.exitCode !== 0 ? execution.result.stderr : undefined,
             });
 
             return {
               index,
               command: entry.command,
               cwd: relativeCwd,
-              ok: result.exitCode === 0,
+              ok: execution.result.exitCode === 0,
               blocked: false,
-              exitCode: result.exitCode,
-              output: formatCommandOutput(result, maxCharsPerCommand),
+              exitCode: execution.result.exitCode,
+              output: formatCommandOutput(execution.result, maxCharsPerCommand),
             };
           };
+
 
           const batchRun = adaptiveConcurrency
             ? await mapWithAdaptiveConcurrency(commands, {

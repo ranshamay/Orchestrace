@@ -1392,7 +1392,8 @@ describe('run_command safety', () => {
     expect(result.content).toContain('Blocked command outside allowlist');
   });
 
-  it('rejects markdown-like single-line payloads before shell execution', async () => {
+      it('rejects markdown-like single-line payloads before shell execution', async () => {
+
     const cwd = await makeWorkspace();
     const toolset = createAgentToolset({ cwd, phase: 'implementation', taskType: 'code' });
 
@@ -1407,7 +1408,10 @@ describe('run_command safety', () => {
     expect(result.content).toContain('markdown/instructional');
   });
 
+
+  
   it('rejects multiline observer-style payloads before shell execution', async () => {
+
     const cwd = await makeWorkspace();
     const toolset = createAgentToolset({ cwd, phase: 'implementation', taskType: 'code' });
 
@@ -1438,15 +1442,16 @@ describe('run_command safety', () => {
         const result = await toolset.executeTool({
       id: '1',
       name: 'run_command_batch',
-      arguments: {
+            arguments: {
         commands: [
           { command: 'echo first' },
           { command: 'echo second' },
           { command: 'git reset --hard' },
-          { command: '## Task: run git status' },
+          { command: 'echo hi; git status' },
         ],
         concurrency: 3,
       },
+
     });
 
     expect(result.isError).toBe(true);
@@ -1464,8 +1469,9 @@ describe('run_command safety', () => {
     expect(parsed.commands[1]).toMatchObject({ command: 'echo second', ok: true, blocked: false });
     expect(parsed.commands[2]).toMatchObject({ command: 'git reset --hard', ok: false, blocked: true });
     expect(parsed.commands[2].output).toContain('Blocked potentially destructive command');
-    expect(parsed.commands[3]).toMatchObject({ command: '## Task: run git status', ok: false, blocked: true });
-    expect(parsed.commands[3].output).toContain('Blocked non-command payload');
+        expect(parsed.commands[3]).toMatchObject({ command: 'echo hi; git status', ok: false, blocked: true });
+    expect(parsed.commands[3].output).toContain('shell operators');
+
   });
 
   it('run_command_batch supports adaptive concurrency metadata', async () => {
@@ -1502,7 +1508,7 @@ describe('run_command safety', () => {
     expect(parsed.windows).toBeGreaterThanOrEqual(1);
   });
 
-  it('run_command_batch uses run-level adaptive defaults when tool args omit them', async () => {
+    it('run_command_batch uses run-level adaptive defaults when tool args omit them', async () => {
     const cwd = await makeWorkspace();
     const toolset = createAgentToolset({
       cwd,
@@ -1534,7 +1540,63 @@ describe('run_command safety', () => {
     expect(parsed.concurrency).toBe(2);
     expect(parsed.minConcurrency).toBe(1);
   });
+
+  it('rejects shell operator injection in run_command before execution', async () => {
+    const cwd = await makeWorkspace();
+    const toolset = createAgentToolset({ cwd, phase: 'implementation', taskType: 'code' });
+
+    const result = await toolset.executeTool({
+      id: 'operator-injection',
+      name: 'run_command',
+      arguments: { command: 'echo hi; git status' },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content).toContain('shell operators');
+  });
+
+    it('fails closed when sandbox mode is enabled and docker is unavailable', async () => {
+    const cwd = await makeWorkspace();
+    const runCommandSpy = vi.spyOn(commandRunner, 'runCommand').mockImplementation(async (binary) => {
+      if (binary === 'docker') {
+        return {
+          exitCode: -1,
+          stdout: '',
+          stderr: 'docker not found',
+        };
+      }
+      return {
+        exitCode: 0,
+        stdout: 'ok',
+        stderr: '',
+      };
+    });
+
+    try {
+      const toolset = createAgentToolset({
+        cwd,
+        phase: 'implementation',
+        taskType: 'code',
+        commandExecutionMode: 'sandbox',
+        commandSandboxFallbackPolicy: 'fail_closed',
+      });
+
+      const result = await toolset.executeTool({
+        id: 'sandbox-fail-closed',
+        name: 'run_command',
+        arguments: { command: 'echo sandbox' },
+      });
+
+      expect(result.isError).toBe(true);
+      expect(result.content).toContain('Sandbox execution unavailable');
+      expect(result.content).toContain('fail_closed');
+    } finally {
+      runCommandSpy.mockRestore();
+    }
+  });
+
 });
+
 
 describe('url_fetch tool', () => {
   it('is available in planning and implementation phases', async () => {
