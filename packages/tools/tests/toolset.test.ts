@@ -639,7 +639,7 @@ describe('search_files tool', () => {
     runCommandSpy.mockRestore();
   });
 
-  it('treats ENOENT-like stderr as non-fatal when stdout already contains valid matches', async () => {
+    it('treats ENOENT-like stderr as non-fatal when stdout already contains valid matches', async () => {
     const cwd = await makeWorkspace();
     await writeFile(join(cwd, 'src', 'coordination-tools.ts'), 'async function mapWithAdaptiveConcurrency() {}\n', 'utf-8');
     const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
@@ -661,7 +661,36 @@ describe('search_files tool', () => {
 
     expect(result.isError).toBeFalsy();
     expect(result.content).toContain('src/coordination-tools.ts:1:async function mapWithAdaptiveConcurrency() {}');
-    expect(result.content).toContain('No such file or directory (os error 2)');
+    expect(result.content).not.toContain('No such file or directory (os error 2)');
+    expect(result.details).toBeUndefined();
+
+    runCommandSpy.mockRestore();
+  });
+
+  it('filters ENOENT-like stderr in explicit literal mode when stdout has matches', async () => {
+    const cwd = await makeWorkspace();
+    await writeFile(join(cwd, 'src', 'literal-match.ts'), 'const token = "mapWithAdaptiveConcurrency";\n', 'utf-8');
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+
+    const runCommandSpy = vi.spyOn(commandRunner, 'runCommand').mockResolvedValueOnce({
+      exitCode: 2,
+      stdout: 'src/literal-match.ts:1:const token = "mapWithAdaptiveConcurrency";\n',
+      stderr: 'rg: mapWithAdaptiveConcurrency: No such file or directory (os error 2)',
+    });
+
+    const result = await toolset.executeTool({
+      id: 'enoent-with-matches-literal-mode',
+      name: 'search_files',
+      arguments: {
+        query: 'mapWithAdaptiveConcurrency',
+        queryMode: 'literal',
+        path: 'src',
+      },
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.content).toContain('src/literal-match.ts:1:const token = "mapWithAdaptiveConcurrency";');
+    expect(result.content).not.toContain('No such file or directory (os error 2)');
     expect(result.details).toBeUndefined();
 
     runCommandSpy.mockRestore();
@@ -669,6 +698,7 @@ describe('search_files tool', () => {
 
 
   it('marks search_files as error for genuine command failures without match output', async () => {
+
     const cwd = await makeWorkspace();
     const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
 

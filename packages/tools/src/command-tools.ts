@@ -2,7 +2,7 @@ import { constants } from 'node:fs';
 import { access, readdir, readFile, realpath, stat } from 'node:fs/promises';
 import { extname, isAbsolute, join } from 'node:path';
 import { Type } from '@mariozechner/pi-ai';
-import type { AgentToolsetOptions, RegisteredAgentTool } from './types.js';
+import type { AgentToolsetOptions, CommandResult, RegisteredAgentTool } from './types.js';
 import { resolveWorkspacePath, toWorkspaceRelative } from './path-utils.js';
 import { formatCommandOutput, runCommand } from './command-tools/command-runner.js';
 import {
@@ -222,7 +222,7 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
           }
         }
 
-                const output = formatCommandOutput(result, options.maxOutputChars ?? 16000);
+                        const output = formatCommandOutput(result, options.maxOutputChars ?? 16000);
         const hasMatches = result.stdout.trim().length > 0;
 
         // Prefer successful match output when available. ripgrep may emit stderr
@@ -230,10 +230,11 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
         // when there are no matches to return.
         if (hasMatches) {
           return {
-            content: output,
+            content: formatSuccessfulSearchOutput(result, options.maxOutputChars ?? 16000),
             isError: false,
           };
         }
+
 
         if (result.exitCode === 2 && useRegex) {
           return createSearchFilesErrorResult({
@@ -1147,6 +1148,26 @@ function hasRipgrepPathError(stderr: string): boolean {
   return isDeterministicRipgrepPathError(stderr);
 }
 
+function formatSuccessfulSearchOutput(result: CommandResult, maxChars: number): string {
+  const sanitizedStderr = removeRipgrepPathErrorLines(result.stderr);
+  return formatCommandOutput({
+    ...result,
+    stderr: sanitizedStderr,
+  }, maxChars);
+}
+
+function removeRipgrepPathErrorLines(stderr: string): string {
+  if (stderr.trim().length === 0) {
+    return stderr;
+  }
+
+  const lines = stderr
+    .split(/\r?\n/)
+    .filter((line) => line.trim().length > 0 && !isDeterministicRipgrepPathError(line));
+
+  return lines.join('\n');
+}
+
 function isDeterministicRipgrepPathError(stderr: string): boolean {
   const normalized = stderr.trim();
   if (normalized.length === 0) {
@@ -1155,6 +1176,7 @@ function isDeterministicRipgrepPathError(stderr: string): boolean {
 
   return /\bNo such file or directory\b|\bos error 2\b|\bENOENT\b/i.test(normalized);
 }
+
 
 function isMissingPathErrorLike(error: unknown): boolean {
   if (!error) {
