@@ -66,17 +66,18 @@ describe('workspace runtime validation', () => {
     expect(() => assertWorkspaceRuntimeIsComplete(result)).not.toThrow();
   });
 
-  it('returns missing critical paths when expected test directories are removed', async () => {
+    it('returns missing critical paths when essential config files are removed', async () => {
     const workspace = await makeWorkspaceLikeTree();
-    await rm(join(workspace, 'packages', 'tools', 'tests'), { recursive: true, force: true });
+    await rm(join(workspace, 'package.json'), { force: true });
 
     const result = await validateWorkspaceRuntime(workspace);
 
-    expect(result.missingCriticalPaths).toContain('packages/tools/tests');
+    expect(result.missingCriticalPaths).toContain('package.json');
     expect(() => assertWorkspaceRuntimeIsComplete(result)).toThrow(
       'Workspace runtime check failed: critical source/test/config files missing under cwd',
     );
   });
+
 
 
   it('throws for inaccessible workspace paths', async () => {

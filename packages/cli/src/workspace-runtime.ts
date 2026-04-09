@@ -29,7 +29,8 @@ const CRITICAL_TEST_DIRECTORIES = [
 ] as const;
 
 export async function resolveWorkspaceRuntimeCriticalPaths(workspacePath: string): Promise<string[]> {
-  const criticalPaths = [...BASE_WORKSPACE_RUNTIME_CRITICAL_PATHS];
+  const criticalPaths: string[] = [...BASE_WORKSPACE_RUNTIME_CRITICAL_PATHS];
+
 
   for (const testDir of CRITICAL_TEST_DIRECTORIES) {
     try {
@@ -44,7 +45,9 @@ export async function resolveWorkspaceRuntimeCriticalPaths(workspacePath: string
 }
 
 
+
 export async function validateWorkspaceRuntime(workspacePath: string): Promise<WorkspaceRuntimeValidationResult> {
+
   const trimmed = workspacePath.trim();
   if (!trimmed) {
     throw new Error('Workspace path cannot be empty.');
@@ -73,7 +76,8 @@ export async function validateWorkspaceRuntime(workspacePath: string): Promise<W
     }
   }
 
-    const criticalPaths = await resolveWorkspaceRuntimeCriticalPaths(normalizedPath);
+      const criticalPaths = await resolveWorkspaceRuntimeCriticalPaths(normalizedPath);
+
   const missingCriticalPaths: string[] = [];
   for (const criticalPath of criticalPaths) {
     try {
@@ -84,7 +88,9 @@ export async function validateWorkspaceRuntime(workspacePath: string): Promise<W
   }
 
 
+  
   return {
+
     normalizedPath,
     missingExpectedDirs,
     missingCriticalPaths,
