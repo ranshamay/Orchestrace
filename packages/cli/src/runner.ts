@@ -2456,7 +2456,7 @@ function parseResultJson(text: string): Record<string, unknown> | undefined {
   return undefined;
 }
 
-function parsePrMetadataResponse(
+export function parsePrMetadataResponse(
   text: string,
   taskRanges: Array<{ todoId: string; todoTitle: string }>,
   isObserverSession?: boolean,
