@@ -7,6 +7,8 @@
 // ---------------------------------------------------------------------------
 
 import type { LlmAdapter } from '@orchestrace/provider';
+import { resolveProviderApiKeyWithCopilotTtl, type ResolveProviderApiKey } from '../provider-auth.js';
+
 import type { ObserverConfig, FindingCategory, FindingSeverity } from './types.js';
 import { ALL_FINDING_CATEGORIES } from './types.js';
 import type { BackendLogger } from './backend-logger.js';
@@ -56,7 +58,8 @@ export interface LogWatcherOptions {
   llm: LlmAdapter;
   config: ObserverConfig;
   logger: BackendLogger;
-  resolveApiKey: (provider: string) => Promise<string | undefined>;
+    resolveApiKey: ResolveProviderApiKey;
+
   /** Called when status or findings change. */
   onStateChange?: (state: LogWatcherState) => void;
   /** Called only with findings newly detected in the latest analysis batch. */
@@ -122,7 +125,8 @@ Respond ONLY with valid JSON matching this schema:
 export class LogWatcher {
   private readonly llm: LlmAdapter;
   private config: ObserverConfig;
-  private readonly resolveApiKey: (provider: string) => Promise<string | undefined>;
+    private readonly resolveApiKey: ResolveProviderApiKey;
+
   private readonly onStateChange?: (state: LogWatcherState) => void;
   private readonly onFindings?: (findings: LogFinding[]) => void | Promise<void>;
   private readonly batchSize: number;
@@ -230,7 +234,8 @@ export class LogWatcher {
       const prompt = this.buildAnalysisPrompt(batch);
       const provider = pickModelSetting(this.config.logWatcherProvider, this.config.provider);
       const model = pickModelSetting(this.config.logWatcherModel, this.config.model);
-      const apiKey = await this.resolveApiKey(provider);
+            const apiKey = await resolveProviderApiKeyWithCopilotTtl(this.resolveApiKey, provider);
+
 
       const result = await this.llm.complete({
         provider,
@@ -239,7 +244,8 @@ export class LogWatcher {
         prompt,
         signal: this.abortController.signal,
                 apiKey,
-        refreshApiKey: () => this.resolveApiKey(provider),
+                refreshApiKey: () => resolveProviderApiKeyWithCopilotTtl(this.resolveApiKey, provider),
+
         allowAuthRefreshRetry: true,
 
 

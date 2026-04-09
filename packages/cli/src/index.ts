@@ -7,6 +7,8 @@ import { config as loadDotEnv } from 'dotenv';
 import { orchestrate, type TaskRouteCategory } from '@orchestrace/core';
 import type { TaskGraph, DagEvent, PlanApprovalRequest, TaskOutput } from '@orchestrace/core';
 import { PiAiAdapter, ProviderAuthManager } from '@orchestrace/provider';
+import { resolveProviderApiKeyWithCopilotTtl } from './provider-auth.js';
+
 import type { ProviderInfo } from '@orchestrace/provider';
 import { DEFAULT_AGENT_TOOL_POLICY_VERSION, createAgentToolset } from '@orchestrace/tools';
 import { createInterface } from 'node:readline/promises';
@@ -512,7 +514,8 @@ async function runGraph(
     onEvent,
     requirePlanApproval: true,
     onPlanApproval: approvalGate,
-    resolveApiKey: (providerId) => authManager.resolveApiKey(providerId),
+        resolveApiKey: (providerId) => resolveProviderApiKeyWithCopilotTtl((resolvedProviderId, options) => authManager.resolveApiKey(resolvedProviderId, options), providerId),
+
     createToolset: ({ phase, task, graphId, provider: activeProvider, model: activeModel, reasoning, taskRequiresWrites }) => createAgentToolset({
       cwd,
       phase,
@@ -537,8 +540,9 @@ async function runGraph(
           systemPrompt: request.systemPrompt
             ?? 'You are a focused sub-agent. Solve the given sub-task and return concise actionable output.',
           toolset: subAgentToolset,
-                    apiKey: await authManager.resolveApiKey(subProvider),
-          refreshApiKey: () => authManager.resolveApiKey(subProvider),
+                                        apiKey: await resolveProviderApiKeyWithCopilotTtl((providerId, options) => authManager.resolveApiKey(providerId, options), subProvider),
+          refreshApiKey: () => resolveProviderApiKeyWithCopilotTtl((providerId, options) => authManager.resolveApiKey(providerId, options), subProvider),
+
           allowAuthRefreshRetry: true,
 
 

@@ -1,5 +1,6 @@
 export { PiAiAdapter } from './adapter.js';
-export { ProviderAuthManager } from './auth.js';
+export { ProviderAuthManager, COPILOT_MINIMUM_REQUEST_TTL_SECONDS } from './auth.js';
+
 export type {
 	AgentModelConfig,
 	LlmAdapter,
@@ -27,6 +28,8 @@ export type {
 	ProviderInfo,
 	ProviderReadinessResult,
 	ProviderReadinessErrorCode,
-	ProviderTokenTtlStatus,
+		ProviderTokenTtlStatus,
+	ResolveApiKeyOptions,
 } from './auth.js';
+
 

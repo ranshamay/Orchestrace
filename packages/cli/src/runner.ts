@@ -27,6 +27,8 @@ import {
 } from '@orchestrace/core';
 import type { DagEvent, TaskGraph, TaskOutput, TaskRouteCategory, TaskEffort } from '@orchestrace/core';
 import { PiAiAdapter, ProviderAuthManager, type LlmToolCall } from '@orchestrace/provider';
+import { resolveProviderApiKeyWithCopilotTtl } from './provider-auth.js';
+
 import {
   DEFAULT_AGENT_TOOL_POLICY_VERSION,
   createAgentToolset,
@@ -928,8 +930,9 @@ async function main(): Promise<void> {
         model: config.model,
         systemPrompt: 'You are a precise JSON generator. Output only valid JSON, nothing else.',
         timeoutMs: 30_000,
-                apiKey: await authManager.resolveApiKey(config.provider),
-        refreshApiKey: () => authManager.resolveApiKey(config.provider),
+                                apiKey: await resolveProviderApiKeyWithCopilotTtl((providerId, options) => authManager.resolveApiKey(providerId, options), config.provider),
+        refreshApiKey: () => resolveProviderApiKeyWithCopilotTtl((providerId, options) => authManager.resolveApiKey(providerId, options), config.provider),
+
         allowAuthRefreshRetry: true,
 
 
@@ -1725,7 +1728,8 @@ async function main(): Promise<void> {
       requirePlanApproval: !config.autoApprove,
       onPlanApproval: async () => config.autoApprove,
       signal: controller.signal,
-      resolveApiKey: async (providerId) => authManager.resolveApiKey(providerId),
+            resolveApiKey: async (providerId) => resolveProviderApiKeyWithCopilotTtl((resolvedProviderId, options) => authManager.resolveApiKey(resolvedProviderId, options), providerId),
+
 
       createToolset: ({ phase, task, graphId, provider: activeProvider, model: activeModel, reasoning, taskRequiresWrites }) => createAgentToolset({
         cwd: config.workspacePath,
@@ -1797,8 +1801,9 @@ async function main(): Promise<void> {
               systemPrompt: resolveSubAgentSystemPrompt(request),
               signal: subSignal,
               toolset: subToolset,
-                            apiKey: await authManager.resolveApiKey(subProvider),
-              refreshApiKey: () => authManager.resolveApiKey(subProvider),
+                                                        apiKey: await resolveProviderApiKeyWithCopilotTtl((providerId, options) => authManager.resolveApiKey(providerId, options), subProvider),
+              refreshApiKey: () => resolveProviderApiKeyWithCopilotTtl((providerId, options) => authManager.resolveApiKey(providerId, options), subProvider),
+
               allowAuthRefreshRetry: true,
 
 

@@ -15,6 +15,8 @@ import {
 import type { SessionSummary } from './summarizer.js';
 import { formatSummaryForLlm } from './summarizer.js';
 import { OBSERVER_SYSTEM_PROMPT } from './prompts.js';
+import { resolveProviderApiKeyWithCopilotTtl, type ResolveProviderApiKey } from '../provider-auth.js';
+
 
 /**
  * Analyze one or more session summaries via LLM and return structured findings.
@@ -24,7 +26,8 @@ export async function analyzeSessionSummaries(
   config: ObserverConfig,
   summaries: SessionSummary[],
   signal?: AbortSignal,
-  resolveApiKey?: (provider: string) => Promise<string | undefined>,
+    resolveApiKey?: ResolveProviderApiKey,
+
 ): Promise<AnalysisResult> {
   if (summaries.length === 0) return { findings: [] };
 
@@ -35,7 +38,10 @@ export async function analyzeSessionSummaries(
 
   const userPrompt = buildAnalysisPrompt(summaries, allowedCategories);
 
-  const apiKey = resolveApiKey ? await resolveApiKey(config.provider) : undefined;
+    const apiKey = resolveApiKey
+    ? await resolveProviderApiKeyWithCopilotTtl(resolveApiKey, config.provider)
+    : undefined;
+
   const result = await llm.complete({
     provider: config.provider,
     model: config.model,
@@ -43,7 +49,10 @@ export async function analyzeSessionSummaries(
     prompt: userPrompt,
     signal,
         apiKey,
-    refreshApiKey: resolveApiKey ? () => resolveApiKey(config.provider) : undefined,
+        refreshApiKey: resolveApiKey
+      ? () => resolveProviderApiKeyWithCopilotTtl(resolveApiKey, config.provider)
+      : undefined,
+
     allowAuthRefreshRetry: true,
 
 

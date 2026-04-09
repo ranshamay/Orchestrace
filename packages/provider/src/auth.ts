@@ -42,6 +42,8 @@ export interface ProviderInfo {
 const GITHUB_COPILOT_PROVIDER_ID = 'github-copilot';
 const COPILOT_TOKEN_REFRESH_SKEW_SECONDS = 120;
 const COPILOT_TOKEN_NEAR_EXPIRY_WARNING_SECONDS = 10 * 60;
+export const COPILOT_MINIMUM_REQUEST_TTL_SECONDS = 10 * 60;
+
 
 export interface ProviderTokenTtlStatus {
   provider: string;

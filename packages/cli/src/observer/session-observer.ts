@@ -9,6 +9,8 @@
 
 import type { EventStore, SessionEvent } from '@orchestrace/store';
 import type { LlmAdapter } from '@orchestrace/provider';
+import { resolveProviderApiKeyWithCopilotTtl, type ResolveProviderApiKey } from '../provider-auth.js';
+
 import type { ObserverConfig, FindingCategory, FindingSeverity } from './types.js';
 import { ALL_FINDING_CATEGORIES } from './types.js';
 import { REALTIME_OBSERVER_SYSTEM_PROMPT } from './prompts.js';
@@ -96,7 +98,8 @@ export class SessionObserver {
   private readonly llm: LlmAdapter;
   private readonly config: ObserverConfig;
   private readonly emit: ObserverEventEmitter;
-  private readonly resolveApiKey: (provider: string) => Promise<string | undefined>;
+    private readonly resolveApiKey: ResolveProviderApiKey;
+
   private readonly ctx: AccumulatedContext;
   private state: SessionObserverState;
   private unwatch: (() => void) | null = null;
@@ -111,7 +114,8 @@ export class SessionObserver {
     llm: LlmAdapter;
     config: ObserverConfig;
     emit: ObserverEventEmitter;
-    resolveApiKey: (provider: string) => Promise<string | undefined>;
+        resolveApiKey: ResolveProviderApiKey;
+
   }) {
     this.sessionId = options.sessionId;
     this.eventStore = options.eventStore;
@@ -355,7 +359,8 @@ export class SessionObserver {
           : ALL_FINDING_CATEGORIES;
 
       const provider = this.config.provider;
-      const apiKey = await this.resolveApiKey(provider);
+            const apiKey = await resolveProviderApiKeyWithCopilotTtl(this.resolveApiKey, provider);
+
       const result = await this.llm.complete({
         provider,
         model: this.config.model,
@@ -363,7 +368,8 @@ export class SessionObserver {
         prompt,
         signal: this.abortController.signal,
                 apiKey,
-        refreshApiKey: () => this.resolveApiKey(provider),
+                refreshApiKey: () => resolveProviderApiKeyWithCopilotTtl(this.resolveApiKey, provider),
+
         allowAuthRefreshRetry: true,
 
 
