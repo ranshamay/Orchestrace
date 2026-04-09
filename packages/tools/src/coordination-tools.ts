@@ -50,6 +50,8 @@ const SUBAGENT_BATCH_DEFAULT_CONCURRENCY = 8;
 const SUBAGENT_BATCH_MAX_CONCURRENCY = 64;
 const SUBAGENT_BATCH_MIN_CONCURRENCY = 1;
 const SUBAGENT_BATCH_IDENTICAL_FAILURE_CAP = 2;
+const SUBAGENT_BATCH_GITHUB_TOKEN_PRECHECK_MIN_TTL_SECONDS = 10 * 60;
+
 const SUBAGENT_PROMPT_SOFT_LIMIT_CHARS = 2200;
 const SUBAGENT_PROMPT_PREVIEW_MAX_CHARS = 220;
 const SUBAGENT_OUTPUT_PREVIEW_MAX_CHARS = 900;
@@ -189,8 +191,10 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
         description: 'Read the current task todo list for this agent task context.',
         parameters: Type.Object({}),
       },
-      execute: async () => {
+            execute: async () => {
         const state = await readCoordinationState(statePath);
+
+
         return {
           content: JSON.stringify(state.todos, null, 2),
         };
@@ -642,9 +646,61 @@ export function createCoordinationTools(options: CoordinationToolsOptions): Regi
           };
         }
 
+                const requiresGithubCopilotPreflight = requests.some((request) => {
+          const effectiveProvider = (request.provider ?? options.provider ?? '').trim().toLowerCase();
+          return effectiveProvider === 'github-copilot';
+        });
+
+        if (requiresGithubCopilotPreflight) {
+          if (!options.resolveGithubToken) {
+            const message = [
+              'subagent_spawn_batch preflight failed: provider=github-copilot requires token resolution, but resolveGithubToken is not configured.',
+              'Action required: refresh/re-auth GitHub Copilot credentials and retry.',
+            ].join(' ');
+            console.warn(`[coordination-tools] ${message}`);
+            return {
+              content: message,
+              isError: true,
+            };
+          }
+
+          let githubToken: string | undefined;
+          try {
+            githubToken = await options.resolveGithubToken({
+              minimumTtlSeconds: SUBAGENT_BATCH_GITHUB_TOKEN_PRECHECK_MIN_TTL_SECONDS,
+            });
+          } catch (error) {
+            const reason = error instanceof Error ? error.message : String(error);
+            const message = [
+              'subagent_spawn_batch preflight failed: provider=github-copilot token refresh/reacquisition threw an error.',
+              `reason=${reason.replace(/\s+/g, ' ').trim()}`,
+              'Action required: refresh/re-auth GitHub Copilot credentials and retry.',
+            ].join(' ');
+            console.warn(`[coordination-tools] ${message}`);
+            return {
+              content: message,
+              isError: true,
+            };
+          }
+
+          if (!githubToken) {
+            const message = [
+              'subagent_spawn_batch preflight failed: provider=github-copilot token is missing, expired, or below the required TTL threshold.',
+              `requiredMinimumTtlSeconds=${SUBAGENT_BATCH_GITHUB_TOKEN_PRECHECK_MIN_TTL_SECONDS}`,
+              'Action required: refresh/re-auth GitHub Copilot credentials and retry.',
+            ].join(' ');
+            console.warn(`[coordination-tools] ${message}`);
+            return {
+              content: message,
+              isError: true,
+            };
+          }
+        }
+
         const state = await readCoordinationState(statePath);
 
         const cacheHits = new Map<number, {
+
           request: SubAgentRequest;
           record: SubAgentRunRecord;
           run: SubAgentBatchRunResult;

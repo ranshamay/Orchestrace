@@ -1278,7 +1278,8 @@ describe('github_api tool', () => {
         cwd,
         phase: 'implementation',
         taskType: 'code',
-        resolveGithubToken: async () => 'ghp_test_token',
+                resolveGithubToken: async (_options) => 'ghp_test_token',
+
       });
 
       const result = await toolset.executeTool({
@@ -1639,7 +1640,7 @@ describe('subagent prompt enrichment', () => {
     }
   });
 
-  it('subagent_spawn_batch validates args synchronously and skips all sub-agent invocations on malformed payload', async () => {
+    it('subagent_spawn_batch validates args synchronously and skips all sub-agent invocations on malformed payload', async () => {
     const cwd = await makeWorkspace();
     const runSubAgent = vi.fn(async () => ({ text: 'unexpected dispatch' }));
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
@@ -1679,7 +1680,150 @@ describe('subagent prompt enrichment', () => {
       warnSpy.mockRestore();
     }
   });
+
+  it('subagent_spawn_batch preflight fails fast for github-copilot when token TTL is insufficient', async () => {
+    const cwd = await makeWorkspace();
+    const runSubAgent = vi.fn(async () => ({ text: 'unexpected dispatch' }));
+    const resolveGithubToken = vi.fn(async () => undefined);
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    try {
+      const toolset = createAgentToolset({
+        cwd,
+        phase: 'planning',
+        taskType: 'code',
+        graphId: 'g1',
+        taskId: 't-preflight-ttl-fail',
+        provider: 'github-copilot',
+        runSubAgent,
+        resolveGithubToken,
+      });
+
+      const result = await toolset.executeTool({
+        id: '1',
+        name: 'subagent_spawn_batch',
+        arguments: {
+          agents: [{ nodeId: 'n1', prompt: 'Inspect src/file.ts for exports.' }],
+        },
+      });
+
+      expect(result.isError).toBe(true);
+      expect(result.content).toContain('subagent_spawn_batch preflight failed');
+      expect(result.content).toContain('provider=github-copilot');
+      expect(result.content).toContain('Action required: refresh/re-auth GitHub Copilot credentials and retry.');
+      expect(runSubAgent).not.toHaveBeenCalled();
+      expect(resolveGithubToken).toHaveBeenCalledWith({ minimumTtlSeconds: 600 });
+      expect(warnSpy).toHaveBeenCalled();
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('subagent_spawn_batch preflight fails gracefully when github-copilot token refresh throws', async () => {
+    const cwd = await makeWorkspace();
+    const runSubAgent = vi.fn(async () => ({ text: 'unexpected dispatch' }));
+    const resolveGithubToken = vi.fn(async () => {
+      throw new Error('unauthorized: token expired');
+    });
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    try {
+      const toolset = createAgentToolset({
+        cwd,
+        phase: 'planning',
+        taskType: 'code',
+        graphId: 'g1',
+        taskId: 't-preflight-throw-fail',
+        runSubAgent,
+        resolveGithubToken,
+      });
+
+      const result = await toolset.executeTool({
+        id: '1',
+        name: 'subagent_spawn_batch',
+        arguments: {
+          agents: [{ nodeId: 'n1', provider: 'github-copilot', prompt: 'Inspect src/file.ts for exports.' }],
+        },
+      });
+
+      expect(result.isError).toBe(true);
+      expect(result.content).toContain('subagent_spawn_batch preflight failed');
+      expect(result.content).toContain('token refresh/reacquisition threw an error');
+      expect(result.content).toContain('reason=unauthorized: token expired');
+      expect(result.content).toContain('Action required: refresh/re-auth GitHub Copilot credentials and retry.');
+      expect(runSubAgent).not.toHaveBeenCalled();
+      expect(resolveGithubToken).toHaveBeenCalledWith({ minimumTtlSeconds: 600 });
+      expect(warnSpy).toHaveBeenCalled();
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('subagent_spawn_batch preflight fails when github-copilot provider is requested but resolver is unavailable', async () => {
+    const cwd = await makeWorkspace();
+    const runSubAgent = vi.fn(async () => ({ text: 'unexpected dispatch' }));
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    try {
+      const toolset = createAgentToolset({
+        cwd,
+        phase: 'planning',
+        taskType: 'code',
+        graphId: 'g1',
+        taskId: 't-preflight-no-resolver',
+        runSubAgent,
+      });
+
+      const result = await toolset.executeTool({
+        id: '1',
+        name: 'subagent_spawn_batch',
+        arguments: {
+          agents: [{ nodeId: 'n1', provider: 'github-copilot', prompt: 'Inspect src/file.ts for exports.' }],
+        },
+      });
+
+      expect(result.isError).toBe(true);
+      expect(result.content).toContain('subagent_spawn_batch preflight failed');
+      expect(result.content).toContain('resolveGithubToken is not configured');
+      expect(result.content).toContain('Action required: refresh/re-auth GitHub Copilot credentials and retry.');
+      expect(runSubAgent).not.toHaveBeenCalled();
+      expect(warnSpy).toHaveBeenCalled();
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('subagent_spawn_batch proceeds when github-copilot preflight token is healthy', async () => {
+    const cwd = await makeWorkspace();
+    const runSubAgent = vi.fn(async () => ({ text: 'ok' }));
+    const resolveGithubToken = vi.fn(async () => 'ghp_valid_preflight_token');
+
+    const toolset = createAgentToolset({
+      cwd,
+      phase: 'planning',
+      taskType: 'code',
+      graphId: 'g1',
+      taskId: 't-preflight-healthy',
+      provider: 'github-copilot',
+      runSubAgent,
+      resolveGithubToken,
+    });
+
+    const result = await toolset.executeTool({
+      id: '1',
+      name: 'subagent_spawn_batch',
+      arguments: {
+        agents: [{ nodeId: 'n1', prompt: 'Inspect src/file.ts for exports.' }],
+      },
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(resolveGithubToken).toHaveBeenCalledWith({ minimumTtlSeconds: 600 });
+    expect(runSubAgent).toHaveBeenCalledTimes(1);
+  });
+
   it('prefers provided context packet snippets over disk reads', async () => {
+
     const cwd = await makeWorkspace();
     const delegatedPrompts: string[] = [];
 

@@ -71,7 +71,13 @@ export interface ResolveApiKeyOptions {
    * Defaults to true for backward compatibility when explicitly resolving credentials.
    */
   allowRefresh?: boolean;
+  /**
+   * Optional minimum remaining TTL required for a resolved token.
+   * For GitHub Copilot, tokens below this threshold trigger refresh/reacquisition logic.
+   */
+  minimumTtlSeconds?: number;
 }
+
 
 
 export interface PersistedAuthStore {
@@ -187,9 +193,10 @@ export class ProviderAuthManager {
     return { path: this.authFilePath, removed };
   }
 
-      async resolveApiKey(providerId: string, options: ResolveApiKeyOptions = {}): Promise<string | undefined> {
+        async resolveApiKey(providerId: string, options: ResolveApiKeyOptions = {}): Promise<string | undefined> {
     const store = await this.loadStore();
     const allowRefresh = options.allowRefresh ?? true;
+    const minimumTtlSeconds = normalizeMinimumTtlSeconds(options.minimumTtlSeconds);
 
     const storedApiKey = store.apiKeys[providerId];
     if (storedApiKey) {
@@ -201,7 +208,8 @@ export class ProviderAuthManager {
       try {
         if (providerId === GITHUB_COPILOT_PROVIDER_ID) {
           const ttl = computeTokenTtlStatus(providerId, oauthCredentials);
-          if (!ttl || ttl.refreshRecommended) {
+          const belowMinimumTtl = isTokenBelowMinimumTtl(ttl, minimumTtlSeconds);
+          if (!ttl || ttl.refreshRecommended || belowMinimumTtl) {
             if (!allowRefresh) {
               return undefined;
             }
@@ -213,6 +221,12 @@ export class ProviderAuthManager {
 
             store.oauth[providerId] = result.newCredentials;
             await this.saveStore(store);
+
+            const refreshedTtl = computeTokenTtlStatus(providerId, result.newCredentials);
+            if (isTokenBelowMinimumTtl(refreshedTtl, minimumTtlSeconds)) {
+              return undefined;
+            }
+
             return result.apiKey;
           }
 
@@ -238,6 +252,7 @@ export class ProviderAuthManager {
         return undefined;
       }
     }
+
 
     // Optional fallback for users who still prefer environment variables.
     // GitHub Copilot intentionally does not use this fallback to enforce device OAuth.
@@ -417,6 +432,27 @@ function normalizeExpiresToEpochMs(rawExpires: number): number {
   // OAuth libraries frequently serialize `exp` in seconds; legacy stores may keep milliseconds.
   return rawExpires > 1_000_000_000_000 ? rawExpires : rawExpires * 1000;
 }
+
+function normalizeMinimumTtlSeconds(value: number | undefined): number {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
+    return 0;
+  }
+
+  return Math.floor(value);
+}
+
+function isTokenBelowMinimumTtl(ttl: ProviderTokenTtlStatus | undefined, minimumTtlSeconds: number): boolean {
+  if (minimumTtlSeconds <= 0) {
+    return false;
+  }
+
+  if (!ttl || typeof ttl.expiresInSeconds !== 'number') {
+    return true;
+  }
+
+  return ttl.expiresInSeconds < minimumTtlSeconds;
+}
+
 
 function findWorkspaceRoot(startDir: string): string {
   let current = resolve(startDir);

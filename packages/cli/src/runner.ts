@@ -1567,7 +1567,8 @@ async function main(): Promise<void> {
         adaptiveConcurrency: config.adaptiveConcurrency,
         batchConcurrency: config.batchConcurrency,
         batchMinConcurrency: config.batchMinConcurrency,
-        resolveGithubToken: () => githubAuthManager.resolveApiKey('github'),
+                resolveGithubToken: (resolveOptions) => githubAuthManager.resolveApiKey('github', resolveOptions),
+
       });
 
       const toolCallId = `lightweight-${randomUUID()}`;
@@ -1728,7 +1729,8 @@ async function main(): Promise<void> {
         adaptiveConcurrency: config.adaptiveConcurrency,
         batchConcurrency: config.batchConcurrency,
         batchMinConcurrency: config.batchMinConcurrency,
-        resolveGithubToken: () => githubAuthManager.resolveApiKey('github'),
+                resolveGithubToken: (resolveOptions) => githubAuthManager.resolveApiKey('github', resolveOptions),
+
         sharedContextStore,
         fileReadCache,
         agentId: `orchestrator::${task.id}`,
@@ -1768,7 +1770,8 @@ async function main(): Promise<void> {
             adaptiveConcurrency: config.adaptiveConcurrency,
             batchConcurrency: config.batchConcurrency,
             batchMinConcurrency: config.batchMinConcurrency,
-            resolveGithubToken: () => githubAuthManager.resolveApiKey('github'),
+                    resolveGithubToken: (resolveOptions) => githubAuthManager.resolveApiKey('github', resolveOptions),
+
             sharedContextStore,
             fileReadCache,
             agentId: `subagent::${task.id}::subagent::${request.nodeId ?? toolCallId}`,

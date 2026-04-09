@@ -426,7 +426,8 @@ async function runGraph(
       provider: activeProvider,
       model: activeModel,
       reasoning,
-      resolveGithubToken: () => githubAuthManager.resolveApiKey(GITHUB_PROVIDER_ID),
+            resolveGithubToken: (resolveOptions) => githubAuthManager.resolveApiKey(GITHUB_PROVIDER_ID, resolveOptions),
+
       runSubAgent: async (request, _signal) => {
         const subProvider = request.provider ?? activeProvider;
         const subModel = request.model ?? activeModel;

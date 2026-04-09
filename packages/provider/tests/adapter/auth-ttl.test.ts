@@ -96,7 +96,7 @@ describe('ProviderAuthManager Copilot TTL awareness', () => {
     expect(oauthMock.getOAuthApiKey).not.toHaveBeenCalled();
   });
 
-  it('does not refresh oauth token when refresh is disabled', async () => {
+    it('does not refresh oauth token when refresh is disabled', async () => {
     const now = Math.floor(Date.now() / 1000);
     await writeAuthStore(now + 3600);
 
@@ -117,8 +117,48 @@ describe('ProviderAuthManager Copilot TTL awareness', () => {
     expect(oauthMock.getOAuthApiKey).not.toHaveBeenCalled();
   });
 
+  it('refreshes token when below caller minimum TTL threshold', async () => {
+    const now = Math.floor(Date.now() / 1000);
+    await writeAuthStore(now + 300);
+
+    oauthMock.getOAuthApiKey.mockResolvedValue({
+      apiKey: 'refreshed-min-ttl-token',
+      newCredentials: {
+        access: 'refreshed-min-ttl-access',
+        refresh: 'refresh-token',
+        expires: now + 3600,
+      },
+    });
+
+    const auth = new ProviderAuthManager({ authFilePath: authPath });
+    const token = await auth.resolveApiKey('github-copilot', { minimumTtlSeconds: 600 });
+
+    expect(token).toBe('refreshed-min-ttl-token');
+    expect(oauthMock.getOAuthApiKey).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns undefined when refreshed token still does not meet minimum TTL threshold', async () => {
+    const now = Math.floor(Date.now() / 1000);
+    await writeAuthStore(now + 10);
+
+    oauthMock.getOAuthApiKey.mockResolvedValue({
+      apiKey: 'refreshed-still-low-ttl-token',
+      newCredentials: {
+        access: 'refreshed-still-low-ttl-access',
+        refresh: 'refresh-token',
+        expires: now + 120,
+      },
+    });
+
+    const auth = new ProviderAuthManager({ authFilePath: authPath });
+    const token = await auth.resolveApiKey('github-copilot', { minimumTtlSeconds: 600 });
+
+    expect(token).toBeUndefined();
+    expect(oauthMock.getOAuthApiKey).toHaveBeenCalledTimes(1);
+  });
 
   it('includes near-expiry metadata in status', async () => {
+
     const now = Math.floor(Date.now() / 1000);
     await writeAuthStore(now + 60);
 
