@@ -14,7 +14,14 @@ import {
 } from '@orchestrace/core';
 import type { DagEvent, PromptSection, TaskPromptValidationErrorCode } from '@orchestrace/core';
 import { getModels } from '@mariozechner/pi-ai';
-import { PiAiAdapter, ProviderAuthManager, type LlmPromptInput, type LlmToolCallEvent } from '@orchestrace/provider';
+import {
+  PiAiAdapter,
+  ProviderAuthManager,
+  ProviderAuthValidationError,
+  type LlmPromptInput,
+  type LlmToolCallEvent,
+} from '@orchestrace/provider';
+
 import {
   createAgentToolset,
   createFileReadCache,
@@ -230,10 +237,14 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
   const githubAuthManager = createGithubAuthManager();
   const llm = new PiAiAdapter();
 
-    const resolveProviderApiKey = async (
+      const resolveProviderApiKey = async (
     providerId: string,
     options?: { allowRefresh?: boolean },
-  ): Promise<string | undefined> => authManager.resolveApiKey(providerId, options);
+  ): Promise<string | undefined> => {
+    await authManager.assertProviderConfigured(providerId);
+    return authManager.resolveApiKey(providerId, options);
+  };
+
 
 
   // -- Persistent backend log stream ------------------------------------------
@@ -1606,41 +1617,19 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       request.deliveryStrategy ?? uiPreferences.defaultDeliveryStrategy,
     );
 
-    const providerStatuses = await authManager.getAllStatus();
-    const phaseProviders: Array<{ phase: 'planning' | 'implementation'; provider: string }> = [
-      { phase: 'planning', provider: planningProvider },
-      { phase: 'implementation', provider: implementationProvider },
-    ];
-
-    for (const phaseConfig of phaseProviders) {
-      const providerStatus = providerStatuses.find((item) => item.provider === phaseConfig.provider);
-      if (!providerStatus || providerStatus.source === 'none') {
+        const uniqueProviders = new Set([planningProvider, implementationProvider]);
+    try {
+      await authManager.assertProvidersConfigured(uniqueProviders);
+    } catch (error) {
+      if (error instanceof ProviderAuthValidationError) {
         return {
-          error: `${phaseConfig.phase === 'planning' ? 'Planning' : 'Implementation'} provider ${phaseConfig.provider} is not connected. Connect it in Settings first.`,
+          error: error.message,
           statusCode: 400,
         };
       }
+      throw error;
     }
 
-    const uniqueProviders = new Set([planningProvider, implementationProvider]);
-    for (const providerId of uniqueProviders) {
-      try {
-        const apiKey = await resolveProviderApiKey(providerId);
-        if (apiKey) {
-          continue;
-        }
-
-        return {
-          error: `Provider ${providerId} is missing an API key. Connect it in Settings first.`,
-          statusCode: 400,
-        };
-      } catch {
-        return {
-          error: `Provider ${providerId} is missing an API key. Connect it in Settings first.`,
-          statusCode: 400,
-        };
-      }
-    }
 
     const promptValidation = validateAndNormalizeSessionPromptInput({
       prompt: request.prompt,

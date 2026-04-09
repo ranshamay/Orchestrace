@@ -26,7 +26,8 @@ import {
   resolveTrivialTaskGateConfig,
 } from '@orchestrace/core';
 import type { DagEvent, TaskGraph, TaskOutput, TaskRouteCategory, TaskEffort } from '@orchestrace/core';
-import { PiAiAdapter, ProviderAuthManager, type LlmToolCall } from '@orchestrace/provider';
+import { PiAiAdapter, ProviderAuthManager, ProviderAuthValidationError, type LlmToolCall } from '@orchestrace/provider';
+
 import {
   DEFAULT_AGENT_TOOL_POLICY_VERSION,
   createAgentToolset,
@@ -928,8 +929,16 @@ async function main(): Promise<void> {
         model: config.model,
         systemPrompt: 'You are a precise JSON generator. Output only valid JSON, nothing else.',
         timeoutMs: 30_000,
-                apiKey: await authManager.resolveApiKey(config.provider),
-        refreshApiKey: () => authManager.resolveApiKey(config.provider),
+                                apiKey: await (async () => {
+          await authManager.assertProviderConfigured(config.provider);
+          return authManager.resolveApiKey(config.provider);
+        })(),
+
+        refreshApiKey: async () => {
+          await authManager.assertProviderConfigured(config.provider);
+          return authManager.resolveApiKey(config.provider);
+        },
+
         allowAuthRefreshRetry: true,
 
 
@@ -1681,9 +1690,34 @@ async function main(): Promise<void> {
         : 'LLM dispatch requires provider/model configuration.',
     });
 
-    await enterLifecyclePhase('EXECUTING');
+        await enterLifecyclePhase('EXECUTING');
+
+    if (route.category !== 'shell_command') {
+      const requiredProviders = [
+        config.provider,
+        config.planningProvider,
+        config.implementationProvider,
+      ].filter((provider): provider is string => typeof provider === 'string' && provider.trim().length > 0);
+
+      try {
+        await authManager.assertProvidersConfigured(requiredProviders);
+      } catch (error) {
+        if (error instanceof ProviderAuthValidationError) {
+          const detail = error.message;
+          await emit({ time: iso(), type: 'session:error-change', payload: { error: detail } });
+          await emit({ time: iso(), type: 'session:status-change', payload: { status: 'failed' } });
+                    await finalizeCheckpoint('failed', iso());
+          await lifecycle.complete('FAILED');
+          await emitLifecyclePhaseChange('FAILED');
+
+          process.exit(1);
+        }
+        throw error;
+      }
+    }
 
     const outputs = route.category === 'shell_command'
+
       ? await runShellCommandRoute(dispatch.shell.command!, config.workspacePath)
       : await orchestrate(graph, {
       llm,
@@ -1715,7 +1749,11 @@ async function main(): Promise<void> {
       requirePlanApproval: !config.autoApprove,
       onPlanApproval: async () => config.autoApprove,
       signal: controller.signal,
-      resolveApiKey: async (providerId) => authManager.resolveApiKey(providerId),
+            resolveApiKey: async (providerId) => {
+        await authManager.assertProviderConfigured(providerId);
+        return authManager.resolveApiKey(providerId);
+      },
+
 
       createToolset: ({ phase, task, graphId, provider: activeProvider, model: activeModel, reasoning, taskRequiresWrites }) => createAgentToolset({
         cwd: config.workspacePath,
@@ -1736,8 +1774,10 @@ async function main(): Promise<void> {
         fileReadCache,
         agentId: `orchestrator::${task.id}`,
         runSubAgent: async (request, _signal) => {
-          const subProvider = request.provider ?? activeProvider;
+                    const subProvider = request.provider ?? activeProvider;
+          await authManager.assertProviderConfigured(subProvider);
           const subModel = request.model ?? activeModel;
+
           const subTimeoutMs = resolveTimeoutMs('ORCHESTRACE_SUBAGENT_TIMEOUT_MS', 120_000);
           // Combine the session abort signal with a per-subagent hard timeout so that
           // a hung LLM connection (no response, no error) cannot block the runner forever.
@@ -1787,8 +1827,16 @@ async function main(): Promise<void> {
               systemPrompt: resolveSubAgentSystemPrompt(request),
               signal: subSignal,
               toolset: subToolset,
-                            apiKey: await authManager.resolveApiKey(subProvider),
-              refreshApiKey: () => authManager.resolveApiKey(subProvider),
+                                                        apiKey: await (async () => {
+                await authManager.assertProviderConfigured(subProvider);
+                return authManager.resolveApiKey(subProvider);
+              })(),
+
+              refreshApiKey: async () => {
+                await authManager.assertProviderConfigured(subProvider);
+                return authManager.resolveApiKey(subProvider);
+              },
+
               allowAuthRefreshRetry: true,
 
 

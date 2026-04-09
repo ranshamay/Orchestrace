@@ -5,8 +5,9 @@ import { resolve } from 'node:path';
 import { config as loadDotEnv } from 'dotenv';
 import { orchestrate, type TaskRouteCategory } from '@orchestrace/core';
 import type { TaskGraph, DagEvent, PlanApprovalRequest, TaskOutput } from '@orchestrace/core';
-import { PiAiAdapter, ProviderAuthManager } from '@orchestrace/provider';
+import { PiAiAdapter, ProviderAuthManager, ProviderAuthValidationError } from '@orchestrace/provider';
 import type { ProviderInfo } from '@orchestrace/provider';
+
 import { DEFAULT_AGENT_TOOL_POLICY_VERSION, createAgentToolset } from '@orchestrace/tools';
 import { createInterface } from 'node:readline/promises';
 import { promisify } from 'node:util';
@@ -399,12 +400,23 @@ async function runGraph(
     }
   };
 
-  const llm = new PiAiAdapter();
+    const llm = new PiAiAdapter();
   const authManager = new ProviderAuthManager();
   const githubAuthManager = createGithubAuthManager();
   const cwd = options.workspace.path;
 
+  try {
+    await authManager.assertProvidersConfigured([provider]);
+  } catch (error) {
+    if (error instanceof ProviderAuthValidationError) {
+      console.error(`\n✗ ${error.message}`);
+      return 1;
+    }
+    throw error;
+  }
+
   const outputs = await orchestrate(graph, {
+
     llm,
     cwd,
     planOutputDir: resolve(cwd, '.orchestrace', 'plans'),
@@ -415,7 +427,11 @@ async function runGraph(
     onEvent,
     requirePlanApproval: true,
     onPlanApproval: approvalGate,
-    resolveApiKey: (providerId) => authManager.resolveApiKey(providerId),
+        resolveApiKey: async (providerId) => {
+      await authManager.assertProviderConfigured(providerId);
+      return authManager.resolveApiKey(providerId);
+    },
+
     createToolset: ({ phase, task, graphId, provider: activeProvider, model: activeModel, reasoning, taskRequiresWrites }) => createAgentToolset({
       cwd,
       phase,
@@ -429,10 +445,12 @@ async function runGraph(
             resolveGithubToken: (resolveOptions) => githubAuthManager.resolveApiKey(GITHUB_PROVIDER_ID, resolveOptions),
 
       runSubAgent: async (request, _signal) => {
-        const subProvider = request.provider ?? activeProvider;
+                const subProvider = request.provider ?? activeProvider;
         const subModel = request.model ?? activeModel;
         const subAgentToolset = createReadOnlySubAgentToolset(cwd, taskRequiresWrites);
+        await authManager.assertProviderConfigured(subProvider);
         const subAgent = await llm.spawnAgent({
+
           provider: subProvider,
           model: subModel,
           reasoning: request.reasoning ?? reasoning,
@@ -440,8 +458,16 @@ async function runGraph(
           systemPrompt: request.systemPrompt
             ?? 'You are a focused sub-agent. Solve the given sub-task and return concise actionable output.',
           toolset: subAgentToolset,
-                    apiKey: await authManager.resolveApiKey(subProvider),
-          refreshApiKey: () => authManager.resolveApiKey(subProvider),
+                                        apiKey: await (async () => {
+            await authManager.assertProviderConfigured(subProvider);
+            return authManager.resolveApiKey(subProvider);
+          })(),
+
+          refreshApiKey: async () => {
+            await authManager.assertProviderConfigured(subProvider);
+            return authManager.resolveApiKey(subProvider);
+          },
+
           allowAuthRefreshRetry: true,
 
 
