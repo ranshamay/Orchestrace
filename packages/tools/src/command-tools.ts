@@ -926,14 +926,20 @@ function sanitizeSearchQueryAndMode(input: SanitizedSearchQueryAndModeInput): Va
     useRegex = false;
   }
 
+  let sanitizedQuery = queryValidation.value;
+  if (useRegex) {
+    sanitizedQuery = sanitizeMalformedRegexQuery(sanitizedQuery);
+  }
+
   return {
     ok: true,
     value: {
-      query: queryValidation.value,
+      query: sanitizedQuery,
       useRegex,
     },
   };
 }
+
 
 function isRiskyLiteralCandidate(query: string): boolean {
   const normalized = query.trim().toLowerCase();
@@ -1013,19 +1019,136 @@ function validateQueryMode(rawMode: string | undefined): ValidationResult<'regex
   return { ok: true, value: rawMode };
 }
 
-function validateRegexQuery(query: string): ValidationResult<string> {
+function sanitizeMalformedRegexQuery(query: string): string {
+  if (isValidRegexQuery(query)) {
+    return query;
+  }
+
+  const repaired = escapeUnbalancedRegexTokens(query);
+  if (repaired === query) {
+    return query;
+  }
+
+  return isValidRegexQuery(repaired) ? repaired : query;
+}
+
+function escapeUnbalancedRegexTokens(query: string): string {
+  const chars = Array.from(query);
+  const stack: Array<{ kind: 'group' | 'class' | 'brace'; index: number }> = [];
+  const unmatchedClosingIndexes = new Set<number>();
+
+  for (let i = 0; i < chars.length; i += 1) {
+    const char = chars[i];
+    const isEscaped = isRegexCharEscaped(chars, i);
+
+    if (isEscaped) {
+      continue;
+    }
+
+    if (char === '(') {
+      stack.push({ kind: 'group', index: i });
+      continue;
+    }
+
+    if (char === '[') {
+      stack.push({ kind: 'class', index: i });
+      continue;
+    }
+
+    if (char === '{') {
+      stack.push({ kind: 'brace', index: i });
+      continue;
+    }
+
+    if (char === ')') {
+      const matchIndex = findMatchingOpenToken(stack, 'group');
+      if (matchIndex >= 0) {
+        stack.splice(matchIndex, 1);
+      } else {
+        unmatchedClosingIndexes.add(i);
+      }
+      continue;
+    }
+
+    if (char === ']') {
+      const matchIndex = findMatchingOpenToken(stack, 'class');
+      if (matchIndex >= 0) {
+        stack.splice(matchIndex, 1);
+      } else {
+        unmatchedClosingIndexes.add(i);
+      }
+      continue;
+    }
+
+    if (char === '}') {
+      const matchIndex = findMatchingOpenToken(stack, 'brace');
+      if (matchIndex >= 0) {
+        stack.splice(matchIndex, 1);
+      } else {
+        unmatchedClosingIndexes.add(i);
+      }
+    }
+  }
+
+  const unmatchedOpenIndexes = new Set(stack.map((entry) => entry.index));
+  if (unmatchedOpenIndexes.size === 0 && unmatchedClosingIndexes.size === 0) {
+    return query;
+  }
+
+  let repaired = '';
+  for (let i = 0; i < chars.length; i += 1) {
+    if (unmatchedOpenIndexes.has(i) || unmatchedClosingIndexes.has(i)) {
+      repaired += '\\';
+    }
+    repaired += chars[i];
+  }
+
+  return repaired;
+}
+
+function findMatchingOpenToken(
+  stack: Array<{ kind: 'group' | 'class' | 'brace'; index: number }>,
+  kind: 'group' | 'class' | 'brace',
+): number {
+  for (let i = stack.length - 1; i >= 0; i -= 1) {
+    if (stack[i].kind === kind) {
+      return i;
+    }
+  }
+
+  return -1;
+}
+
+function isRegexCharEscaped(chars: string[], index: number): boolean {
+  let backslashCount = 0;
+  for (let i = index - 1; i >= 0 && chars[i] === '\\'; i -= 1) {
+    backslashCount += 1;
+  }
+
+  return backslashCount % 2 === 1;
+}
+
+function isValidRegexQuery(query: string): boolean {
   try {
-    // Validate deterministically before invoking rg to avoid runtime stderr noise.
     // eslint-disable-next-line no-new
     new RegExp(query);
-    return { ok: true, value: query };
+    return true;
   } catch {
-    return {
-      ok: false,
-      error: 'Invalid regex query.',
-    };
+    return false;
   }
 }
+
+function validateRegexQuery(query: string): ValidationResult<string> {
+  if (isValidRegexQuery(query)) {
+    return { ok: true, value: query };
+  }
+
+  return {
+    ok: false,
+    error: 'Invalid regex query.',
+  };
+}
+
 
 function validateSearchGlob(rawGlob: unknown): ValidationResult<string | undefined> {
   if (rawGlob === undefined) {
