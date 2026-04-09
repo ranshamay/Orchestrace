@@ -1,7 +1,6 @@
 import { execFile } from 'node:child_process';
 import type { Dirent } from 'node:fs';
 import { access, mkdir, readFile, readdir, realpath, rm } from 'node:fs/promises';
-import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 
@@ -41,7 +40,7 @@ export function resolveManagedWorktreeBaseDir(repoPath: string): string {
     return isAbsolute(override) ? override : resolve(repoPath, override);
   }
 
-  return join(homedir(), '.orchestrace', 'worktrees');
+  return join(resolve(repoPath), '.worktrees');
 }
 
 export async function ensureWorktreeExists(options: EnsureWorktreeOptions): Promise<ManagedWorktree> {
