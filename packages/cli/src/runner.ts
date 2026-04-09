@@ -25,6 +25,8 @@ import {
   extractSingleCommandFromPrompt,
   resolveTrivialTaskGateConfig,
 } from '@orchestrace/core';
+import { createContainer } from '@orchestrace/sandbox';
+
 import type { DagEvent, TaskGraph, TaskOutput, TaskRouteCategory, TaskEffort } from '@orchestrace/core';
 import { PiAiAdapter, ProviderAuthManager, type LlmToolCall } from '@orchestrace/provider';
 import {
@@ -154,15 +156,64 @@ interface GitHubApiResponse {
   body: unknown;
 }
 
+type ShellExecutionMode = 'host' | 'sandbox';
+
 interface RunnerShellExecutionDependencies {
   execFile: typeof execFileAsync;
+  execInSandbox: (input: { program: string; args: string[]; cwd: string; timeout?: number }) => Promise<{ stdout: string; stderr: string }>;
   logError: (message: string) => void;
+  logAudit: (event: Record<string, unknown>) => void;
+}
+
+function resolveShellExecutionMode(): ShellExecutionMode {
+  return process.env.ORCHESTRACE_SHELL_EXECUTION_MODE === 'sandbox' ? 'sandbox' : 'host';
+}
+
+async function execShellCommandInSandbox(input: { program: string; args: string[]; cwd: string; timeout?: number }): Promise<{ stdout: string; stderr: string }> {
+  const image = process.env.ORCHESTRACE_SHELL_SANDBOX_IMAGE ?? 'node:22-slim';
+  const minimalPrivileges = process.env.ORCHESTRACE_SHELL_SANDBOX_MIN_PRIVILEGE !== 'false';
+  const disableNetwork = process.env.ORCHESTRACE_SHELL_SANDBOX_DISABLE_NETWORK === 'true';
+  const uid = process.getuid?.();
+  const gid = process.getgid?.();
+  const user = typeof uid === 'number' && typeof gid === 'number' ? `${uid}:${gid}` : undefined;
+  const container = await createContainer({
+    image,
+    workdir: '/workspace',
+    volumes: [`${input.cwd}:/workspace:rw`],
+    user,
+    minimalPrivileges,
+    networkDisabled: disableNetwork,
+  });
+
+    try {
+    const timeoutMs = input.timeout ?? 120_000;
+    let timeoutHandle: NodeJS.Timeout | undefined;
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timeoutHandle = setTimeout(() => {
+        reject(new Error(`Sandbox command timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
+    });
+    const stdout = await Promise.race<string>([
+      container.exec(input.program, input.args),
+      timeoutPromise,
+    ]);
+    if (timeoutHandle) {
+      clearTimeout(timeoutHandle);
+    }
+    return { stdout, stderr: '' };
+  } finally {
+
+    await container.cleanup();
+  }
 }
 
 const defaultRunnerShellExecutionDependencies: RunnerShellExecutionDependencies = {
   execFile: execFileAsync,
+  execInSandbox: execShellCommandInSandbox,
   logError: (message) => console.error(message),
+  logAudit: (event) => console.log(`[shell-audit] ${JSON.stringify(event)}`),
 };
+
 
 // sub-agent failure types are imported from runner-subagent-failure.ts
 
@@ -2615,8 +2666,20 @@ export async function runShellCommandWithTimeoutWithDeps(
   timeout: number,
   deps: RunnerShellExecutionDependencies,
 ): Promise<{ ok: boolean; stdout: string; stderr: string; error?: string }> {
+  const startedAt = Date.now();
+  const mode = resolveShellExecutionMode();
   const validation = validateShellInput(command);
+  const baseAudit = {
+    entrypoint: 'runner.runShellCommandWithTimeout',
+    mode,
+    cwd,
+    inputPreview: compact(command, 240),
+    timeout,
+    timestamp: new Date().toISOString(),
+  };
+
   if (!validation.ok || !validation.parsed) {
+    deps.logAudit({ ...baseAudit, outcome: 'rejected', reason: validation.reason });
     deps.logError(formatShellValidationRejection('runner.runShellCommandWithTimeout', validation.reason));
     return {
       ok: false,
@@ -2626,15 +2689,48 @@ export async function runShellCommandWithTimeoutWithDeps(
     };
   }
 
+  deps.logAudit({
+    ...baseAudit,
+    outcome: 'accepted',
+    program: validation.parsed.program,
+    args: validation.parsed.args,
+  });
+
   try {
-    const { stdout, stderr } = await deps.execFile(validation.parsed.program, validation.parsed.args, {
-      cwd,
-      timeout,
-      maxBuffer: 5 * 1024 * 1024,
+    const result = mode === 'sandbox'
+      ? await deps.execInSandbox({
+        program: validation.parsed.program,
+        args: validation.parsed.args,
+        cwd,
+        timeout,
+      })
+      : await deps.execFile(validation.parsed.program, validation.parsed.args, {
+        cwd,
+        timeout,
+        maxBuffer: 5 * 1024 * 1024,
+      });
+    const stdout = result.stdout ?? '';
+    const stderr = result.stderr ?? '';
+    deps.logAudit({
+      ...baseAudit,
+      outcome: 'executed',
+      status: 'success',
+      program: validation.parsed.program,
+      args: validation.parsed.args,
+      durationMs: Date.now() - startedAt,
     });
     return { ok: true, stdout, stderr };
   } catch (err) {
     const typed = err as ExecFileException;
+    deps.logAudit({
+      ...baseAudit,
+      outcome: 'executed',
+      status: 'failed',
+      program: validation.parsed.program,
+      args: validation.parsed.args,
+      durationMs: Date.now() - startedAt,
+      error: compact(errorMsg(err), 500),
+    });
     return {
       ok: false,
       stdout: typeof typed.stdout === 'string' ? typed.stdout : '',
@@ -2650,9 +2746,19 @@ export async function runShellCommandRouteWithDeps(
   deps: RunnerShellExecutionDependencies,
 ): Promise<Map<string, TaskOutput>> {
   const startedAt = Date.now();
+  const mode = resolveShellExecutionMode();
   const validation = validateShellInput(command);
+  const baseAudit = {
+    entrypoint: 'runner.runShellCommandRoute',
+    mode,
+    cwd,
+    taskId: 'task',
+    inputPreview: compact(command, 240),
+    timestamp: new Date().toISOString(),
+  };
 
   if (!validation.ok || !validation.parsed) {
+    deps.logAudit({ ...baseAudit, outcome: 'rejected', reason: validation.reason });
     deps.logError(formatShellValidationRejection('runner.runShellCommandRoute', validation.reason));
     return new Map([
       ['task', {
@@ -2666,9 +2772,34 @@ export async function runShellCommandRouteWithDeps(
     ]);
   }
 
+  deps.logAudit({
+    ...baseAudit,
+    outcome: 'accepted',
+    program: validation.parsed.program,
+    args: validation.parsed.args,
+  });
+
   try {
-    const { stdout, stderr } = await deps.execFile(validation.parsed.program, validation.parsed.args, { cwd });
-    const text = `${stdout ?? ''}${stderr ?? ''}`.trim();
+    const result = mode === 'sandbox'
+      ? await deps.execInSandbox({
+        program: validation.parsed.program,
+        args: validation.parsed.args,
+        cwd,
+      })
+      : await deps.execFile(validation.parsed.program, validation.parsed.args, { cwd });
+    const stdout = result.stdout ?? '';
+    const stderr = result.stderr ?? '';
+    const text = `${stdout}${stderr}`.trim();
+
+    deps.logAudit({
+      ...baseAudit,
+      outcome: 'executed',
+      status: 'success',
+      program: validation.parsed.program,
+      args: validation.parsed.args,
+      durationMs: Date.now() - startedAt,
+    });
+
     return new Map([
       ['task', {
         taskId: 'task',
@@ -2681,6 +2812,15 @@ export async function runShellCommandRouteWithDeps(
   } catch (error) {
     const err = error as ExecFileException;
     const details = `${err.stdout ?? ''}${err.stderr ?? ''}`.trim();
+    deps.logAudit({
+      ...baseAudit,
+      outcome: 'executed',
+      status: 'failed',
+      program: validation.parsed.program,
+      args: validation.parsed.args,
+      durationMs: Date.now() - startedAt,
+      error: compact(err.message, 500),
+    });
     return new Map([
       ['task', {
         taskId: 'task',
@@ -2693,6 +2833,7 @@ export async function runShellCommandRouteWithDeps(
     ]);
   }
 }
+
 
 async function runShellCommandRoute(command: string, cwd: string): Promise<Map<string, TaskOutput>> {
   return runShellCommandRouteWithDeps(command, cwd, defaultRunnerShellExecutionDependencies);

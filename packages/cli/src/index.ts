@@ -6,9 +6,11 @@ import { fileURLToPath } from 'node:url';
 import { config as loadDotEnv } from 'dotenv';
 import { orchestrate, type TaskRouteCategory } from '@orchestrace/core';
 import type { TaskGraph, DagEvent, PlanApprovalRequest, TaskOutput } from '@orchestrace/core';
+import { createContainer } from '@orchestrace/sandbox';
 import { PiAiAdapter, ProviderAuthManager } from '@orchestrace/provider';
 import type { ProviderInfo } from '@orchestrace/provider';
 import { DEFAULT_AGENT_TOOL_POLICY_VERSION, createAgentToolset } from '@orchestrace/tools';
+
 import { createInterface } from 'node:readline/promises';
 import { promisify } from 'node:util';
 import { startUiServer } from './ui-server.js';
@@ -711,18 +713,52 @@ export function buildSingleTaskGraph(prompt: string, routeCategory: TaskRouteCat
   };
 }
 
+type ShellExecutionMode = 'host' | 'sandbox';
+
 interface ShellRouteDependencies {
   execFile: typeof execFileAsync;
+  execInSandbox: (input: { program: string; args: string[]; cwd: string }) => Promise<{ stdout: string; stderr: string }>;
   stdoutWrite: (message: string) => void;
   stderrWrite: (message: string) => void;
   logError: (message: string) => void;
+  logAudit: (event: Record<string, unknown>) => void;
+}
+
+function resolveShellExecutionMode(): ShellExecutionMode {
+  return process.env.ORCHESTRACE_SHELL_EXECUTION_MODE === 'sandbox' ? 'sandbox' : 'host';
+}
+
+async function execShellCommandInSandbox(input: { program: string; args: string[]; cwd: string }): Promise<{ stdout: string; stderr: string }> {
+  const image = process.env.ORCHESTRACE_SHELL_SANDBOX_IMAGE ?? 'node:22-slim';
+  const minimalPrivileges = process.env.ORCHESTRACE_SHELL_SANDBOX_MIN_PRIVILEGE !== 'false';
+  const disableNetwork = process.env.ORCHESTRACE_SHELL_SANDBOX_DISABLE_NETWORK === 'true';
+  const uid = process.getuid?.();
+  const gid = process.getgid?.();
+  const user = typeof uid === 'number' && typeof gid === 'number' ? `${uid}:${gid}` : undefined;
+  const container = await createContainer({
+    image,
+    workdir: '/workspace',
+    volumes: [`${input.cwd}:/workspace:rw`],
+    user,
+    minimalPrivileges,
+    networkDisabled: disableNetwork,
+  });
+
+  try {
+    const stdout = await container.exec(input.program, input.args);
+    return { stdout, stderr: '' };
+  } finally {
+    await container.cleanup();
+  }
 }
 
 const defaultShellRouteDependencies: ShellRouteDependencies = {
   execFile: execFileAsync,
+  execInSandbox: execShellCommandInSandbox,
   stdoutWrite: (message) => process.stdout.write(message),
   stderrWrite: (message) => process.stderr.write(message),
   logError: (message) => console.error(message),
+  logAudit: (event) => console.log(`[shell-audit] ${JSON.stringify(event)}`),
 };
 
 export async function runShellCommandRouteWithDeps(
@@ -730,14 +766,41 @@ export async function runShellCommandRouteWithDeps(
   cwd: string,
   deps: ShellRouteDependencies,
 ): Promise<number> {
+  const startedAt = Date.now();
   const validation = validateShellInput(command);
+  const mode = resolveShellExecutionMode();
+  const baseAudit = {
+    entrypoint: 'cli.runShellCommandRoute',
+    mode,
+    cwd,
+    inputPreview: previewText(command, 240),
+    timestamp: new Date().toISOString(),
+  };
+
   if (!validation.ok || !validation.parsed) {
+    deps.logAudit({ ...baseAudit, outcome: 'rejected', reason: validation.reason });
     deps.logError(formatShellValidationRejection('cli.runShellCommandRoute', validation.reason));
     return 1;
   }
 
+  deps.logAudit({
+    ...baseAudit,
+    outcome: 'accepted',
+    program: validation.parsed.program,
+    args: validation.parsed.args,
+  });
+
   try {
-    const { stdout, stderr } = await deps.execFile(validation.parsed.program, validation.parsed.args, { cwd });
+    const result = mode === 'sandbox'
+      ? await deps.execInSandbox({
+        program: validation.parsed.program,
+        args: validation.parsed.args,
+        cwd,
+      })
+      : await deps.execFile(validation.parsed.program, validation.parsed.args, { cwd });
+    const stdout = result.stdout ?? '';
+    const stderr = result.stderr ?? '';
+
     if (stdout) {
       deps.stdoutWrite(stdout);
     }
@@ -745,13 +808,32 @@ export async function runShellCommandRouteWithDeps(
     if (stderr) {
       deps.stderrWrite(stderr);
     }
+
+    deps.logAudit({
+      ...baseAudit,
+      outcome: 'executed',
+      status: 'success',
+      program: validation.parsed.program,
+      args: validation.parsed.args,
+      durationMs: Date.now() - startedAt,
+    });
     return 0;
   } catch (error) {
     const details = error instanceof Error ? error.message : String(error);
+    deps.logAudit({
+      ...baseAudit,
+      outcome: 'executed',
+      status: 'failed',
+      program: validation.parsed.program,
+      args: validation.parsed.args,
+      durationMs: Date.now() - startedAt,
+      error: previewText(details, 500),
+    });
     deps.logError(`Shell command failed: ${details}`);
     return 1;
   }
 }
+
 
 async function runShellCommandRoute(command: string, cwd: string): Promise<number> {
   return runShellCommandRouteWithDeps(command, cwd, defaultShellRouteDependencies);

@@ -17,8 +17,8 @@ describe('task routing config', () => {
     expect(parseTaskRouteOverride('invalid')).toBeUndefined();
   });
 
-  it('resolves shell command route with direct strategy', () => {
-    const route = resolveTaskRoute('run pnpm -w test');
+    it('resolves shell command route with direct strategy', () => {
+    const route = resolveTaskRoute('run pnpm run test');
     expect(route.result.category).toBe('shell_command');
     expect(route.result.strategy).toBe('direct_shell');
   });
@@ -122,10 +122,16 @@ describe('task routing config', () => {
     expect(validation.reason).toContain('no executable command was found');
   });
 
-    it('rejects disallowed executable when parsed directly', () => {
+      it('rejects disallowed executable when parsed directly', () => {
     const parsed = parseShellCommandToArgv('ruby -v');
     expect(parsed.ok).toBe(false);
     expect(parsed.reason).toContain('not in the allowed shell command list');
+  });
+
+  it('rejects dangerous git subcommands even when program is allowed', () => {
+    const parsed = parseShellCommandToArgv('git checkout main');
+    expect(parsed.ok).toBe(false);
+    expect(parsed.reason).toContain('explicitly blocked');
   });
 
   it('rejects control characters when parsed directly', () => {
@@ -149,9 +155,9 @@ describe('task routing config', () => {
   });
 
 
-  it('keeps validateShellExecutionPrompt aligned with canonical validator', () => {
-    const canonical = validateShellInput('run pnpm test');
-    const alias = validateShellExecutionPrompt('run pnpm test');
+    it('keeps validateShellExecutionPrompt aligned with canonical validator', () => {
+    const canonical = validateShellInput('run pnpm run test');
+    const alias = validateShellExecutionPrompt('run pnpm run test');
     expect(alias).toEqual(canonical);
   });
 

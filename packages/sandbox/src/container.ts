@@ -4,8 +4,10 @@ import { randomUUID } from 'node:crypto';
 export interface ContainerHandle {
   id: string;
   name: string;
-  /** Execute a command inside the container. */
-  exec(command: string): Promise<string>;
+  /** Execute a command inside the container via argv-safe invocation. */
+  exec(program: string, args?: string[]): Promise<string>;
+  /** Backward-compatible helper for existing call sites that pass a single shell command string. */
+  execCommand(command: string): Promise<string>;
   /** Copy files from host to container. */
   copyTo(hostPath: string, containerPath: string): Promise<void>;
   /** Copy files from container to host. */
@@ -23,6 +25,12 @@ export interface ContainerConfig {
   env?: Record<string, string>;
   /** Volume mounts in `host:container` format. */
   volumes?: string[];
+  /** Run with a reduced privilege profile. Default: true. */
+  minimalPrivileges?: boolean;
+  /** Optional linux user id/group id inside container (for least privilege). */
+  user?: string;
+  /** Restrict network access when true. */
+  networkDisabled?: boolean;
 }
 
 /**
@@ -33,12 +41,27 @@ export async function createContainer(config: ContainerConfig = {}): Promise<Con
   const image = config.image ?? 'node:22-slim';
   const workdir = config.workdir ?? '/workspace';
   const name = `orchestrace-${randomUUID().slice(0, 8)}`;
+  const minimalPrivileges = config.minimalPrivileges ?? true;
 
   const args = [
     'run', '-d',
     '--name', name,
     '-w', workdir,
   ];
+
+  if (minimalPrivileges) {
+    args.push('--security-opt', 'no-new-privileges');
+    args.push('--cap-drop', 'ALL');
+    args.push('--pids-limit', '256');
+  }
+
+  if (config.networkDisabled) {
+    args.push('--network', 'none');
+  }
+
+  if (config.user) {
+    args.push('--user', config.user);
+  }
 
   if (config.env) {
     for (const [key, value] of Object.entries(config.env)) {
@@ -59,7 +82,10 @@ export async function createContainer(config: ContainerConfig = {}): Promise<Con
   return {
     id,
     name,
-    async exec(command: string): Promise<string> {
+    async exec(program: string, programArgs: string[] = []): Promise<string> {
+      return docker(['exec', name, program, ...programArgs]);
+    },
+    async execCommand(command: string): Promise<string> {
       return docker(['exec', name, 'sh', '-c', command]);
     },
     async copyTo(hostPath: string, containerPath: string): Promise<void> {

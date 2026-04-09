@@ -1600,7 +1600,7 @@ describe('github_api tool', () => {
         cwd,
         phase: 'implementation',
         taskType: 'code',
-                resolveGithubToken: async (_options) => 'ghp_test_token',
+                                resolveGithubToken: async () => 'ghp_test_token',
 
       });
 

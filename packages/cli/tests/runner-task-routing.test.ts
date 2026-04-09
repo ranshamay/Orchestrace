@@ -98,14 +98,14 @@ describe('runner task routing parity', () => {
     expect(coercionAudit?.reason).toContain('Shell dispatch blocked by validation');
   });
 
-  it('keeps shell route for user command prompt under shell override', () => {
-    const prompt = '$ pnpm test';
+    it('keeps shell route for user command prompt under shell override', () => {
+    const prompt = '$ pnpm run test';
     const resolvedRoute = resolveTaskRouteForSource(prompt, 'user', 'shell_command').result;
     const dispatch = enforceSafeShellDispatch(prompt, resolvedRoute, 'user');
 
     expect(dispatch.route.category).toBe('shell_command');
     expect(dispatch.shell.ok).toBe(true);
-    expect(dispatch.shell.command).toBe('pnpm test');
+    expect(dispatch.shell.command).toBe('pnpm run test');
     expect(deriveRoutingCoercionAudit(resolvedRoute, dispatch)).toBeUndefined();
   });
 
