@@ -13,9 +13,10 @@
     "test": "vitest run --config vitest.config.ts",
     "clean": "rm -rf dist"
   },
-  "dependencies": {
+    "dependencies": {
     "@mariozechner/pi-ai": "^0.64.0",
     "@orchestrace/context": "workspace:*",
+    "@orchestrace/core": "workspace:*",
     "@orchestrace/provider": "workspace:*"
   },
   "devDependencies": {
