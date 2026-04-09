@@ -22,6 +22,14 @@ type DiffFileSection = {
 
 type DiffLineKind = 'added' | 'removed' | 'hunk' | 'meta' | 'context';
 
+type DirectoryImpact = {
+  directory: string;
+  additions: number;
+  deletions: number;
+  files: number;
+  total: number;
+};
+
 const STATUS_FILTERS: StatusFilter[] = ['all', 'added', 'modified', 'deleted', 'renamed', 'copied', 'unmerged', 'unknown'];
 
 const REFRESH_INTERVAL_MS = 8_000;
@@ -120,6 +128,9 @@ export function CodeChangesCard({ selectedSession, selectedSessionRunning }: Pro
     }
     return fileSections.filter((section) => section.status === statusFilter);
   }, [fileSections, statusFilter]);
+
+  const directoryImpacts = useMemo(() => summarizeDirectoryImpacts(fileSections), [fileSections]);
+  const maxDirectoryTotal = directoryImpacts[0]?.total ?? 0;
 
   const activeSection = useMemo(() => {
     if (visibleSections.length === 0) {
@@ -226,6 +237,27 @@ export function CodeChangesCard({ selectedSession, selectedSessionRunning }: Pro
                   <StoryBlock label="Why" text={summarizeSessionIntent(selectedSession)} />
                   <StoryBlock label="What changed" text={summarizeSnapshotChange(snapshot)} />
                 </div>
+                {directoryImpacts.length > 0 && (
+                  <div className="mt-2 rounded border border-slate-200 bg-white px-2 py-1.5 dark:border-slate-800 dark:bg-slate-900">
+                    <div className="text-[10px] font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">Hotspots by directory</div>
+                    <div className="mt-1.5 space-y-1.5">
+                      {directoryImpacts.slice(0, 5).map((impact) => (
+                        <div key={impact.directory} className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
+                          <div className="min-w-0">
+                            <div className="flex items-center justify-between gap-2 text-[10px] text-slate-600 dark:text-slate-300">
+                              <span className="truncate font-mono">{impact.directory}</span>
+                              <span className="font-mono">+{impact.additions} -{impact.deletions}</span>
+                            </div>
+                            <div className="mt-1 flex h-1.5 overflow-hidden rounded-full bg-slate-200 dark:bg-slate-800">
+                              <div className="bg-cyan-500" style={{ width: `${toPercent(impact.total, maxDirectoryTotal)}%` }} />
+                            </div>
+                          </div>
+                          <span className="rounded bg-slate-200 px-1.5 py-0.5 font-mono text-[10px] text-slate-600 dark:bg-slate-800 dark:text-slate-300">{impact.files} files</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
 
               <div className="flex flex-wrap gap-1">
@@ -602,4 +634,51 @@ function diffDotClass(kind: DiffLineKind): string {
     return 'bg-slate-500';
   }
   return 'bg-slate-300 dark:bg-slate-600';
+}
+
+function summarizeDirectoryImpacts(sections: DiffFileSection[]): DirectoryImpact[] {
+  const map = new Map<string, DirectoryImpact>();
+
+  for (const section of sections) {
+    const directory = toDisplayDirectory(section.path);
+    const next = map.get(directory) ?? {
+      directory,
+      additions: 0,
+      deletions: 0,
+      files: 0,
+      total: 0,
+    };
+
+    next.additions += section.additions;
+    next.deletions += section.deletions;
+    next.files += 1;
+    next.total += section.additions + section.deletions;
+    map.set(directory, next);
+  }
+
+  return [...map.values()].sort((a, b) => {
+    if (b.total !== a.total) {
+      return b.total - a.total;
+    }
+    if (b.files !== a.files) {
+      return b.files - a.files;
+    }
+    return a.directory.localeCompare(b.directory);
+  });
+}
+
+function toDisplayDirectory(path: string): string {
+  const parts = path.split('/').filter(Boolean);
+  if (parts.length <= 1) {
+    return '(root)';
+  }
+
+  return parts.slice(0, Math.min(2, parts.length - 1)).join('/');
+}
+
+function toPercent(value: number, max: number): number {
+  if (max <= 0) {
+    return 0;
+  }
+  return Math.max(6, Math.round((value / max) * 100));
 }
