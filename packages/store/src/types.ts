@@ -122,6 +122,12 @@ export interface SessionConfig {
   quickStartMode?: boolean;
   /** Max successful tool calls allowed before first successful sub-agent delegation in quick-start mode. */
   quickStartMaxPreDelegationToolCalls?: number;
+  /** Preferred execution context for this session. */
+  executionContext?: 'workspace' | 'git-worktree';
+  /** Optional selected worktree path when using git-worktree context. */
+  selectedWorktreePath?: string;
+  /** Legacy compatibility switch for worktree mode. */
+  useWorktree?: boolean;
   adaptiveConcurrency: boolean;
   batchConcurrency: number;
   batchMinConcurrency: number;
@@ -129,6 +135,14 @@ export interface SessionConfig {
   trivialTaskMaxPromptLength?: number;
   worktreePath?: string;
   worktreeBranch?: string;
+  workspaceAssignment?: {
+    assignmentSource: 'workspace-root' | 'selected-worktree' | 'fallback-worktree' | 'auto-created-worktree';
+    reusedExistingWorktree?: boolean;
+    cleanupApplied?: boolean;
+    cleanupDefaultBranch?: string;
+    workspacePathSessionIdRelation?: 'match' | 'mismatch' | 'none';
+    workspacePathSessionId?: string;
+  };
   creationReason: SessionCreationReason;
   sourceSessionId?: string;
   /** Session origin: 'user' (default) or 'observer' (auto-created by observer agent). */
