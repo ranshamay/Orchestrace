@@ -187,7 +187,8 @@ function createInheritedSubAgentToolset(
     adaptiveConcurrency?: boolean;
     batchConcurrency?: number;
     batchMinConcurrency?: number;
-    resolveGithubToken: () => Promise<string | undefined>;
+        resolveGithubToken: (options?: { allowRefresh?: boolean; minimumTtlSeconds?: number }) => Promise<string | undefined>;
+
     sharedContextStore?: import('@orchestrace/context').SharedContextStore;
     agentId?: string;
     fileReadCache?: ReturnType<typeof createFileReadCache> | Map<string, { content: string; mtimeMs: number; size: number; readAt: number }>;
@@ -2615,7 +2616,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           adaptiveConcurrency: session.adaptiveConcurrency,
           batchConcurrency: session.batchConcurrency,
           batchMinConcurrency: session.batchMinConcurrency,
-          resolveGithubToken: () => githubAuthManager.resolveApiKey(GITHUB_PROVIDER_ID),
+                    resolveGithubToken: (resolveOptions) => githubAuthManager.resolveApiKey(GITHUB_PROVIDER_ID, resolveOptions),
+
           runSubAgent: async () => ({ text: '' }),
         });
 
@@ -3049,7 +3051,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                 adaptiveConcurrency: session.adaptiveConcurrency,
                 batchConcurrency: session.batchConcurrency,
                 batchMinConcurrency: session.batchMinConcurrency,
-                resolveGithubToken: () => githubAuthManager.resolveApiKey(GITHUB_PROVIDER_ID),
+                          resolveGithubToken: (resolveOptions) => githubAuthManager.resolveApiKey(GITHUB_PROVIDER_ID, resolveOptions),
+
                 sharedContextStore: sessionSharedContextStores.get(session.id),
                 fileReadCache,
                 agentId: `chat::${session.id}`,
@@ -3085,7 +3088,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                     adaptiveConcurrency: session.adaptiveConcurrency,
                     batchConcurrency: session.batchConcurrency,
                     batchMinConcurrency: session.batchMinConcurrency,
-                    resolveGithubToken: () => githubAuthManager.resolveApiKey(GITHUB_PROVIDER_ID),
+                              resolveGithubToken: (resolveOptions) => githubAuthManager.resolveApiKey(GITHUB_PROVIDER_ID, resolveOptions),
+
                     sharedContextStore: sessionSharedContextStores.get(session.id),
                     fileReadCache,
                     agentId: `subagent::${subAgentTaskId}`,
@@ -3446,7 +3450,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
               adaptiveConcurrency: session.adaptiveConcurrency,
               batchConcurrency: session.batchConcurrency,
               batchMinConcurrency: session.batchMinConcurrency,
-              resolveGithubToken: () => githubAuthManager.resolveApiKey(GITHUB_PROVIDER_ID),
+                        resolveGithubToken: (resolveOptions) => githubAuthManager.resolveApiKey(GITHUB_PROVIDER_ID, resolveOptions),
+
               sharedContextStore: sessionSharedContextStores.get(session.id),
               fileReadCache,
               agentId: `chat::${session.id}`,
@@ -3482,7 +3487,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                   adaptiveConcurrency: session.adaptiveConcurrency,
                   batchConcurrency: session.batchConcurrency,
                   batchMinConcurrency: session.batchMinConcurrency,
-                  resolveGithubToken: () => githubAuthManager.resolveApiKey(GITHUB_PROVIDER_ID),
+                            resolveGithubToken: (resolveOptions) => githubAuthManager.resolveApiKey(GITHUB_PROVIDER_ID, resolveOptions),
+
                   sharedContextStore: sessionSharedContextStores.get(session.id),
                   fileReadCache,
                   agentId: `subagent::${subAgentTaskId}`,

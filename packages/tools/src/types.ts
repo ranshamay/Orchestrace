@@ -13,7 +13,13 @@ export interface AgentToolPermissions {
   toolBlocklist?: string[];
 }
 
+export interface ResolveGithubTokenOptions {
+  minimumTtlSeconds?: number;
+  allowRefresh?: boolean;
+}
+
 export interface AgentToolsetOptions {
+
   cwd: string;
   phase?: AgentToolPhase;
   taskRequiresWrites?: boolean;
@@ -31,7 +37,8 @@ export interface AgentToolsetOptions {
   permissions?: Partial<AgentToolPermissions>;
   runSubAgent?: (request: SubAgentRequest, signal?: AbortSignal) => Promise<SubAgentResult>;
   modeController?: AgentModeController;
-  resolveGithubToken?: () => Promise<string | undefined>;
+    resolveGithubToken?: (options?: ResolveGithubTokenOptions) => Promise<string | undefined>;
+
   sharedContextStore?: SharedContextStore;
   agentId?: string;
   fileReadCache?: FileReadCache | SessionFileReadCache;
