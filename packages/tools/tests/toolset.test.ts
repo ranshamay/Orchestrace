@@ -672,7 +672,7 @@ describe('search_files tool', () => {
     expect(result.content.toLowerCase()).not.toContain('no such file or directory');
   });
 
-  it('returns a clear validation error when glob is used with a file path', async () => {
+    it('returns a clear validation error when glob is used with a file path', async () => {
     const cwd = await makeWorkspace();
     await writeFile(join(cwd, 'src', 'file-only.txt'), 'value\n', 'utf-8');
     const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
@@ -689,6 +689,45 @@ describe('search_files tool', () => {
 
     expect(result.isError).toBe(true);
     expect(result.content).toBe('Invalid glob usage: glob can only be used when path points to a directory.');
+    expect(result.content.toLowerCase()).not.toContain('no such file or directory');
+  });
+
+  it('returns a deterministic error when cwd is invalid', async () => {
+    const cwd = await makeWorkspace();
+    const invalidCwd = join(cwd, 'definitely-missing-cwd');
+    const toolset = createAgentToolset({ cwd: invalidCwd, phase: 'planning', taskType: 'code' });
+
+    const result = await toolset.executeTool({
+      id: '1',
+      name: 'search_files',
+      arguments: {
+        query: 'value',
+        path: 'src',
+      },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content).toContain('Invalid working directory for search_files:');
+    expect(result.content.toLowerCase()).not.toContain('ripgrep');
+    expect(result.content.toLowerCase()).not.toContain('no such file or directory');
+  });
+
+  it('accepts absolute search path inside workspace and returns normalized matches', async () => {
+    const cwd = await makeWorkspace();
+    await writeFile(join(cwd, 'src', 'coordination.ts'), 'interface CoordinationState { ok: true }\n', 'utf-8');
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+
+    const result = await toolset.executeTool({
+      id: '1',
+      name: 'search_files',
+      arguments: {
+        query: 'interface CoordinationState',
+        path: join(cwd, 'src'),
+      },
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.content).toContain('src/coordination.ts:1:interface CoordinationState { ok: true }');
     expect(result.content.toLowerCase()).not.toContain('no such file or directory');
   });
 });
