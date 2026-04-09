@@ -8,6 +8,9 @@ import { ObserverDaemon } from '../src/observer/daemon.js';
 import { LogWatcher } from '../src/observer/log-watcher.js';
 import { validateShellExecutionPrompt } from '../src/task-routing.js';
 
+type ObserverDaemonOptions = ConstructorParameters<typeof ObserverDaemon>[0];
+type LogWatcherOptions = ConstructorParameters<typeof LogWatcher>[0];
+
 function createEventStoreStub(): EventStore {
   return {
     append: async () => 0,
@@ -31,7 +34,7 @@ describe('log watcher fix-session emission', () => {
       const daemon = new ObserverDaemon({
         orchestraceDir,
         eventStore: createEventStoreStub(),
-        llm: { complete: vi.fn() } as unknown as any,
+        llm: { complete: vi.fn() } as ObserverDaemonOptions['llm'],
         startSession,
         resolveApiKey: async () => undefined,
       });
@@ -89,7 +92,7 @@ describe('log watcher fix-session emission', () => {
       const daemon = new ObserverDaemon({
         orchestraceDir,
         eventStore: createEventStoreStub(),
-        llm: { complete: vi.fn() } as unknown as any,
+        llm: { complete: vi.fn() } as ObserverDaemonOptions['llm'],
         startSession,
         resolveApiKey: async () => undefined,
       });
@@ -187,9 +190,9 @@ describe('log watcher fix-session emission', () => {
 
     const emitted: string[] = [];
     const watcher = new LogWatcher({
-      llm: { complete } as unknown as any,
+      llm: { complete } as LogWatcherOptions['llm'],
       config: DEFAULT_OBSERVER_CONFIG,
-      logger: logger as unknown as any,
+      logger: logger as LogWatcherOptions['logger'],
       resolveApiKey: async () => undefined,
       batchSize: 1,
       timeWindowMs: 60_000,
@@ -199,7 +202,7 @@ describe('log watcher fix-session emission', () => {
     });
 
     try {
-      watcher.start(logger as unknown as any);
+      watcher.start(logger as LogWatcherOptions['logger']);
       onLineHandler?.('first line');
       await vi.waitFor(() => {
         expect(emitted).toEqual(['Repeated timeout']);
@@ -245,7 +248,7 @@ describe('log watcher fix-session emission', () => {
       const daemon = new ObserverDaemon({
         orchestraceDir,
         eventStore: createEventStoreStub(),
-        llm: { complete: vi.fn() } as unknown as any,
+        llm: { complete: vi.fn() } as ObserverDaemonOptions['llm'],
         startSession,
         resolveApiKey: async () => undefined,
       });
