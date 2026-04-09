@@ -5,6 +5,8 @@ import { Type } from '@mariozechner/pi-ai';
 import type { AgentToolsetOptions, RegisteredAgentTool } from './types.js';
 import { resolveWorkspacePath, toWorkspaceRelative } from './path-utils.js';
 import { formatCommandOutput, runCommand } from './command-tools/command-runner.js';
+import { isRipgrepPathError, runSafeRipgrep } from './command-tools/safe-ripgrep.js';
+
 import {
   asRequiredString,
   asString,
@@ -169,20 +171,16 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
         }
 
 
-        const args = ['-n', '--no-heading', '--color', 'never', '-e', query];
-        if (!useRegex) {
-          args.push('--fixed-strings');
-        }
-        if (globValidation.value) {
-          args.push('--glob', globValidation.value);
-        }
-        args.push('--', relTarget);
-
-        const result = await runCommand('rg', args, {
+                const result = await runSafeRipgrep({
           cwd: resolvedCwd.cwd,
+          query,
+          relTarget,
+          useRegex,
+          glob: globValidation.value,
           timeoutMs: options.commandTimeoutMs ?? 20000,
           signal,
         });
+
 
         const stderr = result.stderr.trim();
 
@@ -246,7 +244,9 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
           });
         }
 
-        const hasPathError = hasRipgrepPathError(stderr);
+                        const hasPathError = hasRipgrepPathError(stderr);
+
+
 
 
                 if (result.exitCode === 1 && result.stdout.trim().length === 0) {
@@ -1144,17 +1144,10 @@ async function normalizeRequestedSearchPath(rawPath: string): Promise<string> {
 }
 
 function hasRipgrepPathError(stderr: string): boolean {
-  return isDeterministicRipgrepPathError(stderr);
+  return isRipgrepPathError(stderr);
 }
 
-function isDeterministicRipgrepPathError(stderr: string): boolean {
-  const normalized = stderr.trim();
-  if (normalized.length === 0) {
-    return false;
-  }
 
-  return /\bNo such file or directory\b|\bos error 2\b|\bENOENT\b/i.test(normalized);
-}
 
 function isMissingPathErrorLike(error: unknown): boolean {
   if (!error) {

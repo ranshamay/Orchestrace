@@ -965,7 +965,7 @@ describe('search_files tool', () => {
     expect(result.content.toLowerCase()).not.toContain('os error 2');
   });
 
-  it('still supports explicit regex semantics for function-call-like snippets', async () => {
+    it('still supports explicit regex semantics for function-call-like snippets', async () => {
     const cwd = await makeWorkspace();
     await writeFile(
       join(cwd, 'src', 'exec-regex.ts'),
@@ -988,6 +988,64 @@ describe('search_files tool', () => {
     expect(result.content).toContain("exec-regex.ts:1:execFileAsync('sh', ['-lc', 'one']);");
     expect(result.content).toContain("exec-regex.ts:2:execFileAsync('shh', ['-lc', 'two']);");
   });
+
+  it('treats observer shell fragments as literal query text by default', async () => {
+    const cwd = await makeWorkspace();
+    await writeFile(
+      join(cwd, 'src', 'observer-shell-fragments.txt'),
+      ['sh -lc', 'zsh -lc', 'exec(', 'execX'].join('\n') + '\n',
+      'utf-8',
+    );
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+
+    const patterns = ['sh -lc', 'zsh -lc', 'exec('];
+    for (const query of patterns) {
+      const result = await toolset.executeTool({
+        id: `observer-shell-${query}`,
+        name: 'search_files',
+        arguments: {
+          query,
+          path: 'src',
+        },
+      });
+
+      expect(result.isError).toBeFalsy();
+      expect(result.content).toContain(query);
+      expect(result.content.toLowerCase()).not.toContain('no such file or directory');
+      expect(result.content.toLowerCase()).not.toContain('os error 2');
+    }
+  });
+
+  it('always invokes rg with literal-safe flags for default query mode', async () => {
+    const cwd = await makeWorkspace();
+    await writeFile(join(cwd, 'src', 'shell-safe.txt'), 'sh -lc\n', 'utf-8');
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+
+    const runCommandSpy = vi.spyOn(commandRunner, 'runCommand');
+
+    const result = await toolset.executeTool({
+      id: 'literal-args-safe',
+      name: 'search_files',
+      arguments: {
+        query: 'sh -lc',
+        path: 'src',
+      },
+    });
+
+    expect(result.isError).toBeFalsy();
+        expect(runCommandSpy).toHaveBeenCalledWith(
+      'rg',
+      expect.arrayContaining(['-e', 'sh -lc', '--fixed-strings', '--', 'src']),
+      expect.objectContaining({
+        cwd: expect.any(String),
+        timeoutMs: 20000,
+      }),
+    );
+
+
+    runCommandSpy.mockRestore();
+  });
+
 
   it('skips invalid target paths without surfacing retriable ripgrep errors', async () => {
 
