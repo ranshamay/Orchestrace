@@ -149,10 +149,25 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
         });
 
         if (result.exitCode === -1) {
-          return {
-            content: 'ripgrep (rg) is required but was not found in PATH.',
-            isError: true,
-          };
+          try {
+            const fallback = await fallbackSearchFromFs({
+              cwd: resolvedCwd.cwd,
+              target: canonicalTarget ?? target,
+              relTarget,
+              query,
+              useRegex,
+              glob: globValidation.value,
+              maxChars: options.maxOutputChars ?? 16000,
+            });
+            return {
+              content: fallback,
+            };
+          } catch (error) {
+            return {
+              content: error instanceof Error ? error.message : String(error),
+              isError: true,
+            };
+          }
         }
 
         if (result.exitCode === 2 && useRegex) {
