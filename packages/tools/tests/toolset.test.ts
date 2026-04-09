@@ -832,11 +832,11 @@ describe('search_files tool', () => {
     expect(result.content.toLowerCase()).not.toContain('no such file or directory');
   });
 
-  it('treats shell-like query text such as sh -c as a literal search by default', async () => {
+    it('treats shell-like query text such as sh -lc as a literal search by default', async () => {
     const cwd = await makeWorkspace();
     await writeFile(
       join(cwd, 'src', 'shell-like.txt'),
-      'sh -c\nshh -c\n',
+      'sh -lc\nshh -lc\n',
       'utf-8',
     );
     const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
@@ -845,16 +845,17 @@ describe('search_files tool', () => {
       id: '1',
       name: 'search_files',
       arguments: {
-        query: 'sh -c',
+        query: 'sh -lc',
         path: 'src',
       },
     });
 
     expect(result.isError).toBeFalsy();
-    expect(result.content).toContain('shell-like.txt:1:sh -c');
-    expect(result.content).not.toContain('shell-like.txt:2:shh -c');
+    expect(result.content).toContain('shell-like.txt:1:sh -lc');
+    expect(result.content).not.toContain('shell-like.txt:2:shh -lc');
     expect(result.content.toLowerCase()).not.toContain('no such file or directory');
   });
+
 
     it('honors explicit regex mode even for shell-like query text', async () => {
     const cwd = await makeWorkspace();

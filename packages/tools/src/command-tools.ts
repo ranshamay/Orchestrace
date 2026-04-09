@@ -973,6 +973,8 @@ function resolveSearchQueryMode(input: {
 
 
 
+const MAX_SEARCH_QUERY_LENGTH = 4096;
+
 function validateSearchQuery(rawQuery: unknown): ValidationResult<string> {
 
   if (typeof rawQuery !== 'string') {
@@ -987,6 +989,13 @@ function validateSearchQuery(rawQuery: unknown): ValidationResult<string> {
     return {
       ok: false,
       error: 'Invalid query: query must not be empty.',
+    };
+  }
+
+  if (trimmedQuery.length > MAX_SEARCH_QUERY_LENGTH) {
+    return {
+      ok: false,
+      error: `Invalid query: query is too long (max ${MAX_SEARCH_QUERY_LENGTH} characters).`,
     };
   }
 
@@ -1020,6 +1029,7 @@ function validateSearchQuery(rawQuery: unknown): ValidationResult<string> {
 
   return { ok: true, value: trimmedQuery };
 }
+
 
 function hasUnsupportedSearchControlChars(query: string): boolean {
   return /[\u0001-\u0008\u000B\u000C\u000E-\u001F\u007F]/.test(query);
@@ -1153,8 +1163,26 @@ function isDeterministicRipgrepPathError(stderr: string): boolean {
     return false;
   }
 
-  return /\bNo such file or directory\b|\bos error 2\b|\bENOENT\b/i.test(normalized);
+  const pathErrorLines = normalized
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .filter((line) => /\bNo such file or directory\b|\bos error 2\b|\bENOENT\b/i.test(line));
+
+  if (pathErrorLines.length === 0) {
+    return false;
+  }
+
+  return pathErrorLines.some(isStructuredRipgrepPathErrorLine);
 }
+
+function isStructuredRipgrepPathErrorLine(line: string): boolean {
+  // Keep this narrow: only classify as a deterministic path error when rg
+  // reports a concrete path-shaped diagnostic (e.g., "rg: ./src: No such file...").
+  // This avoids misclassifying query text that happens to include ENOENT terms.
+  return /^rg:\s+.+:\s+(?:No such file or directory|.*\(os error 2\)|ENOENT)/i.test(line);
+}
+
 
 function isMissingPathErrorLike(error: unknown): boolean {
   if (!error) {
