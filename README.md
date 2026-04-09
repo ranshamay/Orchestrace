@@ -142,7 +142,18 @@ export ANTHROPIC_API_KEY=sk-...
 
 OpenAI, Anthropic, Google, Vertex AI, Mistral, Groq, Cerebras, xAI, OpenRouter, Amazon Bedrock, and any OpenAI-compatible API (Ollama, vLLM, LM Studio, etc.)
 
+## Deployment
+
+Deployment architecture and rollout instructions are documented in [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md).
+
+Infrastructure-as-code and workflow assets:
+
+- Terraform: `infra/terraform`
+- Compute deploy script: `infra/scripts/deploy-compute.sh`
+- GitHub Actions deploy workflow: `.github/workflows/deploy.yml`
+
 ## Development
+
 
 ```bash
 pnpm install
