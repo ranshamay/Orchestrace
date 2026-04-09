@@ -62,4 +62,20 @@ describe('task routing config', () => {
     expect(validation.ok).toBe(false);
     expect(validation.command).toBeUndefined();
   });
+
+  it('routes a near-verbatim observer fix prompt to full planning pipeline', () => {
+    const observerPrompt = `[Observer Fix] Observer-generated task prompt passed directly to shell instead of agent runtime
+
+Category: architecture | Severity: critical
+
+## Issue
+The shell attempted to interpret markdown as commands and failed immediately.
+
+## Task
+Route observer prompts through agent runtime instead of sh -lc.`;
+    const route = resolveTaskRoute(observerPrompt);
+    expect(route.result.category).toBe('code_change');
+    expect(route.result.strategy).toBe('full_planning_pipeline');
+    expect(extractShellCommand(observerPrompt)).toBeUndefined();
+  });
 });

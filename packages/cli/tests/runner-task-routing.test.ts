@@ -24,4 +24,11 @@ describe('runner task routing parity', () => {
     expect(coerced.strategy).toBe('full_planning_pipeline');
     expect(coerced.source).toBe('fallback');
   });
+
+  it('does not coerce user shell routes', () => {
+    const shellRoute = resolveTaskRoute('run git status').result;
+    const coerced = coerceRouteForSessionSource(shellRoute, 'user');
+    expect(coerced).toBe(shellRoute);
+    expect(coerced.category).toBe('shell_command');
+  });
 });

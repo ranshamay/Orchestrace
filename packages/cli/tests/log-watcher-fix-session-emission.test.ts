@@ -6,6 +6,7 @@ import type { EventStore } from '@orchestrace/store';
 import { DEFAULT_OBSERVER_CONFIG } from '../src/observer/types.js';
 import { ObserverDaemon } from '../src/observer/daemon.js';
 import { LogWatcher } from '../src/observer/log-watcher.js';
+import { validateShellCommandPrompt } from '../src/task-routing.js';
 
 function createEventStoreStub(): EventStore {
   return {
