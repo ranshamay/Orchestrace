@@ -1,7 +1,7 @@
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { BackendLogger } from '../src/observer/backend-logger.js';
 import { LOG_REDACTION_MARKERS } from '../src/runner/log-sanitizer.js';
 
@@ -28,7 +28,11 @@ describe('backend logger sanitization', () => {
       logger.stop();
 
       const logPath = logger.getLogPath();
-      const persisted = await readFile(logPath, 'utf8');
+      let persisted = '';
+      await vi.waitFor(async () => {
+        persisted = await readFile(logPath, 'utf8');
+        expect(persisted.length).toBeGreaterThan(0);
+      });
       const streamed = received.join('\n');
 
       for (const output of [persisted, streamed]) {
