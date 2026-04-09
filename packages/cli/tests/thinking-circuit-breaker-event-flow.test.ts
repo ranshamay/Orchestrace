@@ -58,9 +58,10 @@ describe('thinking circuit breaker event-flow semantics', () => {
     process(planningDelta(), THINKING_NO_TOOL_PROGRESS_ABORT_MS);
     expect(emittedMessages).toEqual([THINKING_CIRCUIT_BREAKER_NUDGE, THINKING_CIRCUIT_BREAKER_ABORT]);
 
-    process(toolCall, THINKING_NO_TOOL_PROGRESS_ABORT_MS + 1_000);
+    const resetAt = THINKING_NO_TOOL_PROGRESS_ABORT_MS + 1_000;
+    process(toolCall, resetAt);
 
-    process(planningDelta(), THINKING_NO_TOOL_PROGRESS_ABORT_MS + THINKING_NO_TOOL_PROGRESS_NUDGE_MS);
+    process(planningDelta(), resetAt + THINKING_NO_TOOL_PROGRESS_NUDGE_MS);
     expect(emittedMessages).toEqual([
       THINKING_CIRCUIT_BREAKER_NUDGE,
       THINKING_CIRCUIT_BREAKER_ABORT,

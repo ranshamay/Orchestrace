@@ -8,7 +8,7 @@ import { access, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import { PromptSectionName, renderPromptSections } from '@orchestrace/core';
+import { PromptSectionName, renderPromptSections, classifyTrivialTaskPrompt } from '@orchestrace/core';
 import type { DagEvent, PromptSection } from '@orchestrace/core';
 import { getModels } from '@mariozechner/pi-ai';
 import { PiAiAdapter, ProviderAuthManager, type LlmPromptInput, type LlmToolCallEvent } from '@orchestrace/provider';
@@ -7646,6 +7646,72 @@ async function buildManagedChatContinuationInput(params: {
   }
 }
 
+type SessionPlanningGuardState = {
+  consecutiveNonWriteToolCalls: number;
+  forcedImplementation: boolean;
+};
+
+type PlanningToolCallGuardParams = {
+  session: WorkSession;
+  continuationPhase: 'planning' | 'implementation';
+  toolEvent: LlmToolCallEvent;
+  sessionPlanningGuards: Map<string, SessionPlanningGuardState>;
+  persistEvent: (sessionId: string, event: SessionEventInput) => void;
+  uiStatePersistence: { schedule: () => void; flush: () => Promise<void> };
+};
+
+function getSessionPlanningGuardState(): SessionPlanningGuardState {
+  return {
+    consecutiveNonWriteToolCalls: 0,
+    forcedImplementation: false,
+  };
+}
+
+function isSimpleSessionTaskPrompt(prompt: string): boolean {
+  return classifyTrivialTaskPrompt(prompt).isTrivial;
+}
+
+function isWriteToolName(toolName: string): boolean {
+  return toolName === 'edit_file' || toolName === 'write_file' || toolName === 'write_files' || toolName === 'edit_files';
+}
+
+function enforcePlanningToolCallGuard(params: PlanningToolCallGuardParams): void {
+  const { session, continuationPhase, toolEvent, sessionPlanningGuards, persistEvent, uiStatePersistence } = params;
+  if (continuationPhase !== 'planning' || toolEvent.type !== 'started') {
+    return;
+  }
+
+  const maxNonWriteCalls = parsePositiveSetting(process.env.ORCHESTRACE_MAX_TOOL_CALLS_WITHOUT_WRITE) ?? 3;
+  const state = sessionPlanningGuards.get(session.id) ?? getSessionPlanningGuardState();
+
+  if (isWriteToolName(toolEvent.toolName)) {
+    state.consecutiveNonWriteToolCalls = 0;
+    state.forcedImplementation = false;
+    sessionPlanningGuards.set(session.id, state);
+    return;
+  }
+
+  state.consecutiveNonWriteToolCalls += 1;
+
+  if (state.consecutiveNonWriteToolCalls > maxNonWriteCalls) {
+    state.forcedImplementation = true;
+    session.llmStatus = {
+      ...session.llmStatus,
+      phase: 'implementation',
+      detail: `Planning guard triggered after ${state.consecutiveNonWriteToolCalls} consecutive non-write tool calls.`,
+      updatedAt: now(),
+    };
+    persistEvent(session.id, {
+      time: now(),
+      type: 'session:llm-status-change',
+      payload: { llmStatus: session.llmStatus },
+    });
+    uiStatePersistence.schedule();
+  }
+
+  sessionPlanningGuards.set(session.id, state);
+}
+
 function buildContextExecutionStateSummary(session: WorkSession, todos: AgentTodoItem[]): string {
   const doneCount = todos.filter((todo) => todo.done || todo.status === 'done').length;
   const pendingTodos = todos
@@ -7672,7 +7738,7 @@ function buildContextExecutionStateSummary(session: WorkSession, todos: AgentTod
   return lines.join('\n');
 }
 
-function buildSessionSystemPrompt(session: WorkSession, phase: SessionPromptPhase): string {
+export function buildSessionSystemPrompt(session: WorkSession, phase: SessionPromptPhase): string {
   const quickStartMode = session.quickStartMode
     ?? (parseBooleanSetting(process.env.ORCHESTRACE_QUICK_START_MODE) ?? false);
   const quickStartMaxPreDelegationToolCalls = normalizePositiveSetting(
@@ -7713,6 +7779,9 @@ function buildSessionSystemPrompt(session: WorkSession, phase: SessionPromptPhas
             'todo_set items must include numeric weight values and the total todo weight must sum to 100.',
             'agent_graph_set nodes must include numeric weight values and the total node weight must sum to 100.',
             'Planning must use subagent_spawn or subagent_spawn_batch for focused parallel research and delegate only relevant context.',
+            'For simple single-file tasks, skip sub-agent delegation and execute directly when safe.',
+            'Planning is budgeted: keep planning activity under 25% of total effort before execution begins.',
+            'If session guard thresholds are exceeded, transition from planning to implementation with a concise execution checklist.',
             'Quick-start mode for well-scoped tasks: keep parent pre-delegation orientation to at most 3-4 calls and delegate within the first 2-3 calls whenever possible.',
             'Keep parent orientation lightweight and push detailed file reading/search into sub-agent scopes.',
             'For independent nodes, use subagent_spawn_batch so work runs in parallel.',
@@ -7814,6 +7883,12 @@ function hasFollowUpSuggestions(text: string): boolean {
     || normalized.includes('next followup suggestions')
     || normalized.includes('next steps');
 }
+
+export {
+  enforcePlanningToolCallGuard,
+  getSessionPlanningGuardState,
+  isSimpleSessionTaskPrompt,
+};
 
 function buildFollowUpSuggestionsBlock(phase: FollowUpSuggestionPhase): string {
   const suggestions = phase === 'planning'

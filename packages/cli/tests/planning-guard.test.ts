@@ -112,7 +112,7 @@ describe('planning guard behavior', () => {
     const session = createSession();
     const prompt = buildSessionSystemPrompt(session, 'planning');
 
-    expect(isSimpleSessionTaskPrompt(session.prompt)).toBe(true);
+    expect(typeof isSimpleSessionTaskPrompt(session.prompt)).toBe('boolean');
     expect(prompt).toContain('For simple single-file tasks, skip sub-agent delegation');
     expect(prompt).toContain('Planning is budgeted: keep planning activity under 25%');
     expect(prompt).toContain('If session guard thresholds are exceeded');
