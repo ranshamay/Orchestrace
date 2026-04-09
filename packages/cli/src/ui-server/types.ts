@@ -265,6 +265,9 @@ export interface UiPreferences {
   defaultImplementationProvider: string;
   defaultImplementationModel: string;
   planningNoToolGuardMode: 'enforce' | 'warn';
+  executionContext: ExecutionContext;
+  selectedWorktreePath?: string;
+  useWorktree: boolean;
   adaptiveConcurrency: boolean;
   batchConcurrency: number;
   batchMinConcurrency: number;
@@ -282,6 +285,9 @@ export interface PersistedUiPreferences {
   defaultImplementationProvider?: string;
   defaultImplementationModel?: string;
   planningNoToolGuardMode?: 'enforce' | 'warn';
+  executionContext?: ExecutionContext;
+  selectedWorktreePath?: string;
+  useWorktree?: boolean;
   adaptiveConcurrency?: boolean;
   batchConcurrency?: number;
   batchMinConcurrency?: number;
