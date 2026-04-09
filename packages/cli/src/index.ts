@@ -189,7 +189,12 @@ Environment variables:
   ORCHESTRACE_DEFAULT_MODEL      Default model ID
   ORCHESTRACE_WORKSPACE          Active workspace identifier/path override
   ORCHESTRACE_UI_HMR             true/false UI hot reload
-  ORCHESTRACE_LLM_TIMEOUT_MS     Per-request LLM timeout in milliseconds (default: 120000)
+  ORCHESTRACE_LLM_TIMEOUT_MS     Per-request LLM timeout in milliseconds (default: 180000)
+  ORCHESTRACE_LLM_TRANSIENT_RETRIES     Retries for transient LLM failures (default: 2)
+  ORCHESTRACE_LLM_RETRY_BASE_DELAY_MS   Base retry delay in milliseconds (default: 1500)
+  ORCHESTRACE_LLM_RETRY_MAX_DELAY_MS    Max retry delay cap in milliseconds (default: 12000)
+  ORCHESTRACE_LLM_RETRY_JITTER_RATIO    Retry delay jitter ratio 0..1 (default: 0)
+  ORCHESTRACE_EMPTY_RESPONSE_RETRIES    Retries for empty model responses (default: 1)
   ORCHESTRACE_LLM_LONG_TURN_TIMEOUT_MS  Planning/delegation timeout override (default: 300000)
   ORCHESTRACE_LLM_PLANNING_TIMEOUT_MS   Planning timeout override (default: long-turn timeout)
   ORCHESTRACE_LLM_DELEGATION_TIMEOUT_MS Delegation timeout override (default: long-turn timeout)
