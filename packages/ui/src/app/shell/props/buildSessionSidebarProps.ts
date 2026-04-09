@@ -17,7 +17,7 @@ type Params = {
     handleCopyTraceSession: (sessionId: string) => Promise<'idle' | 'copied' | 'failed'>;
   };
   copyTraceState: { sessionId: string; state: 'idle' | 'copied' | 'failed' };
-  sessionStatusSummary: { total: number; running: number; completed: number; failed: number; cancelled: number; overall: string };
+      sessionStatusSummary: { total: number; running: number; completed: number; failed: number; cancelled: number; merged: number; overall: string };
   failureTypeSummary: Array<[FailureType, number]>;
 };
 

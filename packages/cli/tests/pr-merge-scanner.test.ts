@@ -157,7 +157,7 @@ describe('PrMergeScanner', () => {
     expect(mergedSessions).toEqual([id]);
   });
 
-  it('skips merge-after-ci sessions', async () => {
+        it('skips merge-after-ci sessions', async () => {
     const store = new InMemoryEventStore();
     const id = 'sess-merge-after-ci';
     await store.appendBatch(id, [
@@ -183,4 +183,4 @@ describe('PrMergeScanner', () => {
     expect(statuses).toEqual(['completed']);
     expect(fetchMock).not.toHaveBeenCalled();
   });
-}
+});

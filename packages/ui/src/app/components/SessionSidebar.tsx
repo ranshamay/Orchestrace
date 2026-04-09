@@ -20,7 +20,7 @@ export type SessionSidebarProps = {
   onRetrySession: (id: string) => Promise<void>;
   onCopyTraceSession: (id: string) => Promise<void>;
   copyTraceState: { sessionId: string; state: 'idle' | 'copied' | 'failed' };
-  sessionStatusSummary: { total: number; running: number; completed: number; failed: number; cancelled: number; overall: string };
+      sessionStatusSummary: { total: number; running: number; completed: number; failed: number; cancelled: number; merged: number; overall: string };
   failureTypeSummary: Array<[FailureType, number]>;
 };
 
@@ -73,7 +73,7 @@ export function SessionSidebar(props: SessionSidebarProps) {
         <div className="mb-2 flex items-center justify-between px-1 text-[11px] text-slate-500 dark:text-slate-400"><span>Overall</span><span className="rounded px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide bg-slate-200 text-slate-600 dark:bg-slate-800 dark:text-slate-300">{sessionStatusSummary.overall}</span></div>
 
         {sessions.length > 0 && <div className="mb-2 px-1 text-[11px] text-slate-500 dark:text-slate-400">{sessionStatusSummary.running} running / {sessionStatusSummary.total} total</div>}
-        {sessions.length > 0 && <div className="mb-2 flex flex-wrap gap-1 px-1"><span className="rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300">completed {sessionStatusSummary.completed}</span><span className="rounded bg-blue-100 px-1.5 py-0.5 text-[10px] text-blue-700 dark:bg-blue-900/40 dark:text-blue-300">running {sessionStatusSummary.running}</span><span className="rounded bg-red-100 px-1.5 py-0.5 text-[10px] text-red-700 dark:bg-red-900/40 dark:text-red-300">failed {sessionStatusSummary.failed}</span><span className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] text-amber-700 dark:bg-amber-900/40 dark:text-amber-300">cancelled {sessionStatusSummary.cancelled}</span></div>}
+                        {sessions.length > 0 && <div className="mb-2 flex flex-wrap gap-1 px-1"><span className="rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300">completed {sessionStatusSummary.completed}</span><span className="rounded bg-blue-100 px-1.5 py-0.5 text-[10px] text-blue-700 dark:bg-blue-900/40 dark:text-blue-300">running {sessionStatusSummary.running}</span><span className="rounded bg-red-100 px-1.5 py-0.5 text-[10px] text-red-700 dark:bg-red-900/40 dark:text-red-300">failed {sessionStatusSummary.failed}</span><span className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] text-amber-700 dark:bg-amber-900/40 dark:text-amber-300">cancelled {sessionStatusSummary.cancelled}</span><span className="rounded bg-purple-100 px-1.5 py-0.5 text-[10px] text-purple-700 dark:bg-purple-900/40 dark:text-purple-300">merged {sessionStatusSummary.merged}</span></div>}
 
         {!selectedSessionId && sessions.length > 0 && (
           <div className="mb-2 rounded border border-blue-200 bg-blue-50 px-2 py-1 text-[10px] text-blue-700 dark:border-blue-800 dark:bg-blue-950/40 dark:text-blue-300">
