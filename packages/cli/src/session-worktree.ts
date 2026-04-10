@@ -37,17 +37,26 @@ export async function ensureSessionWorktree(params: {
   branchName?: string;
 }): Promise<SessionWorktreeState> {
   const repoRoot = resolve(params.repoRoot);
-  const branchName = params.branchName?.trim() || resolveSessionWorktreeBranch(params.sessionId);
-  const worktreePath = params.worktreePath?.trim()
-    ? resolve(params.worktreePath)
-    : resolveSessionWorktreePath(repoRoot, params.sessionId);
+  const expectedBranchName = resolveSessionWorktreeBranch(params.sessionId);
+  const expectedWorktreePath = resolveSessionWorktreePath(repoRoot, params.sessionId);
 
-    const ensured = await ensureWorktreeExists({
+  const providedBranchName = params.branchName?.trim();
+  const providedWorktreePath = params.worktreePath?.trim() ? resolve(params.worktreePath) : undefined;
+
+  const branchName = providedBranchName && providedBranchName === expectedBranchName
+    ? providedBranchName
+    : expectedBranchName;
+  const worktreePath = providedWorktreePath && providedWorktreePath === expectedWorktreePath
+    ? providedWorktreePath
+    : expectedWorktreePath;
+
+  const ensured = await ensureWorktreeExists({
     repoPath: repoRoot,
     branchName,
     worktreePath,
     requiredPaths: WORKSPACE_RUNTIME_CRITICAL_PATHS,
   });
+
 
   return {
     repoRoot,

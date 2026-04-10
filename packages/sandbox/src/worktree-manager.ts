@@ -51,9 +51,9 @@ export async function ensureWorktreeExists(options: EnsureWorktreeOptions): Prom
   const requestedBaseRef = options.baseRef?.trim() || 'HEAD';
 
   return withWorktreeCreationLock(worktreePath, async () => {
-    const trackingRef = await resolvePreferredTrackingRef(repoPath);
+        const trackingRef = await resolvePreferredTrackingRef(repoPath);
     const baseRef = shouldUseAutoTrackingBase(requestedBaseRef) ? (trackingRef ?? requestedBaseRef) : requestedBaseRef;
-        const setupStatus = await getWorktreeSetupStatus(repoPath, worktreePath, options.requiredPaths);
+    const setupStatus = await getWorktreeSetupStatus(repoPath, worktreePath, branchName, options.requiredPaths);
     if (setupStatus.ready) {
       if (options.bootstrapDependencies !== false) {
         await ensureWorktreeDependenciesInstalled(worktreePath);
@@ -243,6 +243,7 @@ async function addWorktree(options: {
 async function getWorktreeSetupStatus(
   repoPath: string,
   worktreePath: string,
+  expectedBranchName: string,
   requiredPaths: readonly string[] | undefined,
 ): Promise<{ ready: boolean; missingRequiredPaths: string[] }> {
   if (!(await pathExists(worktreePath))) {
@@ -251,17 +252,22 @@ async function getWorktreeSetupStatus(
 
   const registeredWorktrees = await listWorktrees(repoPath);
   const targetPath = await resolveComparablePath(worktreePath);
-  let registered = false;
+  let matchingEntry: NativeGitWorktree | undefined;
   for (const entry of registeredWorktrees) {
     if ((await resolveComparablePath(entry.path)) === targetPath) {
-      registered = true;
+      matchingEntry = entry;
       break;
     }
   }
 
-  if (!registered) {
+  if (!matchingEntry) {
     return { ready: false, missingRequiredPaths: [] };
   }
+
+  if (matchingEntry.detached || matchingEntry.branch !== expectedBranchName) {
+    return { ready: false, missingRequiredPaths: [] };
+  }
+
 
   const missingRequiredPaths: string[] = [];
   for (const requiredPath of requiredPaths ?? []) {

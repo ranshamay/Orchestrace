@@ -1120,8 +1120,9 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       batchMinConcurrency: session.batchMinConcurrency,
       enableTrivialTaskGate: session.enableTrivialTaskGate,
       trivialTaskMaxPromptLength: session.trivialTaskMaxPromptLength,
-      worktreePath: session.worktreePath,
+            worktreePath: session.worktreePath,
       worktreeBranch: session.worktreeBranch,
+      workspaceAssignment: session.workspaceAssignment,
       creationReason: session.creationReason,
       sourceSessionId: session.sourceSessionId,
       source: session.source,
@@ -1137,7 +1138,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     };
   }
 
-  async function initializeManagedSessionWorkspace(params: {
+    async function initializeManagedSessionWorkspace(params: {
     sessionId: string;
     workspaceRoot: string;
     worktreePath?: string;
@@ -1146,6 +1147,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     workspacePath: string;
     worktreePath: string;
     worktreeBranch: string;
+    workspaceAssignment: SessionWorkspaceAssignmentProvenance;
     cleanupWorktree: () => Promise<void>;
     warnings: string[];
   }> {
@@ -1161,15 +1163,27 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       warnings.push(`Recreated session worktree for session ${params.sessionId}.`);
     }
 
-    const runtimePath = await resolveWorkspaceRuntimePath(managedWorktree.worktreePath);
+        const runtimePath = await resolveWorkspaceRuntimePath(managedWorktree.worktreePath);
     if (runtimePath.warning) {
       warnings.push(runtimePath.warning);
     }
+
+    const extractedSessionId = extractSessionIdFromWorktreePath(runtimePath.workspacePath);
+    const relation: SessionWorktreePathSessionIdRelation = extractedSessionId
+      ? (extractedSessionId === params.sessionId ? 'match' : 'mismatch')
+      : 'none';
 
     return {
       workspacePath: runtimePath.workspacePath,
       worktreePath: runtimePath.workspacePath,
       worktreeBranch: managedWorktree.branchName,
+      workspaceAssignment: {
+        assignmentSource: 'auto-created-worktree',
+        reusedExistingWorktree: !managedWorktree.recreated,
+        cleanupApplied: managedWorktree.recreated,
+        workspacePathSessionIdRelation: relation,
+        workspacePathSessionId: extractedSessionId,
+      },
       cleanupWorktree: async () => {
         await cleanupSessionWorktree({
           repoRoot: params.workspaceRoot,
@@ -1561,7 +1575,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     session.workspacePath = managedWorkspace.workspacePath;
     session.worktreePath = managedWorkspace.worktreePath;
     session.worktreeBranch = managedWorkspace.worktreeBranch;
-    session.cleanupWorktree = managedWorkspace.cleanupWorktree;
+        session.cleanupWorktree = managedWorkspace.cleanupWorktree;
+    session.workspaceAssignment = managedWorkspace.workspaceAssignment;
     session.prompt = normalizedDisplayPrompt;
     session.executionPromptOverride = normalizedExecutionPrompt;
     session.promptParts = promptParts.length > 0 ? cloneChatContentParts(promptParts) : undefined;
@@ -1781,8 +1796,9 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       batchMinConcurrency,
       enableTrivialTaskGate,
       trivialTaskMaxPromptLength,
-      worktreePath: managedWorkspace.worktreePath,
+            worktreePath: managedWorkspace.worktreePath,
       worktreeBranch: managedWorkspace.worktreeBranch,
+      workspaceAssignment: managedWorkspace.workspaceAssignment,
       creationReason: request.creationReason ?? 'start',
       sourceSessionId: asString(request.sourceSessionId) || undefined,
       source: request.source,
@@ -5559,6 +5575,11 @@ function normalizeWorkspacePathSessionIdRelation(
   }
 
   return undefined;
+}
+
+function extractSessionIdFromWorktreePath(worktreePath: string): string | undefined {
+  const match = worktreePath.match(/(?:^|[\\/])session-([^\\/]+)$/);
+  return match?.[1];
 }
 
 function normalizeUiTab(value: unknown): 'graph' | 'settings' | undefined {

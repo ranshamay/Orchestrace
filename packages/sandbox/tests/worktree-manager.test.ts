@@ -79,7 +79,7 @@ describe('worktree manager', () => {
     await cleanupWorktree({ repoPath: repoRoot, worktreePath, branchName });
   });
 
-  it('recreates an existing registered worktree when required files are missing', async () => {
+    it('recreates an existing registered worktree when required files are missing', async () => {
     const repoRoot = await createTempRepoWithOrigin();
     const worktreePath = join(repoRoot, '.managed-worktrees', 'session-3');
     const branchName = 'orchestrace/session-3';
@@ -108,7 +108,38 @@ describe('worktree manager', () => {
 
     await cleanupWorktree({ repoPath: repoRoot, worktreePath, branchName });
   });
+
+  it('recreates a registered worktree when it is on a different branch than expected', async () => {
+    const repoRoot = await createTempRepoWithOrigin();
+    const worktreePath = join(repoRoot, '.managed-worktrees', 'session-4');
+    const branchName = 'orchestrace/session-4';
+
+    await ensureWorktreeExists({
+      repoPath: repoRoot,
+      branchName,
+      worktreePath,
+      baseRef: 'HEAD',
+      requiredPaths: REQUIRED_PATHS,
+    });
+
+    await git(worktreePath, ['checkout', '-B', 'orchestrace/foreign-session']);
+
+    const healed = await ensureWorktreeExists({
+      repoPath: repoRoot,
+      branchName,
+      worktreePath,
+      baseRef: 'HEAD',
+      requiredPaths: REQUIRED_PATHS,
+    });
+
+    expect(healed.created).toBe(false);
+    expect(healed.recreated).toBe(true);
+    expect((await git(worktreePath, ['rev-parse', '--abbrev-ref', 'HEAD'])).trim()).toBe(branchName);
+
+    await cleanupWorktree({ repoPath: repoRoot, worktreePath, branchName });
+  });
 });
+
 
 async function createTempRepo(): Promise<string> {
   const repoRoot = await mkdtemp(join(tmpdir(), 'orchestrace-worktree-manager-'));

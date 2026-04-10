@@ -78,7 +78,7 @@ describe('session worktree helper', () => {
     expect(await pathExists(first.worktreePath)).toBe(false);
   });
 
-  it('self-heals an existing session worktree when critical files were deleted', async () => {
+    it('self-heals an existing session worktree when critical files were deleted', async () => {
     const repoRoot = await createTempRepoWithOrigin();
     const sessionId = 'session-heal';
 
@@ -93,7 +93,28 @@ describe('session worktree helper', () => {
 
     await cleanupSessionWorktree({ repoRoot, sessionId });
   });
+
+  it('normalizes mismatched override path and branch to session-derived identity', async () => {
+    const repoRoot = await createTempRepoWithOrigin();
+    const sessionId = 'session-normalize';
+    const expectedPath = resolveSessionWorktreePath(repoRoot, sessionId);
+    const expectedBranch = resolveSessionWorktreeBranch(sessionId);
+
+    const mismatched = await ensureSessionWorktree({
+      repoRoot,
+      sessionId,
+      worktreePath: join(repoRoot, '.managed-worktrees', 'foreign-session-path'),
+      branchName: 'orchestrace/foreign-session-branch',
+    });
+
+    expect(mismatched.worktreePath).toBe(expectedPath);
+    expect(mismatched.branchName).toBe(expectedBranch);
+    expect(await pathExists(expectedPath)).toBe(true);
+
+    await cleanupSessionWorktree({ repoRoot, sessionId });
+  });
 });
+
 
 async function createTempRepo(): Promise<string> {
   const repoRoot = await mkdtemp(join(tmpdir(), 'orchestrace-session-worktree-repo-'));
