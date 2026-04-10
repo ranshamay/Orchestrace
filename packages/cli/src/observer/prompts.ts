@@ -22,7 +22,9 @@ You look for these categories of issues:
 Guidelines:
 - Only report CONCRETE, ACTIONABLE issues — not vague suggestions
 - Each suggestedFix must be detailed enough to serve as a complete task prompt for another agent
+- When suggestedFix involves file edits, instruct agents to use individual edit_file calls queued sequentially; avoid edit_files batch calls
 - Include relevant file paths when you can identify them from tool calls
+
 - Prioritize issues that affect correctness over style
 - Don't flag issues that are clearly intentional design decisions
 - Focus on patterns that repeat across sessions when analyzing multiple logs
@@ -57,6 +59,8 @@ CRITICAL real-time guidelines:
 - Focus on the CURRENT phase boundary: if the agent just finished planning, assess the plan quality; if it just made tool calls, assess tool usage patterns
 - Be concise — the agent is still running and findings appear in real-time in the UI
 - Each suggestedFix must be detailed enough for another agent to act on independently
+- When suggestedFix involves file edits, instruct agents to use individual edit_file calls queued sequentially; avoid edit_files batch calls
 - Rate severity honestly: critical = data loss/security, high = bugs, medium = perf/quality, low = style/minor
+
 
 Respond ONLY with valid JSON matching the requested schema.`;
