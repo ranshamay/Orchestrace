@@ -354,7 +354,8 @@ export interface SessionObserverFindingPayload {
     severity: ObserverFindingSeverity;
     title: string;
     description: string;
-    suggestedFix: string;
+    issueSummary: string;
+    evidence: string[];
     relevantFiles?: string[];
     phase: ObserverFindingPhase;
     detectedAt: string;

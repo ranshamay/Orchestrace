@@ -46,12 +46,13 @@ export class FindingRegistry {
    * into additionalSessions instead of creating a duplicate.
    */
     register(
-    finding: {
+        finding: {
       category: FindingCategory;
       severity: FindingSeverity;
       title: string;
       description: string;
-      suggestedFix: string;
+      issueSummary: string;
+      evidence: string[];
       relevantFiles?: string[];
     },
     sessionIds: string[],

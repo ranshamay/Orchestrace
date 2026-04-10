@@ -565,7 +565,8 @@ export interface ObserverFinding {
   severity: string;
   title: string;
   description: string;
-  suggestedFix: string;
+  issueSummary: string;
+  evidence: string[];
   relevantFiles?: string[];
   observedInSessions: string[];
   detectedAt: string;
@@ -573,6 +574,7 @@ export interface ObserverFinding {
   fixStatus: 'pending' | 'spawned' | 'completed' | 'failed';
   additionalSessions: string[];
 }
+
 
 export interface ObserverStatusResponse {
   config: {
@@ -672,11 +674,13 @@ export interface SessionObserverFinding {
   severity: string;
   title: string;
   description: string;
-  suggestedFix: string;
+  issueSummary: string;
+  evidence: string[];
   relevantFiles?: string[];
   phase: string;
   detectedAt: string;
 }
+
 
 export interface SessionObserverState {
   status: SessionObserverStatus;
@@ -712,11 +716,13 @@ export interface LogFinding {
   severity: string;
   title: string;
   description: string;
-  suggestedFix: string;
+  issueSummary: string;
+  evidence: string[];
   relevantFiles?: string[];
   logSnippet: string;
   detectedAt: string;
 }
+
 
 export interface LogWatcherState {
   status: LogWatcherStatus;

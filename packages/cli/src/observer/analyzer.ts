@@ -73,9 +73,11 @@ function buildAnalysisPrompt(summaries: SessionSummary[], allowedCategories: Fin
             `      "category": ${FINDING_CATEGORY_LIST},\n` +
       '      "severity": "low" | "medium" | "high" | "critical",\n' +
       '      "title": "Short one-line title",\n' +
-      '      "description": "Detailed description of the issue found",\n' +
-      '      "suggestedFix": "Concrete implementation instruction that could be used as a task prompt",\n' +
+            '      "description": "Detailed description of the issue found",\n' +
+      '      "issueSummary": "Concise implementation instruction that could be used as a task prompt",\n' +
+      '      "evidence": ["Specific observation that supports this finding"],\n' +
       '      "relevantFiles": ["path/to/file.ts"]  // optional\n' +
+
       '    }\n' +
       '  ]\n' +
       '}\n' +
@@ -112,12 +114,13 @@ function parseAnalysisResponse(text: string, allowedCategories: FindingCategory[
     const validSeverities: FindingSeverity[] = ['low', 'medium', 'high', 'critical'];
 
     const mappedFindings: AnalysisResult['findings'] = parsed.findings
-      .filter(
+            .filter(
         (f: Record<string, unknown>) =>
           typeof f.title === 'string' &&
           typeof f.description === 'string' &&
-          typeof f.suggestedFix === 'string',
+          typeof f.issueSummary === 'string',
       )
+
       .map((f: Record<string, unknown>) => ({
         category: validCategories.includes(f.category as FindingCategory)
           ? (f.category as FindingCategory)
@@ -125,12 +128,16 @@ function parseAnalysisResponse(text: string, allowedCategories: FindingCategory[
         severity: validSeverities.includes(f.severity as FindingSeverity)
           ? (f.severity as FindingSeverity)
           : ('medium' as FindingSeverity),
-        title: String(f.title),
+                title: String(f.title),
         description: String(f.description),
-        suggestedFix: String(f.suggestedFix),
+        issueSummary: String(f.issueSummary),
+        evidence: Array.isArray(f.evidence)
+          ? f.evidence.filter((p: unknown) => typeof p === 'string')
+          : [],
         relevantFiles: Array.isArray(f.relevantFiles)
           ? f.relevantFiles.filter((p: unknown) => typeof p === 'string')
           : undefined,
+
       }));
 
     const findings: AnalysisResult['findings'] = mappedFindings.filter((finding) =>
