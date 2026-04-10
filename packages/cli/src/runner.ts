@@ -2807,12 +2807,12 @@ function buildSystemPrompt(config: SessionConfig, phase: 'planning' | 'implement
       'Do not ask the user to continue after partial progress; continue autonomously until completion or a concrete blocker is reached.',
       'For transient tool or sub-agent failures (timeouts, aborts, rate limits), retry automatically before surfacing a blocker.',
     ]
-    : [
-            'Execute approved work with minimal, scoped edits and verify outcomes.',
+        : [
+      'Execute approved work with minimal, scoped edits and verify outcomes.',
       'Read before editing, and use tool output to adapt after failures.',
       'Once sufficient context is available, immediately issue the first edit_files call; do not continue exploratory steps.',
       'Use the edit_files tool directly on each file in sequence for implementation edits.',
-            'Do not use intermediate scripting (python/bash/node) to orchestrate or batch code edits.',
+      'Do not use intermediate scripting (python/bash/node) to orchestrate or batch code edits.',
       ...(isLowEffort
         ? []
         : [

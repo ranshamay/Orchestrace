@@ -151,7 +151,8 @@ describe('executeWithOptionalTools', () => {
     expect(deterministicPrompt).toBeDefined();
     expect(String(deterministicPrompt?.content?.[0]?.text ?? '')).toContain('Switch immediately to direct edit_files calls, applying one file at a time in sequence.');
 
-        const genericRemediationLine = context.messages.find(
+                
+    const genericRemediationLine = context.messages.find(
       (message) => message.role === 'user' && String(message.content?.[0]?.text ?? '').includes('Correct the arguments using this error and retry this tool call.'),
     );
     expect(genericRemediationLine).toBeUndefined();
