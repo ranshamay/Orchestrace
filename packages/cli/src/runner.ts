@@ -2823,7 +2823,7 @@ function buildSystemPrompt(config: SessionConfig, phase: 'planning' | 'implement
       '- Multi-file changes: spawn sub-agents to parallelize independent slices',
       'When using sub-agents, prefer subagent_spawn_batch for independent parallel work.',
       'When using sub-agents, pass nodeId so progress tracking stays current.',
-      'For multi-file inspection, use read_files with concurrency to reduce latency.',
+            'For reads/searches, issue individual sequential tool calls by default; only batch when unavoidable and cap concurrency to 2.',
       '',
       `Task effort: ${effort}. Scale coordination overhead accordingly.`,
       'Use gh tools/CLI for GitHub operations when available; fallback to github_api only when needed.',
