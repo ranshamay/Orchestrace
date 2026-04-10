@@ -128,10 +128,15 @@ function buildFixPrompt(finding: FindingRecord): string {
   parts.push('## Issue');
   parts.push(finding.description);
   parts.push('');
-  parts.push('## Task');
+    parts.push('## Task');
   parts.push(finding.suggestedFix);
+  parts.push('');
+  parts.push('## Execution Constraints');
+  parts.push('Use individual edit_file calls only. Do not use edit_files batch calls.');
+  parts.push('Queue each file edit sequentially to ensure deterministic results.');
 
   if (finding.relevantFiles && finding.relevantFiles.length > 0) {
+
     parts.push('');
     parts.push('## Relevant Files');
     for (const f of finding.relevantFiles) {

@@ -64,8 +64,14 @@ describe('log watcher fix-session emission', () => {
         findingSeverity: 'high',
         routeIntent: 'code_change',
       }));
-      expect(sessionRequest?.routingAuditContext?.reason).toContain('Observer finding converted');
+            expect(sessionRequest?.routingAuditContext?.reason).toContain('Observer finding converted');
       expect(sessionRequest?.routingAuditContext?.promptCharLength).toBeGreaterThan(0);
+      const sessionPrompt = sessionRequest?.prompt ?? '';
+      expect(sessionPrompt).toContain('## Execution Constraints');
+      expect(sessionPrompt).toContain('Use individual edit_file calls only.');
+      expect(sessionPrompt).toContain('Do not use edit_files batch calls.');
+      expect(sessionPrompt).toContain('Queue each file edit sequentially');
+
 
       const duplicate = await daemon.ingestSessionObserverFindings('session-123', [
         {
@@ -146,9 +152,14 @@ describe('log watcher fix-session emission', () => {
         findingSeverity: 'high',
         routeIntent: 'code_change',
       }));
-      expect(firstPrompt).toContain('## Issue');
+            expect(firstPrompt).toContain('## Issue');
       expect(firstPrompt).toContain('\n## Task\n');
+      expect(firstPrompt).toContain('## Execution Constraints');
+      expect(firstPrompt).toContain('Use individual edit_file calls only.');
+      expect(firstPrompt).toContain('Do not use edit_files batch calls.');
+      expect(firstPrompt).toContain('Queue each file edit sequentially');
       const shellValidation = validateShellExecutionPrompt(firstPrompt);
+
       expect(shellValidation.ok).toBe(false);
       expect(shellValidation.command).toBeUndefined();
       expect(daemon.getFindings()[0]?.category).toBe('code-quality');
