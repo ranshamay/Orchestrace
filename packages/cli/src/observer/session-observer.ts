@@ -25,11 +25,13 @@ export interface RealtimeFinding {
   severity: FindingSeverity;
   title: string;
   description: string;
-  suggestedFix: string;
+  issueSummary: string;
+  evidence: string[];
   relevantFiles?: string[];
   phase: string;
   detectedAt: string;
 }
+
 
 export interface SessionObserverState {
   status: ObserverSessionStatus;
@@ -494,7 +496,8 @@ export class SessionObserver {
     lines.push(`Allowed categories: ${allowedCategories.join(', ')}`);
     lines.push('');
     lines.push(
-      'Respond with a JSON object: { "findings": [{ "category": "...", "severity": "...", "title": "...", "description": "...", "suggestedFix": "...", "relevantFiles": [...] }] }',
+            'Respond with a JSON object: { "findings": [{ "category": "...", "severity": "...", "title": "...", "description": "...", "issueSummary": "...", "evidence": ["..."], "relevantFiles": [...] }] }',
+
     );
     lines.push('Return ONLY the JSON, no other text. If no issues found, return { "findings": [] }.');
 
@@ -559,9 +562,11 @@ function parseRealtimeFindings(
     return parsed.findings
       .filter(
         (f: Record<string, unknown>) =>
-          typeof f.title === 'string' &&
+                    typeof f.title === 'string' &&
           typeof f.description === 'string' &&
-          typeof f.suggestedFix === 'string',
+          typeof f.issueSummary === 'string' &&
+          Array.isArray(f.evidence),
+
       )
       .filter((f: Record<string, unknown>) =>
         allowedCategories.includes(f.category as FindingCategory),
@@ -575,9 +580,11 @@ function parseRealtimeFindings(
           ? (f.severity as FindingSeverity)
           : 'medium',
         title: String(f.title),
-        description: String(f.description),
-        suggestedFix: String(f.suggestedFix),
+                description: String(f.description),
+        issueSummary: String(f.issueSummary),
+        evidence: (f.evidence as unknown[]).filter((p: unknown) => typeof p === 'string').map((p) => String(p)),
         relevantFiles: Array.isArray(f.relevantFiles)
+
           ? f.relevantFiles.filter((p: unknown) => typeof p === 'string')
           : undefined,
         phase: triggerPhase,

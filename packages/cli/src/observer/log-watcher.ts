@@ -23,11 +23,13 @@ export interface LogFinding {
   severity: FindingSeverity;
   title: string;
   description: string;
-  suggestedFix: string;
+  issueSummary: string;
+  evidence: string[];
   relevantFiles?: string[];
   logSnippet: string;
   detectedAt: string;
 }
+
 
 export type LogFindingCategory =
   | 'error-pattern'
@@ -92,7 +94,8 @@ You look for these categories:
 Guidelines:
 - Only report CONCRETE, ACTIONABLE issues backed by evidence from the logs
 - Include the relevant log snippet (1-3 key lines) in each finding
-- Each suggestedFix must be a specific code change or configuration adjustment
+- Each issueSummary must be a specific code change or configuration adjustment
+- Each evidence array must list concrete supporting log-derived points
 - Don't flag normal operational logs (startup messages, successful operations)
 - Focus on patterns — a single transient error is less important than a recurring one
 - Rate severity honestly: critical = data loss/security, high = breaking errors, medium = perf/reliability, low = minor improvements
@@ -106,10 +109,12 @@ Respond ONLY with valid JSON matching this schema:
       "category": "error-pattern|performance|configuration|reliability|security",
       "severity": "low|medium|high|critical",
       "title": "Short one-line title",
-      "description": "Detailed description of the issue with context from the logs",
-      "suggestedFix": "Concrete fix — specific code change, config adjustment, or action to take",
+            "description": "Detailed description of the issue with context from the logs",
+      "issueSummary": "Concrete fix — specific code change, config adjustment, or action to take",
+      "evidence": ["Supporting point extracted from logs"],
       "relevantFiles": ["path/to/file.ts"],
       "logSnippet": "The 1-3 key log lines that evidence this issue"
+
     }
   ]
 }
@@ -325,9 +330,13 @@ function parseLogFindings(text: string): LogFinding[] {
         category: validateLogCategory(f.category as string),
         severity: validateSeverity(f.severity as string),
         title: String(f.title),
-        description: String(f.description),
-        suggestedFix: String(f.suggestedFix ?? ''),
+                description: String(f.description),
+        issueSummary: String(f.issueSummary ?? ''),
+        evidence: Array.isArray(f.evidence)
+          ? f.evidence.filter((x: unknown) => typeof x === 'string').map((x) => String(x))
+          : [],
         relevantFiles: Array.isArray(f.relevantFiles)
+
           ? f.relevantFiles.filter((x: unknown) => typeof x === 'string')
           : undefined,
         logSnippet: String(f.logSnippet ?? ''),
