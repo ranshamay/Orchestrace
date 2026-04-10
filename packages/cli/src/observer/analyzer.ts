@@ -148,7 +148,7 @@ function parseAnalysisResponse(text: string, allowedCategories: FindingCategory[
           ? f.relevantFiles.filter((p: unknown) => typeof p === 'string')
           : undefined,
       }))
-      .filter((f) => f.evidence.length > 0);
+      .filter((f: { evidence: { title: string; detail: string; source?: string }[] }) => f.evidence.length > 0);
 
     const findings: AnalysisResult['findings'] = mappedFindings.filter((finding) =>
       allowedCategories.includes(finding.category),

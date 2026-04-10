@@ -128,10 +128,22 @@ function buildFixPrompt(finding: FindingRecord): string {
   parts.push('## Issue');
   parts.push(finding.description);
   parts.push('');
-  parts.push('## Task');
-  parts.push(finding.suggestedFix);
+    parts.push('## Task');
+  parts.push('Implement a focused fix for the issue above, using the evidence below to validate root cause and scope.');
+  parts.push('');
+    parts.push('## Evidence');
+  const evidenceItems = Array.isArray(finding.evidence) ? finding.evidence : [];
+  if (evidenceItems.length > 0) {
+    for (const item of evidenceItems) {
+      parts.push(`- **${item.title}**: ${item.detail}${item.source ? ` (source: ${item.source})` : ''}`);
+    }
+  } else {
+    parts.push('- No structured evidence entries were provided; infer concrete evidence from issue context before editing.');
+  }
+
 
   if (finding.relevantFiles && finding.relevantFiles.length > 0) {
+
     parts.push('');
     parts.push('## Relevant Files');
     for (const f of finding.relevantFiles) {

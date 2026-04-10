@@ -21,7 +21,7 @@ You look for these categories of issues:
 
 Guidelines:
 - Only report CONCRETE, ACTIONABLE issues — not vague suggestions
-- Provide an `evidence` array for each finding with 1-5 entries `{ "title", "detail", "source?" }`
+- Provide an \`evidence\` array for each finding with 1-5 entries \`{ "title", "detail", "source?" }\`
 - Evidence must be specific and directly observable from provided session/log context
 - Include relevant file paths when you can identify them from tool calls
 - Prioritize issues that affect correctness over style
@@ -57,7 +57,7 @@ CRITICAL real-time guidelines:
 - Do NOT repeat findings already listed in "Previously Reported Findings"
 - Focus on the CURRENT phase boundary: if the agent just finished planning, assess the plan quality; if it just made tool calls, assess tool usage patterns
 - Be concise — the agent is still running and findings appear in real-time in the UI
-- Each finding MUST include an `evidence` array with 1-5 entries `{ "title", "detail", "source?" }`
+- Each finding MUST include an \`evidence\` array with 1-5 entries \`{ "title", "detail", "source?" }\`
 - Rate severity honestly: critical = data loss/security, high = bugs, medium = perf/quality, low = style/minor
 
 Respond ONLY with valid JSON matching the requested schema.`;

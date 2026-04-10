@@ -317,29 +317,39 @@ function parseLogFindings(text: string): LogFinding[] {
     const raw = Array.isArray(parsed) ? parsed : parsed?.findings;
     if (!Array.isArray(raw)) return [];
 
-        return raw
+            return raw
       .filter(
         (f: Record<string, unknown>) =>
           f &&
           typeof f.title === 'string' &&
           typeof f.description === 'string' &&
-          Array.isArray(f.evidence) &&
-          f.evidence.length > 0,
+          (Array.isArray(f.evidence) || typeof f.suggestedFix === 'string'),
       )
       .map((f: Record<string, unknown>) => {
-        const evidence: FindingEvidence[] = (f.evidence as unknown[])
-          .filter(
-            (entry): entry is { title: string; detail: string; source?: string } =>
-              typeof entry === 'object' &&
-              entry !== null &&
-              typeof (entry as { title?: unknown }).title === 'string' &&
-              typeof (entry as { detail?: unknown }).detail === 'string',
-          )
-          .map((entry) => ({
-            title: entry.title,
-            detail: entry.detail,
-            source: typeof entry.source === 'string' ? entry.source : undefined,
-          }));
+        const evidence: FindingEvidence[] = Array.isArray(f.evidence)
+          ? (f.evidence as unknown[])
+              .filter(
+                (entry): entry is { title: string; detail: string; source?: string } =>
+                  typeof entry === 'object' &&
+                  entry !== null &&
+                  typeof (entry as { title?: unknown }).title === 'string' &&
+                  typeof (entry as { detail?: unknown }).detail === 'string',
+              )
+              .map((entry) => ({
+                title: entry.title,
+                detail: entry.detail,
+                source: typeof entry.source === 'string' ? entry.source : undefined,
+              }))
+          : [];
+
+        if (evidence.length === 0 && typeof f.suggestedFix === 'string' && f.suggestedFix.trim().length > 0) {
+          evidence.push({
+            title: 'Suggested fix',
+            detail: f.suggestedFix,
+            source: 'legacy-suggestedFix',
+          });
+        }
+
 
         return {
           id: `logf-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,

@@ -7,7 +7,7 @@
 import { createHash } from 'node:crypto';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
-import type { FindingRecord, FindingCategory, FindingSeverity } from './types.js';
+import type { FindingRecord, FindingCategory, FindingSeverity, FindingEvidence } from './types.js';
 
 export class FindingRegistry {
   private findings: FindingRecord[] = [];
@@ -22,9 +22,9 @@ export class FindingRegistry {
   async load(): Promise<void> {
     try {
       const raw = await readFile(this.filePath, 'utf-8');
-      const parsed = JSON.parse(raw);
+            const parsed = JSON.parse(raw);
       if (Array.isArray(parsed)) {
-        this.findings = parsed;
+        this.findings = parsed.map(normalizePersistedFindingRecord).filter((f): f is FindingRecord => f !== null);
       }
     } catch {
       // File doesn't exist or is corrupted — start fresh
@@ -46,12 +46,12 @@ export class FindingRegistry {
    * into additionalSessions instead of creating a duplicate.
    */
     register(
-    finding: {
+        finding: {
       category: FindingCategory;
       severity: FindingSeverity;
       title: string;
       description: string;
-      suggestedFix: string;
+      evidence: FindingEvidence[];
       relevantFiles?: string[];
     },
     sessionIds: string[],
@@ -204,6 +204,67 @@ function normalizeForComparison(text: string): string {
     .replace(/[^a-z0-9]+/g, ' ')
     .trim()
     .replace(/\s+/g, ' ');
+}
+
+function normalizePersistedFindingRecord(raw: unknown): FindingRecord | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const record = raw as Partial<FindingRecord> & { suggestedFix?: unknown };
+
+  const evidence = Array.isArray(record.evidence)
+    ? record.evidence
+        .filter(
+          (entry): entry is { title: string; detail: string; source?: string } =>
+            !!entry &&
+            typeof entry === 'object' &&
+            typeof (entry as { title?: unknown }).title === 'string' &&
+            typeof (entry as { detail?: unknown }).detail === 'string',
+        )
+        .map((entry) => ({
+          title: entry.title,
+          detail: entry.detail,
+          source: typeof entry.source === 'string' ? entry.source : undefined,
+        }))
+    : [];
+
+  if (evidence.length === 0 && typeof record.suggestedFix === 'string' && record.suggestedFix.trim().length > 0) {
+    evidence.push({
+      title: 'Suggested fix',
+      detail: record.suggestedFix,
+      source: 'legacy-suggestedFix',
+    });
+  }
+
+  if (
+    typeof record.fingerprint !== 'string' ||
+    typeof record.category !== 'string' ||
+    typeof record.severity !== 'string' ||
+    typeof record.title !== 'string' ||
+    typeof record.description !== 'string' ||
+    !Array.isArray(record.observedInSessions) ||
+    typeof record.detectedAt !== 'string' ||
+    (record.fixSessionId !== null && typeof record.fixSessionId !== 'string') ||
+    typeof record.fixStatus !== 'string' ||
+    !Array.isArray(record.additionalSessions)
+  ) {
+    return null;
+  }
+
+  return {
+    fingerprint: record.fingerprint,
+    category: record.category as FindingCategory,
+    severity: record.severity as FindingSeverity,
+    title: record.title,
+    description: record.description,
+    evidence,
+    relevantFiles: Array.isArray(record.relevantFiles)
+      ? record.relevantFiles.filter((p): p is string => typeof p === 'string')
+      : undefined,
+    observedInSessions: record.observedInSessions.filter((sid): sid is string => typeof sid === 'string'),
+    detectedAt: record.detectedAt,
+    fixSessionId: record.fixSessionId,
+    fixStatus: record.fixStatus as FindingRecord['fixStatus'],
+    additionalSessions: record.additionalSessions.filter((sid): sid is string => typeof sid === 'string'),
+  };
 }
 
 function compareSeverity(a: FindingSeverity, b: FindingSeverity): number {

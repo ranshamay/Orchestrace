@@ -14,6 +14,7 @@ import {
   DEFAULT_OBSERVER_CONFIG,
   type FindingCategory,
   type FindingSeverity,
+  type FindingEvidence,
   type ObserverConfig,
   type ObserverDaemonState,
 } from './types.js';
@@ -34,7 +35,8 @@ type LogWatcherFindingInput = {
   severity: FindingSeverity;
   title: string;
   description: string;
-  suggestedFix: string;
+  evidence?: FindingEvidence[];
+  suggestedFix?: string;
   relevantFiles?: string[];
 };
 
@@ -43,7 +45,8 @@ type RealtimeFindingInput = {
   severity: FindingSeverity;
   title: string;
   description: string;
-  suggestedFix: string;
+  evidence?: FindingEvidence[];
+  suggestedFix?: string;
   relevantFiles?: string[];
 };
 
@@ -219,12 +222,13 @@ export class ObserverDaemon {
         continue;
       }
 
-      const { isNew } = this.registry.register({
+            const { isNew } = this.registry.register({
         category: mappedCategory,
         severity: finding.severity,
         title: finding.title,
         description: finding.description,
-        suggestedFix: finding.suggestedFix,
+                evidence: normalizeFindingEvidence(finding.evidence, finding.suggestedFix),
+
         relevantFiles: finding.relevantFiles,
       }, [LOG_WATCHER_SOURCE_SESSION_ID]);
 
@@ -262,12 +266,13 @@ export class ObserverDaemon {
         continue;
       }
 
-      const { isNew } = this.registry.register({
+            const { isNew } = this.registry.register({
         category: finding.category,
         severity: finding.severity,
         title: finding.title,
         description: finding.description,
-        suggestedFix: finding.suggestedFix,
+                evidence: normalizeFindingEvidence(finding.evidence, finding.suggestedFix),
+
         relevantFiles: finding.relevantFiles,
       }, [sourceSessionId]);
 
@@ -719,7 +724,38 @@ function hasPrUrl(text: string): boolean {
   return /https?:\/\/github\.com\/[^/\s]+\/[^/\s]+\/pull\/\d+/i.test(text);
 }
 
+function normalizeFindingEvidence(
+  evidence: FindingEvidence[] | undefined,
+  suggestedFix: string | undefined,
+): FindingEvidence[] {
+  const normalized = Array.isArray(evidence)
+    ? evidence
+        .filter(
+          (entry): entry is FindingEvidence =>
+            !!entry &&
+            typeof entry.title === 'string' &&
+            typeof entry.detail === 'string',
+        )
+        .map((entry) => ({
+          title: entry.title,
+          detail: entry.detail,
+          source: entry.source,
+        }))
+    : [];
+
+  if (normalized.length > 0) {
+    return normalized;
+  }
+
+  if (typeof suggestedFix === 'string' && suggestedFix.trim().length > 0) {
+    return [{ title: 'Suggested fix', detail: suggestedFix, source: 'legacy-suggestedFix' }];
+  }
+
+  return [{ title: 'Observed issue', detail: 'No structured evidence provided by source payload.' }];
+}
+
 function mapLogWatcherCategory(category: LogFindingCategory): FindingCategory {
+
   switch (category) {
     case 'performance':
       return 'performance';
