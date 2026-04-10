@@ -43,10 +43,12 @@ type RealtimeFindingInput = {
   severity: FindingSeverity;
   title: string;
   description: string;
-  evidence: Array<{
+  evidence?: Array<{
     summary: string;
     details?: string;
   }>;
+  /** Legacy compatibility for older realtime emitters/tests. */
+  suggestedFix?: string;
   relevantFiles?: string[];
 };
 
@@ -265,12 +267,29 @@ export class ObserverDaemon {
         continue;
       }
 
-            const { isNew } = this.registry.register({
+                        const evidence: Array<{ summary: string; details?: string }> = Array.isArray(finding.evidence)
+        ? finding.evidence
+          .filter((item) => item && typeof item.summary === 'string' && item.summary.trim().length > 0)
+          .map((item) => ({
+            summary: item.summary.trim(),
+            details: typeof item.details === 'string' && item.details.trim().length > 0
+              ? item.details.trim()
+              : undefined,
+          }))
+        : [];
+      if (evidence.length === 0 && typeof finding.suggestedFix === 'string' && finding.suggestedFix.trim().length > 0) {
+        evidence.push({ summary: finding.suggestedFix.trim() });
+      }
+      if (evidence.length === 0) {
+        continue;
+      }
+
+      const { isNew } = this.registry.register({
         category: finding.category,
         severity: finding.severity,
         title: finding.title,
         description: finding.description,
-        evidence: finding.evidence,
+        evidence,
         relevantFiles: finding.relevantFiles,
       }, [sourceSessionId]);
 
