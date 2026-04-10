@@ -208,7 +208,9 @@ export type SessionEventType =
 // Per-event payload types
 export interface SessionCreatedPayload {
   config: SessionConfig;
+  [key: string]: unknown;
 }
+
 
 export interface SessionStartedPayload {
   pid?: number;
