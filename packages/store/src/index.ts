@@ -35,13 +35,13 @@ export type {
   SessionConfig,
   WorkState,
   SessionCreationReason,
-  ReasoningLevel,
-    SessionAgentRole,
+    ReasoningLevel,
+  SessionAgentRole,
   SessionAgentGraphNodeStatus,
   AgentTodoStatus,
   SessionAgentModelConfig,
-
   SessionAgentModels,
+
   LlmSessionState,
   SessionLlmStatus,
   SessionAgentGraphNode,

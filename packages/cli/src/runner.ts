@@ -2213,11 +2213,11 @@ async function main(): Promise<void> {
       try {
         const input = JSON.parse(event.input) as Record<string, unknown>;
         const nodeIds = resolveNodeIds(agentGraph, event.toolName, input);
-        if (nodeIds.length === 0) return;
-                pendingNodeIds.set(event.toolCallId, nodeIds);
+                if (nodeIds.length === 0) return;
+        pendingNodeIds.set(event.toolCallId, nodeIds);
         if (setNodeStatus(nodeIds, 'in_progress')) {
-
           void emit({ time: iso(), type: 'session:agent-graph-set', payload: { graph: agentGraph } });
+
         }
       } catch { /* ignore */ }
       return;
@@ -2266,9 +2266,9 @@ async function main(): Promise<void> {
   }
 
     
-  function setNodeStatus(nodeIds: string[], status: SessionAgentGraphNodeStatus): boolean {
-
+    function setNodeStatus(nodeIds: string[], status: SessionAgentGraphNodeStatus): boolean {
     let changed = false;
+
     const targets = new Set(nodeIds);
     for (let i = 0; i < agentGraph.length; i++) {
       if (targets.has(agentGraph[i].id) && agentGraph[i].status !== status) {

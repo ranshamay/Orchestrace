@@ -267,7 +267,9 @@ export class SessionObserver {
         break;
       }
 
-                  case 'session:agent-graph-node-status': {
+                  
+      case 'session:agent-graph-node-status': {
+
         const p = event.payload as { nodeId: string; status: 'pending' | 'running' | 'in_progress' | 'completed' | 'failed' };
         this.ctx.agentGraph = this.ctx.agentGraph.map((n) =>
           n.id === p.nodeId ? { ...n, status: p.status } : n,
@@ -275,7 +277,9 @@ export class SessionObserver {
         break;
       }
 
-                  case 'session:todos-set': {
+                  
+      case 'session:todos-set': {
+
         const items = (event.payload as { items: Array<{ text: string; done: boolean; status?: 'todo' | 'in_progress' | 'done' }> }).items;
         this.ctx.todos = items;
         break;

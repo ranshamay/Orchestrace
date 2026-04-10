@@ -61,11 +61,11 @@ export interface SessionAgentGraphNode {
   id: string;
   name?: string;
   prompt: string;
-  weight?: number;
-    dependencies: string[];
+    weight?: number;
+  dependencies: string[];
   status?: SessionAgentGraphNodeStatus;
-
   provider?: string;
+
   model?: string;
   reasoning?: ReasoningLevel;
 }
@@ -98,10 +98,10 @@ export interface SessionChatMessage {
 
 export interface AgentTodoItem {
   id: string;
-    text: string;
+  text: string;
   status?: AgentTodoStatus;
-
   done: boolean;
+
   weight?: number;
   createdAt: string;
   updatedAt: string;

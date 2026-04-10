@@ -1300,7 +1300,9 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           break;
         }
 
-                        case 'session:agent-graph-node-status': {
+                        
+        case 'session:agent-graph-node-status': {
+
           const p = event.payload as { nodeId: string; status: SessionAgentGraphNode['status'] };
           session.agentGraph = session.agentGraph.map((node) =>
             node.id === p.nodeId ? { ...node, status: p.status } : node,

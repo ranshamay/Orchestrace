@@ -160,12 +160,11 @@ export interface WorkSession {
     toolIsError?: boolean;
     toolDetails?: unknown;
     message: string;
-  }>;
+    }>;
 
-    
   agentGraph?: Array<{
-
     id: string;
+
     name?: string;
     prompt: string;
     weight?: number;
@@ -207,10 +206,10 @@ export interface WorkSessionDiffResponse {
 
 export interface AgentTodo {
   id: string;
-    text: string;
+  text: string;
   status?: 'todo' | 'in_progress' | 'done';
-
   done: boolean;
+
   weight?: number;
   createdAt: string;
   updatedAt: string;
