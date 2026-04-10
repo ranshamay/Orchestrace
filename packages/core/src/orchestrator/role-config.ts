@@ -196,7 +196,9 @@ export function buildImplementationPrompt(params: {
       name: PromptSectionName.Autonomy,
       lines: [
         'If a tool call fails, read the error details, adjust arguments, and retry the tool call.',
-        'Read relevant files before editing. Keep edits minimal and focused.',
+                'Read relevant files before editing. Keep edits minimal and focused.',
+        'If planning/search results or prior reads already include the needed file sections, reuse that context and avoid re-reading the same content.',
+        'Call read_file/read_files again only when additional or refreshed context is required for safe edits or validation.',
         ...(isLowEffort
           ? []
           : [
@@ -299,7 +301,9 @@ export function buildRoleSystemPrompt(params: {
         ]
       : [
           'Execute the approved plan and deliver validated code changes.',
-          'Read relevant files before editing and keep edits minimal in scope.',
+                    'Read relevant files before editing and keep edits minimal in scope.',
+          'If planning/search results or prior reads already include the needed file sections, reuse that context and avoid re-reading the same content.',
+          'Call read_file/read_files again only when additional or refreshed context is required for safe edits or validation.',
           'Use todo and agent graph state as the execution backbone, updating progress continuously.',
           'Use subagent_spawn or subagent_spawn_batch for parallelizable slices and delegate only relevant context to each sub-agent.',
           'search_files uses regex; characters like ( and ) need escaping as \\( and \\).',

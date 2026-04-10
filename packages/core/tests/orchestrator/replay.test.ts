@@ -1135,7 +1135,8 @@ describe('orchestrate replay capture', () => {
       expect(output?.status).toBe('completed');
       expect(capturedImplementationPrompts.length).toBeGreaterThan(0);
       const implementationPrompt = capturedImplementationPrompts[0] ?? '';
-      expect(implementationPrompt).toContain('search_files uses regex; characters like ( and ) need escaping as \\( and \\).');
+            expect(implementationPrompt).toContain('search_files uses regex; characters like ( and ) need escaping as \\( and \\).');
+      expect(implementationPrompt).toContain('If planning/search results or prior reads already include the needed file sections, reuse that context and avoid re-reading the same content.');
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }

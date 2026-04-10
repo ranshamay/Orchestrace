@@ -8166,7 +8166,9 @@ export function buildSessionSystemPrompt(session: WorkSession, phase: SessionPro
           ]
         : [
             'Execute approved work with minimal, scoped edits and verify outcomes.',
-            'Read before editing, and use tool output to adapt after failures.',
+                        'Read before editing, and use tool output to adapt after failures.',
+            'If planning/search results or prior reads already include the needed file sections, reuse that context and avoid re-reading the same content.',
+            'Call read_file/read_files again only when additional or refreshed context is required for safe edits or validation.',
             'Read todo_get and agent_graph_get before coding, then keep todo_update current while implementing.',
             'Use subagent_spawn or subagent_spawn_batch to execute parallelizable slices with minimal relevant context per agent.',
             'For independent nodes, use subagent_spawn_batch so work runs in parallel.',

@@ -114,7 +114,7 @@ describe('planning guard behavior', () => {
     expect(state?.forcedImplementation).toBe(false);
   });
 
-  it('includes simple-task policy and planning budget language in planning prompt', () => {
+    it('includes simple-task policy and planning budget language in planning prompt', () => {
     const session = createSession();
     const prompt = buildSessionSystemPrompt(session, 'planning');
 
@@ -122,5 +122,13 @@ describe('planning guard behavior', () => {
     expect(prompt).toContain('For simple single-file tasks, skip sub-agent delegation');
     expect(prompt).toContain('Planning is budgeted: keep planning activity under 25%');
     expect(prompt).toContain('If session guard thresholds are exceeded');
+  });
+
+  it('includes implementation guidance to avoid redundant file re-reads', () => {
+    const session = createSession();
+    const prompt = buildSessionSystemPrompt(session, 'implementation');
+
+    expect(prompt).toContain('If planning/search results or prior reads already include the needed file sections, reuse that context and avoid re-reading the same content.');
+    expect(prompt).toContain('Call read_file/read_files again only when additional or refreshed context is required for safe edits or validation.');
   });
 });
