@@ -249,15 +249,8 @@ async function executeToolWithEditFilesDedup(params: {
   toolCall: ToolCall;
   arguments: Record<string, unknown>;
   signal?: AbortSignal;
-  allowRuntimeDuplicateFallback?: boolean;
 }): Promise<ToolExecutionPayload> {
-  const {
-    toolset,
-    toolCall,
-    arguments: toolArgs,
-    signal,
-    allowRuntimeDuplicateFallback = true,
-  } = params;
+  const { toolset, toolCall, arguments: toolArgs, signal } = params;
 
   if (toolCall.name !== 'edit_files') {
     return executeToolWithSubagentBatchRetry(params);
@@ -275,18 +268,19 @@ async function executeToolWithEditFilesDedup(params: {
   }
 
   const directResult = await executeToolWithSubagentBatchRetry(params);
-  if (!allowRuntimeDuplicateFallback || !isDuplicateEditFilesPathError(directResult.content)) {
+  if (!isDuplicateEditFilesPathError(directResult.content) || editFiles.length === 0) {
     return directResult;
   }
 
-  return executeToolWithEditFilesDedup({
+  return executeDedupedEditFilesBatch({
     toolset,
     toolCall,
-    arguments: toolArgs,
+    toolArgs,
+    editFiles,
     signal,
-    allowRuntimeDuplicateFallback: false,
   });
 }
+
 
 
 function getEditFileEntries(value: unknown): Array<Record<string, unknown>> {

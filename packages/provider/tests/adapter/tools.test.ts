@@ -272,7 +272,7 @@ describe('executeWithOptionalTools', () => {
     expect(parsed.files.map((entry) => entry.path)).toEqual(['src/a.ts', 'src/b.ts', 'src/a.ts']);
   });
 
-  it('uses deterministic remediation guidance for duplicate-path edit_files errors', async () => {
+    it('retries duplicate-path edit_files runtime errors as sequential single-file calls', async () => {
     const consumeStreamMock = vi.mocked(consumeStream);
 
     const firstResponse = makeAssistantMessage([
@@ -283,7 +283,7 @@ describe('executeWithOptionalTools', () => {
         arguments: {
           files: [
             { path: 'src/a.ts', oldText: 'one', newText: 'ONE' },
-            { path: 'src/a.ts', oldText: 'two', newText: 'TWO' },
+            { path: 'src/b.ts', oldText: 'two', newText: 'TWO' },
           ],
         },
       },
@@ -292,6 +292,20 @@ describe('executeWithOptionalTools', () => {
 
     consumeStreamMock.mockResolvedValueOnce(firstResponse as never);
     consumeStreamMock.mockResolvedValueOnce(finalResponse as never);
+
+    const executeTool = vi.fn()
+      .mockResolvedValueOnce({
+        content: 'Duplicate paths are not allowed: src/a.ts',
+        isError: true,
+      })
+      .mockResolvedValueOnce({
+        isError: false,
+        content: JSON.stringify({ total: 1, successes: 1, failures: 0, files: [{ path: 'src/a.ts', ok: true }] }),
+      })
+      .mockResolvedValueOnce({
+        isError: false,
+        content: JSON.stringify({ total: 1, successes: 1, failures: 0, files: [{ path: 'src/b.ts', ok: true }] }),
+      });
 
     const context: TestContext = {
       messages: [],
@@ -304,23 +318,47 @@ describe('executeWithOptionalTools', () => {
       options: {},
       toolset: {
         tools: [],
-        async executeTool() {
-          return { content: 'Duplicate paths are not allowed: src/a.ts', isError: true };
-        },
+        executeTool,
       },
       onUsage: () => {},
     });
 
+    expect(executeTool).toHaveBeenCalledTimes(3);
+    expect(executeTool.mock.calls[0]?.[0].arguments.files).toEqual([
+      { path: 'src/a.ts', oldText: 'one', newText: 'ONE' },
+      { path: 'src/b.ts', oldText: 'two', newText: 'TWO' },
+    ]);
+    expect(executeTool.mock.calls[1]?.[0].arguments.files).toEqual([
+      { path: 'src/a.ts', oldText: 'one', newText: 'ONE' },
+    ]);
+    expect(executeTool.mock.calls[2]?.[0].arguments.files).toEqual([
+      { path: 'src/b.ts', oldText: 'two', newText: 'TWO' },
+    ]);
+
     const deterministicPrompt = context.messages.find(
       (message) => message.role === 'user' && String(message.content?.[0]?.text ?? '').includes('This failure is deterministic.'),
     );
-    expect(deterministicPrompt).toBeDefined();
+    expect(deterministicPrompt).toBeUndefined();
 
     const genericRetryPrompt = context.messages.find(
       (message) => message.role === 'user' && String(message.content?.[0]?.text ?? '').includes('retry this tool call'),
     );
     expect(genericRetryPrompt).toBeUndefined();
+
+    const toolResult = context.messages.find((message) => message.role === 'toolResult');
+    expect(toolResult?.isError).toBe(false);
+    const parsed = JSON.parse(String(toolResult?.content?.[0]?.text ?? '{}')) as {
+      total: number;
+      successes: number;
+      failures: number;
+      files: Array<{ path: string; ok: boolean }>;
+    };
+    expect(parsed.total).toBe(2);
+    expect(parsed.successes).toBe(2);
+    expect(parsed.failures).toBe(0);
+    expect(parsed.files.map((entry) => entry.path)).toEqual(['src/a.ts', 'src/b.ts']);
   });
+
 
   it('retries subagent_spawn_batch failures in a single reduced batch request', async () => {
 
