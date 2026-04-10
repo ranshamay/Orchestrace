@@ -151,10 +151,10 @@ describe('executeWithOptionalTools', () => {
     expect(deterministicPrompt).toBeDefined();
     expect(String(deterministicPrompt?.content?.[0]?.text ?? '')).toContain('Switch immediately to direct edit_files calls, applying one file at a time in sequence.');
 
-    const genericRetryPrompt = context.messages.find(
-      (message) => message.role === 'user' && String(message.content?.[0]?.text ?? '').includes('retry this tool call'),
+        const genericRemediationLine = context.messages.find(
+      (message) => message.role === 'user' && String(message.content?.[0]?.text ?? '').includes('Correct the arguments using this error and retry this tool call.'),
     );
-    expect(genericRetryPrompt).toBeUndefined();
+    expect(genericRemediationLine).toBeUndefined();
   });
 
   it('does not inject retry prompt when tool call succeeds', async () => {

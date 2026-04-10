@@ -797,6 +797,9 @@ async function sleepWithSignal(ms: number, signal?: AbortSignal): Promise<void> 
 function buildToolCallRetryMessage(toolCall: ToolCall, errorContent: string): string {
   const deterministicEditFailure = isDeterministicEditValidationFailure(toolCall.name, errorContent);
   const scriptFirstEditFailure = isScriptFirstEditFailure(toolCall, errorContent);
+  const normalizedErrorContent = scriptFirstEditFailure
+    ? stripGenericRetryLine(errorContent)
+    : errorContent;
   const remediationLine = deterministicEditFailure
     ? 'This failure is deterministic. Revise the edit plan/arguments (or skip this edit) before issuing another edit tool call.'
     : scriptFirstEditFailure
@@ -805,9 +808,16 @@ function buildToolCallRetryMessage(toolCall: ToolCall, errorContent: string): st
 
   return [
     `Tool call ${toolCall.name} (${toolCall.id}) failed.`,
-    errorContent,
+    normalizedErrorContent,
     remediationLine,
   ].join('\n');
+}
+
+function stripGenericRetryLine(errorContent: string): string {
+  return errorContent
+    .split('\n')
+    .filter((line) => line.trim() !== 'Inspect the error, correct the arguments, and retry this tool call.')
+    .join('\n');
 }
 
 function isDeterministicEditValidationFailure(toolName: string, errorContent: string): boolean {
