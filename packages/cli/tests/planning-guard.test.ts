@@ -59,6 +59,16 @@ function startedTool(toolName: string): LlmToolCallEvent {
 }
 
 describe('planning guard behavior', () => {
+  it('includes direct edit-first and no-scripting policy in implementation prompt', () => {
+    const session = createSession();
+    const prompt = buildSessionSystemPrompt(session, 'implementation');
+
+    expect(prompt).toContain('When sufficient context is available, immediately issue the first edit_file/edit_files call.');
+    expect(prompt).toContain('Do not use python/bash or other intermediate scripting layers to orchestrate edits; use edit_file/edit_files directly.');
+    expect(prompt).toContain('Edit files sequentially: start with the first target file, then proceed file-by-file.');
+  });
+
+
   it('forces implementation phase after exceeding no-write threshold while planning', () => {
     process.env.ORCHESTRACE_MAX_TOOL_CALLS_WITHOUT_WRITE = '2';
     process.env.ORCHESTRACE_PLANNING_BUDGET_PERCENT = '25';

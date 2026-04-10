@@ -1134,8 +1134,11 @@ describe('orchestrate replay capture', () => {
       const output = outputs.get('task-1');
       expect(output?.status).toBe('completed');
       expect(capturedImplementationPrompts.length).toBeGreaterThan(0);
-      const implementationPrompt = capturedImplementationPrompts[0] ?? '';
+            const implementationPrompt = capturedImplementationPrompts[0] ?? '';
       expect(implementationPrompt).toContain('search_files uses regex; characters like ( and ) need escaping as \\( and \\).');
+      expect(implementationPrompt).toContain('Once sufficient context is gathered, immediately issue the first edit_file/edit_files call.');
+      expect(implementationPrompt).toContain('Do not orchestrate code edits through python/bash scripts; use edit_file/edit_files directly.');
+      expect(implementationPrompt).toContain('Perform edits sequentially by file, starting with the first target file.');
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }

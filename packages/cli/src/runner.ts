@@ -2808,8 +2808,11 @@ function buildSystemPrompt(config: SessionConfig, phase: 'planning' | 'implement
       'For transient tool or sub-agent failures (timeouts, aborts, rate limits), retry automatically before surfacing a blocker.',
     ]
     : [
-      'Execute approved work with minimal, scoped edits and verify outcomes.',
+            'Execute approved work with minimal, scoped edits and verify outcomes.',
       'Read before editing, and use tool output to adapt after failures.',
+      'When sufficient context is available, immediately issue the first edit_file/edit_files call.',
+      'Do not use python/bash or other intermediate scripting layers to orchestrate edits; use edit_file/edit_files directly.',
+      'Edit files sequentially: start with the first target file, then proceed file-by-file.',
       ...(isLowEffort
         ? []
         : [

@@ -796,9 +796,12 @@ async function sleepWithSignal(ms: number, signal?: AbortSignal): Promise<void> 
 
 function buildToolCallRetryMessage(toolCall: ToolCall, errorContent: string): string {
   const deterministicEditFailure = isDeterministicEditValidationFailure(toolCall.name, errorContent);
+  const pythonEditDetourFailure = isPythonEditDetourFailure(toolCall, errorContent);
   const remediationLine = deterministicEditFailure
     ? 'This failure is deterministic. Revise the edit plan/arguments (or skip this edit) before issuing another edit tool call.'
-    : 'Correct the arguments using this error and retry this tool call.';
+    : pythonEditDetourFailure
+      ? 'Do not retry edit orchestration via python/bash. Switch to edit_file/edit_files now, start with the first target file immediately, and continue file-by-file sequentially.'
+      : 'Correct the arguments using this error and retry this tool call.';
 
   return [
     `Tool call ${toolCall.name} (${toolCall.id}) failed.`,
@@ -807,17 +810,41 @@ function buildToolCallRetryMessage(toolCall: ToolCall, errorContent: string): st
   ].join('\n');
 }
 
+
 function isDeterministicEditValidationFailure(toolName: string, errorContent: string): boolean {
   if (toolName !== 'edit_file' && toolName !== 'edit_files') {
     return false;
   }
 
   const normalized = errorContent.toLowerCase();
-    return normalized.includes('missing newtext')
+  return normalized.includes('missing newtext')
     || normalized.includes('no-op edit is not allowed')
     || normalized.includes('duplicate paths are not allowed');
-
 }
+
+function isPythonEditDetourFailure(toolCall: ToolCall, errorContent: string): boolean {
+  if (toolCall.name !== 'run_command') {
+    return false;
+  }
+
+  const command = String((toolCall.arguments as { command?: unknown } | undefined)?.command ?? '').toLowerCase();
+  const normalizedError = errorContent.toLowerCase();
+  const pythonMissing = normalizedError.includes('command not found: python')
+    || normalizedError.includes('command not found: python3')
+    || normalizedError.includes('python: not found')
+    || normalizedError.includes('python3: not found');
+  const editOrchestrationIntent = command.includes('python')
+    && (
+      command.includes('edit_file')
+      || command.includes('edit_files')
+      || command.includes('replace')
+      || command.includes('rewrite')
+      || command.includes('batch')
+    );
+
+  return pythonMissing && editOrchestrationIntent;
+}
+
 
 function getToolCalls(message: AssistantMessage): ToolCall[] {
   const calls: ToolCall[] = [];

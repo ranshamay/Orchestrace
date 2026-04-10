@@ -49,7 +49,7 @@ describe('executeWithOptionalTools', () => {
     const consumeStreamMock = vi.mocked(consumeStream);
     const validateToolCallMock = vi.mocked(validateToolCall);
 
-    const firstResponse = makeAssistantMessage([
+        const firstResponse = makeAssistantMessage([
       { type: 'toolCall', id: 'call-1', name: 'run_command', arguments: { command: 'bad command 1' } },
       { type: 'toolCall', id: 'call-2', name: 'run_command', arguments: { command: 'bad command 2' } },
     ], 'tool_calls');
@@ -109,7 +109,50 @@ describe('executeWithOptionalTools', () => {
     expect(toolEvents[3]).toMatchObject({ type: 'result', toolCallId: 'call-2', toolName: 'run_command', isError: true });
   });
 
+    it('uses direct edit fallback guidance for python edit-orchestration detours', async () => {
+    const consumeStreamMock = vi.mocked(consumeStream);
+
+    const firstResponse = makeAssistantMessage([
+      {
+        type: 'toolCall',
+        id: 'call-python-edit',
+        name: 'run_command',
+        arguments: { command: 'python3 -c "print(\'batch edit_files\')"' },
+      },
+    ], 'tool_calls');
+    const finalResponse = makeAssistantMessage([{ type: 'text', text: 'Recovered.' }]);
+
+    consumeStreamMock.mockResolvedValueOnce(firstResponse as never);
+    consumeStreamMock.mockResolvedValueOnce(finalResponse as never);
+
+    const context: TestContext = {
+      messages: [],
+      tools: [{ name: 'run_command', description: 'Run shell command', parameters: { type: 'object' } }],
+    };
+
+    await executeWithOptionalTools({
+      model: {} as never,
+      context,
+      options: {},
+      toolset: {
+        tools: [],
+        async executeTool() {
+          throw new Error('command not found: python3');
+        },
+      },
+      onUsage: () => {},
+    });
+
+    const fallbackPrompt = context.messages.find(
+      (message) => message.role === 'user' && String(message.content?.[0]?.text ?? '').includes('Switch to edit_file/edit_files now'),
+    );
+    expect(fallbackPrompt).toBeDefined();
+    expect(String(fallbackPrompt?.content?.[0]?.text ?? '')).toContain('start with the first target file immediately');
+    expect(String(fallbackPrompt?.content?.[0]?.text ?? '')).toContain('file-by-file sequentially');
+  });
+
   it('does not inject retry prompt when tool call succeeds', async () => {
+
     const consumeStreamMock = vi.mocked(consumeStream);
 
     const firstResponse = makeAssistantMessage([

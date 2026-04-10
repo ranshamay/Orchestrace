@@ -195,8 +195,11 @@ export function buildImplementationPrompt(params: {
     {
       name: PromptSectionName.Autonomy,
       lines: [
-        'If a tool call fails, read the error details, adjust arguments, and retry the tool call.',
+                'If a tool call fails, read the error details, adjust arguments, and retry the tool call.',
         'Read relevant files before editing. Keep edits minimal and focused.',
+        'When you determine you have sufficient context, immediately issue the first edit_file/edit_files call instead of narrating additional analysis.',
+        'Do not use python/bash or other intermediate scripting to orchestrate edits; call edit_file/edit_files directly.',
+        'Apply edits file-by-file in sequence; start with the first target file and continue sequentially.',
         ...(isLowEffort
           ? []
           : [
@@ -298,8 +301,11 @@ export function buildRoleSystemPrompt(params: {
           'Return a plan that another agent could execute deterministically.',
         ]
       : [
-          'Execute the approved plan and deliver validated code changes.',
+                    'Execute the approved plan and deliver validated code changes.',
           'Read relevant files before editing and keep edits minimal in scope.',
+          'Once sufficient context is gathered, immediately issue the first edit_file/edit_files call.',
+          'Do not orchestrate code edits through python/bash scripts; use edit_file/edit_files directly.',
+          'Perform edits sequentially by file, starting with the first target file.',
           'Use todo and agent graph state as the execution backbone, updating progress continuously.',
           'Use subagent_spawn or subagent_spawn_batch for parallelizable slices and delegate only relevant context to each sub-agent.',
           'search_files uses regex; characters like ( and ) need escaping as \\( and \\).',
