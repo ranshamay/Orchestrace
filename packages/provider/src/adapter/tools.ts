@@ -1,3 +1,5 @@
+import { normalize as normalizePosixPath } from 'node:path/posix';
+
 import {
   validateToolCall,
   type AssistantMessage,
@@ -6,7 +8,6 @@ import {
   type ToolResultMessage,
 } from '@mariozechner/pi-ai';
 import type { LlmCompletionOptions, LlmToolset } from '../types.js';
-
 
 import { consumeStream, getUsage } from './stream.js';
 import { formatToolPayload, toErrorMessage } from './utils.js';
@@ -367,7 +368,7 @@ function getEditFileEntries(value: unknown): Array<Record<string, unknown>> {
 function hasDuplicateEditPaths(editFiles: Array<Record<string, unknown>>): boolean {
   const seen = new Set<string>();
   for (const edit of editFiles) {
-    const key = String(edit.path);
+    const key = toCanonicalEditPathKey(edit.path);
     if (seen.has(key)) {
       return true;
     }
@@ -376,6 +377,13 @@ function hasDuplicateEditPaths(editFiles: Array<Record<string, unknown>>): boole
 
   return false;
 }
+
+function toCanonicalEditPathKey(pathValue: unknown): string {
+  const rawPath = typeof pathValue === 'string' ? pathValue : String(pathValue ?? '');
+  const normalized = normalizePosixPath(rawPath.trim());
+  return normalized === '.' ? '' : normalized;
+}
+
 
 async function executeDedupedEditFilesBatch(params: {
   toolset: LlmToolset;
