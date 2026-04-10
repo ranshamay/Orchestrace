@@ -732,6 +732,17 @@ export interface LogWatcherState {
   linesProcessed: number;
 }
 
+export interface LogStreamErrorEvent {
+  errorId: string;
+  source: 'log-watcher' | 'observer-ingestion' | 'session-observer-ingestion' | 'log-stream';
+  operation: string;
+  message: string;
+  timestamp: string;
+  severity?: 'info' | 'warning' | 'error';
+  context?: Record<string, unknown>;
+}
+
+
 export async function fetchLogWatcherStatus(): Promise<{ state: LogWatcherState }> {
   const res = await authedFetch(`${API_BASE}/logs/status`);
   return readJson(res);
