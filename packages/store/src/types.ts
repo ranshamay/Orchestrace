@@ -12,6 +12,8 @@ export type WorkState = 'running' | 'completed' | 'failed' | 'cancelled';
 export type SessionCreationReason = 'start' | 'retry';
 export type ReasoningLevel = 'minimal' | 'low' | 'medium' | 'high';
 export type SessionAgentRole = 'router' | 'planner' | 'implementer' | 'reviewer' | 'investigator';
+export type FindingSeverity = 'low' | 'medium' | 'high' | 'critical';
+
 
 export interface SessionAgentModelConfig {
   provider?: string;
@@ -340,7 +342,8 @@ export interface SessionObserverFindingPayload {
   finding: {
     id: string;
     category: string;
-    severity: string;
+        severity: FindingSeverity;
+
     title: string;
     description: string;
     suggestedFix: string;
