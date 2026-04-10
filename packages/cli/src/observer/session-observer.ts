@@ -25,7 +25,8 @@ export interface RealtimeFinding {
   severity: FindingSeverity;
   title: string;
   description: string;
-  suggestedFix: string;
+    evidence: string;
+  recommendedAction: string;
   relevantFiles?: string[];
   phase: string;
   detectedAt: string;
@@ -494,7 +495,7 @@ export class SessionObserver {
     lines.push(`Allowed categories: ${allowedCategories.join(', ')}`);
     lines.push('');
     lines.push(
-      'Respond with a JSON object: { "findings": [{ "category": "...", "severity": "...", "title": "...", "description": "...", "suggestedFix": "...", "relevantFiles": [...] }] }',
+      'Respond with a JSON object: { "findings": [{ "category": "...", "severity": "...", "title": "...", "description": "...", "evidence": "...", "recommendedAction": "...", "relevantFiles": [...] }] }',
     );
     lines.push('Return ONLY the JSON, no other text. If no issues found, return { "findings": [] }.');
 
@@ -561,7 +562,8 @@ function parseRealtimeFindings(
         (f: Record<string, unknown>) =>
           typeof f.title === 'string' &&
           typeof f.description === 'string' &&
-          typeof f.suggestedFix === 'string',
+                    typeof f.evidence === 'string' &&
+          typeof f.recommendedAction === 'string',
       )
       .filter((f: Record<string, unknown>) =>
         allowedCategories.includes(f.category as FindingCategory),
@@ -576,7 +578,8 @@ function parseRealtimeFindings(
           : 'medium',
         title: String(f.title),
         description: String(f.description),
-        suggestedFix: String(f.suggestedFix),
+                evidence: String(f.evidence),
+        recommendedAction: String(f.recommendedAction),
         relevantFiles: Array.isArray(f.relevantFiles)
           ? f.relevantFiles.filter((p: unknown) => typeof p === 'string')
           : undefined,

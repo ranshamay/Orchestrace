@@ -34,7 +34,8 @@ type LogWatcherFindingInput = {
   severity: FindingSeverity;
   title: string;
   description: string;
-  suggestedFix: string;
+    evidence: string;
+  recommendedAction: string;
   relevantFiles?: string[];
 };
 
@@ -43,7 +44,8 @@ type RealtimeFindingInput = {
   severity: FindingSeverity;
   title: string;
   description: string;
-  suggestedFix: string;
+    evidence: string;
+  recommendedAction: string;
   relevantFiles?: string[];
 };
 
@@ -224,7 +226,8 @@ export class ObserverDaemon {
         severity: finding.severity,
         title: finding.title,
         description: finding.description,
-        suggestedFix: finding.suggestedFix,
+                evidence: finding.evidence,
+        recommendedAction: finding.recommendedAction,
         relevantFiles: finding.relevantFiles,
       }, [LOG_WATCHER_SOURCE_SESSION_ID]);
 
@@ -267,7 +270,8 @@ export class ObserverDaemon {
         severity: finding.severity,
         title: finding.title,
         description: finding.description,
-        suggestedFix: finding.suggestedFix,
+                evidence: finding.evidence,
+        recommendedAction: finding.recommendedAction,
         relevantFiles: finding.relevantFiles,
       }, [sourceSessionId]);
 

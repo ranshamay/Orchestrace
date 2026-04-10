@@ -51,7 +51,8 @@ export class FindingRegistry {
       severity: FindingSeverity;
       title: string;
       description: string;
-      suggestedFix: string;
+            evidence: string;
+      recommendedAction: string;
       relevantFiles?: string[];
     },
     sessionIds: string[],
