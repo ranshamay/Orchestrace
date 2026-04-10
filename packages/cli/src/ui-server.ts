@@ -8165,8 +8165,11 @@ export function buildSessionSystemPrompt(session: WorkSession, phase: SessionPro
               : []),
           ]
         : [
-            'Execute approved work with minimal, scoped edits and verify outcomes.',
+                        'Execute approved work with minimal, scoped edits and verify outcomes.',
             'Read before editing, and use tool output to adapt after failures.',
+            'Once sufficient context is available, immediately issue the first edit_files call; do not continue exploratory steps.',
+            'Use the edit_files tool directly on each file in sequence for implementation edits.',
+            'Do not use intermediate scripting (python/bash/node) to orchestrate or batch code edits.'
             'Read todo_get and agent_graph_get before coding, then keep todo_update current while implementing.',
             'Use subagent_spawn or subagent_spawn_batch to execute parallelizable slices with minimal relevant context per agent.',
             'For independent nodes, use subagent_spawn_batch so work runs in parallel.',
