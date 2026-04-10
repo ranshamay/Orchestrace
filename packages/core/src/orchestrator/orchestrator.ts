@@ -314,10 +314,12 @@ export async function orchestrate(
         let planningPreFirstToolTokenUsage = 0;
                 let planningPreFirstToolTokenNudged = false;
         let planningPreFirstToolTokenHardWarningEmitted = false;
-        let planningNoToolInitialWarningEmitted = false;
+                let planningNoToolInitialWarningEmitted = false;
         let planningNoToolProgressWarningEmitted = false;
         let planningNoToolAbortReason = '';
+        let planningToolCallBudgetExceeded = false;
         let successfulPlanningToolCalls = 0;
+
 
 
         const planningNoProgressInterval = setInterval(() => {
@@ -419,20 +421,27 @@ export async function orchestrate(
 
               if (isSuccessfulToolResultRecord(replayRecord)) {
                 successfulPlanningToolCalls += 1;
-                if (successfulPlanningToolCalls > resolvedMaxPlanningToolCallsPerAttempt) {
+                                if (successfulPlanningToolCalls > resolvedMaxPlanningToolCallsPerAttempt) {
                   planningNoProgressTriggered = true;
+                  planningToolCallBudgetExceeded = true;
                   planningNoToolAbortReason =
                     `Planning tool-call budget exceeded (${successfulPlanningToolCalls}/${resolvedMaxPlanningToolCallsPerAttempt} successful tool calls). `
                     + 'Emit a concrete plan with explicit TODO items once key files and contract shape are identified; defer edge-case discovery to implementation.';
                   planningNoProgressAbortController();
                 }
+
               }
             },
 
           });
         } catch (error) {
-          const wasPlanningNoProgressAbort = planningNoProgressTriggered || isPlanningNoProgressAbortError(error);
-          const failureType = wasPlanningNoProgressAbort ? 'timeout' : resolveReplayFailureType(error);
+                    const wasPlanningNoProgressAbort = planningNoProgressTriggered || isPlanningNoProgressAbortError(error);
+          const failureType = planningToolCallBudgetExceeded
+            ? 'validation'
+            : wasPlanningNoProgressAbort
+              ? 'timeout'
+              : resolveReplayFailureType(error);
+
           const planningError = wasPlanningNoProgressAbort
             ? planningNoToolAbortReason
               || `Planning made no tool progress for ${Math.ceil(noProgressTimeoutMs / 1000)}s. ${PLANNING_NO_TOOL_PROGRESS_NUDGE}`
