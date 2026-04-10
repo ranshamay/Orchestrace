@@ -105,7 +105,7 @@ export function createFilesystemTools(options: FilesystemToolOptions): Registere
       },
       execute: async (toolArgs) => {
         const files = asReadBatchRequests(toolArgs.files);
-        const requestedConcurrency = asPositiveInteger(toolArgs.concurrency)
+                const requestedConcurrency = asPositiveInteger(toolArgs.concurrency)
           ?? options.batchConcurrency
           ?? DEFAULT_BATCH_READ_CONCURRENCY;
         const concurrency = clampConcurrency(requestedConcurrency);
@@ -117,6 +117,10 @@ export function createFilesystemTools(options: FilesystemToolOptions): Registere
             ?? options.batchMinConcurrency
             ?? DEFAULT_BATCH_MIN_CONCURRENCY,
         );
+        const effectiveMaxConcurrency = Math.max(1, Math.min(MAX_BATCH_CONCURRENCY, files.length));
+        const effectiveConcurrency = Math.min(concurrency, effectiveMaxConcurrency);
+        const effectiveMinConcurrency = Math.min(minConcurrency, effectiveMaxConcurrency);
+
 
                 const mapper = async (request: ReadBatchRequest): Promise<ReadBatchResult> => {
           const target = resolveWorkspacePath(options.cwd, request.path);
@@ -159,17 +163,18 @@ export function createFilesystemTools(options: FilesystemToolOptions): Registere
           }
         };
 
-                const batchRun = adaptiveConcurrency
+                                const batchRun = adaptiveConcurrency
           ? await mapWithAdaptiveConcurrency(files, {
-              initialConcurrency: concurrency,
-              minConcurrency,
-              maxConcurrency: MAX_BATCH_CONCURRENCY,
+              initialConcurrency: effectiveConcurrency,
+              minConcurrency: effectiveMinConcurrency,
+              maxConcurrency: effectiveMaxConcurrency,
             }, mapper, isReadBatchFailure)
           : {
-              results: await mapWithConcurrency(files, concurrency, mapper),
-              finalConcurrency: concurrency,
+              results: await mapWithConcurrency(files, effectiveConcurrency, mapper),
+              finalConcurrency: effectiveConcurrency,
               windows: 1,
             };
+
 
         const fileResults = batchRun.results;
 
@@ -179,9 +184,10 @@ export function createFilesystemTools(options: FilesystemToolOptions): Registere
         return {
           content: JSON.stringify({
             total: fileResults.length,
-            concurrency,
+                        concurrency: effectiveConcurrency,
             adaptiveConcurrency,
-            minConcurrency,
+            minConcurrency: effectiveMinConcurrency,
+
             finalConcurrency: batchRun.finalConcurrency,
             windows: batchRun.windows,
             successes,

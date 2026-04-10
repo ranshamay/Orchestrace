@@ -458,19 +458,23 @@ describe('batch filesystem tools', () => {
     expect(result.content.length).toBe(250 + '\n... (truncated)'.length);
   });
 
-  it('read_files supports adaptive concurrency metadata', async () => {
+    it('read_files supports adaptive concurrency metadata', async () => {
 
     const cwd = await makeWorkspace();
     const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+
+    const files = [
+      { path: 'src/file.ts' },
+      { path: 'src/file.ts' },
+      { path: 'src/file.ts' },
+      { path: 'src/file.ts' },
+    ];
 
     const result = await toolset.executeTool({
       id: '1',
       name: 'read_files',
       arguments: {
-        files: [
-          { path: 'src/file.ts' },
-          { path: 'src/file.ts' },
-        ],
+        files,
         concurrency: 2,
         adaptiveConcurrency: true,
         minConcurrency: 1,
@@ -487,8 +491,10 @@ describe('batch filesystem tools', () => {
     expect(parsed.adaptiveConcurrency).toBe(true);
     expect(parsed.minConcurrency).toBe(1);
     expect(parsed.finalConcurrency).toBeGreaterThanOrEqual(1);
+    expect(parsed.finalConcurrency).toBeLessThanOrEqual(files.length);
     expect(parsed.windows).toBeGreaterThanOrEqual(1);
   });
+
 
   it('read_files uses run-level adaptive defaults when tool args omit them', async () => {
     const cwd = await makeWorkspace();
