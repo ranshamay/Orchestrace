@@ -1243,7 +1243,7 @@ describe('search_files tool', () => {
     expect(result.content.toLowerCase()).not.toContain('os error 2');
   });
 
-    it('keeps missing TypeScript file path handling deterministic and skips ripgrep execution', async () => {
+      it('keeps missing TypeScript file path handling deterministic and skips ripgrep execution', async () => {
     const cwd = await makeWorkspace();
     const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
     const runCommandSpy = vi.spyOn(commandRunner, 'runCommand');
@@ -1264,7 +1264,85 @@ describe('search_files tool', () => {
 
     runCommandSpy.mockRestore();
   });
+
+  it('returns a validation error for invalid path payload bytes before invoking ripgrep', async () => {
+    const cwd = await makeWorkspace();
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+    const runCommandSpy = vi.spyOn(commandRunner, 'runCommand');
+
+    const result = await toolset.executeTool({
+      id: 'invalid-path-null-byte',
+      name: 'search_files',
+      arguments: {
+        query: 'value',
+        path: `src${String.fromCharCode(0)}file.ts`,
+      },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content).toBe('Invalid search path: null bytes are not allowed.');
+    expect(result.details).toMatchObject({
+      errorType: 'invalid_arguments',
+      toolName: 'search_files',
+    });
+    expect(runCommandSpy).not.toHaveBeenCalled();
+
+    runCommandSpy.mockRestore();
+  });
+
+  it('repairs swapped query/path payloads when path is query-like and query is an existing file target', async () => {
+    const cwd = await makeWorkspace();
+    await writeFile(
+      join(cwd, 'src', 'runner-observer.ts'),
+      ['checkpoint', 'git status', 'execFileAsync(', 'function runShellCommandRoute() {}'].join('\n') + '\n',
+      'utf-8',
+    );
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+
+    const result = await toolset.executeTool({
+      id: 'swapped-query-path',
+      name: 'search_files',
+      arguments: {
+        query: 'src/runner-observer.ts',
+        path: 'git status',
+      },
+    });
+
+        expect(result.isError).toBeFalsy();
+    expect(result.content).toContain('2:git status');
+    expect(result.content.toLowerCase()).not.toContain('no such file or directory');
+    expect(result.content.toLowerCase()).not.toContain('os error 2');
+
+  });
+
+  it('keeps observer tokens as literal query text in normal non-swapped calls', async () => {
+    const cwd = await makeWorkspace();
+    await writeFile(
+      join(cwd, 'src', 'observer-tokens.ts'),
+      ['git status', 'execFileAsync(', 'checkpoint', 'function runShellCommandRoute() {}'].join('\n') + '\n',
+      'utf-8',
+    );
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+
+    const queries = ['git status', 'execFileAsync(', 'checkpoint', 'function runShellCommandRoute() {}'];
+    for (const query of queries) {
+      const result = await toolset.executeTool({
+        id: `observer-token-${query}`,
+        name: 'search_files',
+        arguments: {
+          query,
+          path: 'src',
+        },
+      });
+
+      expect(result.isError).toBeFalsy();
+      expect(result.content).toContain(query);
+      expect(result.content.toLowerCase()).not.toContain('no such file or directory');
+      expect(result.content.toLowerCase()).not.toContain('os error 2');
+    }
+  });
 });
+
 
 describe('git_status and git_diff session gating', () => {
   it('returns status output in a git repository when task requires writes', async () => {
