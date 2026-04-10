@@ -65,7 +65,7 @@ export function buildCompletionFailureRetryHint(params: {
         'Retry with fewer consecutive tool calls and prioritize essential steps first.',
         `Failure detail: ${params.errorMessage}`,
       ].join('\n');
-        case 'tool_runtime':
+            case 'tool_runtime':
       return [
         'Previous attempt failed during tool execution.',
         'Inspect prior tool-call errors, fix arguments/paths, and retry only needed targeted tools.',
