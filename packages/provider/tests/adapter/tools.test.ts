@@ -272,7 +272,7 @@ describe('executeWithOptionalTools', () => {
     expect(parsed.files.map((entry) => entry.path)).toEqual(['src/a.ts', 'src/b.ts', 'src/a.ts']);
   });
 
-  it('uses deterministic remediation guidance for duplicate-path edit_files errors', async () => {
+    it('uses deterministic remediation guidance for duplicate-path edit_files errors', async () => {
     const consumeStreamMock = vi.mocked(consumeStream);
 
     const firstResponse = makeAssistantMessage([
@@ -321,6 +321,78 @@ describe('executeWithOptionalTools', () => {
     );
     expect(genericRetryPrompt).toBeUndefined();
   });
+
+  it('splits canonical duplicate-path variants in edit_files batches', async () => {
+    const consumeStreamMock = vi.mocked(consumeStream);
+
+    const firstResponse = makeAssistantMessage([
+      {
+        type: 'toolCall',
+        id: 'edit-batch-canonical-dup',
+        name: 'edit_files',
+        arguments: {
+          files: [
+            { path: 'src/a.ts', oldText: 'one', newText: 'ONE' },
+            { path: './src/a.ts', oldText: 'two', newText: 'TWO' },
+          ],
+          concurrency: 3,
+          adaptiveConcurrency: true,
+          minConcurrency: 1,
+        },
+      },
+    ], 'tool_calls');
+    const finalResponse = makeAssistantMessage([{ type: 'text', text: 'done' }]);
+
+    consumeStreamMock.mockResolvedValueOnce(firstResponse as never);
+    consumeStreamMock.mockResolvedValueOnce(finalResponse as never);
+
+    const executeTool = vi.fn()
+      .mockResolvedValueOnce({
+        isError: false,
+        content: JSON.stringify({ total: 1, successes: 1, failures: 0, files: [{ path: 'src/a.ts', ok: true }] }),
+      })
+      .mockResolvedValueOnce({
+        isError: false,
+        content: JSON.stringify({ total: 1, successes: 1, failures: 0, files: [{ path: './src/a.ts', ok: true }] }),
+      });
+
+    const context: TestContext = {
+      messages: [],
+      tools: [{ name: 'edit_files', description: 'Edit files in batch', parameters: { type: 'object' } }],
+    };
+
+    await executeWithOptionalTools({
+      model: {} as never,
+      context,
+      options: {},
+      toolset: {
+        tools: [],
+        executeTool,
+      },
+      onUsage: () => {},
+    });
+
+    expect(executeTool).toHaveBeenCalledTimes(2);
+    expect(executeTool.mock.calls[0]?.[0]?.arguments?.files).toEqual([
+      { path: 'src/a.ts', oldText: 'one', newText: 'ONE' },
+    ]);
+    expect(executeTool.mock.calls[1]?.[0]?.arguments?.files).toEqual([
+      { path: './src/a.ts', oldText: 'two', newText: 'TWO' },
+    ]);
+
+    const toolResult = context.messages.find((message) => message.role === 'toolResult');
+    const parsed = JSON.parse(String(toolResult?.content?.[0]?.text ?? '{}')) as {
+      total: number;
+      successes: number;
+      failures: number;
+      files: Array<{ path: string }>;
+    };
+    expect(parsed.total).toBe(2);
+    expect(parsed.successes).toBe(2);
+    expect(parsed.failures).toBe(0);
+    expect(parsed.files.map((entry) => entry.path)).toEqual(['src/a.ts', './src/a.ts']);
+  });
+
 
   it('retries subagent_spawn_batch failures in a single reduced batch request', async () => {
 
