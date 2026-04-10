@@ -7,7 +7,13 @@
 import { createHash } from 'node:crypto';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
-import type { FindingRecord, FindingCategory, FindingSeverity } from './types.js';
+import {
+  ALL_FINDING_CATEGORIES,
+  type FindingRecord,
+  type FindingCategory,
+  type FindingSeverity,
+} from './types.js';
+
 
 export class FindingRegistry {
   private findings: FindingRecord[] = [];
@@ -18,19 +24,22 @@ export class FindingRegistry {
     this.filePath = join(observerDir, 'findings.json');
   }
 
-  /** Load persisted findings from disk. */
+    /** Load persisted findings from disk. */
   async load(): Promise<void> {
     try {
       const raw = await readFile(this.filePath, 'utf-8');
       const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed)) {
-        this.findings = parsed;
+      const { findings, migrated } = normalizePersistedFindings(parsed);
+      this.findings = findings;
+      if (migrated) {
+        this.dirty = true;
       }
     } catch {
       // File doesn't exist or is corrupted — start fresh
       this.findings = [];
     }
   }
+
 
   /** Persist findings to disk (only if dirty). */
   async save(): Promise<void> {
@@ -224,4 +233,132 @@ function computeFingerprint(category: string, title: string, description: string
   const normalized = `${category}::${title.toLowerCase().trim()}::${description.slice(0, 200).toLowerCase().trim()}`;
   return createHash('sha256').update(normalized).digest('hex').slice(0, 16);
 }
+
+function normalizePersistedFindings(value: unknown): { findings: FindingRecord[]; migrated: boolean } {
+  if (!Array.isArray(value)) {
+    return { findings: [], migrated: false };
+  }
+
+  const normalized: FindingRecord[] = [];
+  let migrated = false;
+
+  for (const candidate of value) {
+    const result = normalizePersistedFinding(candidate);
+    if (result) {
+      normalized.push(result.finding);
+      migrated = migrated || result.migrated;
+    } else {
+      migrated = true;
+    }
+  }
+
+  return { findings: normalized, migrated };
+}
+
+function normalizePersistedFinding(value: unknown): { finding: FindingRecord; migrated: boolean } | null {
+  if (!isPlainObject(value)) {
+    return null;
+  }
+
+  const category = normalizeCategory(value.category);
+  const severity = normalizeSeverity(value.severity);
+  const title = asNonEmptyString(value.title);
+  const description = asNonEmptyString(value.description);
+  const observedInSessions = asStringArray(value.observedInSessions);
+  const detectedAt = asString(value.detectedAt) ?? new Date().toISOString();
+
+  if (!category || !severity || !title || !description || observedInSessions.length === 0) {
+    return null;
+  }
+
+  const persistedFingerprint = asString(value.fingerprint);
+  const expectedFingerprint = computeFingerprint(category, title, description);
+  const fingerprint = persistedFingerprint && persistedFingerprint.length > 0
+    ? persistedFingerprint
+    : expectedFingerprint;
+
+  const fixStatus = normalizeFixStatus(value.fixStatus);
+  const fixSessionId = normalizeFixSessionId(value.fixSessionId);
+  const relevantFiles = asStringArray(value.relevantFiles);
+  const additionalSessions = asStringArray(value.additionalSessions);
+
+  const suggestedFix = asString(value.suggestedFix);
+  const persistedEvidence = asStringArray(value.evidence);
+  const evidence = persistedEvidence.length > 0
+    ? persistedEvidence
+    : (suggestedFix ? [suggestedFix] : []);
+
+  let migrated = false;
+  if (!persistedFingerprint || persistedFingerprint.length === 0) migrated = true;
+  if (!asString(value.detectedAt)) migrated = true;
+  if (!Array.isArray(value.relevantFiles)) migrated = true;
+  if (!Array.isArray(value.additionalSessions)) migrated = true;
+  if (!Array.isArray(value.evidence)) migrated = true;
+  if (!fixStatus || fixStatus !== value.fixStatus) migrated = true;
+  if (fixSessionId !== value.fixSessionId) migrated = true;
+
+  const finding: FindingRecord = {
+    fingerprint,
+    category,
+    severity,
+    title,
+    description,
+    suggestedFix: suggestedFix ?? evidence[0] ?? '',
+    evidence,
+    relevantFiles,
+    observedInSessions,
+    detectedAt,
+    fixSessionId,
+    fixStatus,
+    additionalSessions,
+  };
+
+  return { finding, migrated };
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
+function asString(value: unknown): string | undefined {
+  return typeof value === 'string' ? value : undefined;
+}
+
+function asNonEmptyString(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function asStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is string => typeof item === 'string' && item.length > 0);
+}
+
+function normalizeCategory(value: unknown): FindingCategory | null {
+  if (typeof value !== 'string') return null;
+  return ALL_FINDING_CATEGORIES.includes(value as FindingCategory)
+    ? (value as FindingCategory)
+    : null;
+}
+
+function normalizeSeverity(value: unknown): FindingSeverity | null {
+  if (value === 'low' || value === 'medium' || value === 'high' || value === 'critical') {
+    return value;
+  }
+  return null;
+}
+
+function normalizeFixStatus(value: unknown): FindingRecord['fixStatus'] {
+  if (value === 'pending' || value === 'spawned' || value === 'completed' || value === 'failed') {
+    return value;
+  }
+  return 'pending';
+}
+
+function normalizeFixSessionId(value: unknown): string | null {
+  return typeof value === 'string' && value.length > 0 ? value : null;
+}
+
+
 

@@ -297,9 +297,66 @@ describe('log watcher fix-session emission', () => {
     }
   });
 
+    it('migrates legacy persisted findings without evidence and still spawns actionable fix prompts', async () => {
+    const orchestraceDir = await mkdtemp(join(tmpdir(), 'orchestrace-observer-'));
+
+    try {
+      const observerDir = join(orchestraceDir, 'observer');
+      await mkdir(observerDir, { recursive: true });
+      await writeFile(
+        join(observerDir, 'findings.json'),
+        JSON.stringify([
+          {
+            fingerprint: 'legacy-finding-1',
+            category: 'architecture',
+            severity: 'high',
+            title: 'Legacy persisted finding',
+            description: 'Finding persisted before evidence schema existed.',
+            suggestedFix: 'Migrate state reads to normalize legacy schema.',
+            observedInSessions: ['legacy-session'],
+            detectedAt: new Date().toISOString(),
+            fixSessionId: null,
+            fixStatus: 'pending',
+          },
+        ], null, 2),
+        'utf-8',
+      );
+
+      const startSession = vi.fn(async () => ({ id: `fix-${String(startSession.mock.calls.length + 1)}` }));
+      const daemon = new ObserverDaemon({
+        orchestraceDir,
+        eventStore: createEventStoreStub(),
+        llm: { complete: vi.fn() } as ObserverDaemonOptions['llm'],
+        startSession,
+        resolveApiKey: async () => undefined,
+      });
+
+      await daemon.start();
+      await daemon.updateConfig({ maxConcurrentFixSessions: 0 });
+
+                  const spawned = await daemon.spawnAll();
+      expect(spawned).toBe(1);
+      expect(startSession).toHaveBeenCalledTimes(1);
+
+
+      const prompt = String(startSession.mock.calls[0]?.[0].prompt ?? '');
+      expect(prompt).toContain('## Task');
+      expect(prompt).toContain('Migrate state reads to normalize legacy schema.');
+
+      const findings = daemon.getFindings();
+      expect(findings).toHaveLength(1);
+      expect(findings[0]?.evidence).toEqual(['Migrate state reads to normalize legacy schema.']);
+      expect(findings[0]?.additionalSessions).toEqual([]);
+      expect(findings[0]?.relevantFiles).toEqual([]);
+    } finally {
+      await rm(orchestraceDir, { recursive: true, force: true });
+    }
+  });
+
   it('does not count historical spawned findings against current process concurrency', async () => {
 
     const orchestraceDir = await mkdtemp(join(tmpdir(), 'orchestrace-observer-'));
+
 
     try {
       const observerDir = join(orchestraceDir, 'observer');
