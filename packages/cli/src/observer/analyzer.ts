@@ -14,7 +14,7 @@ import {
 } from './types.js';
 import type { SessionSummary } from './summarizer.js';
 import { formatSummaryForLlm } from './summarizer.js';
-import { OBSERVER_SYSTEM_PROMPT } from './prompts.js';
+import { FINDING_CATEGORY_LIST, OBSERVER_SYSTEM_PROMPT } from './prompts.js';
 
 /**
  * Analyze one or more session summaries via LLM and return structured findings.
@@ -70,7 +70,7 @@ function buildAnalysisPrompt(summaries: SessionSummary[], allowedCategories: Fin
       '{\n' +
       '  "findings": [\n' +
       '    {\n' +
-      '      "category": "code-quality" | "performance" | "agent-efficiency" | "architecture" | "test-coverage",\n' +
+            `      "category": ${FINDING_CATEGORY_LIST},\n` +
       '      "severity": "low" | "medium" | "high" | "critical",\n' +
       '      "title": "Short one-line title",\n' +
       '      "description": "Detailed description of the issue found",\n' +
