@@ -54,6 +54,14 @@ export interface LogWatcherState {
   linesProcessed: number;
 }
 
+export type LogWatcherRuntimeError = {
+  source: 'log-watcher';
+  operation: 'analyze-batch' | 'emit-findings';
+  message: string;
+  timestamp: string;
+  context?: Record<string, unknown>;
+};
+
 export interface LogWatcherOptions {
   llm: LlmAdapter;
   config: ObserverConfig;
@@ -63,11 +71,14 @@ export interface LogWatcherOptions {
   onStateChange?: (state: LogWatcherState) => void;
   /** Called only with findings newly detected in the latest analysis batch. */
   onFindings?: (findings: LogFinding[]) => void | Promise<void>;
+  /** Called when analysis/runtime errors occur in watcher execution. */
+  onError?: (error: LogWatcherRuntimeError) => void | Promise<void>;
   /** Maximum lines to accumulate before triggering analysis (default 200). */
   batchSize?: number;
   /** Time window (ms) — trigger analysis after this interval even if batch isn't full (default 120s). */
   timeWindowMs?: number;
 }
+
 
 // ---------------------------------------------------------------------------
 // System Prompt
@@ -129,8 +140,10 @@ export class LogWatcher {
   private config: ObserverConfig;
   private readonly resolveApiKey: (provider: string) => Promise<string | undefined>;
   private readonly onStateChange?: (state: LogWatcherState) => void;
-  private readonly onFindings?: (findings: LogFinding[]) => void | Promise<void>;
+    private readonly onFindings?: (findings: LogFinding[]) => void | Promise<void>;
+  private readonly onError?: (error: LogWatcherRuntimeError) => void | Promise<void>;
   private readonly batchSize: number;
+
   private readonly timeWindowMs: number;
 
   private state: LogWatcherState = {
@@ -151,9 +164,11 @@ export class LogWatcher {
     this.llm = options.llm;
     this.config = { ...options.config };
     this.resolveApiKey = options.resolveApiKey;
-    this.onStateChange = options.onStateChange;
+        this.onStateChange = options.onStateChange;
     this.onFindings = options.onFindings;
+    this.onError = options.onError;
     this.batchSize = options.batchSize ?? 200;
+
     this.timeWindowMs = options.timeWindowMs ?? 120_000;
   }
 
@@ -232,10 +247,17 @@ export class LogWatcher {
     this.emitChange();
 
     try {
-      const prompt = this.buildAnalysisPrompt(batch);
+            const prompt = this.buildAnalysisPrompt(batch);
       const provider = pickModelSetting(this.config.logWatcherProvider, this.config.provider);
       const model = pickModelSetting(this.config.logWatcherModel, this.config.model);
       const apiKey = await this.resolveApiKey(provider);
+      const context = {
+        provider,
+        model,
+        batchSize: batch.length,
+        bufferedLinesRemaining: this.buffer.length,
+      };
+
 
       const result = await this.llm.complete({
         provider,
@@ -260,22 +282,38 @@ export class LogWatcher {
         newlyDetected.push(finding);
       }
 
-      if (newlyDetected.length > 0 && this.onFindings) {
+            if (newlyDetected.length > 0 && this.onFindings) {
         void Promise.resolve(this.onFindings(newlyDetected)).catch((err) => {
-          process.stderr.write(
-            `[orchestrace][log-watcher] Finding callback error: ${(err as Error).message}\n`,
-          );
+          this.emitError({
+            source: 'log-watcher',
+            operation: 'emit-findings',
+            message: toErrorMessage(err),
+            timestamp: new Date().toISOString(),
+            context: {
+              findingsCount: newlyDetected.length,
+              ...context,
+            },
+          });
         });
       }
 
+
       this.state.analyzedBatches++;
       this.state.lastAnalyzedAt = new Date().toISOString();
-    } catch (err) {
+        } catch (err) {
       if ((err as Error).name !== 'AbortError') {
-        // Use original console to avoid recursion
-        process.stderr.write(`[orchestrace][log-watcher] Analysis error: ${(err as Error).message}\n`);
+        this.emitError({
+          source: 'log-watcher',
+          operation: 'analyze-batch',
+          message: toErrorMessage(err),
+          timestamp: new Date().toISOString(),
+          context: {
+            batchSize: batch.length,
+          },
+        });
       }
     } finally {
+
       this.analyzing = false;
       if ((this.state.status as string) !== 'stopped') {
         this.state.status = 'watching';
@@ -303,10 +341,25 @@ export class LogWatcher {
     return lines.join('\n');
   }
 
-  private emitChange(): void {
+    private emitChange(): void {
     this.onStateChange?.(this.state);
   }
+
+    private emitError(error: LogWatcherRuntimeError): void {
+    if (this.onError) {
+      void Promise.resolve(this.onError(error)).catch((handlerError) => {
+        process.stderr.write(
+          `[orchestrace][log-watcher] error handler failure: ${toErrorMessage(handlerError)}\n`,
+        );
+      });
+      return;
+    }
+
+    process.stderr.write(`[orchestrace][log-watcher] ${error.operation} error: ${error.message}\n`);
+  }
+
 }
+
 
 // ---------------------------------------------------------------------------
 // Response Parser
@@ -357,7 +410,16 @@ function validateSeverity(sev: string): FindingSeverity {
   return valid.includes(sev as FindingSeverity) ? (sev as FindingSeverity) : 'medium';
 }
 
+function toErrorMessage(err: unknown): string {
+  if (err instanceof Error) {
+    return err.message;
+  }
+
+  return String(err);
+}
+
 function pickModelSetting(value: unknown, fallback: string): string {
+
   if (typeof value !== 'string') {
     return fallback;
   }

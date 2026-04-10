@@ -7,4 +7,11 @@ export { DEFAULT_OBSERVER_CONFIG } from './types.js';
 export { BackendLogger } from './backend-logger.js';
 export type { BackendLoggerOptions } from './backend-logger.js';
 export { LogWatcher } from './log-watcher.js';
-export type { LogWatcherState, LogFinding, LogFindingCategory, LogWatcherStatus } from './log-watcher.js';
+export type {
+  LogWatcherState,
+  LogFinding,
+  LogFindingCategory,
+  LogWatcherStatus,
+  LogWatcherRuntimeError,
+} from './log-watcher.js';
+

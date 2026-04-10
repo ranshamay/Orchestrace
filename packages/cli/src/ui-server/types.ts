@@ -73,7 +73,18 @@ export interface SessionAgentGraphNode {
   reasoning?: ReasoningLevel;
 }
 
+export type LogStreamErrorEvent = {
+  errorId: string;
+  source: 'log-watcher' | 'observer-ingestion' | 'session-observer-ingestion' | 'log-stream';
+  operation: string;
+  message: string;
+  timestamp: string;
+  severity?: 'info' | 'warning' | 'error';
+  context?: Record<string, unknown>;
+};
+
 export interface UiDagEvent {
+
   time: string;
   runId?: string;
   type: DagEvent['type'];

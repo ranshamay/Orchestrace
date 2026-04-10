@@ -1,14 +1,23 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { LogWatcherState } from '../../../lib/api';
+import type { LogStreamErrorEvent, LogWatcherState } from '../../../lib/api';
 import { API_BASE, buildAuthedSseUrl, fetchLogWatcherStatus } from '../../../lib/api';
 import { LogWatcherPanel } from '../observer/LogWatcherPanel';
 
 const MAX_LOG_LINES = 1200;
+const MAX_BACKEND_ERRORS = 8;
+
+function isLogStreamErrorSource(value: unknown): value is LogStreamErrorEvent['source'] {
+  return value === 'log-watcher'
+    || value === 'observer-ingestion'
+    || value === 'session-observer-ingestion'
+    || value === 'log-stream';
+}
 
 export function LogsTabView() {
   const [state, setState] = useState<LogWatcherState | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [backendErrors, setBackendErrors] = useState<LogStreamErrorEvent[]>([]);
   const [lines, setLines] = useState<string[]>([]);
   const [streamConnected, setStreamConnected] = useState(false);
   const [paused, setPaused] = useState(false);
@@ -52,7 +61,7 @@ export function LogsTabView() {
   }, []);
 
   useEffect(() => {
-        const url = buildAuthedSseUrl(`${API_BASE}/logs/stream`);
+    const url = buildAuthedSseUrl(`${API_BASE}/logs/stream`);
     const es = new EventSource(url);
 
     const handleOpen = () => {
@@ -96,6 +105,38 @@ export function LogsTabView() {
       }
     };
 
+    const handleBackendError = (ev: MessageEvent) => {
+      try {
+        const data = JSON.parse(ev.data) as Partial<LogStreamErrorEvent>;
+        if (
+          typeof data.errorId !== 'string'
+          || !isLogStreamErrorSource(data.source)
+          || typeof data.operation !== 'string'
+          || typeof data.message !== 'string'
+          || typeof data.timestamp !== 'string'
+        ) {
+          return;
+        }
+
+        const parsed: LogStreamErrorEvent = {
+          errorId: data.errorId,
+          source: data.source,
+          operation: data.operation,
+          message: data.message,
+          timestamp: data.timestamp,
+          severity: data.severity,
+          context: data.context,
+        };
+
+        setBackendErrors((current) => {
+          const next = [parsed, ...current.filter((item) => item.errorId !== parsed.errorId)];
+          return next.slice(0, MAX_BACKEND_ERRORS);
+        });
+      } catch {
+        // Ignore malformed stream payloads.
+      }
+    };
+
     const handleError = () => {
       setStreamConnected(false);
       setError((current) => current ?? 'Log stream disconnected. Retrying...');
@@ -104,6 +145,7 @@ export function LogsTabView() {
     es.addEventListener('open', handleOpen as EventListener);
     es.addEventListener('log', handleLog as EventListener);
     es.addEventListener('log-watcher-state', handleState as EventListener);
+    es.addEventListener('log-error', handleBackendError as EventListener);
     es.addEventListener('error', handleError as EventListener);
 
     return () => {
@@ -164,6 +206,22 @@ export function LogsTabView() {
         {error && (
           <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700 dark:border-red-900/60 dark:bg-red-950/40 dark:text-red-300">
             Failed to load log watcher status: {error}
+          </div>
+        )}
+        {backendErrors.length > 0 && (
+          <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-200">
+            <p className="font-semibold">Recent backend operational errors</p>
+            <ul className="mt-1 space-y-1">
+              {backendErrors.map((entry) => (
+                <li key={entry.errorId}>
+                  <span className="font-medium">{entry.source}</span>
+                  {' · '}
+                  <span>{entry.operation}</span>
+                  {' · '}
+                  <span>{entry.message}</span>
+                </li>
+              ))}
+            </ul>
           </div>
         )}
 

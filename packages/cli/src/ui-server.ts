@@ -61,8 +61,10 @@ import type {
   SessionAgentModels,
   SessionLlmStatus,
   SessionRecoveryInfo,
-  UiDagEvent,
+    UiDagEvent,
+  LogStreamErrorEvent,
   UiPreferences,
+
   UiServerOptions,
   WorkSession,
   WorkState,
@@ -87,7 +89,8 @@ import type {
   SessionRecoveryDetectedPayload,
 } from '@orchestrace/store';
 import { ObserverDaemon, SessionObserver, BackendLogger, LogWatcher } from './observer/index.js';
-import type { RealtimeFinding } from './observer/index.js';
+import type { LogWatcherRuntimeError, RealtimeFinding } from './observer/index.js';
+
 import { sanitizeLogLine, sanitizeToolPayload } from './runner/log-sanitizer.js';
 import { parseTaskRouteOverride } from './task-routing.js';
 import { PrMergeScanner } from './pr-merge-scanner.js';
@@ -291,18 +294,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
   const backendLogger = new BackendLogger({ orchestraceDir });
   backendLogger.start();
 
-  // Stream log lines to SSE clients
-  backendLogger.onLine((line) => {
-    for (const client of [...logStreamClients]) {
-      try {
-        sendSse(client, 'log', { line });
-      } catch {
-        logStreamClients.delete(client);
-      }
-    }
-  });
+    const workSessions = new Map<string, WorkSession>();
 
-  const workSessions = new Map<string, WorkSession>();
   const authSessions = new Map<string, AuthSession>();
   const githubDeviceAuthSessions = new Map<string, GithubDeviceAuthSession>();
   const sessionChats = new Map<string, SessionChatThread>();
@@ -321,9 +314,51 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
   const chatStreamClients = new Map<string, Set<ServerResponse>>();
   const sessionStatusStreamClients = new Set<ServerResponse>();
   const logStreamClients = new Set<ServerResponse>();
-  const uiStatePath = join(workspaceManager.getRootDir(), '.orchestrace', 'ui-state.json');
+    const uiStatePath = join(workspaceManager.getRootDir(), '.orchestrace', 'ui-state.json');
+
+  function broadcastLogStreamEvent(event: string, payload: unknown): void {
+    for (const client of [...logStreamClients]) {
+      try {
+        sendSse(client, event, payload);
+      } catch {
+        logStreamClients.delete(client);
+      }
+    }
+  }
+
+    function reportLogStreamError(input: {
+    source: LogStreamErrorEvent['source'];
+    operation: string;
+    message: string;
+    severity?: LogStreamErrorEvent['severity'];
+    context?: Record<string, unknown>;
+  }): void {
+
+    const event: LogStreamErrorEvent = {
+      errorId: randomUUID(),
+      source: input.source,
+      operation: input.operation,
+      message: input.message,
+      severity: input.severity ?? 'error',
+      timestamp: now(),
+      context: input.context,
+    };
+
+    console.error(
+      `[orchestrace][${event.source}] ${event.operation}: ${event.message}`,
+      event.context ?? {},
+    );
+
+        broadcastLogStreamEvent('log-error', event);
+  }
+
+  // Stream log lines to SSE clients
+  backendLogger.onLine((line) => {
+    broadcastLogStreamEvent('log', { line });
+  });
 
   // Event store for durable session event logs (Phase 2: dual-write alongside in-memory state)
+
   const eventStore = new FileEventStore(
     join(workspaceManager.getRootDir(), '.orchestrace', 'sessions'),
   );
@@ -1515,12 +1550,21 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           if (evt.type === 'session:observer-finding') {
             const finding = (evt.payload as { finding?: RealtimeFinding }).finding;
             if (finding) {
-              void observerDaemon.ingestSessionObserverFindings(id, [finding]).catch((error) => {
-                console.error(
-                  `[orchestrace][observer] Failed to ingest session observer finding for ${id}:`,
-                  error,
-                );
+                            void observerDaemon.ingestSessionObserverFindings(id, [finding]).catch((error) => {
+                reportLogStreamError({
+                  source: 'session-observer-ingestion',
+                  operation: 'ingest-session-observer-findings',
+                  message: toErrorMessage(error),
+                  context: {
+                    sessionId: id,
+                    findingTitle: finding.title,
+                    category: finding.category,
+                    severity: finding.severity,
+                    relevantFiles: finding.relevantFiles ?? [],
+                  },
+                });
               });
+
             }
           }
         },
@@ -1977,21 +2021,32 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     config: observerDaemon.getConfig(),
     logger: backendLogger,
     resolveApiKey: (provider) => resolveProviderApiKey(provider),
-    onStateChange: (state) => {
+        onStateChange: (state) => {
       // Broadcast log watcher state to log stream SSE clients
-      for (const client of [...logStreamClients]) {
-        try {
-          sendSse(client, 'log-watcher-state', { state });
-        } catch {
-          logStreamClients.delete(client);
-        }
-      }
+      broadcastLogStreamEvent('log-watcher-state', { state });
     },
     onFindings: (findings) => {
       void observerDaemon.ingestLogWatcherFindings(findings).catch((error) => {
-        console.error('[orchestrace][observer] Failed to ingest log watcher findings:', error);
+        reportLogStreamError({
+          source: 'observer-ingestion',
+          operation: 'ingest-log-watcher-findings',
+          message: toErrorMessage(error),
+          context: {
+            findingsCount: findings.length,
+            findingTitles: findings.map((finding) => finding.title),
+          },
+        });
       });
     },
+    onError: (error: LogWatcherRuntimeError) => {
+      reportLogStreamError({
+        source: 'log-watcher',
+        operation: error.operation,
+        message: error.message,
+        context: error.context,
+      });
+    },
+
   });
 
   void observerDaemon.start().then(() => {
@@ -4104,9 +4159,18 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           for (const line of recentLines) {
             sendSse(res, 'log', { line });
           }
-        } catch {
-          // Best effort: stream remains live even if tail preload fails.
+                } catch (error) {
+          reportLogStreamError({
+            source: 'log-stream',
+            operation: 'preload-log-tail',
+            message: toErrorMessage(error),
+            severity: 'warning',
+            context: {
+              logPath: backendLogger.getLogPath(),
+            },
+          });
         }
+
 
         logStreamClients.add(res);
         // Send current state as initial payload
