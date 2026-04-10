@@ -639,7 +639,7 @@ describe('search_files tool', () => {
     runCommandSpy.mockRestore();
   });
 
-  it('treats ENOENT-like stderr as non-fatal when stdout already contains valid matches', async () => {
+    it('treats ENOENT-like stderr as non-fatal when stdout already contains valid matches', async () => {
     const cwd = await makeWorkspace();
     await writeFile(join(cwd, 'src', 'coordination-tools.ts'), 'async function mapWithAdaptiveConcurrency() {}\n', 'utf-8');
     const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
@@ -661,7 +661,37 @@ describe('search_files tool', () => {
 
     expect(result.isError).toBeFalsy();
     expect(result.content).toContain('src/coordination-tools.ts:1:async function mapWithAdaptiveConcurrency() {}');
-    expect(result.content).toContain('No such file or directory (os error 2)');
+    expect(result.content.toLowerCase()).not.toContain('no such file or directory');
+    expect(result.content.toLowerCase()).not.toContain('os error 2');
+    expect(result.details).toBeUndefined();
+
+    runCommandSpy.mockRestore();
+  });
+
+
+
+      it('returns no matches (without raw ENOENT noise) when rg reports ENOENT-like stderr and fallback finds no matches', async () => {
+    const cwd = await makeWorkspace();
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+
+    const runCommandSpy = vi.spyOn(commandRunner, 'runCommand').mockResolvedValueOnce({
+      exitCode: 1,
+      stdout: '',
+      stderr: 'rg: src/missing-directory: No such file or directory (os error 2)',
+    });
+
+    const result = await toolset.executeTool({
+      id: 'enoent-no-matches',
+      name: 'search_files',
+      arguments: {
+        query: 'definitely-not-present-token',
+        path: 'src',
+      },
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.content).toBe('(no matches)');
+    expect(result.content.toLowerCase()).not.toContain('no such file or directory');
     expect(result.details).toBeUndefined();
 
     runCommandSpy.mockRestore();
@@ -699,6 +729,7 @@ describe('search_files tool', () => {
 
     runCommandSpy.mockRestore();
   });
+
 
 
     it('treats regression tokens as query text, not file paths', async () => {

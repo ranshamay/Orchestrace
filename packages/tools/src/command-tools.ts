@@ -222,13 +222,23 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
           }
         }
 
-                const output = formatCommandOutput(result, options.maxOutputChars ?? 16000);
+                        const output = formatCommandOutput(result, options.maxOutputChars ?? 16000);
         const hasMatches = result.stdout.trim().length > 0;
+        const hasPathError = hasRipgrepPathError(stderr);
 
         // Prefer successful match output when available. ripgrep may emit stderr
         // diagnostics in mixed-result scenarios; only escalate error behavior
-        // when there are no matches to return.
+        // when there are no matches to return. If stderr only contains
+        // deterministic path-miss noise, return matches without surfacing raw
+        // ENOENT details.
         if (hasMatches) {
+          if (hasPathError) {
+            return {
+              content: truncateText(result.stdout.trim(), options.maxOutputChars ?? 16000),
+              isError: false,
+            };
+          }
+
           return {
             content: output,
             isError: false,
@@ -246,16 +256,9 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
           });
         }
 
-        const hasPathError = hasRipgrepPathError(stderr);
-
-
-                if (result.exitCode === 1 && result.stdout.trim().length === 0) {
-          return { content: '(no matches)', isError: false };
-        }
-
         if (hasPathError) {
           const targetKindAfterSearch = await getPathKind(canonicalTarget ?? target);
-                    if (targetKindAfterSearch === 'missing') {
+          if (targetKindAfterSearch === 'missing') {
             return {
               content: `(skipped invalid search path: ${relTarget})`,
               isError: false,
@@ -273,13 +276,13 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
               glob: globValidation.value,
               maxChars: options.maxOutputChars ?? 16000,
             });
-                        return {
+            return {
               content: fallback,
               isError: false,
             };
 
           } catch (error) {
-                        if (isMissingPathErrorLike(error)) {
+            if (isMissingPathErrorLike(error)) {
               return {
                 content: `(skipped invalid search path: ${relTarget})`,
                 isError: false,
@@ -297,7 +300,15 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
             });
           }
         }
+
+        if (result.exitCode === 1 && result.stdout.trim().length === 0) {
+          return { content: '(no matches)', isError: false };
+        }
+
+          
+                
         if (result.exitCode > 1) {
+
           return createSearchFilesErrorResult({
             errorType: 'command_failed',
             message: output,
