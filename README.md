@@ -150,6 +150,22 @@ pnpm build
 pnpm test
 ```
 
+## Pre-session workspace hygiene
+
+Orchestrace now enforces a workspace hygiene check before launching a session runner.
+Set `ORCHESTRACE_PRESESSION_CLEANUP_MODE` to control behavior when the session worktree is dirty:
+
+- `abort` (default): fail fast with an actionable error
+- `stash`: auto-stash tracked + untracked changes, then continue
+- `warn`: log a warning and continue
+
+Example:
+
+```bash
+export ORCHESTRACE_PRESESSION_CLEANUP_MODE=stash
+```
+
+
 ### Monorepo internal package resolution
 
 Internal `@orchestrace/*` packages publish `main`/`types` from `dist/`, so build outputs must exist before strict typecheck/test flows in dependent packages.

@@ -101,14 +101,21 @@ async function spawnFixSession(
       },
     });
 
+        
     if ('error' in result) {
+
+      const codeSuffix = result.code ? ` (code=${result.code})` : '';
+      const detailSuffix = result.details ? ` details=${JSON.stringify(result.details)}` : '';
       console.error(
-        `[orchestrace][observer] Failed to spawn fix session for "${finding.title}": ${result.error}`,
+        `[orchestrace][observer] Failed to spawn fix session for "${finding.title}": ${result.error}${codeSuffix}${detailSuffix}`,
       );
       return null;
     }
 
+
+    
     console.log(
+
       `[orchestrace][observer] Spawned fix session ${result.id} for "${finding.title}"`,
     );
     return result.id;

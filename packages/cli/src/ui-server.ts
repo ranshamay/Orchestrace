@@ -121,9 +121,12 @@ const WORK_DIFF_MAX_CHARS = 300_000;
 const PHASE_PROGRESS_PLAN_WEIGHT_DEFAULT = 30;
 const PHASE_PROGRESS_IMPLEMENTATION_WEIGHT_DEFAULT = 70;
 const STARTUP_RECOVERY_MODE_ENV = 'ORCHESTRACE_RECOVERY_MODE';
+const PRESESSION_CLEANUP_MODE_ENV = 'ORCHESTRACE_PRESESSION_CLEANUP_MODE';
+const PRESESSION_STASH_PREFIX = 'orchestrace-pre-session';
 const SESSION_CHECKPOINT_FILE = 'checkpoint.json';
 const CHECKPOINT_STASH_PREFIX = 'orchestrace-checkpoint';
 const execFileAsync = promisify(execFile);
+
 
 type SessionCheckpointMetadata = {
   sessionId: string;
@@ -390,7 +393,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           implementationModel: c.implementationModel,
           agentModels: c.agentModels,
         });
-        const session: WorkSession = {
+            const session: WorkSession = {
+
           id: c.id,
           workspaceId: c.workspaceId,
           workspaceName: c.workspaceName,
@@ -426,9 +430,14 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
               workspacePathSessionIdRelation: normalizeWorkspacePathSessionIdRelation(
                 legacyConfig.workspaceAssignment.workspacePathSessionIdRelation,
               ),
-              workspacePathSessionId: asString(legacyConfig.workspaceAssignment.workspacePathSessionId) || undefined,
+                            workspacePathSessionId: asString(legacyConfig.workspaceAssignment.workspacePathSessionId) || undefined,
+              preSessionCleanupMode: normalizePreSessionCleanupMode(legacyConfig.workspaceAssignment.preSessionCleanupMode),
+              preSessionCleanupAction: normalizePreSessionCleanupAction(legacyConfig.workspaceAssignment.preSessionCleanupAction),
+              preSessionCleanupStashRef: asString(legacyConfig.workspaceAssignment.preSessionCleanupStashRef) || undefined,
+              preSessionCleanupStashMessage: asString(legacyConfig.workspaceAssignment.preSessionCleanupStashMessage) || undefined,
             }
             : undefined,
+
           creationReason: c.creationReason,
           sourceSessionId: c.sourceSessionId,
           source: c.source,
@@ -911,7 +920,89 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     };
   }
 
+    
+  type PreSessionCleanupMode = 'abort' | 'stash' | 'warn';
+  type PreSessionCleanupAction = 'none' | 'aborted' | 'stashed' | 'warned';
+
+  function normalizePreSessionCleanupMode(value: unknown): PreSessionCleanupMode | undefined {
+    return resolvePreSessionCleanupModeEnvValue(asString(value) || undefined, undefined);
+  }
+
+  function normalizePreSessionCleanupAction(value: unknown): PreSessionCleanupAction | undefined {
+
+    const normalized = asString(value).toLowerCase();
+    if (normalized === 'none' || normalized === 'aborted' || normalized === 'stashed' || normalized === 'warned') {
+      return normalized;
+    }
+    return undefined;
+  }
+
+      function resolvePreSessionCleanupMode(): PreSessionCleanupMode {
+    return normalizePreSessionCleanupMode(process.env[PRESESSION_CLEANUP_MODE_ENV]) ?? 'abort';
+  }
+
+  async function stashWorkspaceChanges(workspacePath: string, sessionId: string): Promise<{ stashRef?: string; stashMessage: string }> {
+
+    const stashMessage = `${PRESESSION_STASH_PREFIX}:${sessionId}:${new Date().toISOString()}`;
+    const pushOutput = await gitExec(workspacePath, ['stash', 'push', '--include-untracked', '--message', stashMessage]);
+    if (pushOutput.includes('No local changes to save')) {
+      return { stashMessage };
+    }
+
+    const stashList = await gitExec(workspacePath, ['stash', 'list']);
+    const stashLine = stashList
+      .split('\n')
+      .map((line) => line.trim())
+      .find((line) => line.includes(stashMessage));
+    const stashRef = stashLine?.split(':', 1)?.[0]?.trim();
+    return { stashRef, stashMessage };
+  }
+
+      async function enforcePreSessionWorkspaceHygiene(session: WorkSession): Promise<void> {
+    const mode = resolvePreSessionCleanupMode();
+    const dirty = await getWorkspaceDirtySummary(session.workspacePath);
+
+    const hasDirty = dirty.hasUncommittedChanges || dirty.hasStagedChanges || dirty.hasUntrackedChanges;
+
+    session.workspaceAssignment = {
+      ...(session.workspaceAssignment ?? { assignmentSource: 'auto-created-worktree' }),
+      preSessionCleanupMode: mode,
+      preSessionCleanupAction: 'none',
+      preSessionCleanupStashRef: undefined,
+      preSessionCleanupStashMessage: undefined,
+    };
+
+    if (!hasDirty) {
+      return;
+    }
+
+    if (mode === 'stash') {
+      const stashed = await stashWorkspaceChanges(session.workspacePath, session.id);
+      session.workspaceAssignment.preSessionCleanupAction = stashed.stashRef ? 'stashed' : 'none';
+      session.workspaceAssignment.preSessionCleanupStashRef = stashed.stashRef;
+      session.workspaceAssignment.preSessionCleanupStashMessage = stashed.stashMessage;
+      return;
+    }
+
+    if (mode === 'warn') {
+      session.workspaceAssignment.preSessionCleanupAction = 'warned';
+      const details = dirty.dirtySummary.slice(0, 20).join('\n');
+      console.warn(
+        [
+          `[ui-server] Workspace is not clean at session start: ${session.workspacePath}`,
+          `Continuing due to ${PRESESSION_CLEANUP_MODE_ENV}=warn.`,
+          details ? `Detected changes:\n${details}` : undefined,
+        ].filter(Boolean).join('\n'),
+      );
+      return;
+    }
+
+    session.workspaceAssignment.preSessionCleanupAction = 'aborted';
+    await assertWorkspaceIsClean(session.workspacePath, getWorkspaceDirtySummary);
+  }
+
   async function maybeRollbackFromCheckpoint(workspacePath: string, checkpoint?: SessionCheckpointMetadata): Promise<boolean> {
+
     const recoveryMode = (process.env[STARTUP_RECOVERY_MODE_ENV] ?? 'flag').trim().toLowerCase();
     if (recoveryMode !== 'rollback') {
       return false;
@@ -1120,9 +1211,11 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       batchMinConcurrency: session.batchMinConcurrency,
       enableTrivialTaskGate: session.enableTrivialTaskGate,
       trivialTaskMaxPromptLength: session.trivialTaskMaxPromptLength,
-      worktreePath: session.worktreePath,
+            worktreePath: session.worktreePath,
       worktreeBranch: session.worktreeBranch,
+      workspaceAssignment: session.workspaceAssignment,
       creationReason: session.creationReason,
+
       sourceSessionId: session.sourceSessionId,
       source: session.source,
     };
@@ -1554,15 +1647,28 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     const normalizedDisplayPrompt = promptParts.length > 0
       ? compactInlineImageMarkdown(displayPrompt || summarizeChatContentParts(promptParts))
       : (displayPrompt || summarizeChatContentParts(promptParts));
-    const normalizedExecutionPrompt = executionPrompt.trim() || normalizedDisplayPrompt;
+        const normalizedExecutionPrompt = executionPrompt.trim() || normalizedDisplayPrompt;
 
     const retryStartedAt = now();
     session.workspaceName = workspace.name;
+
     session.workspacePath = managedWorkspace.workspacePath;
-    session.worktreePath = managedWorkspace.worktreePath;
+
+        session.worktreePath = managedWorkspace.worktreePath;
     session.worktreeBranch = managedWorkspace.worktreeBranch;
     session.cleanupWorktree = managedWorkspace.cleanupWorktree;
+
+    try {
+      await enforcePreSessionWorkspaceHygiene(session);
+    } catch (error) {
+      return {
+        error: toErrorMessage(error),
+        statusCode: 409,
+      };
+    }
+
     session.prompt = normalizedDisplayPrompt;
+
     session.executionPromptOverride = normalizedExecutionPrompt;
     session.promptParts = promptParts.length > 0 ? cloneChatContentParts(promptParts) : undefined;
     session.creationReason = 'retry';
@@ -1757,11 +1863,12 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     const controller = new AbortController();
     const createdAt = now();
 
-    const session: WorkSession = {
+        const session: WorkSession = {
       id,
       workspaceId: workspace.id,
       workspaceName: workspace.name,
       workspacePath: managedWorkspace.workspacePath,
+
       prompt: normalizedPrompt,
       promptParts: promptParts.length > 0 ? cloneChatContentParts(promptParts) : undefined,
       provider: implementationProvider,
@@ -1796,10 +1903,21 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       events: [],
       agentGraph: [],
       controller,
-      cleanupWorktree: managedWorkspace.cleanupWorktree,
+            cleanupWorktree: managedWorkspace.cleanupWorktree,
     };
 
+    try {
+      await enforcePreSessionWorkspaceHygiene(session);
+    } catch (error) {
+      void managedWorkspace.cleanupWorktree().catch(() => {});
+      return {
+        error: toErrorMessage(error),
+        statusCode: 409,
+      };
+    }
+
     workSessions.set(id, session);
+
     console.log(
       `[ui-server] session worktree initialized: ${JSON.stringify({
         sessionId: id,
@@ -8102,7 +8220,21 @@ export function resolveRunnerTaskRouteEnvValue(
   return parseTaskRouteOverride(routeOverrideRaw) ?? 'code_change';
 }
 
+export function resolvePreSessionCleanupModeEnvValue(
+  modeRaw: string | undefined,
+  fallback: 'abort' | 'stash' | 'warn' = 'abort',
+): 'abort' | 'stash' | 'warn' {
+  const normalized = asString(modeRaw).toLowerCase();
+  if (normalized === 'abort' || normalized === 'stash' || normalized === 'warn') {
+    return normalized;
+  }
+  return fallback;
+}
+
+
+
 export function buildSessionSystemPrompt(session: WorkSession, phase: SessionPromptPhase): string {
+
 
   const quickStartMode = session.quickStartMode
     ?? (parseBooleanSetting(process.env.ORCHESTRACE_QUICK_START_MODE) ?? false);

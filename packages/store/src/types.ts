@@ -154,14 +154,19 @@ export interface SessionConfig {
   trivialTaskMaxPromptLength?: number;
   worktreePath?: string;
   worktreeBranch?: string;
-  workspaceAssignment?: {
+    workspaceAssignment?: {
     assignmentSource: 'workspace-root' | 'selected-worktree' | 'fallback-worktree' | 'auto-created-worktree';
     reusedExistingWorktree?: boolean;
     cleanupApplied?: boolean;
     cleanupDefaultBranch?: string;
     workspacePathSessionIdRelation?: 'match' | 'mismatch' | 'none';
     workspacePathSessionId?: string;
+    preSessionCleanupMode?: 'abort' | 'stash' | 'warn';
+    preSessionCleanupAction?: 'none' | 'aborted' | 'stashed' | 'warned';
+    preSessionCleanupStashRef?: string;
+    preSessionCleanupStashMessage?: string;
   };
+
   creationReason: SessionCreationReason;
   sourceSessionId?: string;
   /** Session origin: 'user' (default) or 'observer' (auto-created by observer agent). */

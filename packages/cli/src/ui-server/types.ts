@@ -35,7 +35,12 @@ export interface SessionWorkspaceAssignmentProvenance {
   cleanupDefaultBranch?: string;
   workspacePathSessionIdRelation?: SessionWorktreePathSessionIdRelation;
   workspacePathSessionId?: string;
+  preSessionCleanupMode?: 'abort' | 'stash' | 'warn';
+  preSessionCleanupAction?: 'none' | 'aborted' | 'stashed' | 'warned';
+  preSessionCleanupStashRef?: string;
+  preSessionCleanupStashMessage?: string;
 }
+
 
 export type LlmSessionState =
   | 'queued'

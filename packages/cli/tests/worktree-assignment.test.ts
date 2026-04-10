@@ -1,5 +1,7 @@
 import { execFile } from 'node:child_process';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+
+
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -8,8 +10,12 @@ import {
   assertWorkspaceIsClean,
   classifyWorkspacePathSessionIdRelation,
   cleanupReusedWorktree,
-  resolveRunnerTaskRouteEnvValue,
+    resolveRunnerTaskRouteEnvValue,
+  resolvePreSessionCleanupModeEnvValue,
 } from '../src/ui-server.js';
+
+
+
 
 
 const execFileAsync = promisify(execFile);
@@ -72,13 +78,27 @@ describe('worktree assignment helpers', () => {
     expect(resolveRunnerTaskRouteEnvValue('not_a_route')).toBe('code_change');
   });
 
-  it('preserves valid runner task route overrides', () => {
+    it('preserves valid runner task route overrides', () => {
     expect(resolveRunnerTaskRouteEnvValue('shell_command')).toBe('shell_command');
     expect(resolveRunnerTaskRouteEnvValue(' investigation ')).toBe('investigation');
     expect(resolveRunnerTaskRouteEnvValue('refactor')).toBe('refactor');
   });
 
+  it('resolves pre-session cleanup mode with safe fallback', () => {
+    expect(resolvePreSessionCleanupModeEnvValue(undefined)).toBe('abort');
+    expect(resolvePreSessionCleanupModeEnvValue('')).toBe('abort');
+    expect(resolvePreSessionCleanupModeEnvValue('invalid')).toBe('abort');
+    expect(resolvePreSessionCleanupModeEnvValue('invalid', 'stash')).toBe('stash');
+  });
+
+  it('preserves valid pre-session cleanup mode overrides', () => {
+    expect(resolvePreSessionCleanupModeEnvValue('abort')).toBe('abort');
+    expect(resolvePreSessionCleanupModeEnvValue('stash')).toBe('stash');
+    expect(resolvePreSessionCleanupModeEnvValue(' warn ')).toBe('warn');
+  });
+
   it('cleans reused worktree without checking out default branch directly', async () => {
+
 
     const repoRoot = await mkdtemp(join(tmpdir(), 'orchestrace-worktree-cleanup-'));
 
