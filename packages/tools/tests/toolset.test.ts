@@ -43,12 +43,11 @@ describe('createAgentToolset phase policy', () => {
       'read_files',
       'search_files',
       'subagent_list',
-            'todo_add',
+      'todo_add',
       'todo_get',
       'todo_replan',
       'todo_set',
       'todo_update',
-
       'url_fetch',
     ]);
   });
@@ -67,12 +66,11 @@ describe('createAgentToolset phase policy', () => {
       'read_files',
       'search_files',
       'subagent_list',
-            'todo_add',
+      'todo_add',
       'todo_get',
       'todo_replan',
       'todo_set',
       'todo_update',
-
       'url_fetch',
     ]);
   });
@@ -96,15 +94,60 @@ describe('createAgentToolset phase policy', () => {
       'run_command_batch',
       'search_files',
       'subagent_list',
-            'todo_add',
+      'todo_add',
       'todo_get',
       'todo_replan',
       'todo_set',
       'todo_update',
-
       'url_fetch',
       'write_file',
       'write_files',
+    ]);
+  });
+
+  it('exposes read-only tools (including url_fetch) for implementation phase review tasks', async () => {
+    const cwd = await makeWorkspace();
+    const toolset = createAgentToolset({ cwd, phase: 'implementation', taskType: 'review' });
+
+    expect(toolNames(toolset)).toEqual([
+      'agent_graph_get',
+      'agent_graph_set',
+      'git_diff',
+      'git_status',
+      'list_directory',
+      'read_file',
+      'read_files',
+      'search_files',
+      'subagent_list',
+      'todo_add',
+      'todo_get',
+      'todo_replan',
+      'todo_set',
+      'todo_update',
+      'url_fetch',
+    ]);
+  });
+
+  it('exposes read-only tools (including url_fetch) for implementation phase plan tasks', async () => {
+    const cwd = await makeWorkspace();
+    const toolset = createAgentToolset({ cwd, phase: 'implementation', taskType: 'plan' });
+
+    expect(toolNames(toolset)).toEqual([
+      'agent_graph_get',
+      'agent_graph_set',
+      'git_diff',
+      'git_status',
+      'list_directory',
+      'read_file',
+      'read_files',
+      'search_files',
+      'subagent_list',
+      'todo_add',
+      'todo_get',
+      'todo_replan',
+      'todo_set',
+      'todo_update',
+      'url_fetch',
     ]);
   });
 });
