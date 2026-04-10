@@ -42,15 +42,12 @@ describe('log watcher fix-session emission', () => {
       await daemon.updateConfig({ enabled: true, maxConcurrentFixSessions: 0 });
 
       const first = await daemon.ingestSessionObserverFindings('session-123', [
-        {
+                {
           category: 'architecture',
           severity: 'high',
           title: 'Unsafe cross-session mutable state',
           description: 'Multiple sessions mutate a shared singleton without locks.',
-                              suggestedFix: 'Scope mutable state per session and guard shared writes with synchronization.',
-          evidence: {
-            summary: 'Same duplicate signal observed in the same session.',
-          },
+          suggestedFix: 'Scope mutable state per session and guard shared writes with synchronization.',
           relevantFiles: ['packages/cli/src/ui-server.ts'],
           evidence: {
             summary: 'Observed shared singleton writes across concurrent sessions.',
@@ -75,12 +72,15 @@ describe('log watcher fix-session emission', () => {
       expect(sessionRequest?.routingAuditContext?.promptCharLength).toBeGreaterThan(0);
 
       const duplicate = await daemon.ingestSessionObserverFindings('session-123', [
-        {
+                {
           category: 'architecture',
           severity: 'high',
           title: 'Unsafe cross-session mutable state',
           description: 'Multiple sessions mutate a shared singleton without locks.',
           suggestedFix: 'Scope mutable state per session and guard shared writes with synchronization.',
+          evidence: {
+            summary: 'Same duplicate signal observed in the same session.',
+          },
         },
       ]);
 
@@ -88,15 +88,12 @@ describe('log watcher fix-session emission', () => {
       expect(startSession).toHaveBeenCalledTimes(1);
 
       const equivalentQueued = await daemon.ingestSessionObserverFindings('session-456', [
-        {
+                {
           category: 'architecture',
           severity: 'critical',
           title: 'Unsafe cross session mutable state',
           description: 'Completely different wording for body should still merge by equivalent queue title.',
-                              suggestedFix: 'Apply synchronization and isolate state.',
-          evidence: {
-            summary: 'Fresh equivalent issue observed in new session.',
-          },
+          suggestedFix: 'Apply synchronization and isolate state.',
           relevantFiles: ['packages/cli/src/observer/daemon.ts'],
           evidence: {
             summary: 'Equivalent architecture issue appeared in another session.',
@@ -296,12 +293,15 @@ describe('log watcher fix-session emission', () => {
       await daemon.updateConfig({ maxConcurrentFixSessions: 0 });
 
       const created = await daemon.ingestSessionObserverFindings('fresh-session', [
-        {
+                {
           category: 'architecture',
           severity: 'high',
           title: 'Unsafe cross session mutable state',
           description: 'Fresh finding should become a new queued task because prior one is completed.',
           suggestedFix: 'Apply synchronization and isolate state.',
+          evidence: {
+            summary: 'Fresh equivalent issue observed in new session.',
+          },
         },
       ]);
 

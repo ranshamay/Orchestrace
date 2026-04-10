@@ -23,7 +23,7 @@ Guidelines:
 - Only report CONCRETE, ACTIONABLE issues — not vague suggestions
 - Each suggestedFix must be detailed enough to serve as a complete task prompt for another agent
 - Include relevant file paths when you can identify them from tool calls
-- Every finding MUST include an `evidence` object with at least `summary`, and include structured metrics when available (eventCount, durationSeconds, toolCalls, implementationAttempt, files, snippets)
+- Every finding MUST include an evidence object with at least a summary, and include structured metrics when available (eventCount, durationSeconds, toolCalls, implementationAttempt, files, snippets)
 - Prioritize issues that affect correctness over style
 - Don't flag issues that are clearly intentional design decisions
 - Focus on patterns that repeat across sessions when analyzing multiple logs
@@ -58,7 +58,7 @@ CRITICAL real-time guidelines:
 - Focus on the CURRENT phase boundary: if the agent just finished planning, assess the plan quality; if it just made tool calls, assess tool usage patterns
 - Be concise — the agent is still running and findings appear in real-time in the UI
 - Each suggestedFix must be detailed enough for another agent to act on independently
-- Every finding MUST include an `evidence` object with at least `summary`, plus structured metrics when available (eventCount, durationSeconds, toolCalls, implementationAttempt, files, snippets)
+- Every finding MUST include an evidence object with at least a summary, plus structured metrics when available (eventCount, durationSeconds, toolCalls, implementationAttempt, files, snippets)
 - Rate severity honestly: critical = data loss/security, high = bugs, medium = perf/quality, low = style/minor
 
 Respond ONLY with valid JSON matching the requested schema.`;
