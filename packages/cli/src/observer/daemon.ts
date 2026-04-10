@@ -42,7 +42,6 @@ type LogWatcherFindingInput = {
   title: string;
   description: string;
   schemaVersion?: '1' | '2';
-  suggestedFix?: string;
   evidence?: Array<{ text: string }>;
   relevantFiles?: string[];
 };
@@ -222,34 +221,25 @@ export class ObserverDaemon {
       return { registered: 0, spawned: 0 };
     }
 
-    let registered = 0;
-    for (const finding of findings) {
-      const mappedCategory = mapLogWatcherCategory(finding.category);
+                                let registered = 0;
+    for (const candidate of findings) {
+      const mappedCategory = mapLogWatcherCategory(candidate.category);
       if (!this.config.assessmentCategories.includes(mappedCategory)) {
         continue;
       }
 
-                  const findingInput: ObserverFindingInput =
-        Array.isArray(finding.evidence) && finding.evidence.length > 0
-          ? {
-              schemaVersion: '2',
-              category: mappedCategory,
-              severity: finding.severity,
-              title: finding.title,
-              description: finding.description,
-              evidence: finding.evidence,
-              suggestedFix: finding.suggestedFix,
-              relevantFiles: finding.relevantFiles,
-            }
-          : {
-              schemaVersion: '1',
-              category: mappedCategory,
-              severity: finding.severity,
-              title: finding.title,
-              description: finding.description,
-              suggestedFix: finding.suggestedFix ?? 'No suggested fix provided.',
-              relevantFiles: finding.relevantFiles,
-            };
+      const findingInput: ObserverFindingInput = {
+        schemaVersion: '2',
+        category: mappedCategory,
+        severity: candidate.severity,
+        title: candidate.title,
+        description: candidate.description,
+        evidence:
+          Array.isArray(candidate.evidence) && candidate.evidence.length > 0
+            ? candidate.evidence
+            : [{ text: 'No suggested fix provided in legacy finding payload.' }],
+        relevantFiles: candidate.relevantFiles,
+      };
 
       const { isNew } = this.registry.register(findingInput, [LOG_WATCHER_SOURCE_SESSION_ID]);
 
@@ -283,33 +273,24 @@ export class ObserverDaemon {
       return { registered: 0, spawned: 0 };
     }
 
-    let registered = 0;
-    for (const finding of findings) {
-      if (!this.config.assessmentCategories.includes(finding.category)) {
+                                let registered = 0;
+    for (const candidate of findings) {
+      if (!this.config.assessmentCategories.includes(candidate.category)) {
         continue;
       }
 
-                  const findingInput: ObserverFindingInput =
-        Array.isArray(finding.evidence) && finding.evidence.length > 0
-          ? {
-              schemaVersion: '2',
-              category: finding.category,
-              severity: finding.severity,
-              title: finding.title,
-              description: finding.description,
-              evidence: finding.evidence,
-              suggestedFix: finding.suggestedFix,
-              relevantFiles: finding.relevantFiles,
-            }
-          : {
-              schemaVersion: '1',
-              category: finding.category,
-              severity: finding.severity,
-              title: finding.title,
-              description: finding.description,
-              suggestedFix: finding.suggestedFix ?? 'No suggested fix provided.',
-              relevantFiles: finding.relevantFiles,
-            };
+      const findingInput: ObserverFindingInput = {
+        schemaVersion: '2',
+        category: candidate.category,
+        severity: candidate.severity,
+        title: candidate.title,
+        description: candidate.description,
+        evidence:
+          Array.isArray(candidate.evidence) && candidate.evidence.length > 0
+            ? candidate.evidence
+            : [{ text: 'No suggested fix provided in legacy finding payload.' }],
+        relevantFiles: candidate.relevantFiles,
+      };
 
       const { isNew } = this.registry.register(findingInput, [sourceSessionId]);
 
