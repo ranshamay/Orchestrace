@@ -18,15 +18,20 @@ export interface RunnerPolicyInput {
   envQuickStartMode: string | undefined;
   configQuickStartMaxPreDelegationToolCalls: unknown;
   envQuickStartMaxPreDelegationToolCalls: string | undefined;
+  configPlanningMaxInvestigativeToolCalls: unknown;
+  envPlanningMaxInvestigativeToolCalls: string | undefined;
   configPlanningNoToolGuardMode: unknown;
   envPlanningNoToolGuardMode: string | undefined;
 }
 
+
 export interface RunnerPolicyResolution {
   quickStartMode: ResolutionResult<boolean>;
   quickStartMaxPreDelegationToolCalls: ResolutionResult<number>;
+  planningMaxInvestigativeToolCalls: ResolutionResult<number>;
   planningNoToolGuardMode: ResolutionResult<PlanningNoToolGuardMode>;
 }
+
 
 /**
  * Standardized precedence policy for runner settings:
@@ -56,6 +61,15 @@ export function resolveRunnerPolicy(input: RunnerPolicyInput): RunnerPolicyResol
       parseConfig: parsePositiveIntConfig,
       parseEnv: parsePositiveIntEnv,
     }),
+        planningMaxInvestigativeToolCalls: resolveConfigEnvDefault<number>({
+      settingKey: 'planningMaxInvestigativeToolCalls',
+      envVarName: 'ORCHESTRACE_PLANNING_MAX_INVESTIGATIVE_TOOL_CALLS',
+      configRaw: input.configPlanningMaxInvestigativeToolCalls,
+      envRaw: input.envPlanningMaxInvestigativeToolCalls,
+      defaultValue: 12,
+      parseConfig: parsePositiveIntConfig,
+      parseEnv: parsePositiveIntEnv,
+    }),
     planningNoToolGuardMode: resolveConfigEnvDefault<PlanningNoToolGuardMode>({
       settingKey: 'planningNoToolGuardMode',
       envVarName: 'ORCHESTRACE_PLANNING_NO_TOOL_GUARD_MODE',
@@ -65,6 +79,7 @@ export function resolveRunnerPolicy(input: RunnerPolicyInput): RunnerPolicyResol
       parseConfig: normalizePlanningNoToolGuardMode,
       parseEnv: normalizePlanningNoToolGuardMode,
     }),
+
   };
 }
 

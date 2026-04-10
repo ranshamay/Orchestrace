@@ -1643,9 +1643,11 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     deliveryStrategy?: SessionDeliveryStrategy;
     autoApprove: boolean;
     planningNoToolGuardMode?: 'enforce' | 'warn';
-    quickStartMode?: boolean;
+        quickStartMode?: boolean;
     quickStartMaxPreDelegationToolCalls?: number;
+    planningMaxInvestigativeToolCalls?: number;
     adaptiveConcurrency?: boolean;
+
     batchConcurrency?: number;
     batchMinConcurrency?: number;
     enableTrivialTaskGate?: boolean;
@@ -1729,10 +1731,15 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     );
     const quickStartMode = request.quickStartMode
       ?? (parseBooleanSetting(process.env.ORCHESTRACE_QUICK_START_MODE) ?? false);
-    const quickStartMaxPreDelegationToolCalls = normalizePositiveSetting(
+        const quickStartMaxPreDelegationToolCalls = normalizePositiveSetting(
       request.quickStartMaxPreDelegationToolCalls,
       parsePositiveSetting(process.env.ORCHESTRACE_QUICK_START_MAX_PRE_DELEGATION_TOOL_CALLS) ?? 3,
     );
+    const planningMaxInvestigativeToolCalls = normalizePositiveSetting(
+      request.planningMaxInvestigativeToolCalls,
+      parsePositiveSetting(process.env.ORCHESTRACE_PLANNING_MAX_INVESTIGATIVE_TOOL_CALLS) ?? 12,
+    );
+
     const planningNoToolGuardMode = normalizePlanningNoToolGuardMode(request.planningNoToolGuardMode)
       ?? uiPreferences.planningNoToolGuardMode;
     const enableTrivialTaskGate = request.enableTrivialTaskGate ?? uiPreferences.enableTrivialTaskGate;
@@ -1774,9 +1781,11 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       deliveryStrategy,
       autoApprove: request.autoApprove,
       planningNoToolGuardMode,
-      quickStartMode,
+            quickStartMode,
       quickStartMaxPreDelegationToolCalls,
+      planningMaxInvestigativeToolCalls,
       adaptiveConcurrency,
+
       batchConcurrency,
       batchMinConcurrency,
       enableTrivialTaskGate,
@@ -2465,9 +2474,13 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           ?? parseBooleanSetting(body.enableQuickStart);
         const planningNoToolGuardMode = normalizePlanningNoToolGuardMode(body.planningNoToolGuardMode)
           ?? (parseBooleanSetting(body.planningNoToolWarnOnly) ? 'warn' : undefined);
-        const quickStartMaxPreDelegationToolCalls = parsePositiveSetting(body.quickStartMaxPreDelegationToolCalls)
+                const quickStartMaxPreDelegationToolCalls = parsePositiveSetting(body.quickStartMaxPreDelegationToolCalls)
           ?? parsePositiveSetting(body.quickStartToolCallLimit)
           ?? parsePositiveSetting(body.maxPreDelegationToolCalls);
+        const planningMaxInvestigativeToolCalls = parsePositiveSetting(body.planningMaxInvestigativeToolCalls)
+          ?? parsePositiveSetting(body.planningToolCallBudget)
+          ?? parsePositiveSetting(body.maxPlanningInvestigativeToolCalls);
+
         const adaptiveConcurrency = parseBooleanSetting(body.adaptiveConcurrency)
           ?? parseBooleanSetting(body.adaptiveToolConcurrency);
         const batchConcurrency = parsePositiveSetting(body.batchConcurrency)
@@ -2504,9 +2517,11 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           deliveryStrategy,
           autoApprove,
           planningNoToolGuardMode,
-          quickStartMode,
+                    quickStartMode,
           quickStartMaxPreDelegationToolCalls,
+          planningMaxInvestigativeToolCalls,
           adaptiveConcurrency,
+
           batchConcurrency,
           batchMinConcurrency,
           enableTrivialTaskGate,
@@ -4526,10 +4541,15 @@ function hydratePersistedSession(session: PersistedWorkSession): WorkSession {
       ?? resolvePlanningNoToolGuardModeDefault(),
     quickStartMode: parseBooleanSetting(session.quickStartMode)
       ?? (parseBooleanSetting(process.env.ORCHESTRACE_QUICK_START_MODE) ?? false),
-    quickStartMaxPreDelegationToolCalls: normalizePositiveSetting(
+        quickStartMaxPreDelegationToolCalls: normalizePositiveSetting(
       session.quickStartMaxPreDelegationToolCalls,
       parsePositiveSetting(process.env.ORCHESTRACE_QUICK_START_MAX_PRE_DELEGATION_TOOL_CALLS) ?? 3,
     ),
+    planningMaxInvestigativeToolCalls: normalizePositiveSetting(
+      session.planningMaxInvestigativeToolCalls,
+      parsePositiveSetting(process.env.ORCHESTRACE_PLANNING_MAX_INVESTIGATIVE_TOOL_CALLS) ?? 12,
+    ),
+
     adaptiveConcurrency: parseBooleanSetting(session.adaptiveConcurrency) ?? resolveAdaptiveConcurrencyDefault(),
     batchConcurrency: normalizePositiveSetting(session.batchConcurrency, resolveBatchConcurrencyDefault()),
     batchMinConcurrency: Math.min(
@@ -8106,10 +8126,15 @@ export function buildSessionSystemPrompt(session: WorkSession, phase: SessionPro
 
   const quickStartMode = session.quickStartMode
     ?? (parseBooleanSetting(process.env.ORCHESTRACE_QUICK_START_MODE) ?? false);
-  const quickStartMaxPreDelegationToolCalls = normalizePositiveSetting(
+    const quickStartMaxPreDelegationToolCalls = normalizePositiveSetting(
     session.quickStartMaxPreDelegationToolCalls,
     parsePositiveSetting(process.env.ORCHESTRACE_QUICK_START_MAX_PRE_DELEGATION_TOOL_CALLS) ?? 3,
   );
+  const planningMaxInvestigativeToolCalls = normalizePositiveSetting(
+    session.planningMaxInvestigativeToolCalls,
+    parsePositiveSetting(process.env.ORCHESTRACE_PLANNING_MAX_INVESTIGATIVE_TOOL_CALLS) ?? 12,
+  );
+
   const planningBudgetPercent = resolvePlanningBudgetPercent();
 
   const phaseRules =
@@ -8147,7 +8172,10 @@ export function buildSessionSystemPrompt(session: WorkSession, phase: SessionPro
             'Planning must produce and maintain todo_set and agent_graph_set state.',
             'todo_set items must include numeric weight values and the total todo weight must sum to 100.',
             'agent_graph_set nodes must include numeric weight values and the total node weight must sum to 100.',
-            'Planning must use subagent_spawn or subagent_spawn_batch for focused parallel research and delegate only relevant context.',
+                        'Planning must use subagent_spawn or subagent_spawn_batch for focused parallel research and delegate only relevant context.',
+            `Hard budget: at most ${planningMaxInvestigativeToolCalls} successful investigative planning tool calls per attempt before plan publication is required.`,
+            'Adopt plan-then-validate: once key files/contract are known, publish the plan and defer edge-case discovery to implementation.',
+
             'Quick-start mode for well-scoped tasks: keep parent pre-delegation orientation to at most 3-4 calls and delegate within the first 2-3 calls whenever possible.',
             'Keep parent orientation lightweight and push detailed file reading/search into sub-agent scopes.',
             'For independent nodes, use subagent_spawn_batch so work runs in parallel.',

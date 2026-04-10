@@ -303,7 +303,7 @@ describe('orchestrate replay capture', () => {
       expect(output?.status).toBe('completed');
       expect(output?.replay?.promptVersion).toBe('prompt-v1');
       expect(output?.replay?.policyVersion).toBe('policy-v1');
-      expect(output?.replay?.attempts.length).toBe(2);
+                        expect(output?.replay?.attempts.length).toBe(2);
       expect(output?.replay?.attempts[0]?.phase).toBe('planning');
       expect(output?.replay?.attempts[1]?.phase).toBe('implementation');
       expect(output?.replay?.attempts[0]?.toolCalls.length).toBe(6);
@@ -464,14 +464,16 @@ describe('orchestrate replay capture', () => {
 
       const output = outputs.get('task-1');
       expect(output).toBeDefined();
-      expect(output?.status).toBe('failed');
+            expect(output?.status).toBe('failed');
       expect(output?.failureType).toBe('validation');
+
       expect(output?.error).toContain('Planning contract not satisfied');
+
       expect(output?.error).toContain('todo_set');
       expect(output?.error).toContain('agent_graph_set');
       expect(output?.error).not.toContain('subagent_spawn');
       expect(output?.replay?.attempts.length).toBe(2);
-      expect(output?.error).toContain('Planning stagnated across attempts with no phase advancement');
+            expect(output?.error).toContain('Planning stagnated across attempts with no phase advancement');
       expect(output?.replay?.attempts.at(-1)?.failureType).toBe('validation');
     } finally {
       await rm(cwd, { recursive: true, force: true });
@@ -594,7 +596,7 @@ describe('orchestrate replay capture', () => {
       expect(output).toBeDefined();
       expect(output?.status).toBe('failed');
       expect(output?.failureType).toBe('validation');
-      expect(output?.error).toContain('Planning stagnated across attempts with no phase advancement');
+            expect(output?.error).toContain('Planning stagnated across attempts with no phase advancement');
       expect(output?.error).toContain('planning contract failure signature');
       expect(output?.replay?.attempts.length).toBe(2);
       expect(output?.replay?.attempts.every((attempt) => attempt.phase === 'planning')).toBe(true);
@@ -922,7 +924,10 @@ describe('orchestrate replay capture', () => {
       expect(output?.status).toBe('completed');
       expect(capturedPlanningPrompts.length).toBeGreaterThan(0);
       const planningPrompt = capturedPlanningPrompts[0] ?? '';
-      expect(planningPrompt).toContain('Within the first 1-2 thinking cycles, make a concrete tool call');
+            expect(planningPrompt).toContain('Within the first 1-2 thinking cycles, make a concrete tool call');
+      expect(planningPrompt).toContain('plan-then-validate approach');
+      expect(planningPrompt).toContain('Planning investigative tool-call budget is hard-capped at 12 successful calls per attempt');
+
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }
@@ -1043,7 +1048,7 @@ describe('orchestrate replay capture', () => {
     }
   });
 
-  it('fails planning early when pre-first-tool token budget is exceeded', async () => {
+    it('fails planning early when pre-first-tool token budget is exceeded', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'orchestrace-replay-token-guard-'));
 
     try {
@@ -1078,7 +1083,142 @@ describe('orchestrate replay capture', () => {
     }
   }, 15_000);
 
+  it('fails planning when investigative tool-call budget is exceeded before plan publication', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'orchestrace-replay-planning-call-budget-fail-'));
+
+    try {
+      const outputs = await orchestrate(makeSingleNodeGraph(), {
+        llm: createAdapter({
+          planningBehavior: async ({ options, signal }) => {
+            options?.onToolCall?.({
+              type: 'started',
+              toolCallId: 'plan-r1',
+              toolName: 'read_file',
+              arguments: '{"path":"packages/core/src/orchestrator/orchestrator.ts"}',
+            });
+            options?.onToolCall?.({
+              type: 'result',
+              toolCallId: 'plan-r1',
+              toolName: 'read_file',
+              result: 'ok',
+              isError: false,
+            });
+            options?.onToolCall?.({
+              type: 'started',
+              toolCallId: 'plan-r2',
+              toolName: 'search_files',
+              arguments: '{"query":"planning"}',
+            });
+            options?.onToolCall?.({
+              type: 'result',
+              toolCallId: 'plan-r2',
+              toolName: 'search_files',
+              result: 'ok',
+              isError: false,
+            });
+
+            if (signal?.aborted) {
+              throw signal.reason;
+            }
+            throw new Error('expected planning call-budget abort');
+          },
+        }),
+        cwd,
+        requirePlanApproval: false,
+        planningSystemPrompt: 'planning',
+        implementationSystemPrompt: 'implementation',
+        planningMaxInvestigativeToolCalls: 1,
+      });
+
+            const output = outputs.get('task-1');
+      expect(output?.status).toBe('failed');
+            expect(output?.failureType).toBe('timeout');
+      expect(output?.error).toContain('Planning exceeded investigative tool-call budget');
+      expect(output?.error).toContain('investigative tool-call budget');
+
+                  expect(output?.error).toContain('plan-then-validate');
+      expect(output?.replay?.attempts.length).toBe(3);
+      expect(output?.replay?.attempts.every((attempt) => attempt.phase === 'planning')).toBe(true);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  }, 15_000);
+
+  it('allows coordination tools at planning budget boundary and succeeds', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'orchestrace-replay-planning-call-budget-boundary-'));
+
+    try {
+      const outputs = await orchestrate(makeSingleNodeGraph(), {
+        llm: createAdapter({
+          planningBehavior: async ({ options }) => {
+            options?.onToolCall?.({
+              type: 'started',
+              toolCallId: 'plan-r1',
+              toolName: 'read_file',
+              arguments: '{"path":"packages/core/src/orchestrator/orchestrator.ts"}',
+            });
+            options?.onToolCall?.({
+              type: 'result',
+              toolCallId: 'plan-r1',
+              toolName: 'read_file',
+              result: 'ok',
+              isError: false,
+            });
+
+            options?.onToolCall?.({
+              type: 'started',
+              toolCallId: 'plan-todo-1',
+              toolName: 'todo_set',
+              arguments: '{"items":[{"id":"p1","title":"Plan","status":"in_progress","weight":100}]}',
+            });
+            options?.onToolCall?.({
+              type: 'result',
+              toolCallId: 'plan-todo-1',
+              toolName: 'todo_set',
+              result: 'Stored 1 todo item(s).',
+              isError: false,
+            });
+            options?.onToolCall?.({
+              type: 'started',
+              toolCallId: 'plan-graph-1',
+              toolName: 'agent_graph_set',
+              arguments: '{"nodes":[{"id":"a1","prompt":"Implement changes","weight":100}]}',
+            });
+            options?.onToolCall?.({
+              type: 'result',
+              toolCallId: 'plan-graph-1',
+              toolName: 'agent_graph_set',
+              result: 'Stored agent dependency graph with 1 node(s).',
+              isError: false,
+            });
+
+            return {
+              text: 'Plan published at budget boundary.',
+              usage: { input: 10, output: 5, cost: 0 },
+              metadata: { stopReason: 'end_turn', endpoint: 'https://example.test' },
+            };
+          },
+        }),
+        cwd,
+        requirePlanApproval: false,
+        planningSystemPrompt: 'planning',
+        implementationSystemPrompt: 'implementation',
+        planningMaxInvestigativeToolCalls: 1,
+      });
+
+      const output = outputs.get('task-1');
+      expect(output?.status).toBe('completed');
+      const planningAttempt = output?.replay?.attempts.find((attempt) => attempt.phase === 'planning');
+      expect(planningAttempt?.toolCalls.some((call) => call.toolName === 'read_file' && call.status === 'result')).toBe(true);
+      expect(planningAttempt?.toolCalls.some((call) => call.toolName === 'todo_set' && call.status === 'result')).toBe(true);
+      expect(planningAttempt?.toolCalls.some((call) => call.toolName === 'agent_graph_set' && call.status === 'result')).toBe(true);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  }, 15_000);
+
   it('includes granular planning contract guidance in planning prompt', async () => {
+
     const cwd = await mkdtemp(join(tmpdir(), 'orchestrace-replay-plan-prompt-'));
     const capturedPlanningPrompts: string[] = [];
 

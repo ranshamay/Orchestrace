@@ -66,8 +66,10 @@ export function buildPlanningPrompt(
       lines: [
         'Create an implementation plan for the following task.',
         'Scale your planning depth to match the task complexity - simple tasks need minimal plans, complex tasks need detailed multi-stage plans.',
-        'Within the first 1-2 thinking cycles, make a concrete tool call to gather grounding context before extended narration.',
+                'Within the first 1-2 thinking cycles, make a concrete tool call to gather grounding context before extended narration.',
         'Before each tool call and after each tool result, narrate your reasoning briefly: what you learned, what you plan to do next, and why.',
+        'Use a plan-then-validate approach: once core files/contract are identified, publish todo_set + agent_graph_set promptly and defer deep edge-case discovery to implementation.',
+
       ],
     },
     {
@@ -76,7 +78,9 @@ export function buildPlanningPrompt(
         'If a tool call fails, use the error details to correct arguments and retry instead of aborting.',
         'Each planned task must include a concrete target, explicit done criteria, and at least one verification command.',
         '',
-        '## Required coordination tools',
+                '## Required coordination tools',
+        '- Planning investigative tool-call budget is hard-capped at 12 successful calls per attempt (todo_set/agent_graph_set are coordination and do not consume this budget)',
+
         '- todo_set (required) to create a concrete todo list',
         '- todo_set items must include numeric weight per item, and the total weight must sum to exactly 100',
         '- todo_set item ids must be unique, and dependsOn can only reference ids from the same todo_set payload',

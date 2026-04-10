@@ -139,8 +139,11 @@ export interface SessionConfig {
   planningNoToolGuardMode?: 'enforce' | 'warn';
   /** Enable quick-start planning mode that delegates within first few tool calls. */
   quickStartMode?: boolean;
-  /** Max successful tool calls allowed before first successful sub-agent delegation in quick-start mode. */
+    /** Max successful tool calls allowed before first successful sub-agent delegation in quick-start mode. */
   quickStartMaxPreDelegationToolCalls?: number;
+  /** Max successful investigative planning tool calls per planning attempt before forcing plan publication. */
+  planningMaxInvestigativeToolCalls?: number;
+
   /** Preferred execution context for this session. */
   executionContext?: 'workspace' | 'git-worktree';
   /** Optional selected worktree path when using git-worktree context. */

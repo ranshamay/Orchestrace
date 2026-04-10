@@ -299,12 +299,17 @@ async function main(): Promise<void> {
     envQuickStartMode: process.env.ORCHESTRACE_QUICK_START_MODE,
     configQuickStartMaxPreDelegationToolCalls: config.quickStartMaxPreDelegationToolCalls,
     envQuickStartMaxPreDelegationToolCalls: process.env.ORCHESTRACE_QUICK_START_MAX_PRE_DELEGATION_TOOL_CALLS,
+        configPlanningMaxInvestigativeToolCalls: config.planningMaxInvestigativeToolCalls,
+    envPlanningMaxInvestigativeToolCalls: process.env.ORCHESTRACE_PLANNING_MAX_INVESTIGATIVE_TOOL_CALLS,
     configPlanningNoToolGuardMode: config.planningNoToolGuardMode,
     envPlanningNoToolGuardMode: process.env.ORCHESTRACE_PLANNING_NO_TOOL_GUARD_MODE,
   });
-  const quickStartMode = runnerPolicy.quickStartMode.value;
+
+    const quickStartMode = runnerPolicy.quickStartMode.value;
   const quickStartMaxPreDelegationToolCalls = runnerPolicy.quickStartMaxPreDelegationToolCalls.value;
+  const planningMaxInvestigativeToolCalls = runnerPolicy.planningMaxInvestigativeToolCalls.value;
   const planningNoToolGuardMode = runnerPolicy.planningNoToolGuardMode.value;
+
   const checkpointFilePath = join(workspaceRoot, '.orchestrace', 'sessions', sessionId, CHECKPOINT_METADATA_FILE);
   const checkpointName = `${CHECKPOINT_STASH_PREFIX}:${sessionId}:${Date.now()}`;
   const checkpointState = {
@@ -460,8 +465,10 @@ async function main(): Promise<void> {
   async function emitRunnerPolicyConflictWarnings(): Promise<void> {
     const conflicts = [
       runnerPolicy.quickStartMode.conflict,
-      runnerPolicy.quickStartMaxPreDelegationToolCalls.conflict,
+            runnerPolicy.quickStartMaxPreDelegationToolCalls.conflict,
+      runnerPolicy.planningMaxInvestigativeToolCalls.conflict,
       runnerPolicy.planningNoToolGuardMode.conflict,
+
     ];
 
     for (const conflict of conflicts) {
@@ -1717,9 +1724,11 @@ async function main(): Promise<void> {
       defaultImplementationModel: implementationAgentModel,
       planningSystemPrompt: buildSystemPrompt(config, 'planning', taskEffort),
       implementationSystemPrompt: buildSystemPrompt(config, 'implementation', taskEffort),
-      quickStartMode,
+            quickStartMode,
       quickStartMaxPreDelegationToolCalls,
+      planningMaxInvestigativeToolCalls,
       planningNoToolGuardMode,
+
       taskEffort,
       maxParallel: 1,
       requirePlanApproval: !config.autoApprove,

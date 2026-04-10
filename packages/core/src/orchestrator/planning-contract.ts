@@ -3,16 +3,20 @@ import type { TaskEffort } from './task-complexity.js';
 
 export function buildPlanningContractError(
   toolCalls: ReplayToolCallRecord[],
-  options?: {
+    options?: {
     task?: TaskNode;
     quickStartMode?: boolean;
     quickStartMaxPreDelegationToolCalls?: number;
+    planningMaxInvestigativeToolCalls?: number;
     taskEffort?: TaskEffort;
   },
 ): string | undefined {
-  const effort = options?.taskEffort ?? 'high';
+
+    const effort = options?.taskEffort ?? 'high';
+  const planningMaxInvestigativeToolCalls = Math.max(1, options?.planningMaxInvestigativeToolCalls ?? 12);
 
   // Low/trivial effort skips planning entirely, so never reaches this.
+
   // Medium/high: require todo_set + agent_graph_set as structural scaffolding.
   const requiredTools = ['todo_set', 'agent_graph_set'];
   const missing = requiredTools.filter((toolName) => !hasSuccessfulToolCall(toolCalls, toolName));
@@ -22,7 +26,18 @@ export function buildPlanningContractError(
     contractIssues.push(`Missing successful coordination tool call(s): ${missing.join(', ')}.`);
   }
 
+    const successfulInvestigativeToolCalls = countSuccessfulInvestigativeToolCalls(toolCalls);
+  if (successfulInvestigativeToolCalls > planningMaxInvestigativeToolCalls) {
+    contractIssues.push(
+      `Planning exceeded investigative tool-call budget: ${successfulInvestigativeToolCalls}/${planningMaxInvestigativeToolCalls} successful investigative calls.`,
+    );
+    contractIssues.push(
+      'After identifying core files/contract, emit todo_set + agent_graph_set and a concrete plan instead of additional exploratory reads/searches.',
+    );
+  }
+
   // Validate format of todo_set if it was called
+
   const todoSetResult = latestSuccessfulToolCall(toolCalls, 'todo_set');
   if (todoSetResult) {
     const todoValidation = validateWeightedListPayload(
@@ -94,9 +109,28 @@ export function createPlanningContractFailureSignature(error: string): string {
     .trim();
 }
 
+const PLANNING_COORDINATION_TOOL_ALLOWLIST = new Set(['todo_set', 'agent_graph_set']);
+
+function isInvestigativeTool(toolName: string): boolean {
+  return !PLANNING_COORDINATION_TOOL_ALLOWLIST.has(toolName);
+}
+
+function countSuccessfulInvestigativeToolCalls(toolCalls: ReplayToolCallRecord[]): number {
+  return toolCalls.reduce((count, call) => {
+    if (call.status !== 'result' || call.isError) {
+      return count;
+    }
+    if (!isInvestigativeTool(call.toolName)) {
+      return count;
+    }
+    return count + 1;
+  }, 0);
+}
+
 function hasSuccessfulToolCall(toolCalls: ReplayToolCallRecord[], toolName: string): boolean {
   return toolCalls.some((call) => call.status === 'result' && call.toolName === toolName && !call.isError);
 }
+
 
 function latestSuccessfulToolCall(
   toolCalls: ReplayToolCallRecord[],

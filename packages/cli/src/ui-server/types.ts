@@ -206,10 +206,12 @@ export interface WorkSession {
   implementationModel: string;
   deliveryStrategy: SessionDeliveryStrategy;
   autoApprove: boolean;
-  planningNoToolGuardMode: 'enforce' | 'warn';
+    planningNoToolGuardMode: 'enforce' | 'warn';
   quickStartMode?: boolean;
   quickStartMaxPreDelegationToolCalls?: number;
+  planningMaxInvestigativeToolCalls?: number;
   executionContext?: ExecutionContext;
+
   selectedWorktreePath?: string;
   useWorktree?: boolean;
   adaptiveConcurrency: boolean;
@@ -258,9 +260,11 @@ export interface PersistedWorkSession {
   deliveryStrategy?: SessionDeliveryStrategy;
   autoApprove: boolean;
   planningNoToolGuardMode?: 'enforce' | 'warn';
-  quickStartMode?: boolean;
+    quickStartMode?: boolean;
   quickStartMaxPreDelegationToolCalls?: number;
+  planningMaxInvestigativeToolCalls?: number;
   executionContext?: ExecutionContext;
+
   selectedWorktreePath?: string;
   useWorktree?: boolean;
   adaptiveConcurrency?: boolean;

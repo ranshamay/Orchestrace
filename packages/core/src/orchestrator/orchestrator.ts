@@ -100,8 +100,11 @@ export interface OrchestratorConfig extends RunnerConfig {
   quickStartMode?: boolean;
   /** Max successful tool calls allowed before first successful sub-agent delegation. Defaults to 3 when quick-start is enabled. */
   quickStartMaxPreDelegationToolCalls?: number;
-  /** Abort a planning attempt only after prolonged no-tool progress. Defaults to 5 minutes. */
+    /** Abort a planning attempt only after prolonged no-tool progress. Defaults to 5 minutes. */
   planningNoToolProgressTimeoutMs?: number;
+  /** Max successful investigative planning tool calls per attempt before forcing plan publication. Defaults to 12. */
+  planningMaxInvestigativeToolCalls?: number;
+
   /** Polling interval used for planning no-tool progress checks. Defaults to 1 second. */
   planningNoToolProgressCheckIntervalMs?: number;
   /** Controls whether planning no-tool guards abort attempts (`enforce`) or emit warnings only (`warn`). */
@@ -116,8 +119,10 @@ const MAX_PLANNING_ATTEMPTS = 3;
 const PLANNING_RETRY_BASE_DELAY_MS = 2_000;
 const PLANNING_NO_TOOL_STAGNATION_ABORT_ATTEMPTS = 2;
 const PLANNING_CONTRACT_STAGNATION_ABORT_ATTEMPTS = 2;
+const DEFAULT_PLANNING_MAX_INVESTIGATIVE_TOOL_CALLS = 12;
 const PLANNING_CONTRACT_STAGNATION_ERROR_PREFIX =
   'Planning stagnated across attempts with no phase advancement.';
+
 
 /**
  * High-level orchestrator that wires the DAG scheduler to the LLM provider
@@ -151,10 +156,12 @@ export async function orchestrate(
     trivialTaskMaxPromptLength,
     quickStartMode,
     quickStartMaxPreDelegationToolCalls,
-    planningNoToolProgressTimeoutMs,
+        planningNoToolProgressTimeoutMs,
+    planningMaxInvestigativeToolCalls,
     planningNoToolProgressCheckIntervalMs,
     planningNoToolGuardMode,
     taskEffort: configTaskEffort,
+
   } = config;
 
   const emit = onEvent ?? (() => {});
@@ -232,7 +239,12 @@ export async function orchestrate(
       | { text: string; usage?: { input: number; output: number; cost: number }; metadata?: { stopReason?: string; endpoint?: string } }
       | undefined;
     let persistedPlanPath: string | undefined;
-    const resolvedPlanningNoToolGuardMode = normalizePlanningNoToolGuardMode(planningNoToolGuardMode);
+        const resolvedPlanningNoToolGuardMode = normalizePlanningNoToolGuardMode(planningNoToolGuardMode);
+    const resolvedPlanningMaxInvestigativeToolCalls = Math.max(
+      1,
+      planningMaxInvestigativeToolCalls ?? DEFAULT_PLANNING_MAX_INVESTIGATIVE_TOOL_CALLS,
+    );
+
 
     if (!shouldSkipPlanning) {
       const planningAgent = await spawnRoleAgent({
@@ -399,13 +411,32 @@ export async function orchestrate(
                 }
               }
             },
-            onToolCall: (_event, replayRecord) => {
+                        onToolCall: (_event, replayRecord) => {
               planningLastToolProgressAt = Date.now();
               sawPlanningToolCall = true;
               planningNoToolInitialWarningEmitted = false;
               planningNoToolProgressWarningEmitted = false;
               planningToolCalls.push(replayRecord);
+
+              if (
+                replayRecord.status === 'result'
+                && !replayRecord.isError
+                && isInvestigativePlanningTool(replayRecord.toolName)
+              ) {
+                const successfulInvestigativeToolCalls = countSuccessfulInvestigativePlanningToolCalls(planningToolCalls);
+                if (successfulInvestigativeToolCalls > resolvedPlanningMaxInvestigativeToolCalls) {
+                  const message = [
+                    `Planning exceeded investigative tool-call budget (${successfulInvestigativeToolCalls}/${resolvedPlanningMaxInvestigativeToolCalls} successful investigative calls this attempt).`,
+                    'Publish plan coordination now: run todo_set and agent_graph_set, then emit the implementation plan.',
+                    'Adopt plan-then-validate: stop exploratory reads/search loops and defer edge-case discovery to implementation.',
+                  ].join(' ');
+                  planningNoProgressTriggered = true;
+                  planningNoToolAbortReason = message;
+                  planningNoProgressAbortController();
+                }
+              }
             },
+
           });
         } catch (error) {
           const wasPlanningNoProgressAbort = planningNoProgressTriggered || isPlanningNoProgressAbortError(error);
@@ -539,9 +570,11 @@ export async function orchestrate(
         if (createToolset) {
           const planningContractError = buildPlanningContractError(planningToolCalls, {
             task: node,
-            quickStartMode,
+                        quickStartMode,
             quickStartMaxPreDelegationToolCalls,
+            planningMaxInvestigativeToolCalls: resolvedPlanningMaxInvestigativeToolCalls,
             taskEffort: effort,
+
           });
           if (planningContractError) {
             completedPlanningAttempt.failureType = 'validation';
@@ -817,6 +850,24 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+const PLANNING_COORDINATION_TOOL_ALLOWLIST = new Set(['todo_set', 'agent_graph_set']);
+
+function isInvestigativePlanningTool(toolName: string): boolean {
+  return !PLANNING_COORDINATION_TOOL_ALLOWLIST.has(toolName);
+}
+
+function countSuccessfulInvestigativePlanningToolCalls(toolCalls: ReplayToolCallRecord[]): number {
+  return toolCalls.reduce((count, call) => {
+    if (call.status !== 'result' || call.isError) {
+      return count;
+    }
+    if (!isInvestigativePlanningTool(call.toolName)) {
+      return count;
+    }
+    return count + 1;
+  }, 0);
+}
+
 function resolveTaskRequiresWrites(task: TaskNode): boolean {
   const routeCategory = readTaskMetaString(task, 'routeCategory');
   const routeStrategy = readTaskMetaString(task, 'routeStrategy');
@@ -826,6 +877,7 @@ function resolveTaskRequiresWrites(task: TaskNode): boolean {
 
   return true;
 }
+
 
 function readTaskMetaString(task: TaskNode, key: string): string | undefined {
   const value = task.meta?.[key];
