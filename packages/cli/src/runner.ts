@@ -2813,7 +2813,7 @@ function buildSystemPrompt(config: SessionConfig, phase: 'planning' | 'implement
       ...(isLowEffort
         ? []
         : [
-          'Read todo_get and agent_graph_get before coding, then keep todo_update current while implementing.',
+                    'Use todo/agent graph state from planning already in session context; call todo_get/agent_graph_get only when state is missing, stale, or ambiguous, then keep todo_update current while implementing.',
         ]),
       '',
       '## Sub-agent delegation (your choice)',

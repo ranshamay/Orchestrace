@@ -200,8 +200,8 @@ export function buildImplementationPrompt(params: {
         ...(isLowEffort
           ? []
           : [
-              'Follow the todo list from planning (read todo_get) and update via todo_update as you progress.',
-              'Check agent_graph_get for the execution structure.',
+                            'Follow the todo list and execution graph from planning already present in context, and update progress via todo_update as you work.',
+              'Call todo_get/agent_graph_get only when coordination state is missing, stale, or ambiguous.',
             ]),
         '',
         '## Sub-agent delegation (your choice)',
