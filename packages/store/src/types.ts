@@ -341,9 +341,10 @@ export interface SessionObserverFindingPayload {
     id: string;
     category: string;
     severity: string;
-    title: string;
+        title: string;
     description: string;
-    suggestedFix: string;
+    issueSummary: string;
+    evidence: string[];
     relevantFiles?: string[];
     phase: string;
     detectedAt: string;
