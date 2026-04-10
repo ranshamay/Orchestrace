@@ -16,6 +16,7 @@ import {
   type FindingSeverity,
   type ObserverConfig,
   type ObserverDaemonState,
+  type ObserverFindingEvidence,
 } from './types.js';
 import { FindingRegistry } from './registry.js';
 import { summarizeSession, formatSummaryForLlm, type SessionSummary } from './summarizer.js';
@@ -33,15 +34,18 @@ type LogWatcherFindingInput = {
   category: LogFindingCategory;
   severity: FindingSeverity;
   title: string;
+  evidence?: ObserverFindingEvidence;
   description: string;
   suggestedFix: string;
   relevantFiles?: string[];
+  logSnippet?: string;
 };
 
 type RealtimeFindingInput = {
   category: FindingCategory;
   severity: FindingSeverity;
   title: string;
+  evidence: ObserverFindingEvidence;
   description: string;
   suggestedFix: string;
   relevantFiles?: string[];
@@ -219,10 +223,14 @@ export class ObserverDaemon {
         continue;
       }
 
-      const { isNew } = this.registry.register({
+            const { isNew } = this.registry.register({
         category: mappedCategory,
         severity: finding.severity,
         title: finding.title,
+        evidence: finding.evidence ?? {
+          summary: finding.description,
+          snippets: finding.logSnippet ? [finding.logSnippet] : undefined,
+        },
         description: finding.description,
         suggestedFix: finding.suggestedFix,
         relevantFiles: finding.relevantFiles,
@@ -262,10 +270,11 @@ export class ObserverDaemon {
         continue;
       }
 
-      const { isNew } = this.registry.register({
+            const { isNew } = this.registry.register({
         category: finding.category,
         severity: finding.severity,
         title: finding.title,
+        evidence: finding.evidence,
         description: finding.description,
         suggestedFix: finding.suggestedFix,
         relevantFiles: finding.relevantFiles,

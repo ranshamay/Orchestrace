@@ -22,6 +22,10 @@ export interface LogFinding {
   category: LogFindingCategory;
   severity: FindingSeverity;
   title: string;
+  evidence: {
+    summary: string;
+    snippets?: string[];
+  };
   description: string;
   suggestedFix: string;
   relevantFiles?: string[];
@@ -105,7 +109,8 @@ Respond ONLY with valid JSON matching this schema:
     {
       "category": "error-pattern|performance|configuration|reliability|security",
       "severity": "low|medium|high|critical",
-      "title": "Short one-line title",
+            "title": "Short one-line title",
+      "evidence": { "summary": "Concrete evidence from logs", "snippets": ["optional supporting line"] },
       "description": "Detailed description of the issue with context from the logs",
       "suggestedFix": "Concrete fix — specific code change, config adjustment, or action to take",
       "relevantFiles": ["path/to/file.ts"],
@@ -315,16 +320,31 @@ function parseLogFindings(text: string): LogFinding[] {
     const raw = Array.isArray(parsed) ? parsed : parsed?.findings;
     if (!Array.isArray(raw)) return [];
 
-    return raw
+        return raw
       .filter(
         (f: Record<string, unknown>) =>
-          f && typeof f.title === 'string' && typeof f.description === 'string',
+          f &&
+          typeof f.title === 'string' &&
+          typeof f.description === 'string' &&
+          typeof f.evidence === 'object' &&
+          f.evidence !== null,
       )
       .map((f: Record<string, unknown>) => ({
         id: `logf-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
         category: validateLogCategory(f.category as string),
         severity: validateSeverity(f.severity as string),
-        title: String(f.title),
+                title: String(f.title),
+        evidence: {
+          summary:
+            typeof (f.evidence as { summary?: unknown }).summary === 'string'
+              ? String((f.evidence as { summary: string }).summary)
+              : String(f.description),
+          snippets: Array.isArray((f.evidence as { snippets?: unknown }).snippets)
+            ? (f.evidence as { snippets: unknown[] }).snippets.filter(
+              (x: unknown) => typeof x === 'string',
+            )
+            : undefined,
+        },
         description: String(f.description),
         suggestedFix: String(f.suggestedFix ?? ''),
         relevantFiles: Array.isArray(f.relevantFiles)

@@ -7,7 +7,12 @@
 import { createHash } from 'node:crypto';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
-import type { FindingRecord, FindingCategory, FindingSeverity } from './types.js';
+import type {
+  FindingRecord,
+  FindingCategory,
+  FindingSeverity,
+  ObserverFindingEvidence,
+} from './types.js';
 
 export class FindingRegistry {
   private findings: FindingRecord[] = [];
@@ -46,10 +51,11 @@ export class FindingRegistry {
    * into additionalSessions instead of creating a duplicate.
    */
     register(
-    finding: {
+        finding: {
       category: FindingCategory;
       severity: FindingSeverity;
       title: string;
+      evidence: ObserverFindingEvidence;
       description: string;
       suggestedFix: string;
       relevantFiles?: string[];

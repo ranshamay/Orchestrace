@@ -72,7 +72,8 @@ function buildAnalysisPrompt(summaries: SessionSummary[], allowedCategories: Fin
       '    {\n' +
       '      "category": "code-quality" | "performance" | "agent-efficiency" | "architecture" | "test-coverage",\n' +
       '      "severity": "low" | "medium" | "high" | "critical",\n' +
-      '      "title": "Short one-line title",\n' +
+            '      "title": "Short one-line title",\n' +
+      '      "evidence": { "summary": "Concrete evidence from logs/tool output", "snippets": ["optional supporting snippet"] },\n' +
       '      "description": "Detailed description of the issue found",\n' +
       '      "suggestedFix": "Concrete implementation instruction that could be used as a task prompt",\n' +
       '      "relevantFiles": ["path/to/file.ts"]  // optional\n' +
@@ -112,11 +113,13 @@ function parseAnalysisResponse(text: string, allowedCategories: FindingCategory[
     const validSeverities: FindingSeverity[] = ['low', 'medium', 'high', 'critical'];
 
     const mappedFindings: AnalysisResult['findings'] = parsed.findings
-      .filter(
+            .filter(
         (f: Record<string, unknown>) =>
           typeof f.title === 'string' &&
           typeof f.description === 'string' &&
-          typeof f.suggestedFix === 'string',
+          typeof f.suggestedFix === 'string' &&
+          typeof f.evidence === 'object' &&
+          f.evidence !== null,
       )
       .map((f: Record<string, unknown>) => ({
         category: validCategories.includes(f.category as FindingCategory)
@@ -125,7 +128,18 @@ function parseAnalysisResponse(text: string, allowedCategories: FindingCategory[
         severity: validSeverities.includes(f.severity as FindingSeverity)
           ? (f.severity as FindingSeverity)
           : ('medium' as FindingSeverity),
-        title: String(f.title),
+                title: String(f.title),
+        evidence: {
+          summary:
+            typeof (f.evidence as { summary?: unknown }).summary === 'string'
+              ? String((f.evidence as { summary: string }).summary)
+              : String(f.description),
+          snippets: Array.isArray((f.evidence as { snippets?: unknown }).snippets)
+            ? (f.evidence as { snippets: unknown[] }).snippets.filter(
+              (p: unknown) => typeof p === 'string',
+            )
+            : undefined,
+        },
         description: String(f.description),
         suggestedFix: String(f.suggestedFix),
         relevantFiles: Array.isArray(f.relevantFiles)

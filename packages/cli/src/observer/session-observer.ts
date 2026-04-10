@@ -9,7 +9,7 @@
 
 import type { EventStore, SessionEvent } from '@orchestrace/store';
 import type { LlmAdapter } from '@orchestrace/provider';
-import type { ObserverConfig, FindingCategory, FindingSeverity } from './types.js';
+import type { ObserverConfig, FindingCategory, FindingSeverity, ObserverFindingEvidence } from './types.js';
 import { ALL_FINDING_CATEGORIES } from './types.js';
 import { REALTIME_OBSERVER_SYSTEM_PROMPT } from './prompts.js';
 
@@ -24,6 +24,7 @@ export interface RealtimeFinding {
   category: FindingCategory;
   severity: FindingSeverity;
   title: string;
+  evidence: ObserverFindingEvidence;
   description: string;
   suggestedFix: string;
   relevantFiles?: string[];
@@ -494,7 +495,7 @@ export class SessionObserver {
     lines.push(`Allowed categories: ${allowedCategories.join(', ')}`);
     lines.push('');
     lines.push(
-      'Respond with a JSON object: { "findings": [{ "category": "...", "severity": "...", "title": "...", "description": "...", "suggestedFix": "...", "relevantFiles": [...] }] }',
+            'Respond with a JSON object: { "findings": [{ "category": "...", "severity": "...", "title": "...", "evidence": { "summary": "...", "snippets": ["..."] }, "description": "...", "suggestedFix": "...", "relevantFiles": [...] }] }',
     );
     lines.push('Return ONLY the JSON, no other text. If no issues found, return { "findings": [] }.');
 
@@ -557,11 +558,13 @@ function parseRealtimeFindings(
     let idCounter = 0;
 
     return parsed.findings
-      .filter(
+            .filter(
         (f: Record<string, unknown>) =>
           typeof f.title === 'string' &&
           typeof f.description === 'string' &&
-          typeof f.suggestedFix === 'string',
+          typeof f.suggestedFix === 'string' &&
+          typeof f.evidence === 'object' &&
+          f.evidence !== null,
       )
       .filter((f: Record<string, unknown>) =>
         allowedCategories.includes(f.category as FindingCategory),
@@ -574,7 +577,18 @@ function parseRealtimeFindings(
         severity: validSeverities.includes(f.severity as FindingSeverity)
           ? (f.severity as FindingSeverity)
           : 'medium',
-        title: String(f.title),
+                title: String(f.title),
+        evidence: {
+          summary:
+            typeof (f.evidence as { summary?: unknown }).summary === 'string'
+              ? String((f.evidence as { summary: string }).summary)
+              : String(f.description),
+          snippets: Array.isArray((f.evidence as { snippets?: unknown }).snippets)
+            ? (f.evidence as { snippets: unknown[] }).snippets.filter(
+              (p: unknown) => typeof p === 'string',
+            )
+            : undefined,
+        },
         description: String(f.description),
         suggestedFix: String(f.suggestedFix),
         relevantFiles: Array.isArray(f.relevantFiles)

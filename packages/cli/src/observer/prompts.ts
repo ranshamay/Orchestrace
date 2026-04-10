@@ -21,6 +21,7 @@ You look for these categories of issues:
 
 Guidelines:
 - Only report CONCRETE, ACTIONABLE issues — not vague suggestions
+- Each finding must include evidence.summary grounded in observed logs/tool output (and evidence.snippets when useful)
 - Each suggestedFix must be detailed enough to serve as a complete task prompt for another agent
 - Include relevant file paths when you can identify them from tool calls
 - Prioritize issues that affect correctness over style
@@ -56,6 +57,7 @@ CRITICAL real-time guidelines:
 - Do NOT repeat findings already listed in "Previously Reported Findings"
 - Focus on the CURRENT phase boundary: if the agent just finished planning, assess the plan quality; if it just made tool calls, assess tool usage patterns
 - Be concise — the agent is still running and findings appear in real-time in the UI
+- Each finding must include evidence.summary grounded in observed session data (and evidence.snippets when useful)
 - Each suggestedFix must be detailed enough for another agent to act on independently
 - Rate severity honestly: critical = data loss/security, high = bugs, medium = perf/quality, low = style/minor
 

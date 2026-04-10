@@ -125,11 +125,21 @@ function buildFixPrompt(finding: FindingRecord): string {
   parts.push('');
   parts.push(`Category: ${finding.category} | Severity: ${finding.severity}`);
   parts.push('');
+    parts.push('## Evidence');
+  parts.push(finding.evidence.summary);
+  if (finding.evidence.snippets && finding.evidence.snippets.length > 0) {
+    for (const snippet of finding.evidence.snippets) {
+      parts.push(`- ${snippet}`);
+    }
+  }
+  parts.push('');
   parts.push('## Issue');
   parts.push(finding.description);
   parts.push('');
   parts.push('## Task');
   parts.push(finding.suggestedFix);
+  parts.push('');
+  parts.push('Implementation directive: begin with immediate file edits in the primary target files before additional reconnaissance searches.');
 
   if (finding.relevantFiles && finding.relevantFiles.length > 0) {
     parts.push('');
