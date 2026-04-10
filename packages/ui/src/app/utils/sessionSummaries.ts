@@ -9,8 +9,10 @@ export type SessionStatusSummary = {
   completed: number;
   failed: number;
   cancelled: number;
-  pending: number;
+    pending: number;
+  merged: number;
   unknown: number;
+
   overall: 'empty' | 'running' | 'attention' | 'idle';
 };
 
@@ -21,8 +23,10 @@ export function buildSessionStatusSummary(sessions: WorkSession[]): SessionStatu
     completed: 0,
     failed: 0,
     cancelled: 0,
-    pending: 0,
+        pending: 0,
+    merged: 0,
     unknown: 0,
+
     overall: 'empty',
   };
 
@@ -40,10 +44,14 @@ export function buildSessionStatusSummary(sessions: WorkSession[]): SessionStatu
       case 'cancelled':
         summary.cancelled += 1;
         break;
-      case 'pending':
+            case 'pending':
         summary.pending += 1;
         break;
+      case 'merged':
+        summary.merged += 1;
+        break;
       default:
+
         summary.unknown += 1;
         break;
     }

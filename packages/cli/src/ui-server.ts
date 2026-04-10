@@ -90,6 +90,8 @@ import { ObserverDaemon, SessionObserver, BackendLogger, LogWatcher } from './ob
 import type { RealtimeFinding } from './observer/index.js';
 import { sanitizeLogLine, sanitizeToolPayload } from './runner/log-sanitizer.js';
 import { parseTaskRouteOverride } from './task-routing.js';
+import { PrMergeScanner } from './pr-merge-scanner.js';
+
 
 
 const GITHUB_PROVIDER_ID = 'github';
@@ -1867,8 +1869,27 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     return { id, warnings: managedWorkspace.warnings.length > 0 ? managedWorkspace.warnings : undefined };
   }
 
+    const prMergeScanner = new PrMergeScanner({
+    eventStore,
+    resolveGithubToken: () => githubAuthManager.resolveApiKey(GITHUB_PROVIDER_ID),
+    scanIntervalMs: 60_000,
+  });
+  prMergeScanner.onSessionMerged((sessionId) => {
+    const session = workSessions.get(sessionId);
+    if (!session) {
+      return;
+    }
+
+    session.status = 'merged';
+    session.updatedAt = now();
+    broadcastSessionStatusUpsert(session);
+    uiStatePersistence.schedule();
+  });
+  prMergeScanner.start();
+
   // -- Observer daemon (autonomous background agent) --------------------------
   const observerDaemon = new ObserverDaemon({
+
     orchestraceDir: join(workspaceManager.getRootDir(), '.orchestrace'),
     eventStore,
     llm,
@@ -4004,9 +4025,11 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     return draining;
   }
 
-  server.on('close', () => {
+    server.on('close', () => {
     void uiStatePersistence.flush();
+    prMergeScanner.stop();
     observerDaemon.stop();
+
     logWatcher.stop();
     backendLogger.stop();
     // Stop all per-session observers

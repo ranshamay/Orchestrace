@@ -8,7 +8,7 @@
 // ---- Shared value types (mirrored from @orchestrace/cli ui-server/types) ----
 // Intentionally duplicated here so the store package has zero workspace deps.
 
-export type WorkState = 'running' | 'completed' | 'failed' | 'cancelled';
+export type WorkState = 'running' | 'completed' | 'failed' | 'cancelled' | 'merged';
 export type SessionCreationReason = 'start' | 'retry';
 export type ReasoningLevel = 'minimal' | 'low' | 'medium' | 'high';
 export type SessionAgentRole = 'router' | 'planner' | 'implementer' | 'reviewer' | 'investigator';
