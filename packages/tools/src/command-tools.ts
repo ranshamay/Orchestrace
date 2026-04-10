@@ -68,11 +68,11 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
           regex: Type.Optional(Type.Boolean({ description: 'When true, interpret query as regex. Defaults to false (literal search via --fixed-strings).' })),
           path: Type.Optional(Type.String({ description: 'Relative path to search inside. Defaults to workspace root.' })),
           glob: Type.Optional(Type.String({ description: 'Optional glob include filter, e.g. src/**/*.ts' })),
-          queryMode: Type.Optional(Type.Union([
+                    queryMode: Type.Optional(Type.Union([
             Type.Literal('regex'),
             Type.Literal('literal'),
           ], {
-            description: 'How to interpret query: regex (default) or literal fixed-string search.',
+            description: 'How to interpret query: regex or literal fixed-string search. Defaults to literal when omitted.',
           })),
         }),
       },
@@ -246,22 +246,16 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
           });
         }
 
-        const hasPathError = hasRipgrepPathError(stderr);
-
-
-                if (result.exitCode === 1 && result.stdout.trim().length === 0) {
-          return { content: '(no matches)', isError: false };
-        }
+                const hasPathError = hasRipgrepPathError(stderr);
 
         if (hasPathError) {
           const targetKindAfterSearch = await getPathKind(canonicalTarget ?? target);
-                    if (targetKindAfterSearch === 'missing') {
+          if (targetKindAfterSearch === 'missing') {
             return {
               content: `(skipped invalid search path: ${relTarget})`,
               isError: false,
             };
           }
-
 
           try {
             const fallback = await fallbackSearchFromFs({
@@ -273,19 +267,17 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
               glob: globValidation.value,
               maxChars: options.maxOutputChars ?? 16000,
             });
-                        return {
+            return {
               content: fallback,
               isError: false,
             };
-
           } catch (error) {
-                        if (isMissingPathErrorLike(error)) {
+            if (isMissingPathErrorLike(error)) {
               return {
                 content: `(skipped invalid search path: ${relTarget})`,
                 isError: false,
               };
             }
-
 
             return createSearchFilesErrorResult({
               errorType: 'filesystem_fallback_failed',
@@ -297,6 +289,11 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
             });
           }
         }
+
+        if (result.exitCode === 1) {
+          return { content: '(no matches)', isError: false };
+        }
+
         if (result.exitCode > 1) {
           return createSearchFilesErrorResult({
             errorType: 'command_failed',
