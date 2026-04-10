@@ -1078,6 +1078,35 @@ function usageOrZero(usage: { input: number; output: number; cost: number } | un
   };
 }
 
+function normalizeValidationDetails(message: string): string {
+  const normalized = message
+    .replace(/\b([a-zA-Z0-9_]+(?:\/[a-zA-Z0-9_]+)+)\b/g, (match) => match.replace(/\//g, '.'));
+
+  if (!/additional properties/i.test(normalized)) {
+    return normalized;
+  }
+
+  const pathMatch = normalized.match(/\b([a-zA-Z0-9_]+(?:\.[a-zA-Z0-9_]+)+)\b/);
+  if (!pathMatch) {
+    return normalized;
+  }
+
+  const keyMatch = normalized.match(/additionalProperty\s+["']([^"']+)["']/i)
+    ?? normalized.match(/property\s+["']([^"']+)["']/i);
+  if (!keyMatch) {
+    return normalized;
+  }
+
+  const parentPath = pathMatch[1];
+  const fullPath = `${parentPath}.${keyMatch[1]}`;
+  if (normalized.includes(fullPath)) {
+    return normalized;
+  }
+
+  // Keep canonical phrase and include explicit offending path for additionalProperties violations.
+  return `${normalized} (additional properties at ${fullPath})`;
+}
+
 function validateSubAgentToolArgs(
   toolName: SubAgentToolName,
   schema: typeof subAgentSpawnArgsSchema | typeof subAgentSpawnBatchArgsSchema,
@@ -1090,13 +1119,13 @@ function validateSubAgentToolArgs(
     );
     return { ok: true };
   } catch (error) {
-    const details = (error instanceof Error ? error.message : String(error))
-      .replace(/\b([a-zA-Z0-9_]+(?:\/[a-zA-Z0-9_]+)+)\b/g, (match) => match.replace(/\//g, '.'));
+    const details = normalizeValidationDetails(error instanceof Error ? error.message : String(error));
     const message = `${toolName} argument validation failed before spawn: ${details}`;
     console.warn(`[coordination-tools] ${message}`);
     return { ok: false, message };
   }
 }
+
 
 async function buildSubAgentRequestFromToolArgs(
   cwd: string,
