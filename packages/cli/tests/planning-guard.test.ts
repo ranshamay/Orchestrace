@@ -114,7 +114,7 @@ describe('planning guard behavior', () => {
     expect(state?.forcedImplementation).toBe(false);
   });
 
-  it('includes simple-task policy and planning budget language in planning prompt', () => {
+    it('includes simple-task policy and planning budget language in planning prompt', () => {
     const session = createSession();
     const prompt = buildSessionSystemPrompt(session, 'planning');
 
@@ -122,5 +122,14 @@ describe('planning guard behavior', () => {
     expect(prompt).toContain('For simple single-file tasks, skip sub-agent delegation');
     expect(prompt).toContain('Planning is budgeted: keep planning activity under 25%');
     expect(prompt).toContain('If session guard thresholds are exceeded');
+  });
+
+  it('uses conditional implementation discovery guidance when planning context is already grounded', () => {
+    const session = createSession();
+    const prompt = buildSessionSystemPrompt(session, 'implementation');
+
+    expect(prompt).toContain('When planning already produced concrete file targets/contract details, begin editing the first target file immediately and avoid repeated discovery calls.');
+    expect(prompt).toContain('Only call todo_get, agent_graph_get, or additional discovery tools when required context is missing, stale, or contradictory.');
+    expect(prompt).not.toContain('Read todo_get and agent_graph_get before coding, then keep todo_update current while implementing.');
   });
 });

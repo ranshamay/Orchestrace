@@ -8167,7 +8167,9 @@ export function buildSessionSystemPrompt(session: WorkSession, phase: SessionPro
         : [
             'Execute approved work with minimal, scoped edits and verify outcomes.',
             'Read before editing, and use tool output to adapt after failures.',
-            'Read todo_get and agent_graph_get before coding, then keep todo_update current while implementing.',
+                        'When planning already produced concrete file targets/contract details, begin editing the first target file immediately and avoid repeated discovery calls.',
+            'Only call todo_get, agent_graph_get, or additional discovery tools when required context is missing, stale, or contradictory.',
+            'Keep todo_update current while implementing.',
             'Use subagent_spawn or subagent_spawn_batch to execute parallelizable slices with minimal relevant context per agent.',
             'For independent nodes, use subagent_spawn_batch so work runs in parallel.',
             'For multi-file inspection, use read_files with concurrency to reduce latency; avoid repeated single-file reads when possible.',

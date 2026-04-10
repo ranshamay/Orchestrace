@@ -26,6 +26,7 @@ Guidelines:
 - Prioritize issues that affect correctness over style
 - Don't flag issues that are clearly intentional design decisions
 - Focus on patterns that repeat across sessions when analyzing multiple logs
+- Treat implementation phase re-discovery after planning already grounded file targets/contracts as an agent-efficiency issue (redundant tool calls/wasted tokens)
 - Rate severity honestly: critical = data loss/security, high = bugs, medium = perf/quality, low = style/minor
 
 Respond ONLY with valid JSON matching the requested schema.`;
@@ -55,6 +56,7 @@ CRITICAL real-time guidelines:
 - Do NOT flag things the agent might fix in a later step
 - Do NOT repeat findings already listed in "Previously Reported Findings"
 - Focus on the CURRENT phase boundary: if the agent just finished planning, assess the plan quality; if it just made tool calls, assess tool usage patterns
+- In implementation phase, if planning already grounded concrete file targets/contracts, flag immediate re-discovery loops as agent-efficiency waste and recommend direct editing of the first grounded file
 - Be concise — the agent is still running and findings appear in real-time in the UI
 - Each suggestedFix must be detailed enough for another agent to act on independently
 - Rate severity honestly: critical = data loss/security, high = bugs, medium = perf/quality, low = style/minor
