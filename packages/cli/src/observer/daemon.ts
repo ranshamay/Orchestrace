@@ -34,18 +34,22 @@ type LogWatcherFindingInput = {
   severity: FindingSeverity;
   title: string;
   description: string;
-  suggestedFix: string;
+  contextualEvidence?: string;
+  suggestedFix?: string;
   relevantFiles?: string[];
 };
+
 
 type RealtimeFindingInput = {
   category: FindingCategory;
   severity: FindingSeverity;
   title: string;
   description: string;
-  suggestedFix: string;
+  contextualEvidence?: string;
+  suggestedFix?: string;
   relevantFiles?: string[];
 };
+
 
 const LOG_WATCHER_SOURCE_SESSION_ID = 'log-watcher';
 
@@ -219,14 +223,23 @@ export class ObserverDaemon {
         continue;
       }
 
+                        const contextualEvidence = (finding.contextualEvidence ?? finding.suggestedFix ?? '').trim();
+
+
+      if (!contextualEvidence) {
+        continue;
+      }
+
       const { isNew } = this.registry.register({
         category: mappedCategory,
         severity: finding.severity,
         title: finding.title,
         description: finding.description,
+        contextualEvidence,
         suggestedFix: finding.suggestedFix,
         relevantFiles: finding.relevantFiles,
       }, [LOG_WATCHER_SOURCE_SESSION_ID]);
+
 
       if (isNew) {
         registered += 1;
@@ -262,14 +275,21 @@ export class ObserverDaemon {
         continue;
       }
 
+            const contextualEvidence = (finding.contextualEvidence ?? finding.suggestedFix ?? '').trim();
+      if (!contextualEvidence) {
+        continue;
+      }
+
       const { isNew } = this.registry.register({
         category: finding.category,
         severity: finding.severity,
         title: finding.title,
         description: finding.description,
+        contextualEvidence,
         suggestedFix: finding.suggestedFix,
         relevantFiles: finding.relevantFiles,
       }, [sourceSessionId]);
+
 
       if (isNew) {
         registered += 1;

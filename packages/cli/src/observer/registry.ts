@@ -19,18 +19,21 @@ export class FindingRegistry {
   }
 
   /** Load persisted findings from disk. */
-  async load(): Promise<void> {
+    async load(): Promise<void> {
     try {
       const raw = await readFile(this.filePath, 'utf-8');
       const parsed = JSON.parse(raw);
       if (Array.isArray(parsed)) {
-        this.findings = parsed;
+        this.findings = parsed
+          .map((entry) => deserializeFindingRecord(entry))
+          .filter((entry): entry is FindingRecord => entry != null);
       }
     } catch {
       // File doesn't exist or is corrupted — start fresh
       this.findings = [];
     }
   }
+
 
   /** Persist findings to disk (only if dirty). */
   async save(): Promise<void> {
@@ -46,14 +49,16 @@ export class FindingRegistry {
    * into additionalSessions instead of creating a duplicate.
    */
     register(
-    finding: {
+        finding: {
       category: FindingCategory;
       severity: FindingSeverity;
       title: string;
       description: string;
-      suggestedFix: string;
+      contextualEvidence: string;
+      suggestedFix?: string;
       relevantFiles?: string[];
     },
+
     sessionIds: string[],
   ): { fingerprint: string; isNew: boolean } {
     const fingerprint = computeFingerprint(finding.category, finding.title, finding.description);
@@ -141,10 +146,13 @@ function mergeFindingSignal(
   record: FindingRecord,
   incoming: {
     severity: FindingSeverity;
+    contextualEvidence?: string;
+    suggestedFix?: string;
     relevantFiles?: string[];
   },
   sessionIds: string[],
 ): void {
+
   // Track additional source sessions.
   for (const sid of sessionIds) {
     if (
@@ -160,12 +168,20 @@ function mergeFindingSignal(
     record.severity = incoming.severity;
   }
 
+    if (!record.contextualEvidence && incoming.contextualEvidence) {
+    record.contextualEvidence = incoming.contextualEvidence;
+  }
+  if (!record.suggestedFix && incoming.suggestedFix) {
+    record.suggestedFix = incoming.suggestedFix;
+  }
+
   // Merge relevant file hints without duplicates.
   if (incoming.relevantFiles && incoming.relevantFiles.length > 0) {
     const merged = new Set([...(record.relevantFiles ?? []), ...incoming.relevantFiles]);
     record.relevantFiles = [...merged];
   }
 }
+
 
 function isQueueStatus(status: FindingRecord['fixStatus']): boolean {
   return status === 'pending' || status === 'spawned';
@@ -224,4 +240,58 @@ function computeFingerprint(category: string, title: string, description: string
   const normalized = `${category}::${title.toLowerCase().trim()}::${description.slice(0, 200).toLowerCase().trim()}`;
   return createHash('sha256').update(normalized).digest('hex').slice(0, 16);
 }
+
+function deserializeFindingRecord(raw: unknown): FindingRecord | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const rec = raw as Record<string, unknown>;
+
+  const category = typeof rec.category === 'string' ? rec.category : null;
+  const severity = typeof rec.severity === 'string' ? rec.severity : null;
+  const title = typeof rec.title === 'string' ? rec.title : null;
+  const description = typeof rec.description === 'string' ? rec.description : null;
+  const contextualEvidence =
+    typeof rec.contextualEvidence === 'string'
+      ? rec.contextualEvidence
+      : typeof rec.suggestedFix === 'string'
+        ? rec.suggestedFix
+        : null;
+
+  if (!category || !severity || !title || !description || !contextualEvidence) {
+    return null;
+  }
+
+  const fingerprint =
+    typeof rec.fingerprint === 'string' && rec.fingerprint.trim().length > 0
+      ? rec.fingerprint
+      : computeFingerprint(category, title, description);
+
+  const suggestedFix = typeof rec.suggestedFix === 'string' ? rec.suggestedFix : undefined;
+
+  return {
+    fingerprint,
+    category: category as FindingCategory,
+    severity: severity as FindingSeverity,
+    title,
+    description,
+    contextualEvidence,
+    suggestedFix,
+    relevantFiles: Array.isArray(rec.relevantFiles)
+      ? rec.relevantFiles.filter((f): f is string => typeof f === 'string')
+      : undefined,
+    observedInSessions: Array.isArray(rec.observedInSessions)
+      ? rec.observedInSessions.filter((sid): sid is string => typeof sid === 'string')
+      : [],
+    detectedAt: typeof rec.detectedAt === 'string' ? rec.detectedAt : new Date().toISOString(),
+    fixSessionId: typeof rec.fixSessionId === 'string' ? rec.fixSessionId : null,
+    fixStatus:
+      rec.fixStatus === 'pending' || rec.fixStatus === 'spawned' || rec.fixStatus === 'completed' || rec.fixStatus === 'failed'
+        ? rec.fixStatus
+        : 'pending',
+    additionalSessions: Array.isArray(rec.additionalSessions)
+      ? rec.additionalSessions.filter((sid): sid is string => typeof sid === 'string')
+      : [],
+  };
+}
+
+
 

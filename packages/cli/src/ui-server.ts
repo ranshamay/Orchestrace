@@ -1437,7 +1437,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           });
 
           if (evt.type === 'session:observer-finding') {
-            const finding = (evt.payload as { finding?: RealtimeFinding }).finding;
+                        const finding = (evt.payload as { finding?: RealtimeFinding }).finding;
+
             if (finding) {
               void observerDaemon.ingestSessionObserverFindings(id, [finding]).catch((error) => {
                 console.error(

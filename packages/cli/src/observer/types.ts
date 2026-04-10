@@ -30,8 +30,15 @@ export interface ObserverFinding {
   title: string;
   /** Detailed description of the issue. */
   description: string;
-  /** Concrete fix suggestion the observer will use as a session prompt. */
-  suggestedFix: string;
+    /** Canonical implementation context used as the fix-session task prompt. */
+  contextualEvidence: string;
+    /**
+   * Legacy compatibility field retained during migration.
+   * Follow-up hard-removal is allowed only after persisted findings no longer depend on this fallback.
+   */
+  suggestedFix?: string;
+
+
   /** File paths relevant to this finding (if any). */
   relevantFiles?: string[];
   /** Session IDs where this issue was observed. */
@@ -126,8 +133,10 @@ export interface AnalysisResult {
     category: FindingCategory;
     severity: FindingSeverity;
     title: string;
-    description: string;
-    suggestedFix: string;
+        description: string;
+    contextualEvidence: string;
+    suggestedFix?: string;
     relevantFiles?: string[];
+
   }>;
 }

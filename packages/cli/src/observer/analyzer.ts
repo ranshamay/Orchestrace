@@ -73,9 +73,11 @@ function buildAnalysisPrompt(summaries: SessionSummary[], allowedCategories: Fin
       '      "category": "code-quality" | "performance" | "agent-efficiency" | "architecture" | "test-coverage",\n' +
       '      "severity": "low" | "medium" | "high" | "critical",\n' +
       '      "title": "Short one-line title",\n' +
-      '      "description": "Detailed description of the issue found",\n' +
-      '      "suggestedFix": "Concrete implementation instruction that could be used as a task prompt",\n' +
+            '      "description": "Detailed description of the issue found",\n' +
+      '      "contextualEvidence": "Concrete implementation instruction that could be used as a task prompt",\n' +
+      '      "suggestedFix": "Legacy compatibility alias for contextualEvidence",  // optional\n' +
       '      "relevantFiles": ["path/to/file.ts"]  // optional\n' +
+
       '    }\n' +
       '  ]\n' +
       '}\n' +
@@ -112,26 +114,41 @@ function parseAnalysisResponse(text: string, allowedCategories: FindingCategory[
     const validSeverities: FindingSeverity[] = ['low', 'medium', 'high', 'critical'];
 
     const mappedFindings: AnalysisResult['findings'] = parsed.findings
-      .filter(
-        (f: Record<string, unknown>) =>
-          typeof f.title === 'string' &&
-          typeof f.description === 'string' &&
-          typeof f.suggestedFix === 'string',
-      )
-      .map((f: Record<string, unknown>) => ({
-        category: validCategories.includes(f.category as FindingCategory)
-          ? (f.category as FindingCategory)
-          : ('code-quality' as FindingCategory),
-        severity: validSeverities.includes(f.severity as FindingSeverity)
-          ? (f.severity as FindingSeverity)
-          : ('medium' as FindingSeverity),
-        title: String(f.title),
-        description: String(f.description),
-        suggestedFix: String(f.suggestedFix),
-        relevantFiles: Array.isArray(f.relevantFiles)
-          ? f.relevantFiles.filter((p: unknown) => typeof p === 'string')
-          : undefined,
-      }));
+            .filter((f: Record<string, unknown>) => {
+        if (typeof f.title !== 'string' || typeof f.description !== 'string') {
+          return false;
+        }
+        const contextualEvidence = typeof f.contextualEvidence === 'string' ? f.contextualEvidence : undefined;
+        const suggestedFix = typeof f.suggestedFix === 'string' ? f.suggestedFix : undefined;
+        return Boolean(contextualEvidence || suggestedFix);
+      })
+            .map((f: Record<string, unknown>) => {
+        const contextualEvidence =
+          typeof f.contextualEvidence === 'string'
+            ? f.contextualEvidence
+            : typeof f.suggestedFix === 'string'
+              ? f.suggestedFix
+              : '';
+        const suggestedFix = typeof f.suggestedFix === 'string' ? f.suggestedFix : undefined;
+
+        return {
+          category: validCategories.includes(f.category as FindingCategory)
+            ? (f.category as FindingCategory)
+            : ('code-quality' as FindingCategory),
+          severity: validSeverities.includes(f.severity as FindingSeverity)
+            ? (f.severity as FindingSeverity)
+            : ('medium' as FindingSeverity),
+          title: String(f.title),
+          description: String(f.description),
+          contextualEvidence,
+          suggestedFix,
+          relevantFiles: Array.isArray(f.relevantFiles)
+            ? f.relevantFiles.filter((p: unknown) => typeof p === 'string')
+            : undefined,
+        };
+      });
+
+
 
     const findings: AnalysisResult['findings'] = mappedFindings.filter((finding) =>
       allowedCategories.includes(finding.category),

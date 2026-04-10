@@ -128,8 +128,10 @@ function buildFixPrompt(finding: FindingRecord): string {
   parts.push('## Issue');
   parts.push(finding.description);
   parts.push('');
-  parts.push('## Task');
-  parts.push(finding.suggestedFix);
+    parts.push('## Task');
+  const taskPrompt = finding.contextualEvidence?.trim() || finding.suggestedFix?.trim() || 'Investigate the issue, identify the concrete root cause, implement a robust fix, and add or update tests to prevent regressions.';
+  parts.push(taskPrompt);
+
 
   if (finding.relevantFiles && finding.relevantFiles.length > 0) {
     parts.push('');

@@ -26,7 +26,7 @@ function createEventStoreStub(): EventStore {
 }
 
 describe('log watcher fix-session emission', () => {
-    it('registers realtime session observer findings and spawns fix sessions', async () => {
+  it('registers realtime session observer findings and spawns fix sessions', async () => {
     const orchestraceDir = await mkdtemp(join(tmpdir(), 'orchestrace-observer-'));
 
     try {
@@ -47,6 +47,7 @@ describe('log watcher fix-session emission', () => {
           severity: 'high',
           title: 'Unsafe cross-session mutable state',
           description: 'Multiple sessions mutate a shared singleton without locks.',
+          contextualEvidence: 'Scope mutable state per session and guard shared writes with synchronization.',
           suggestedFix: 'Scope mutable state per session and guard shared writes with synchronization.',
           relevantFiles: ['packages/cli/src/ui-server.ts'],
         },
@@ -86,6 +87,7 @@ describe('log watcher fix-session emission', () => {
           severity: 'critical',
           title: 'Unsafe cross session mutable state',
           description: 'Completely different wording for body should still merge by equivalent queue title.',
+          contextualEvidence: 'Apply synchronization and isolate state.',
           suggestedFix: 'Apply synchronization and isolate state.',
           relevantFiles: ['packages/cli/src/observer/daemon.ts'],
         },
@@ -105,7 +107,6 @@ describe('log watcher fix-session emission', () => {
       await rm(orchestraceDir, { recursive: true, force: true });
     }
   });
-
 
   it('registers log findings and spawns fix sessions immediately', async () => {
     const orchestraceDir = await mkdtemp(join(tmpdir(), 'orchestrace-observer-'));
@@ -128,6 +129,7 @@ describe('log watcher fix-session emission', () => {
           severity: 'high',
           title: 'Crash loop in API handler',
           description: 'Handler retries endlessly when upstream returns malformed payload.',
+          contextualEvidence: 'Add schema guard and stop retrying on non-retryable errors.',
           suggestedFix: 'Add schema guard and stop retrying on non-retryable errors.',
           relevantFiles: ['packages/cli/src/ui-server.ts'],
         },
@@ -172,6 +174,7 @@ describe('log watcher fix-session emission', () => {
           severity: 'medium',
           title: 'Excessive log polling',
           description: 'Loop polls status endpoint too frequently under load.',
+          contextualEvidence: 'Back off polling frequency and debounce updates.',
           suggestedFix: 'Back off polling frequency and debounce updates.',
         },
       ]);
@@ -241,7 +244,7 @@ describe('log watcher fix-session emission', () => {
     }
   });
 
-    it('does not merge into completed findings when matching equivalent tasks', async () => {
+  it('does not merge into completed findings when matching equivalent tasks', async () => {
     const orchestraceDir = await mkdtemp(join(tmpdir(), 'orchestrace-observer-'));
 
     try {
@@ -297,8 +300,93 @@ describe('log watcher fix-session emission', () => {
     }
   });
 
-  it('does not count historical spawned findings against current process concurrency', async () => {
+  it('uses legacy suggestedFix from persisted findings when contextualEvidence is absent', async () => {
+    const orchestraceDir = await mkdtemp(join(tmpdir(), 'orchestrace-observer-'));
 
+    try {
+      const observerDir = join(orchestraceDir, 'observer');
+      await mkdir(observerDir, { recursive: true });
+      await writeFile(
+        join(observerDir, 'findings.json'),
+        JSON.stringify([
+          {
+            fingerprint: 'legacy-pending-1',
+            category: 'code-quality',
+            severity: 'high',
+            title: 'Legacy pending finding',
+            description: 'Persisted before contextualEvidence existed.',
+            suggestedFix: 'Use legacy field as task body.',
+            observedInSessions: ['legacy-session'],
+            detectedAt: new Date().toISOString(),
+            fixSessionId: null,
+            fixStatus: 'pending',
+            additionalSessions: [],
+          },
+        ], null, 2),
+        'utf-8',
+      );
+
+      const startSession = vi.fn(async () => ({ id: `fix-${String(startSession.mock.calls.length + 1)}` }));
+      const daemon = new ObserverDaemon({
+        orchestraceDir,
+        eventStore: createEventStoreStub(),
+        llm: { complete: vi.fn() } as ObserverDaemonOptions['llm'],
+        startSession,
+        resolveApiKey: async () => undefined,
+      });
+
+      await daemon.start();
+      await daemon.updateConfig({ maxConcurrentFixSessions: 0 });
+      const spawned = await daemon.spawnAll();
+
+      expect(spawned).toBe(1);
+      expect(startSession).toHaveBeenCalledTimes(1);
+      const prompt = String(startSession.mock.calls[0]?.[0].prompt ?? '');
+      expect(prompt).toContain('Use legacy field as task body.');
+      const loaded = daemon.getFindings();
+      expect(loaded[0]?.contextualEvidence).toBe('Use legacy field as task body.');
+    } finally {
+      await rm(orchestraceDir, { recursive: true, force: true });
+    }
+  });
+
+  it('prefers contextualEvidence over suggestedFix when both are present', async () => {
+    const orchestraceDir = await mkdtemp(join(tmpdir(), 'orchestrace-observer-'));
+
+    try {
+      const startSession = vi.fn(async () => ({ id: `fix-${String(startSession.mock.calls.length + 1)}` }));
+      const daemon = new ObserverDaemon({
+        orchestraceDir,
+        eventStore: createEventStoreStub(),
+        llm: { complete: vi.fn() } as ObserverDaemonOptions['llm'],
+        startSession,
+        resolveApiKey: async () => undefined,
+      });
+
+      await daemon.updateConfig({ enabled: true, maxConcurrentFixSessions: 0 });
+
+      const result = await daemon.ingestLogWatcherFindings([
+        {
+          category: 'error-pattern',
+          severity: 'high',
+          title: 'Prompt precedence check',
+          description: 'Ensure canonical field wins.',
+          contextualEvidence: 'Use canonical contextualEvidence in the task prompt.',
+          suggestedFix: 'Do not use this legacy task text.',
+        },
+      ]);
+
+      expect(result).toEqual({ registered: 1, spawned: 1 });
+      expect(startSession).toHaveBeenCalledTimes(1);
+      const prompt = String(startSession.mock.calls[0]?.[0].prompt ?? '');
+      expect(prompt).toContain('Use canonical contextualEvidence in the task prompt.');
+      expect(prompt).not.toContain('Do not use this legacy task text.');
+    } finally {
+      await rm(orchestraceDir, { recursive: true, force: true });
+    }
+  });
+
+  it('does not count historical spawned findings against current process concurrency', async () => {
     const orchestraceDir = await mkdtemp(join(tmpdir(), 'orchestrace-observer-'));
 
     try {
@@ -342,6 +430,7 @@ describe('log watcher fix-session emission', () => {
           severity: 'high',
           title: 'Fresh issue A',
           description: 'New issue A from current process.',
+          contextualEvidence: 'Fix issue A.',
           suggestedFix: 'Fix issue A.',
         },
       ]);
@@ -352,6 +441,7 @@ describe('log watcher fix-session emission', () => {
           severity: 'high',
           title: 'Fresh issue B',
           description: 'New issue B from current process.',
+          contextualEvidence: 'Fix issue B.',
           suggestedFix: 'Fix issue B.',
         },
       ]);
