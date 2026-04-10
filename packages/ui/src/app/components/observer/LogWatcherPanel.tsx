@@ -181,7 +181,11 @@ function LogFindingItem({ finding, isExpanded, onToggle }: { finding: LogFinding
           )}
           <div className="rounded bg-slate-50 px-2 py-1.5 dark:bg-slate-800">
             <div className="mb-0.5 text-[9px] font-bold uppercase tracking-wide text-slate-400">Suggested Fix</div>
-                        <p className="text-[11px] text-slate-700 dark:text-slate-200">{finding.issueSummary}</p>
+            <p className="text-[11px] text-slate-700 dark:text-slate-200">
+              {finding.evidence && finding.evidence.length > 0
+                ? finding.evidence.map((entry) => entry.text).filter(Boolean).join('\n')
+                : (finding.suggestedFix ?? '')}
+            </p>
 
           </div>
           {finding.relevantFiles && finding.relevantFiles.length > 0 && (

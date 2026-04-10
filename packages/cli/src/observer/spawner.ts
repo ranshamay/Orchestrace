@@ -5,7 +5,7 @@
 // session creation pipeline as the UI server.
 // ---------------------------------------------------------------------------
 
-import type { FindingRecord, ObserverConfig } from './types.js';
+import { findingTaskTextFromEvidence, type FindingRecord, type ObserverConfig } from './types.js';
 import type { FindingRegistry } from './registry.js';
 
 /** The subset of startWorkSession that the observer needs. */
@@ -128,16 +128,8 @@ function buildFixPrompt(finding: FindingRecord): string {
   parts.push('## Issue');
   parts.push(finding.description);
   parts.push('');
-    parts.push('## Task');
-  parts.push(finding.issueSummary);
-
-  if (finding.evidence.length > 0) {
-    parts.push('');
-    parts.push('## Evidence');
-    for (const item of finding.evidence) {
-      parts.push(`- ${item}`);
-    }
-  }
+  parts.push('## Task');
+  parts.push(findingTaskTextFromEvidence(finding.evidence));
 
   if (finding.relevantFiles && finding.relevantFiles.length > 0) {
 

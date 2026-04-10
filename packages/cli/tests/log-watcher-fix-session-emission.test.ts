@@ -47,7 +47,7 @@ describe('log watcher fix-session emission', () => {
           severity: 'high',
           title: 'Unsafe cross-session mutable state',
           description: 'Multiple sessions mutate a shared singleton without locks.',
-                    issueSummary: 'Scope mutable state per session and guard shared writes with synchronization.',
+          suggestedFix: 'Scope mutable state per session and guard shared writes with synchronization.',
           evidence: [],
           relevantFiles: ['packages/cli/src/ui-server.ts'],
         },
@@ -74,7 +74,7 @@ describe('log watcher fix-session emission', () => {
           severity: 'high',
           title: 'Unsafe cross-session mutable state',
           description: 'Multiple sessions mutate a shared singleton without locks.',
-                    issueSummary: 'Scope mutable state per session and guard shared writes with synchronization.',
+          suggestedFix: 'Scope mutable state per session and guard shared writes with synchronization.',
           evidence: [],
         },
       ]);
@@ -88,7 +88,7 @@ describe('log watcher fix-session emission', () => {
           severity: 'critical',
           title: 'Unsafe cross session mutable state',
           description: 'Completely different wording for body should still merge by equivalent queue title.',
-                    issueSummary: 'Apply synchronization and isolate state.',
+          suggestedFix: 'Apply synchronization and isolate state.',
           evidence: [],
           relevantFiles: ['packages/cli/src/observer/daemon.ts'],
         },
@@ -110,7 +110,49 @@ describe('log watcher fix-session emission', () => {
   });
 
 
+    it('builds fix prompt task text from v2 evidence findings', async () => {
+    const orchestraceDir = await mkdtemp(join(tmpdir(), 'orchestrace-observer-'));
+
+    try {
+      const startSession = vi.fn(async () => ({ id: `fix-${String(startSession.mock.calls.length + 1)}` }));
+      const daemon = new ObserverDaemon({
+        orchestraceDir,
+        eventStore: createEventStoreStub(),
+        llm: { complete: vi.fn() } as ObserverDaemonOptions['llm'],
+        startSession,
+        resolveApiKey: async () => undefined,
+      });
+
+      await daemon.updateConfig({ enabled: true, maxConcurrentFixSessions: 0 });
+
+      const result = await daemon.ingestSessionObserverFindings('session-v2', [
+        {
+          schemaVersion: '2',
+          category: 'architecture',
+          severity: 'high',
+          title: 'Missing migration strategy for schema transition',
+          description: 'Existing persisted records are not normalized before consumers read them.',
+          evidence: [
+            { text: 'Normalize legacy suggestedFix payloads into evidence[] at registry load time.' },
+            { text: 'Stamp schemaVersion=2 before persistence and API emission.' },
+          ],
+          relevantFiles: ['packages/cli/src/observer/registry.ts'],
+        },
+      ]);
+
+      expect(result).toEqual({ registered: 1, spawned: 1 });
+      expect(startSession).toHaveBeenCalledTimes(1);
+      const prompt = String(startSession.mock.calls[0]?.[0].prompt ?? '');
+      expect(prompt).toContain('## Task');
+      expect(prompt).toContain('1. Normalize legacy suggestedFix payloads into evidence[] at registry load time.');
+      expect(prompt).toContain('2. Stamp schemaVersion=2 before persistence and API emission.');
+    } finally {
+      await rm(orchestraceDir, { recursive: true, force: true });
+    }
+  });
+
   it('registers log findings and spawns fix sessions immediately', async () => {
+
     const orchestraceDir = await mkdtemp(join(tmpdir(), 'orchestrace-observer-'));
 
     try {
@@ -131,7 +173,7 @@ describe('log watcher fix-session emission', () => {
           severity: 'high',
           title: 'Crash loop in API handler',
           description: 'Handler retries endlessly when upstream returns malformed payload.',
-                    issueSummary: 'Add schema guard and stop retrying on non-retryable errors.',
+          suggestedFix: 'Add schema guard and stop retrying on non-retryable errors.',
           evidence: [],
           relevantFiles: ['packages/cli/src/ui-server.ts'],
         },
@@ -163,7 +205,7 @@ describe('log watcher fix-session emission', () => {
           severity: 'high',
           title: 'Crash loop in API handler',
           description: 'Handler retries endlessly when upstream returns malformed payload.',
-                    issueSummary: 'Add schema guard and stop retrying on non-retryable errors.',
+          suggestedFix: 'Add schema guard and stop retrying on non-retryable errors.',
           evidence: [],
         },
       ]);
@@ -177,7 +219,7 @@ describe('log watcher fix-session emission', () => {
           severity: 'medium',
           title: 'Excessive log polling',
           description: 'Loop polls status endpoint too frequently under load.',
-                    issueSummary: 'Back off polling frequency and debounce updates.',
+          suggestedFix: 'Back off polling frequency and debounce updates.',
           evidence: [],
         },
       ]);
@@ -210,7 +252,7 @@ describe('log watcher fix-session emission', () => {
             severity: 'high',
             title: 'Repeated timeout',
             description: 'Service call times out repeatedly.',
-                        issueSummary: 'Increase timeout guard and add jittered retry cap.',
+            suggestedFix: 'Increase timeout guard and add jittered retry cap.',
             evidence: [],
             logSnippet: 'timeout after 30000ms',
           },
@@ -257,7 +299,7 @@ describe('log watcher fix-session emission', () => {
       await writeFile(
         join(observerDir, 'findings.json'),
         JSON.stringify([
-          {
+                    {
             fingerprint: 'completed-finding-1',
             category: 'architecture',
             severity: 'medium',
@@ -293,14 +335,17 @@ describe('log watcher fix-session emission', () => {
           severity: 'high',
           title: 'Unsafe cross session mutable state',
           description: 'Fresh finding should become a new queued task because prior one is completed.',
-                    issueSummary: 'Apply synchronization and isolate state.',
+          suggestedFix: 'Apply synchronization and isolate state.',
           evidence: [],
         },
       ]);
 
-      expect(created).toEqual({ registered: 1, spawned: 1 });
+            expect(created).toEqual({ registered: 1, spawned: 1 });
       expect(startSession).toHaveBeenCalledTimes(1);
       expect(daemon.getFindings()).toHaveLength(2);
+      const historical = daemon.getFindings().find((f) => f.fingerprint === 'completed-finding-1');
+      expect(historical?.schemaVersion).toBe('2');
+      expect(historical?.evidence?.[0]?.text).toBe('Historical fix');
     } finally {
       await rm(orchestraceDir, { recursive: true, force: true });
     }
@@ -316,7 +361,7 @@ describe('log watcher fix-session emission', () => {
       await writeFile(
         join(observerDir, 'findings.json'),
         JSON.stringify([
-          {
+                    {
             fingerprint: 'historical-finding-1',
             category: 'code-quality',
             severity: 'medium',
@@ -352,7 +397,7 @@ describe('log watcher fix-session emission', () => {
           severity: 'high',
           title: 'Fresh issue A',
           description: 'New issue A from current process.',
-                    issueSummary: 'Fix issue A.',
+          suggestedFix: 'Fix issue A.',
           evidence: [],
         },
       ]);
@@ -363,7 +408,7 @@ describe('log watcher fix-session emission', () => {
           severity: 'high',
           title: 'Fresh issue B',
           description: 'New issue B from current process.',
-                    issueSummary: 'Fix issue B.',
+          suggestedFix: 'Fix issue B.',
           evidence: [],
         },
       ]);

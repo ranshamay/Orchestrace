@@ -561,12 +561,13 @@ export async function toggleTodo(id: string, todoId: string, done: boolean): Pro
 
 export interface ObserverFinding {
   fingerprint: string;
+  schemaVersion: '1' | '2';
   category: string;
   severity: string;
   title: string;
   description: string;
-  issueSummary: string;
-  evidence: string[];
+  evidence?: Array<{ text: string }>;
+  suggestedFix?: string;
   relevantFiles?: string[];
   observedInSessions: string[];
   detectedAt: string;
@@ -670,12 +671,13 @@ export type SessionObserverStatus = 'idle' | 'watching' | 'analyzing' | 'done';
 
 export interface SessionObserverFinding {
   id: string;
+  schemaVersion: '1' | '2';
   category: string;
   severity: string;
   title: string;
   description: string;
-  issueSummary: string;
-  evidence: string[];
+  evidence?: Array<{ text: string }>;
+  suggestedFix?: string;
   relevantFiles?: string[];
   phase: string;
   detectedAt: string;
@@ -716,8 +718,8 @@ export interface LogFinding {
   severity: string;
   title: string;
   description: string;
-  issueSummary: string;
-  evidence: string[];
+  suggestedFix?: string;
+  evidence?: Array<{ text: string }>;
   relevantFiles?: string[];
   logSnippet: string;
   detectedAt: string;
