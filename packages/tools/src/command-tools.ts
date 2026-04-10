@@ -68,11 +68,11 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
           regex: Type.Optional(Type.Boolean({ description: 'When true, interpret query as regex. Defaults to false (literal search via --fixed-strings).' })),
           path: Type.Optional(Type.String({ description: 'Relative path to search inside. Defaults to workspace root.' })),
           glob: Type.Optional(Type.String({ description: 'Optional glob include filter, e.g. src/**/*.ts' })),
-          queryMode: Type.Optional(Type.Union([
+                    queryMode: Type.Optional(Type.Union([
             Type.Literal('regex'),
             Type.Literal('literal'),
           ], {
-            description: 'How to interpret query: regex (default) or literal fixed-string search.',
+            description: 'How to interpret query: regex or literal fixed-string search. Defaults to literal unless regex=true.',
           })),
         }),
       },
@@ -941,6 +941,14 @@ function sanitizeSearchQueryAndMode(input: SanitizedSearchQueryAndModeInput): Va
     return queryModeValidation;
   }
 
+  const modeConflictValidation = validateSearchModeConflict({
+    queryMode: queryModeValidation.value,
+    regex: input.regex,
+  });
+  if (!modeConflictValidation.ok) {
+    return modeConflictValidation;
+  }
+
   const resolvedMode = resolveSearchQueryMode({
     queryMode: queryModeValidation.value,
     regex: input.regex,
@@ -970,8 +978,27 @@ function resolveSearchQueryMode(input: {
   return 'literal';
 }
 
+function validateSearchModeConflict(input: {
+  queryMode: 'regex' | 'literal' | undefined;
+  regex: boolean | undefined;
+}): ValidationResult<void> {
+  if (input.queryMode === undefined || input.regex === undefined) {
+    return { ok: true, value: undefined };
+  }
 
+  if (input.queryMode === 'regex' && input.regex === true) {
+    return { ok: true, value: undefined };
+  }
 
+  if (input.queryMode === 'literal' && input.regex === false) {
+    return { ok: true, value: undefined };
+  }
+
+  return {
+    ok: false,
+    error: 'Invalid query mode arguments: queryMode and regex disagree. Use either queryMode or matching regex value.',
+  };
+}
 
 function validateSearchQuery(rawQuery: unknown): ValidationResult<string> {
 

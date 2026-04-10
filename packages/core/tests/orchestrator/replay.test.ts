@@ -1113,7 +1113,7 @@ describe('orchestrate replay capture', () => {
     }
   });
 
-  it('includes search_files regex escaping reminder in implementation prompt', async () => {
+    it('includes search_files literal-default reminder in implementation prompt', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'orchestrace-replay-impl-prompt-'));
     const capturedImplementationPrompts: string[] = [];
 
@@ -1135,7 +1135,7 @@ describe('orchestrate replay capture', () => {
       expect(output?.status).toBe('completed');
       expect(capturedImplementationPrompts.length).toBeGreaterThan(0);
       const implementationPrompt = capturedImplementationPrompts[0] ?? '';
-      expect(implementationPrompt).toContain('search_files uses regex; characters like ( and ) need escaping as \\( and \\).');
+            expect(implementationPrompt).toContain('search_files uses literal fixed-string search by default; use queryMode="regex" (or regex=true) only when regex semantics are intended.');
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }

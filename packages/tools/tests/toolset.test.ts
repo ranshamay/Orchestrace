@@ -572,7 +572,7 @@ describe('search_files tool', () => {
     expect(result.content).not.toContain('literal.txt:2:callXvalue');
   });
 
-  it('supports regex mode when regex=true', async () => {
+    it('supports regex mode when regex=true', async () => {
     const cwd = await makeWorkspace();
     await writeFile(join(cwd, 'src', 'regex.txt'), 'call(value)\ncallvalue\n', 'utf-8');
     const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
@@ -590,6 +590,50 @@ describe('search_files tool', () => {
     expect(result.isError).toBeFalsy();
     expect(result.content).toContain('regex.txt:2:callvalue');
     expect(result.content).not.toContain('regex.txt:1:call(value)');
+  });
+
+  it('keeps multi-word queries in literal mode by default', async () => {
+    const cwd = await makeWorkspace();
+    await writeFile(join(cwd, 'src', 'multi-word.txt'), 'log watcher\nlogXwatcher\n', 'utf-8');
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+
+    const result = await toolset.executeTool({
+      id: 'multi-word-literal-default',
+      name: 'search_files',
+      arguments: {
+        query: 'log watcher',
+        path: 'src',
+      },
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.content).toContain('multi-word.txt:1:log watcher');
+    expect(result.content).not.toContain('multi-word.txt:2:logXwatcher');
+  });
+
+  it('rejects conflicting queryMode and regex arguments', async () => {
+    const cwd = await makeWorkspace();
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+
+    const result = await toolset.executeTool({
+      id: 'search-mode-conflict',
+      name: 'search_files',
+      arguments: {
+        query: 'severity',
+        queryMode: 'literal',
+        regex: true,
+        path: 'src',
+      },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content).toBe('Invalid query mode arguments: queryMode and regex disagree. Use either queryMode or matching regex value.');
+    expect(result.details).toMatchObject({
+      errorType: 'invalid_arguments',
+      message: 'Invalid query mode arguments: queryMode and regex disagree. Use either queryMode or matching regex value.',
+      toolName: 'search_files',
+      path: 'src',
+    });
   });
 
     it('returns (no matches) when nothing matches', async () => {
