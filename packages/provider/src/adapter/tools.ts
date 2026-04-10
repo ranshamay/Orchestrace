@@ -796,9 +796,12 @@ async function sleepWithSignal(ms: number, signal?: AbortSignal): Promise<void> 
 
 function buildToolCallRetryMessage(toolCall: ToolCall, errorContent: string): string {
   const deterministicEditFailure = isDeterministicEditValidationFailure(toolCall.name, errorContent);
+  const deterministicSearchFailure = isDeterministicSearchValidationFailure(toolCall.name, errorContent);
   const remediationLine = deterministicEditFailure
     ? 'This failure is deterministic. Revise the edit plan/arguments (or skip this edit) before issuing another edit tool call.'
-    : 'Correct the arguments using this error and retry this tool call.';
+    : deterministicSearchFailure
+      ? "This failure is deterministic. Keep only search text in query, set path to the search root (use '.' for repo-wide), and use glob for file filters (for example glob: '*.ts'); then retry search_files."
+      : 'Correct the arguments using this error and retry this tool call.';
 
   return [
     `Tool call ${toolCall.name} (${toolCall.id}) failed.`,
@@ -807,17 +810,31 @@ function buildToolCallRetryMessage(toolCall: ToolCall, errorContent: string): st
   ].join('\n');
 }
 
+
 function isDeterministicEditValidationFailure(toolName: string, errorContent: string): boolean {
   if (toolName !== 'edit_file' && toolName !== 'edit_files') {
     return false;
   }
 
   const normalized = errorContent.toLowerCase();
-    return normalized.includes('missing newtext')
+  return normalized.includes('missing newtext')
     || normalized.includes('no-op edit is not allowed')
     || normalized.includes('duplicate paths are not allowed');
-
 }
+
+function isDeterministicSearchValidationFailure(toolName: string, errorContent: string): boolean {
+  if (toolName !== 'search_files') {
+    return false;
+  }
+
+  const normalized = errorContent.toLowerCase();
+  return normalized.includes('invalid query: query appears to be a ripgrep path/filter fragment')
+    || (
+      normalized.includes('provide search text in query')
+      && normalized.includes('file scope in path/glob')
+    );
+}
+
 
 function getToolCalls(message: AssistantMessage): ToolCall[] {
   const calls: ToolCall[] = [];

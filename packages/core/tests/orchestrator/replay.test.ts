@@ -1135,7 +1135,9 @@ describe('orchestrate replay capture', () => {
       expect(output?.status).toBe('completed');
       expect(capturedImplementationPrompts.length).toBeGreaterThan(0);
       const implementationPrompt = capturedImplementationPrompts[0] ?? '';
-      expect(implementationPrompt).toContain('search_files uses regex; characters like ( and ) need escaping as \\( and \\).');
+            expect(implementationPrompt).toContain('search_files uses regex; characters like ( and ) need escaping as \\( and \\).');
+      expect(implementationPrompt).toContain("For search_files calls, keep the search pattern only in query, set repository/file-root scope in path (use '.' for repo-wide search), and use glob for file filtering; never embed path/glob fragments in query or mixed path-glob strings in path.");
+
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }

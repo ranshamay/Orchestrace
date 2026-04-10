@@ -272,7 +272,7 @@ describe('executeWithOptionalTools', () => {
     expect(parsed.files.map((entry) => entry.path)).toEqual(['src/a.ts', 'src/b.ts', 'src/a.ts']);
   });
 
-  it('uses deterministic remediation guidance for duplicate-path edit_files errors', async () => {
+    it('uses deterministic remediation guidance for duplicate-path edit_files errors', async () => {
     const consumeStreamMock = vi.mocked(consumeStream);
 
     const firstResponse = makeAssistantMessage([
@@ -322,7 +322,61 @@ describe('executeWithOptionalTools', () => {
     expect(genericRetryPrompt).toBeUndefined();
   });
 
+  it('uses deterministic remediation guidance for search_files query/path-glob shape failures', async () => {
+    const consumeStreamMock = vi.mocked(consumeStream);
+
+    const firstResponse = makeAssistantMessage([
+      {
+        type: 'toolCall',
+        id: 'search-shape-err',
+        name: 'search_files',
+        arguments: {
+          query: '--glob src/**/*.ts',
+          path: 'src',
+        },
+      },
+    ], 'tool_calls');
+    const finalResponse = makeAssistantMessage([{ type: 'text', text: 'Handled.' }]);
+
+    consumeStreamMock.mockResolvedValueOnce(firstResponse as never);
+    consumeStreamMock.mockResolvedValueOnce(finalResponse as never);
+
+    const context: TestContext = {
+      messages: [],
+      tools: [{ name: 'search_files', description: 'Search text', parameters: { type: 'object' } }],
+    };
+
+    await executeWithOptionalTools({
+      model: {} as never,
+      context,
+      options: {},
+      toolset: {
+        tools: [],
+        async executeTool() {
+          return {
+            content: 'Invalid query: query appears to be a ripgrep path/filter fragment. Provide search text in query and file scope in path/glob.',
+            isError: true,
+          };
+        },
+      },
+      onUsage: () => {},
+    });
+
+    const deterministicPrompt = context.messages.find(
+      (message) => message.role === 'user' && String(message.content?.[0]?.text ?? '').includes('This failure is deterministic.'),
+    );
+    expect(deterministicPrompt).toBeDefined();
+    expect(String(deterministicPrompt?.content?.[0]?.text ?? '')).toContain("set path to the search root (use '.' for repo-wide)");
+    expect(String(deterministicPrompt?.content?.[0]?.text ?? '')).toContain("glob: '*.ts'");
+
+    const genericRetryPrompt = context.messages.find(
+      (message) => message.role === 'user' && String(message.content?.[0]?.text ?? '').includes('retry this tool call'),
+    );
+    expect(genericRetryPrompt).toBeUndefined();
+  });
+
   it('retries subagent_spawn_batch failures in a single reduced batch request', async () => {
+
 
     const consumeStreamMock = vi.mocked(consumeStream);
 
