@@ -350,12 +350,14 @@ export type ObserverFindingPhase = 'planning' | 'implementation' | 'unknown';
 export interface SessionObserverFindingPayload {
   finding: {
     id: string;
+    schemaVersion?: '1' | '2';
     category: ObserverFindingCategory;
     severity: ObserverFindingSeverity;
     title: string;
     description: string;
-    issueSummary: string;
-    evidence: string[];
+    issueSummary?: string;
+    suggestedFix?: string;
+    evidence?: Array<{ text: string }>;
     relevantFiles?: string[];
     phase: ObserverFindingPhase;
     detectedAt: string;

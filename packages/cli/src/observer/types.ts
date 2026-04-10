@@ -17,38 +17,134 @@ export const ALL_FINDING_CATEGORIES: FindingCategory[] = [
 ];
 
 export type FindingSeverity = ObserverFindingSeverity;
+export type FindingSchemaVersion = '1' | '2';
 
-/** A single observation/issue found by the observer LLM. */
-export interface ObserverFinding {
-  /** Deterministic fingerprint for deduplication (hash of category + normalized description). */
-  fingerprint: string;
+/** Canonical v2 evidence entry describing concrete remediation/context. */
+export interface FindingEvidence {
+  text: string;
+}
+
+/** Shared finding body fields. */
+interface ObserverFindingBase {
   category: FindingCategory;
   severity: FindingSeverity;
   /** One-line title of the finding. */
   title: string;
   /** Detailed description of the issue. */
   description: string;
-    /** Concise task-ready summary of the implementation work needed. */
-  issueSummary: string;
-  /** Supporting evidence snippets that justify this finding. */
-  evidence: string[];
-
+  /** Concise task-ready summary of the implementation work needed. */
+  issueSummary?: string;
   /** File paths relevant to this finding (if any). */
   relevantFiles?: string[];
+}
+
+/** Legacy finding payload shape (v1). */
+export interface ObserverFindingV1 extends ObserverFindingBase {
+  schemaVersion: '1';
+  /** Legacy concrete fix suggestion. */
+  suggestedFix: string;
+}
+
+/** Canonical finding payload shape (v2). */
+export interface ObserverFindingV2 extends ObserverFindingBase {
+  schemaVersion: '2';
+  /** Canonical evidence list used by parser/store and consumers. */
+  evidence: FindingEvidence[];
+}
+
+/**
+ * Incoming finding payload accepted during migration.
+ * Allows legacy `suggestedFix` and new `evidence[]` shapes.
+ */
+export type ObserverFindingInput =
+  | (ObserverFindingBase & {
+      schemaVersion?: '1';
+      suggestedFix: string;
+      evidence?: FindingEvidence[];
+    })
+  | (ObserverFindingBase & {
+      schemaVersion?: '2';
+      evidence: FindingEvidence[];
+      suggestedFix?: string;
+    });
+
+/** A single observation/issue found by the observer LLM. */
+export type ObserverFinding = (ObserverFindingV1 | ObserverFindingV2) & {
+  /** Deterministic fingerprint for deduplication (hash of category + normalized description). */
+  fingerprint: string;
   /** Session IDs where this issue was observed. */
   observedInSessions: string[];
   /** When the finding was first detected. */
   detectedAt: string;
-}
+};
+
+/** Canonical normalized finding payload used internally/persisted records. */
+export type NormalizedObserverFinding = Omit<ObserverFinding, 'schemaVersion' | 'suggestedFix'> & {
+  schemaVersion: '2';
+  evidence: FindingEvidence[];
+};
 
 /** Persistent state of a registered finding (stored in findings.json). */
-export interface FindingRecord extends ObserverFinding {
+export interface FindingRecord extends NormalizedObserverFinding {
   /** The session ID spawned to fix this finding, or null if not yet spawned. */
   fixSessionId: string | null;
   /** Status of the fix attempt. */
   fixStatus: 'pending' | 'spawned' | 'completed' | 'failed';
   /** Additional session IDs that matched this fingerprint after the first detection. */
   additionalSessions: string[];
+}
+
+const LEGACY_FALLBACK_EVIDENCE_TEXT = 'No suggested fix provided in legacy finding payload.';
+
+export function normalizeFindingEvidence(
+  evidence: FindingEvidence[] | undefined,
+  suggestedFix: string | undefined,
+): FindingEvidence[] {
+  const sanitizedEvidence = (evidence ?? [])
+    .filter((entry): entry is FindingEvidence => !!entry && typeof entry.text === 'string')
+    .map((entry) => ({ text: entry.text.trim() }))
+    .filter((entry) => entry.text.length > 0);
+
+  if (sanitizedEvidence.length > 0) {
+    return sanitizedEvidence;
+  }
+
+  if (typeof suggestedFix === 'string' && suggestedFix.trim().length > 0) {
+    return [{ text: suggestedFix.trim() }];
+  }
+
+  return [{ text: LEGACY_FALLBACK_EVIDENCE_TEXT }];
+}
+
+export function normalizeObserverFindingInput(
+  finding: ObserverFindingInput,
+): Omit<NormalizedObserverFinding, 'fingerprint' | 'observedInSessions' | 'detectedAt'> {
+  return {
+    schemaVersion: '2',
+    category: finding.category,
+    severity: finding.severity,
+    title: finding.title,
+    description: finding.description,
+    relevantFiles: finding.relevantFiles,
+    evidence: normalizeFindingEvidence(finding.evidence, finding.suggestedFix),
+  };
+}
+
+/** Build consumer-facing task text from normalized evidence entries. */
+export function findingTaskTextFromEvidence(evidence: FindingEvidence[]): string {
+  const lines = evidence
+    .map((entry) => entry.text.trim())
+    .filter((text) => text.length > 0);
+
+  if (lines.length === 0) {
+    return LEGACY_FALLBACK_EVIDENCE_TEXT;
+  }
+
+  if (lines.length === 1) {
+    return lines[0];
+  }
+
+  return lines.map((line, idx) => `${idx + 1}. ${line}`).join('\n');
 }
 
 /** Observer daemon configuration (persisted in .orchestrace/observer/config.json). */
@@ -123,6 +219,7 @@ export interface ObserverDaemonState {
 
 /** Structured output from the LLM analysis of a session's event log. */
 export interface AnalysisResult {
+<<<<<<< HEAD
   findings: Array<{
     category: FindingCategory;
     severity: FindingSeverity;
@@ -134,3 +231,7 @@ export interface AnalysisResult {
 
   }>;
 }
+=======
+  findings: ObserverFindingInput[];
+}
+>>>>>>> 09dc142f (refactor: define schemaVersioned finding v2 contract types)
