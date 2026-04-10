@@ -114,7 +114,7 @@ describe('planning guard behavior', () => {
     expect(state?.forcedImplementation).toBe(false);
   });
 
-  it('includes simple-task policy and planning budget language in planning prompt', () => {
+    it('includes simple-task policy and planning budget language in planning prompt', () => {
     const session = createSession();
     const prompt = buildSessionSystemPrompt(session, 'planning');
 
@@ -122,5 +122,14 @@ describe('planning guard behavior', () => {
     expect(prompt).toContain('For simple single-file tasks, skip sub-agent delegation');
     expect(prompt).toContain('Planning is budgeted: keep planning activity under 25%');
     expect(prompt).toContain('If session guard thresholds are exceeded');
+    expect(prompt).toContain('After search identifies independent files, issue one read_files batch covering all of them');
+  });
+
+  it('includes one-batch read_files guidance in chat prompt', () => {
+    const session = createSession();
+    const prompt = buildSessionSystemPrompt(session, 'chat');
+
+    expect(prompt).toContain('After search identifies independent files, issue one read_files batch covering all of them');
+    expect(prompt).toContain('instead of repeated one-by-one read_file calls');
   });
 });
