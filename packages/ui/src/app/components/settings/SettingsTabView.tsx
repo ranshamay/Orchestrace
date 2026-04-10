@@ -22,8 +22,10 @@ import {
   triggerObserverAnalysis,
   type ObserverStatusResponse,
   type ObserverFinding,
-  type ObserverFailedSessionMonitor,
+    type ObserverFailedSessionMonitor,
+  type FindingSeverity,
 } from '../../../lib/api';
+
 import type { SettingsSaveToastState } from '../overlays/SettingsSaveToast';
 import { ModelAutocomplete } from '../ModelAutocomplete';
 
@@ -1716,7 +1718,8 @@ function ObserverSection({
   );
 }
 
-function severityBadge(severity: string): string {
+function severityBadge(severity: FindingSeverity): string {
+
   switch (severity) {
     case 'critical': return 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300';
     case 'high': return 'bg-orange-100 text-orange-700 dark:bg-orange-900/40 dark:text-orange-300';

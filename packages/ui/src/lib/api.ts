@@ -446,10 +446,14 @@ export async function toggleTodo(id: string, todoId: string, done: boolean): Pro
 
 // -- Observer API --
 
+export type FindingSeverity = 'low' | 'medium' | 'high' | 'critical';
+
 export interface ObserverFinding {
+
   fingerprint: string;
   category: string;
-  severity: string;
+    severity: FindingSeverity;
+
   title: string;
   description: string;
   suggestedFix: string;
@@ -556,7 +560,8 @@ export type SessionObserverStatus = 'idle' | 'watching' | 'analyzing' | 'done';
 export interface SessionObserverFinding {
   id: string;
   category: string;
-  severity: string;
+    severity: FindingSeverity;
+
   title: string;
   description: string;
   suggestedFix: string;
@@ -596,7 +601,8 @@ export type LogFindingCategory =
 export interface LogFinding {
   id: string;
   category: LogFindingCategory;
-  severity: string;
+    severity: FindingSeverity;
+
   title: string;
   description: string;
   suggestedFix: string;
