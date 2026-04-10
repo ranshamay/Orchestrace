@@ -22,16 +22,21 @@ export type FindingSeverity = 'low' | 'medium' | 'high' | 'critical';
 
 /** A single observation/issue found by the observer LLM. */
 export interface ObserverFinding {
-  /** Deterministic fingerprint for deduplication (hash of category + normalized description). */
+  /** Deterministic fingerprint for deduplication (hash of category + normalized issue summary). */
   fingerprint: string;
   category: FindingCategory;
   severity: FindingSeverity;
   /** One-line title of the finding. */
   title: string;
-  /** Detailed description of the issue. */
-  description: string;
-  /** Concrete fix suggestion the observer will use as a session prompt. */
-  suggestedFix: string;
+  /** Clear summary of the issue. */
+  issueSummary: string;
+  /**
+   * Concrete evidence supporting the finding.
+   * Cardinality is enforced at runtime: exactly 2-3 items.
+   */
+  evidence: string[];
+  /** Why the assigned severity is appropriate for this finding. */
+  severityRationale: string;
   /** File paths relevant to this finding (if any). */
   relevantFiles?: string[];
   /** Session IDs where this issue was observed. */
@@ -39,6 +44,7 @@ export interface ObserverFinding {
   /** When the finding was first detected. */
   detectedAt: string;
 }
+
 
 /** Persistent state of a registered finding (stored in findings.json). */
 export interface FindingRecord extends ObserverFinding {
@@ -126,8 +132,11 @@ export interface AnalysisResult {
     category: FindingCategory;
     severity: FindingSeverity;
     title: string;
-    description: string;
-    suggestedFix: string;
+    issueSummary: string;
+    /** Runtime validation must enforce evidence length 2-3. */
+    evidence: string[];
+    severityRationale: string;
     relevantFiles?: string[];
   }>;
 }
+

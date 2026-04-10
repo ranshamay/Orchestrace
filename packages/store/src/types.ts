@@ -342,13 +342,16 @@ export interface SessionObserverFindingPayload {
     category: string;
     severity: string;
     title: string;
-    description: string;
-    suggestedFix: string;
+    issueSummary: string;
+    /** Runtime validation must enforce evidence length 2-3. */
+    evidence: string[];
+    severityRationale: string;
     relevantFiles?: string[];
     phase: string;
     detectedAt: string;
   };
 }
+
 
 // The discriminated union
 export type SessionEvent =
