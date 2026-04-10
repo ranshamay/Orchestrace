@@ -146,8 +146,9 @@ describe('log watcher fix-session emission', () => {
         findingSeverity: 'high',
         routeIntent: 'code_change',
       }));
-      expect(firstPrompt).toContain('## Issue');
+            expect(firstPrompt).toContain('## Issue');
       expect(firstPrompt).toContain('\n## Task\n');
+      expect(firstPrompt).toContain('Validate these paths exist in the current worktree before direct reads');
       const shellValidation = validateShellExecutionPrompt(firstPrompt);
       expect(shellValidation.ok).toBe(false);
       expect(shellValidation.command).toBeUndefined();

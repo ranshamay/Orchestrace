@@ -28,6 +28,7 @@ const DEFAULT_BATCH_MIN_CONCURRENCY = 1;
 export function createFilesystemTools(options: FilesystemToolOptions): RegisteredAgentTool[] {
   const resolveRevision = createRevisionResolver(options.cwd);
   const fileReadCache = asFileReadCache(options.fileReadCache);
+  const missingReadAttempts = new Map<string, number>();
   const tools: RegisteredAgentTool[] = [
     {
       tool: {
@@ -67,16 +68,24 @@ export function createFilesystemTools(options: FilesystemToolOptions): Registere
           maxChars: Type.Optional(Type.Number({ minimum: 200, maximum: 200000 })),
         }),
       },
-      execute: async (toolArgs) => {
+            execute: async (toolArgs) => {
         const path = asRequiredString(toolArgs.path, 'path');
         const target = resolveWorkspacePath(options.cwd, path);
         const startLine = asPositiveInteger(toolArgs.startLine) ?? 1;
         const endLine = asPositiveInteger(toolArgs.endLine);
         const maxChars = asPositiveInteger(toolArgs.maxChars) ?? DEFAULT_READ_MAX_CHARS;
+
+        const preflight = await preflightReadableFile(target);
+        if (!preflight.ok) {
+          const attempts = recordMissingReadAttempt(missingReadAttempts, target);
+          throw new Error(formatMissingReadMessage(path, preflight.error, attempts));
+        }
+
         const trimmed = await readWorkspaceFileSlice(target, { startLine, endLine, maxChars }, {
           fileReadCache,
           resolveRevision,
         });
+        clearMissingReadAttempt(missingReadAttempts, target);
 
         return {
           content: trimmed,
@@ -118,8 +127,31 @@ export function createFilesystemTools(options: FilesystemToolOptions): Registere
             ?? DEFAULT_BATCH_MIN_CONCURRENCY,
         );
 
-                const mapper = async (request: ReadBatchRequest): Promise<ReadBatchResult> => {
+                                const mapper = async (request: ReadBatchRequest): Promise<ReadBatchResult> => {
           const target = resolveWorkspacePath(options.cwd, request.path);
+          const preflight = await preflightReadableFile(target);
+          if (!preflight.ok) {
+            const attempts = recordMissingReadAttempt(missingReadAttempts, target);
+            const message = formatMissingReadMessage(request.path, preflight.error, attempts);
+            if (!request.required) {
+              return {
+                path: request.path,
+                ok: false,
+                status: 'optional_missing',
+                required: false,
+                error: message,
+              };
+            }
+
+            return {
+              path: request.path,
+              ok: false,
+              status: 'required_missing',
+              required: request.required,
+              error: message,
+            };
+          }
+
           try {
             const content = await readWorkspaceFileSlice(target, {
               startLine: request.startLine,
@@ -129,6 +161,7 @@ export function createFilesystemTools(options: FilesystemToolOptions): Registere
               fileReadCache,
               resolveRevision,
             });
+            clearMissingReadAttempt(missingReadAttempts, target);
             return {
               path: request.path,
               ok: true,
@@ -811,6 +844,48 @@ async function mapWithAdaptiveConcurrency<T, U>(
 
 function isReadBatchFailure(result: ReadBatchResult): boolean {
   return result.status === 'required_missing' || result.status === 'read_error';
+}
+
+async function preflightReadableFile(target: string): Promise<{ ok: true } | { ok: false; error: string }> {
+  try {
+    const fileStats = await stat(target);
+    if (!fileStats.isFile()) {
+      return {
+        ok: false,
+        error: `Path is not a file: ${target}`,
+      };
+    }
+
+    return { ok: true };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return {
+      ok: false,
+      error: message,
+    };
+  }
+}
+
+function recordMissingReadAttempt(missingReadAttempts: Map<string, number>, target: string): number {
+  const next = (missingReadAttempts.get(target) ?? 0) + 1;
+  missingReadAttempts.set(target, next);
+  return next;
+}
+
+function clearMissingReadAttempt(missingReadAttempts: Map<string, number>, target: string): void {
+  missingReadAttempts.delete(target);
+}
+
+function formatMissingReadMessage(path: string, error: string, attempts: number): string {
+  const parts = [
+    `Cannot read missing file: ${path}`,
+    `attempt=${attempts}`,
+    'Validate the path with list_directory/search_files first, or probe via read_files(required:false) for uncertain targets.',
+  ];
+  if (attempts > 1) {
+    parts.push('Repeated missing-path reads are suppressed unless new evidence indicates the file now exists.');
+  }
+  return `${parts.join(' ')} Original error: ${error}`;
 }
 
 function isMissingFileError(error: unknown, message: string): boolean {

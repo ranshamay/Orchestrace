@@ -110,7 +110,7 @@ describe('createAgentToolset phase policy', () => {
 });
 
 describe('batch filesystem tools', () => {
-  it('read_files reports required missing files as failures', async () => {
+    it('read_files reports required missing files as failures', async () => {
     const cwd = await makeWorkspace();
     await writeFile(join(cwd, 'src', 'second.ts'), 'export const second = 2;\n', 'utf-8');
     const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
@@ -152,10 +152,11 @@ describe('batch filesystem tools', () => {
     expect(parsed.files[0]).toMatchObject({ path: 'src/file.ts', ok: true, status: 'ok', required: true });
     expect(parsed.files[1]).toMatchObject({ path: 'src/second.ts', ok: true, status: 'ok', required: true });
     expect(parsed.files[2]).toMatchObject({ path: 'src/missing.ts', ok: false, status: 'required_missing', required: true });
-    expect(parsed.files[2].error).toBeDefined();
+    expect(parsed.files[2].error).toContain('Cannot read missing file: src/missing.ts');
+    expect(parsed.files[2].error).toContain('attempt=1');
   });
 
-  it('read_files reports optional missing files without escalating tool error', async () => {
+    it('read_files reports optional missing files without escalating tool error', async () => {
     const cwd = await makeWorkspace();
     await writeFile(join(cwd, 'src', 'second.ts'), 'export const second = 2;\n', 'utf-8');
     const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
@@ -197,7 +198,7 @@ describe('batch filesystem tools', () => {
     expect(parsed.files[0]).toMatchObject({ path: 'src/file.ts', ok: true, status: 'ok', required: true });
     expect(parsed.files[1]).toMatchObject({ path: 'src/second.ts', ok: true, status: 'ok', required: true });
     expect(parsed.files[2]).toMatchObject({ path: 'src/missing.ts', ok: false, status: 'optional_missing', required: false });
-    expect(parsed.files[2].error).toBeDefined();
+    expect(parsed.files[2].error).toContain('Cannot read missing file: src/missing.ts');
   });
 
   it('write_files writes multiple files and rejects duplicate paths', async () => {
@@ -416,7 +417,7 @@ describe('batch filesystem tools', () => {
     expect(parsedVerify.files[1].content).toContain('value = 1');
   });
 
-    it('read_file returns correct line slices for large files without full-read truncation artifacts', async () => {
+      it('read_file returns correct line slices for large files without full-read truncation artifacts', async () => {
     const cwd = await makeWorkspace();
     const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
 
@@ -435,6 +436,29 @@ describe('batch filesystem tools', () => {
 
     expect(result.isError).toBeFalsy();
     expect(result.content).toBe('line-20000\nline-20001\nline-20002\nline-20003');
+  });
+
+  it('read_file includes attempt counter for repeated missing-path reads', async () => {
+    const cwd = await makeWorkspace();
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+
+    const first = await toolset.executeTool({
+      id: 'missing-first',
+      name: 'read_file',
+      arguments: { path: 'src/does-not-exist.ts' },
+    });
+    const second = await toolset.executeTool({
+      id: 'missing-second',
+      name: 'read_file',
+      arguments: { path: 'src/does-not-exist.ts' },
+    });
+
+    expect(first.isError).toBe(true);
+    expect(second.isError).toBe(true);
+    expect(first.content).toContain('Cannot read missing file: src/does-not-exist.ts');
+    expect(first.content).toContain('attempt=1');
+    expect(second.content).toContain('attempt=2');
+    expect(second.content).toContain('Repeated missing-path reads are suppressed');
   });
 
   it('read_file applies deterministic maxChars truncation marker on large file reads', async () => {
