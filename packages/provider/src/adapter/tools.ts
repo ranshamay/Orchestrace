@@ -249,26 +249,45 @@ async function executeToolWithEditFilesDedup(params: {
   toolCall: ToolCall;
   arguments: Record<string, unknown>;
   signal?: AbortSignal;
+  allowRuntimeDuplicateFallback?: boolean;
 }): Promise<ToolExecutionPayload> {
-  const { toolset, toolCall, arguments: toolArgs, signal } = params;
+  const {
+    toolset,
+    toolCall,
+    arguments: toolArgs,
+    signal,
+    allowRuntimeDuplicateFallback = true,
+  } = params;
 
   if (toolCall.name !== 'edit_files') {
     return executeToolWithSubagentBatchRetry(params);
   }
 
   const editFiles = getEditFileEntries(toolArgs.files);
-  if (editFiles.length === 0 || !hasDuplicateEditPaths(editFiles)) {
-    return executeToolWithSubagentBatchRetry(params);
+  if (editFiles.length > 0 && hasDuplicateEditPaths(editFiles)) {
+    return executeDedupedEditFilesBatch({
+      toolset,
+      toolCall,
+      toolArgs,
+      editFiles,
+      signal,
+    });
   }
 
-  return executeDedupedEditFilesBatch({
+  const directResult = await executeToolWithSubagentBatchRetry(params);
+  if (!allowRuntimeDuplicateFallback || !isDuplicateEditFilesPathError(directResult.content)) {
+    return directResult;
+  }
+
+  return executeToolWithEditFilesDedup({
     toolset,
     toolCall,
-    toolArgs,
-    editFiles,
+    arguments: toolArgs,
     signal,
+    allowRuntimeDuplicateFallback: false,
   });
 }
+
 
 function getEditFileEntries(value: unknown): Array<Record<string, unknown>> {
   if (!Array.isArray(value)) {
@@ -813,11 +832,15 @@ function isDeterministicEditValidationFailure(toolName: string, errorContent: st
   }
 
   const normalized = errorContent.toLowerCase();
-    return normalized.includes('missing newtext')
+  return normalized.includes('missing newtext')
     || normalized.includes('no-op edit is not allowed')
-    || normalized.includes('duplicate paths are not allowed');
-
+    || isDuplicateEditFilesPathError(errorContent);
 }
+
+function isDuplicateEditFilesPathError(errorContent: string): boolean {
+  return errorContent.toLowerCase().includes('duplicate paths are not allowed');
+}
+
 
 function getToolCalls(message: AssistantMessage): ToolCall[] {
   const calls: ToolCall[] = [];
