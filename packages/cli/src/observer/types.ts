@@ -30,8 +30,14 @@ export interface ObserverFinding {
   title: string;
   /** Detailed description of the issue. */
   description: string;
-  /** Concrete fix suggestion the observer will use as a session prompt. */
+    /** Concrete fix suggestion the observer will use as a session prompt.
+   *  Must be phase-aware: when planning already identified impacted files,
+   *  direct implementation to carry that mapping forward and execute targeted
+   *  reads/edits without repeating list/search discovery for the same scope,
+   *  unless planning evidence is incomplete or ambiguous.
+   */
   suggestedFix: string;
+
   /** File paths relevant to this finding (if any). */
   relevantFiles?: string[];
   /** Session IDs where this issue was observed. */

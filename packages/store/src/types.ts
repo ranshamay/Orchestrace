@@ -343,12 +343,20 @@ export interface SessionObserverFindingPayload {
     severity: string;
     title: string;
     description: string;
+    /**
+     * Observer-provided remediation prompt. Consumers should preserve phase-aware
+     * guidance: if planning already produced an impacted-file mapping, execute
+     * targeted reads/edits directly and avoid redundant list/search discovery
+     * calls for the same scope unless planning evidence is incomplete/ambiguous.
+     */
     suggestedFix: string;
     relevantFiles?: string[];
+    /** Phase where the finding was emitted (e.g. planning or implementation). */
     phase: string;
     detectedAt: string;
   };
 }
+
 
 // The discriminated union
 export type SessionEvent =

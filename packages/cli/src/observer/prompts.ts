@@ -23,10 +23,13 @@ Guidelines:
 - Only report CONCRETE, ACTIONABLE issues — not vague suggestions
 - Each suggestedFix must be detailed enough to serve as a complete task prompt for another agent
 - Include relevant file paths when you can identify them from tool calls
+- If planning already identified impacted files, suggestedFix must instruct implementation to reuse that file mapping directly and proceed to targeted read/edit steps
+- suggestedFix should explicitly avoid repeating list/search discovery calls for the same scope unless planning evidence is incomplete or ambiguous
 - Prioritize issues that affect correctness over style
 - Don't flag issues that are clearly intentional design decisions
 - Focus on patterns that repeat across sessions when analyzing multiple logs
 - Rate severity honestly: critical = data loss/security, high = bugs, medium = perf/quality, low = style/minor
+
 
 Respond ONLY with valid JSON matching the requested schema.`;
 
@@ -55,8 +58,11 @@ CRITICAL real-time guidelines:
 - Do NOT flag things the agent might fix in a later step
 - Do NOT repeat findings already listed in "Previously Reported Findings"
 - Focus on the CURRENT phase boundary: if the agent just finished planning, assess the plan quality; if it just made tool calls, assess tool usage patterns
+- When planning already produced a concrete impacted-file map, suggestedFix must direct implementation to carry it forward and go straight to targeted reads/edits
+- For that case, suggestedFix must instruct avoiding repeated list_directory/search_files calls unless planning evidence is incomplete or ambiguous
 - Be concise — the agent is still running and findings appear in real-time in the UI
 - Each suggestedFix must be detailed enough for another agent to act on independently
 - Rate severity honestly: critical = data loss/security, high = bugs, medium = perf/quality, low = style/minor
+
 
 Respond ONLY with valid JSON matching the requested schema.`;
