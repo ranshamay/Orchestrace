@@ -2,13 +2,11 @@
 // Observer Agent — type definitions
 // ---------------------------------------------------------------------------
 
+import type { ObserverFindingCategory, ObserverFindingSeverity } from '@orchestrace/store';
+
 /** Categories of issues the observer can identify. */
-export type FindingCategory =
-  | 'code-quality'
-  | 'performance'
-  | 'agent-efficiency'
-  | 'architecture'
-  | 'test-coverage';
+export type FindingCategory = ObserverFindingCategory;
+
 
 export const ALL_FINDING_CATEGORIES: FindingCategory[] = [
   'code-quality',
@@ -18,7 +16,7 @@ export const ALL_FINDING_CATEGORIES: FindingCategory[] = [
   'test-coverage',
 ];
 
-export type FindingSeverity = 'low' | 'medium' | 'high' | 'critical';
+export type FindingSeverity = ObserverFindingSeverity;
 
 /** A single observation/issue found by the observer LLM. */
 export interface ObserverFinding {

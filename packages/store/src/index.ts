@@ -30,8 +30,14 @@ export type {
   SessionRunnerHeartbeatPayload,
   SessionCheckpointPayload,
   SessionRecoveryDetectedPayload,
-  SessionStreamDeltaPayload,
+    SessionStreamDeltaPayload,
+  SessionObserverStatusChangePayload,
+  SessionObserverFindingPayload,
+  ObserverFindingCategory,
+  ObserverFindingSeverity,
+  ObserverFindingPhase,
   // Value types
+
   SessionConfig,
   WorkState,
   SessionCreationReason,
