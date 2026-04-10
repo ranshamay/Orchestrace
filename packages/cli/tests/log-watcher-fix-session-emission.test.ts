@@ -47,7 +47,8 @@ describe('log watcher fix-session emission', () => {
           severity: 'high',
           title: 'Unsafe cross-session mutable state',
           description: 'Multiple sessions mutate a shared singleton without locks.',
-          suggestedFix: 'Scope mutable state per session and guard shared writes with synchronization.',
+                    issueSummary: 'Scope mutable state per session and guard shared writes with synchronization.',
+          evidence: ['Concurrent writes observed in shared mutable state across sessions.'],
           relevantFiles: ['packages/cli/src/ui-server.ts'],
         },
       ]);
@@ -73,7 +74,8 @@ describe('log watcher fix-session emission', () => {
           severity: 'high',
           title: 'Unsafe cross-session mutable state',
           description: 'Multiple sessions mutate a shared singleton without locks.',
-          suggestedFix: 'Scope mutable state per session and guard shared writes with synchronization.',
+                    issueSummary: 'Scope mutable state per session and guard shared writes with synchronization.',
+          evidence: ['Concurrent writes observed in shared mutable state across sessions.'],
         },
       ]);
 
@@ -86,7 +88,8 @@ describe('log watcher fix-session emission', () => {
           severity: 'critical',
           title: 'Unsafe cross session mutable state',
           description: 'Completely different wording for body should still merge by equivalent queue title.',
-          suggestedFix: 'Apply synchronization and isolate state.',
+          issueSummary: 'Apply synchronization and isolate state.',
+                    evidence: ['Race-prone shared state access detected in logs.'],
           relevantFiles: ['packages/cli/src/observer/daemon.ts'],
         },
       ]);
@@ -128,7 +131,8 @@ describe('log watcher fix-session emission', () => {
           severity: 'high',
           title: 'Crash loop in API handler',
           description: 'Handler retries endlessly when upstream returns malformed payload.',
-          suggestedFix: 'Add schema guard and stop retrying on non-retryable errors.',
+          issueSummary: 'Add schema guard and stop retrying on non-retryable errors.',
+          evidence: ['Repeated non-retryable failures without schema validation guard.'],
           relevantFiles: ['packages/cli/src/ui-server.ts'],
         },
       ]);
@@ -159,7 +163,8 @@ describe('log watcher fix-session emission', () => {
           severity: 'high',
           title: 'Crash loop in API handler',
           description: 'Handler retries endlessly when upstream returns malformed payload.',
-          suggestedFix: 'Add schema guard and stop retrying on non-retryable errors.',
+          issueSummary: 'Add schema guard and stop retrying on non-retryable errors.',
+                    evidence: ['Repeated non-retryable failures without schema validation guard.'],
         },
       ]);
 
@@ -172,7 +177,8 @@ describe('log watcher fix-session emission', () => {
           severity: 'medium',
           title: 'Excessive log polling',
           description: 'Loop polls status endpoint too frequently under load.',
-          suggestedFix: 'Back off polling frequency and debounce updates.',
+          issueSummary: 'Back off polling frequency and debounce updates.',
+                    evidence: ['High-frequency polling with redundant updates in a short interval.'],
         },
       ]);
 
@@ -204,7 +210,8 @@ describe('log watcher fix-session emission', () => {
             severity: 'high',
             title: 'Repeated timeout',
             description: 'Service call times out repeatedly.',
-            suggestedFix: 'Increase timeout guard and add jittered retry cap.',
+            issueSummary: 'Increase timeout guard and add jittered retry cap.',
+                        evidence: ['Timeout retries occur without jitter and exceed reasonable cap.'],
             logSnippet: 'timeout after 30000ms',
           },
         ],
@@ -256,7 +263,8 @@ describe('log watcher fix-session emission', () => {
             severity: 'medium',
             title: 'Unsafe cross-session mutable state',
             description: 'Old equivalent finding already completed.',
-            suggestedFix: 'Historical fix',
+            issueSummary: 'Historical fix',
+                        evidence: ['Historical evidence point.'],
             observedInSessions: ['legacy-session'],
             detectedAt: new Date().toISOString(),
             fixSessionId: 'legacy-fix-session',
@@ -285,7 +293,8 @@ describe('log watcher fix-session emission', () => {
           severity: 'high',
           title: 'Unsafe cross session mutable state',
           description: 'Fresh finding should become a new queued task because prior one is completed.',
-          suggestedFix: 'Apply synchronization and isolate state.',
+          issueSummary: 'Apply synchronization and isolate state.',
+                    evidence: ['Race-prone shared state access detected in logs.'],
         },
       ]);
 
@@ -313,7 +322,8 @@ describe('log watcher fix-session emission', () => {
             severity: 'medium',
             title: 'Historical spawned finding',
             description: 'Old finding kept as spawned from a prior process.',
-            suggestedFix: 'Historical fix',
+            issueSummary: 'Historical fix',
+                        evidence: ['Historical evidence point.'],
             observedInSessions: ['legacy-session'],
             detectedAt: new Date().toISOString(),
             fixSessionId: 'legacy-fix-session',
@@ -342,7 +352,8 @@ describe('log watcher fix-session emission', () => {
           severity: 'high',
           title: 'Fresh issue A',
           description: 'New issue A from current process.',
-          suggestedFix: 'Fix issue A.',
+          issueSummary: 'Fix issue A.',
+                    evidence: ['Evidence A.'],
         },
       ]);
 
@@ -352,7 +363,8 @@ describe('log watcher fix-session emission', () => {
           severity: 'high',
           title: 'Fresh issue B',
           description: 'New issue B from current process.',
-          suggestedFix: 'Fix issue B.',
+          issueSummary: 'Fix issue B.',
+                    evidence: ['Evidence B.'],
         },
       ]);
 
