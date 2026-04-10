@@ -283,7 +283,7 @@ describe('log watcher fix-session emission', () => {
     }
   });
 
-  it('emits only newly detected findings from log watcher batches', async () => {
+    it('emits only newly detected findings from log watcher batches', async () => {
     let onLineHandler: ((line: string) => void) | null = null;
     const logger = {
       onLine(handler: (line: string) => void) {
@@ -339,6 +339,96 @@ describe('log watcher fix-session emission', () => {
       watcher.stop();
     }
   });
+
+  it('parses runtime log-finding schema fields and legacy compatibility fallbacks', async () => {
+    let onLineHandler: ((line: string) => void) | null = null;
+    const logger = {
+      onLine(handler: (line: string) => void) {
+        onLineHandler = handler;
+        return () => {
+          onLineHandler = null;
+        };
+      },
+    };
+
+    const emitted: Array<{
+      title: string;
+      category: string;
+      severity: string;
+      suggestedFix?: string;
+      evidence?: Array<{ text: string }>;
+      relevantFiles?: string[];
+      logSnippet: string;
+      detectedAt: string;
+    }> = [];
+
+    const watcher = new LogWatcher({
+      llm: {
+        complete: vi.fn(async () => ({
+          text: JSON.stringify({
+            findings: [
+              {
+                category: 'performance',
+                severity: 'high',
+                title: 'Legacy issueSummary finding',
+                description: 'Legacy fields should still map into watcher output.',
+                issueSummary: 'Fallback to issueSummary while rollout is in progress.',
+                evidence: [
+                  { text: 'Throttle repeated watcher analysis invocations.' },
+                  { text: 'Persist schemaVersion=2-compatible evidence payloads.' },
+                ],
+                relevantFiles: ['packages/cli/src/observer/log-watcher.ts'],
+                logSnippet: 'poll loop exceeded expected frequency',
+              },
+            ],
+          }),
+        })),
+      } as LogWatcherOptions['llm'],
+      config: DEFAULT_OBSERVER_CONFIG,
+      logger: logger as LogWatcherOptions['logger'],
+      resolveApiKey: async () => undefined,
+      batchSize: 1,
+      timeWindowMs: 60_000,
+      onFindings: (findings) => {
+        emitted.push(...findings.map((finding) => ({
+          title: finding.title,
+          category: finding.category,
+          severity: finding.severity,
+          suggestedFix: finding.suggestedFix,
+          evidence: finding.evidence,
+          relevantFiles: finding.relevantFiles,
+          logSnippet: finding.logSnippet,
+          detectedAt: finding.detectedAt,
+        })));
+      },
+    });
+
+    try {
+      watcher.start(logger as LogWatcherOptions['logger']);
+      onLineHandler?.('trigger parsing');
+
+      await vi.waitFor(() => {
+        expect(emitted).toHaveLength(1);
+      });
+
+      expect(emitted[0]).toEqual(expect.objectContaining({
+        title: 'Legacy issueSummary finding',
+        category: 'performance',
+        severity: 'high',
+        suggestedFix: 'Fallback to issueSummary while rollout is in progress.',
+        evidence: [
+          { text: 'Throttle repeated watcher analysis invocations.' },
+          { text: 'Persist schemaVersion=2-compatible evidence payloads.' },
+        ],
+        relevantFiles: ['packages/cli/src/observer/log-watcher.ts'],
+        logSnippet: 'poll loop exceeded expected frequency',
+      }));
+      expect(emitted[0]?.detectedAt).toBeTypeOf('string');
+    } finally {
+      watcher.stop();
+    }
+  });
+
 
   it('does not merge into completed findings when matching equivalent tasks', async () => {
     const orchestraceDir = await mkdtemp(join(tmpdir(), 'orchestrace-observer-'));
