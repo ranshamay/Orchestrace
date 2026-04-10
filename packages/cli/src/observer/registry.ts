@@ -7,7 +7,13 @@
 import { createHash } from 'node:crypto';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
-import type { FindingRecord, FindingCategory, FindingSeverity } from './types.js';
+import {
+  ALL_FINDING_CATEGORIES,
+  type FindingRecord,
+  type FindingCategory,
+  type FindingSeverity,
+} from './types.js';
+
 
 export class FindingRegistry {
   private findings: FindingRecord[] = [];
@@ -19,18 +25,17 @@ export class FindingRegistry {
   }
 
   /** Load persisted findings from disk. */
-  async load(): Promise<void> {
+    async load(): Promise<void> {
     try {
       const raw = await readFile(this.filePath, 'utf-8');
       const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed)) {
-        this.findings = parsed;
-      }
+      this.findings = normalizePersistedFindings(parsed);
     } catch {
       // File doesn't exist or is corrupted — start fresh
       this.findings = [];
     }
   }
+
 
   /** Persist findings to disk (only if dirty). */
   async save(): Promise<void> {
@@ -46,14 +51,16 @@ export class FindingRegistry {
    * into additionalSessions instead of creating a duplicate.
    */
     register(
-    finding: {
+        finding: {
       category: FindingCategory;
       severity: FindingSeverity;
       title: string;
       description: string;
-      suggestedFix: string;
+      suggestedFix?: string;
+      evidence?: string[];
       relevantFiles?: string[];
     },
+
     sessionIds: string[],
   ): { fingerprint: string; isNew: boolean } {
     const fingerprint = computeFingerprint(finding.category, finding.title, finding.description);
@@ -81,16 +88,26 @@ export class FindingRegistry {
       return { fingerprint: equivalentQueued.fingerprint, isNew: false };
     }
 
+        const normalizedEvidence = normalizeStringArray(finding.evidence);
+    const normalizedSuggestedFix = normalizeSuggestedFix(finding.suggestedFix, normalizedEvidence);
+
     // New finding
     const record: FindingRecord = {
-      ...finding,
+      category: finding.category,
+      severity: finding.severity,
+      title: finding.title,
+      description: finding.description,
+      suggestedFix: normalizedSuggestedFix,
+      evidence: normalizedEvidence,
+      relevantFiles: normalizeStringArray(finding.relevantFiles),
       fingerprint,
-      observedInSessions: sessionIds,
+      observedInSessions: dedupeStrings(sessionIds),
       detectedAt: new Date().toISOString(),
       fixSessionId: null,
       fixStatus: 'pending',
       additionalSessions: [],
     };
+
     this.findings.push(record);
     this.dirty = true;
     return { fingerprint, isNew: true };
@@ -141,10 +158,13 @@ function mergeFindingSignal(
   record: FindingRecord,
   incoming: {
     severity: FindingSeverity;
+    suggestedFix?: string;
+    evidence?: string[];
     relevantFiles?: string[];
   },
   sessionIds: string[],
 ): void {
+
   // Track additional source sessions.
   for (const sid of sessionIds) {
     if (
@@ -160,12 +180,26 @@ function mergeFindingSignal(
     record.severity = incoming.severity;
   }
 
+    const normalizedIncomingEvidence = normalizeStringArray(incoming.evidence);
+  const mergedEvidence = dedupeStrings([...(record.evidence ?? []), ...normalizedIncomingEvidence]);
+  if (mergedEvidence.length > 0) {
+    record.evidence = mergedEvidence;
+  }
+
+  const nextSuggestedFix = normalizeSuggestedFix(incoming.suggestedFix, normalizedIncomingEvidence);
+  if (nextSuggestedFix.length > 0) {
+    record.suggestedFix = nextSuggestedFix;
+  } else if (!record.suggestedFix || record.suggestedFix.trim().length === 0) {
+    record.suggestedFix = normalizeSuggestedFix(undefined, record.evidence ?? []);
+  }
+
   // Merge relevant file hints without duplicates.
   if (incoming.relevantFiles && incoming.relevantFiles.length > 0) {
     const merged = new Set([...(record.relevantFiles ?? []), ...incoming.relevantFiles]);
     record.relevantFiles = [...merged];
   }
 }
+
 
 function isQueueStatus(status: FindingRecord['fixStatus']): boolean {
   return status === 'pending' || status === 'spawned';
@@ -224,4 +258,138 @@ function computeFingerprint(category: string, title: string, description: string
   const normalized = `${category}::${title.toLowerCase().trim()}::${description.slice(0, 200).toLowerCase().trim()}`;
   return createHash('sha256').update(normalized).digest('hex').slice(0, 16);
 }
+
+function normalizePersistedFindings(value: unknown): FindingRecord[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const normalized: FindingRecord[] = [];
+  for (const entry of value) {
+    const record = normalizePersistedFinding(entry);
+    if (record) {
+      normalized.push(record);
+    }
+  }
+  return normalized;
+}
+
+function normalizePersistedFinding(value: unknown): FindingRecord | null {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+
+  const entry = value as Record<string, unknown>;
+  const category = parseCategory(entry.category);
+  const severity = parseSeverity(entry.severity);
+  const title = asTrimmedString(entry.title);
+  const description = asTrimmedString(entry.description);
+  if (!category || !severity || title.length === 0 || description.length === 0) {
+    return null;
+  }
+
+  const evidence = normalizeStringArray(entry.evidence);
+  const suggestedFix = normalizeSuggestedFix(asOptionalString(entry.suggestedFix), evidence);
+  const fingerprint = asTrimmedString(entry.fingerprint) || computeFingerprint(category, title, description);
+  const detectedAt = asTrimmedString(entry.detectedAt) || new Date().toISOString();
+  const fixSessionId = asNullableString(entry.fixSessionId);
+  const fixStatus = parseFixStatus(entry.fixStatus);
+
+  return {
+    fingerprint,
+    category,
+    severity,
+    title,
+    description,
+    suggestedFix,
+    evidence,
+    relevantFiles: normalizeStringArray(entry.relevantFiles),
+    observedInSessions: normalizeStringArray(entry.observedInSessions),
+    detectedAt,
+    fixSessionId,
+    fixStatus,
+    additionalSessions: normalizeStringArray(entry.additionalSessions),
+  };
+}
+
+function parseCategory(value: unknown): FindingCategory | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+  return ALL_FINDING_CATEGORIES.includes(value as FindingCategory)
+    ? (value as FindingCategory)
+    : null;
+}
+
+function parseSeverity(value: unknown): FindingSeverity | null {
+  if (value === 'low' || value === 'medium' || value === 'high' || value === 'critical') {
+    return value;
+  }
+  return null;
+}
+
+function parseFixStatus(value: unknown): FindingRecord['fixStatus'] {
+  if (value === 'pending' || value === 'spawned' || value === 'completed' || value === 'failed') {
+    return value;
+  }
+  return 'pending';
+}
+
+function normalizeStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return dedupeStrings(
+    value
+      .filter((entry): entry is string => typeof entry === 'string')
+      .map((entry) => entry.trim())
+      .filter((entry) => entry.length > 0),
+  );
+}
+
+function dedupeStrings(values: string[]): string[] {
+  return [...new Set(values)];
+}
+
+function normalizeSuggestedFix(suggestedFix: string | undefined, evidence: string[]): string {
+  const normalizedFix = (suggestedFix ?? '').trim();
+  if (normalizedFix.length > 0) {
+    return normalizedFix;
+  }
+
+  if (evidence.length > 0) {
+    return evidence.join('\n');
+  }
+
+  return 'Review the finding details and implement an appropriate fix.';
+}
+
+function asOptionalString(value: unknown): string | undefined {
+  if (typeof value !== 'string') {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function asNullableString(value: unknown): string | null {
+  if (value === null) {
+    return null;
+  }
+  if (typeof value !== 'string') {
+    return null;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function asTrimmedString(value: unknown): string {
+  if (typeof value !== 'string') {
+    return '';
+  }
+  return value.trim();
+}
+
+
 
