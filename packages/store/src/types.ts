@@ -336,19 +336,31 @@ export interface SessionObserverStatusChangePayload {
   lastAnalyzedAt: string | null;
 }
 
+export type ObserverFindingCategory =
+  | 'code-quality'
+  | 'performance'
+  | 'agent-efficiency'
+  | 'architecture'
+  | 'test-coverage';
+
+export type ObserverFindingSeverity = 'low' | 'medium' | 'high' | 'critical';
+
+export type ObserverFindingPhase = 'planning' | 'implementation' | 'unknown';
+
 export interface SessionObserverFindingPayload {
   finding: {
     id: string;
-    category: string;
-    severity: string;
+    category: ObserverFindingCategory;
+    severity: ObserverFindingSeverity;
     title: string;
     description: string;
     suggestedFix: string;
     relevantFiles?: string[];
-    phase: string;
+    phase: ObserverFindingPhase;
     detectedAt: string;
   };
 }
+
 
 // The discriminated union
 export type SessionEvent =
