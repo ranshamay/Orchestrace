@@ -796,9 +796,12 @@ async function sleepWithSignal(ms: number, signal?: AbortSignal): Promise<void> 
 
 function buildToolCallRetryMessage(toolCall: ToolCall, errorContent: string): string {
   const deterministicEditFailure = isDeterministicEditValidationFailure(toolCall.name, errorContent);
+  const scriptFirstEditFailure = isScriptFirstEditFailure(toolCall, errorContent);
   const remediationLine = deterministicEditFailure
     ? 'This failure is deterministic. Revise the edit plan/arguments (or skip this edit) before issuing another edit tool call.'
-    : 'Correct the arguments using this error and retry this tool call.';
+    : scriptFirstEditFailure
+      ? 'Stop using scripting for edits. Switch immediately to direct edit_files calls, applying one file at a time in sequence.'
+      : 'Correct the arguments using this error and retry this tool call.';
 
   return [
     `Tool call ${toolCall.name} (${toolCall.id}) failed.`,
@@ -813,11 +816,55 @@ function isDeterministicEditValidationFailure(toolName: string, errorContent: st
   }
 
   const normalized = errorContent.toLowerCase();
-    return normalized.includes('missing newtext')
+  return normalized.includes('missing newtext')
     || normalized.includes('no-op edit is not allowed')
     || normalized.includes('duplicate paths are not allowed');
-
 }
+
+function isScriptFirstEditFailure(toolCall: ToolCall, errorContent: string): boolean {
+  if (toolCall.name !== 'run_command') {
+    return false;
+  }
+
+  const command = extractRunCommandArgument(toolCall);
+  if (!command) {
+    return false;
+  }
+
+  const normalizedCommand = command.toLowerCase();
+  const scriptEngineDetected = normalizedCommand.includes('python')
+    || normalizedCommand.includes('node')
+    || normalizedCommand.includes('bash')
+    || normalizedCommand.includes('sh -c');
+  if (!scriptEngineDetected) {
+    return false;
+  }
+
+  const normalizedError = errorContent.toLowerCase();
+  const commandFailureDetected = normalizedError.includes('command not found')
+    || normalizedError.includes('not recognized as an internal or external command')
+    || normalizedError.includes('no such file or directory');
+  if (!commandFailureDetected) {
+    return false;
+  }
+
+  const editIntentDetected = normalizedCommand.includes('edit_file')
+    || normalizedCommand.includes('edit_files')
+    || normalizedCommand.includes('oldtext')
+    || normalizedCommand.includes('newtext');
+
+  return editIntentDetected;
+}
+
+function extractRunCommandArgument(toolCall: ToolCall): string | undefined {
+  if (!toolCall.arguments || typeof toolCall.arguments !== 'object') {
+    return undefined;
+  }
+
+  const value = (toolCall.arguments as Record<string, unknown>).command;
+  return typeof value === 'string' && value.trim().length > 0 ? value : undefined;
+}
+
 
 function getToolCalls(message: AssistantMessage): ToolCall[] {
   const calls: ToolCall[] = [];

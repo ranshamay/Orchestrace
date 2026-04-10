@@ -45,7 +45,7 @@ describe('executeWithOptionalTools', () => {
     vi.clearAllMocks();
   });
 
-  it('emits a retry prompt for each failed tool call', async () => {
+    it('emits a retry prompt for each failed generic tool call', async () => {
     const consumeStreamMock = vi.mocked(consumeStream);
     const validateToolCallMock = vi.mocked(validateToolCall);
 
@@ -74,7 +74,7 @@ describe('executeWithOptionalTools', () => {
       toolset: {
         tools: [],
         async executeTool() {
-          throw new Error('command not found: python');
+          throw new Error('exit status 2');
         },
       },
       completionOptions: {
@@ -90,8 +90,8 @@ describe('executeWithOptionalTools', () => {
     expect(toolResultMessages).toHaveLength(2);
     expect(toolResultMessages[0].isError).toBe(true);
     expect(toolResultMessages[1].isError).toBe(true);
-    expect(toolResultMessages[0].content[0].text).toContain('command not found: python');
-    expect(toolResultMessages[1].content[0].text).toContain('command not found: python');
+    expect(toolResultMessages[0].content[0].text).toContain('exit status 2');
+    expect(toolResultMessages[1].content[0].text).toContain('exit status 2');
 
     const retryPrompts = context.messages.filter(
       (message) => message.role === 'user' && String(message.content?.[0]?.text ?? '').includes('retry this tool call'),
@@ -99,8 +99,8 @@ describe('executeWithOptionalTools', () => {
     expect(retryPrompts).toHaveLength(2);
     expect(retryPrompts[0].content[0].text).toContain('run_command (call-1)');
     expect(retryPrompts[1].content[0].text).toContain('run_command (call-2)');
-    expect(retryPrompts[0].content[0].text).toContain('command not found: python');
-    expect(retryPrompts[1].content[0].text).toContain('command not found: python');
+    expect(retryPrompts[0].content[0].text).toContain('exit status 2');
+    expect(retryPrompts[1].content[0].text).toContain('exit status 2');
 
     expect(toolEvents).toHaveLength(4);
     expect(toolEvents[0]).toMatchObject({ type: 'started', toolCallId: 'call-1', toolName: 'run_command' });
@@ -109,8 +109,57 @@ describe('executeWithOptionalTools', () => {
     expect(toolEvents[3]).toMatchObject({ type: 'result', toolCallId: 'call-2', toolName: 'run_command', isError: true });
   });
 
+    it('uses deterministic remediation guidance for script-first edit failures', async () => {
+    const consumeStreamMock = vi.mocked(consumeStream);
+
+    const firstResponse = makeAssistantMessage([
+      {
+        type: 'toolCall',
+        id: 'script-edit-1',
+        name: 'run_command',
+        arguments: {
+          command: "python3 -c \"# call edit_files for src/a.ts with oldText/newText\"",
+        },
+      },
+    ], 'tool_calls');
+    const finalResponse = makeAssistantMessage([{ type: 'text', text: 'Handled.' }]);
+
+    consumeStreamMock.mockResolvedValueOnce(firstResponse as never);
+    consumeStreamMock.mockResolvedValueOnce(finalResponse as never);
+
+    const context: TestContext = {
+      messages: [],
+      tools: [{ name: 'run_command', description: 'Run shell command', parameters: { type: 'object' } }],
+    };
+
+    await executeWithOptionalTools({
+      model: {} as never,
+      context,
+      options: {},
+      toolset: {
+        tools: [],
+        async executeTool() {
+          throw new Error('command not found: python3');
+        },
+      },
+      onUsage: () => {},
+    });
+
+    const deterministicPrompt = context.messages.find(
+      (message) => message.role === 'user' && String(message.content?.[0]?.text ?? '').includes('Stop using scripting for edits.'),
+    );
+    expect(deterministicPrompt).toBeDefined();
+    expect(String(deterministicPrompt?.content?.[0]?.text ?? '')).toContain('Switch immediately to direct edit_files calls, applying one file at a time in sequence.');
+
+    const genericRetryPrompt = context.messages.find(
+      (message) => message.role === 'user' && String(message.content?.[0]?.text ?? '').includes('retry this tool call'),
+    );
+    expect(genericRetryPrompt).toBeUndefined();
+  });
+
   it('does not inject retry prompt when tool call succeeds', async () => {
     const consumeStreamMock = vi.mocked(consumeStream);
+
 
     const firstResponse = makeAssistantMessage([
       { type: 'toolCall', id: 'call-2', name: 'run_command', arguments: { command: 'echo ok' } },
