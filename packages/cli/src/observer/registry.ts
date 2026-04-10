@@ -298,7 +298,7 @@ function parsePersistedFindingRecord(
     title,
     description,
     evidence: asEvidenceArray(obj.evidence),
-    suggestedFix: asString(obj.suggestedFix) ?? undefined,
+    suggestedFix: asString(obj.suggestedFix) ?? asString(obj.issueSummary) ?? undefined,
     relevantFiles: asStringArray(obj.relevantFiles),
   } as ObserverFindingInput;
 

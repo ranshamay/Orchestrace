@@ -219,6 +219,5 @@ export interface ObserverDaemonState {
 
 /** Structured output from the LLM analysis of a session's event log. */
 export interface AnalysisResult {
-export interface AnalysisResult {
   findings: ObserverFindingInput[];
 }
