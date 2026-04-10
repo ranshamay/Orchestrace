@@ -127,16 +127,39 @@ function buildFixPrompt(finding: FindingRecord): string {
   parts.push('');
   parts.push('## Issue');
   parts.push(finding.description);
-  parts.push('');
-  parts.push('## Task');
-  parts.push(findingTaskTextFromEvidence(finding.evidence));
 
-  if (finding.relevantFiles && finding.relevantFiles.length > 0) {
+  if (finding.verifiedEvidence && finding.verifiedEvidence.length > 0) {
+    parts.push('');
+    parts.push('## Verified Evidence');
+    for (const entry of finding.verifiedEvidence) {
+      parts.push('');
+      parts.push(`### ${entry.file}`);
+      parts.push('Current code:');
+      parts.push('```');
+      parts.push(entry.currentCode);
+      parts.push('```');
+      parts.push(`Problem: ${entry.problem}`);
+      parts.push(`Suggested change: ${entry.suggestedChange}`);
+    }
 
     parts.push('');
-    parts.push('## Relevant Files');
-    for (const f of finding.relevantFiles) {
-      parts.push(`- ${f}`);
+    parts.push('## Instructions');
+    parts.push('- Read each file listed above and confirm the problem still exists before editing.');
+    parts.push('- If the issue is already fixed, stop and return "Issue already resolved" without making code changes.');
+    parts.push('- Apply the minimum change needed to address the verified problem.');
+    parts.push('- Avoid unrelated refactors.');
+    parts.push('- Run verification commands after making changes.');
+  } else {
+    parts.push('');
+    parts.push('## Task');
+    parts.push(findingTaskTextFromEvidence(finding.evidence));
+
+    if (finding.relevantFiles && finding.relevantFiles.length > 0) {
+      parts.push('');
+      parts.push('## Relevant Files');
+      for (const f of finding.relevantFiles) {
+        parts.push(`- ${f}`);
+      }
     }
   }
 

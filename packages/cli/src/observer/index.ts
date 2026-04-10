@@ -14,4 +14,11 @@ export type {
   LogWatcherStatus,
   LogWatcherRuntimeError,
 } from './log-watcher.js';
+export { verifyFindingAgainstCode } from './verifier.js';
+export type { VerificationResult } from './verifier.js';
+export { groupVerifiedFindings } from './grouper.js';
+export type { FindingGroupDecision } from './grouper.js';
+export { evaluateSpawnGate, listRemoteBranches } from './gate.js';
+export type { ObserverOutcomeStats, SpawnGateDecision } from './gate.js';
+export { OutcomeTracker } from './outcomes.js';
 

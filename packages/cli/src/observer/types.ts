@@ -19,9 +19,29 @@ export const ALL_FINDING_CATEGORIES: FindingCategory[] = [
 export type FindingSeverity = ObserverFindingSeverity;
 export type FindingSchemaVersion = '1' | '2';
 
+export type FindingFixStatus =
+  | 'hypothesis'
+  | 'verified'
+  | 'grouped'
+  | 'pending'
+  | 'spawned'
+  | 'completed'
+  | 'failed'
+  | 'rejected';
+
+export type FindingOutcome = 'open' | 'merged' | 'closed';
+
 /** Canonical v2 evidence entry describing concrete remediation/context. */
 export interface FindingEvidence {
   text: string;
+}
+
+/** Canonical verifier payload used to ground spawned fix prompts. */
+export interface VerifiedEvidence {
+  file: string;
+  currentCode: string;
+  problem: string;
+  suggestedChange: string;
 }
 
 /** Shared finding body fields. */
@@ -89,9 +109,25 @@ export interface FindingRecord extends NormalizedObserverFinding {
   /** The session ID spawned to fix this finding, or null if not yet spawned. */
   fixSessionId: string | null;
   /** Status of the fix attempt. */
-  fixStatus: 'pending' | 'spawned' | 'completed' | 'failed';
+  fixStatus: FindingFixStatus;
   /** Additional session IDs that matched this fingerprint after the first detection. */
   additionalSessions: string[];
+  /** Verifier-grounded evidence extracted from current source files. */
+  verifiedEvidence?: VerifiedEvidence[];
+  /** Latest reason the finding was rejected or blocked. */
+  rejectionReason?: string;
+  /** Gate-specific reason when held in grouped state. */
+  gateReason?: string;
+  /** Timestamp of successful verification. */
+  verifiedAt?: string;
+  /** Fingerprints absorbed into this canonical grouped finding. */
+  groupedFrom?: string[];
+  /** PR URL detected from fix-session output. */
+  prUrl?: string;
+  /** Latest known PR outcome for this finding. */
+  outcome?: FindingOutcome;
+  /** Timestamp when outcome was last checked. */
+  outcomeCheckedAt?: string;
 }
 
 const LEGACY_FALLBACK_EVIDENCE_TEXT = 'No suggested fix provided in legacy finding payload.';
@@ -183,6 +219,10 @@ export interface ObserverConfig {
   workspaceFilter: string[];
   /** Maximum number of observer-spawned fix sessions that may run concurrently (0 = unlimited). */
   maxConcurrentFixSessions: number;
+  /** Minimum severity required for automatic fix spawning. */
+  minSeverityForAutoFix: FindingSeverity;
+  /** Minimum merged/(merged+closed) ratio required for automatic spawning. */
+  minAccuracyForAutoSpawn: number;
 }
 
 export const DEFAULT_OBSERVER_CONFIG: ObserverConfig = {
@@ -194,15 +234,17 @@ export const DEFAULT_OBSERVER_CONFIG: ObserverConfig = {
   fixProvider: 'anthropic',
   fixModel: 'claude-sonnet-4-20250514',
   fixAutoApprove: true,
-  analysisCooldownMs: 60_000,
+  analysisCooldownMs: 300_000,
   maxAnalysisPromptChars: 180_000,
-  maxSessionsPerAnalysisBatch: 3,
+  maxSessionsPerAnalysisBatch: 1,
   rateLimitCooldownMs: 120_000,
   maxRateLimitBackoffMs: 900_000,
   assessmentCategories: [...ALL_FINDING_CATEGORIES],
   excludeSessionIds: [],
   workspaceFilter: [],
   maxConcurrentFixSessions: 3,
+  minSeverityForAutoFix: 'high',
+  minAccuracyForAutoSpawn: 0.5,
 };
 
 /** Internal state of the observer daemon (not persisted). */
