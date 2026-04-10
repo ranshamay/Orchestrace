@@ -46,7 +46,7 @@ describe('SessionLifecycle', () => {
     });
   });
 
-  it('runs cleanup stack in reverse order and captures cleanup errors', async () => {
+      it('runs cleanup stack in reverse order and captures cleanup errors', async () => {
     const lifecycle = new SessionLifecycle();
     const steps: string[] = [];
 
@@ -72,5 +72,42 @@ describe('SessionLifecycle', () => {
       phase: 'SETTING_UP',
     });
     expect(lifecycle.diagnostics.currentPhase).toBe('FAILED');
+  });
+
+  it('executes cleanup actions at most once across repeated cleanup calls', async () => {
+    const lifecycle = new SessionLifecycle();
+    let cleanupRuns = 0;
+
+    await lifecycle.enterPhase('SETTING_UP');
+    lifecycle.registerCleanup('SETTING_UP', 'increment-counter', () => {
+      cleanupRuns += 1;
+    });
+
+    await lifecycle.cleanup();
+    await lifecycle.cleanup();
+    await lifecycle.cleanup();
+
+    expect(cleanupRuns).toBe(1);
+  });
+
+  it('shares in-flight cleanup across concurrent cleanup calls', async () => {
+    const lifecycle = new SessionLifecycle();
+    let cleanupRuns = 0;
+    const checkpoints: string[] = [];
+
+    await lifecycle.enterPhase('SETTING_UP');
+    lifecycle.registerCleanup('SETTING_UP', 'slow-cleanup', async () => {
+      cleanupRuns += 1;
+      checkpoints.push('start');
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, 10);
+      });
+      checkpoints.push('end');
+    });
+
+    await Promise.all([lifecycle.cleanup(), lifecycle.cleanup(), lifecycle.cleanup()]);
+
+    expect(cleanupRuns).toBe(1);
+    expect(checkpoints).toEqual(['start', 'end']);
   });
 });
