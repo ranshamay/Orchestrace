@@ -6,23 +6,29 @@
 // ---------------------------------------------------------------------------
 
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import type { EventStore } from '@orchestrace/store';
 import type { LlmAdapter } from '@orchestrace/provider';
 import {
   ALL_FINDING_CATEGORIES,
   DEFAULT_OBSERVER_CONFIG,
-    type FindingCategory,
+  type FindingCategory,
+  type FindingRecord,
   type FindingSeverity,
   type ObserverConfig,
   type ObserverDaemonState,
   type ObserverFindingInput,
+  type VerifiedEvidence,
 } from './types.js';
 import { FindingRegistry } from './registry.js';
 import { summarizeSession, formatSummaryForLlm, type SessionSummary } from './summarizer.js';
 import { analyzeSessionSummaries } from './analyzer.js';
 import { spawnFixSessions, type StartSessionFn } from './spawner.js';
 import type { LogFindingCategory } from './log-watcher.js';
+import { verifyFindingAgainstCode } from './verifier.js';
+import { groupVerifiedFindings } from './grouper.js';
+import { evaluateSpawnGate, listRemoteBranches, type ObserverOutcomeStats } from './gate.js';
+import { OutcomeTracker } from './outcomes.js';
 
 type AnalysisSummaryEntry = {
   sessionId: string;
@@ -67,6 +73,8 @@ export class ObserverDaemon {
   private readonly startSession: StartSessionFn;
   private readonly resolveApiKey: (provider: string) => Promise<string | undefined>;
   private readonly registry: FindingRegistry;
+  private readonly workspaceRoot: string;
+  private readonly outcomeTracker: OutcomeTracker;
   private config: ObserverConfig = { ...DEFAULT_OBSERVER_CONFIG };
   private state: ObserverDaemonState = {
     running: false,
@@ -88,11 +96,13 @@ export class ObserverDaemon {
   constructor(options: ObserverDaemonOptions) {
     this.orchestraceDir = options.orchestraceDir;
     this.observerDir = join(options.orchestraceDir, 'observer');
+    this.workspaceRoot = dirname(options.orchestraceDir);
     this.eventStore = options.eventStore;
     this.llm = options.llm;
     this.startSession = options.startSession;
     this.resolveApiKey = options.resolveApiKey;
     this.registry = new FindingRegistry(this.observerDir);
+    this.outcomeTracker = new OutcomeTracker(this.observerDir);
   }
 
   /** Initialize: load config & findings from disk, start the loop if enabled. */
@@ -100,6 +110,7 @@ export class ObserverDaemon {
     await this.loadConfig();
     await this.loadState();
     await this.registry.load();
+    await this.outcomeTracker.load();
 
     // Seed observer session IDs and already-analyzed sessions from registry
     for (const finding of this.registry.getAll()) {
@@ -109,7 +120,9 @@ export class ObserverDaemon {
       for (const sid of finding.observedInSessions ?? []) {
         this.state.analyzedSessions.add(sid);
       }
+      this.outcomeTracker.syncFinding(finding);
     }
+    await this.outcomeTracker.save();
 
     if (this.config.enabled) {
       this.state.running = true;
@@ -245,8 +258,10 @@ export class ObserverDaemon {
       }
     }
 
-    const spawned = await this.spawnPendingFindings();
+    const pipeline = await this.runFindingPipeline();
+    const spawned = pipeline.spawned;
     await this.registry.save();
+    await this.outcomeTracker.save();
 
     if (registered > 0 || spawned > 0) {
       console.log(
@@ -303,8 +318,10 @@ export class ObserverDaemon {
       }
     }
 
-    const spawned = await this.spawnPendingFindings();
+    const pipeline = await this.runFindingPipeline();
+    const spawned = pipeline.spawned;
     await this.registry.save();
+    await this.outcomeTracker.save();
 
     if (registered > 0 || spawned > 0) {
       console.log(
@@ -325,6 +342,7 @@ export class ObserverDaemon {
     if (spawned > 0) {
       this.trackNewlySpawnedFixSessions();
       await this.registry.save();
+      await this.outcomeTracker.save();
       console.log(`[orchestrace][observer] Spawned all: ${spawned} fix sessions queued`);
     }
     return spawned;
@@ -341,15 +359,24 @@ export class ObserverDaemon {
     const finding = this.registry.getAll().find((f) => f.fixSessionId === sessionId);
     if (!finding) return;
 
-    if (status === 'completed' && outputText && hasPrUrl(outputText)) {
+    const prUrl = outputText ? extractPrUrl(outputText) : null;
+
+    if (status === 'completed' && prUrl) {
       this.registry.markFixResult(finding.fingerprint, 'completed');
+      this.registry.markPrUrl(finding.fingerprint, prUrl);
+      this.registry.markOutcome(finding.fingerprint, 'open');
+      this.outcomeTracker.syncFinding(this.registry.getByFingerprint(finding.fingerprint) ?? finding);
       void this.registry.save();
+      void this.outcomeTracker.save();
       console.log(
         `[orchestrace][observer] Finding "${finding.title}" resolved — PR detected in fix session ${sessionId}`,
       );
     } else if (status === 'failed' || status === 'cancelled') {
       this.registry.markFixResult(finding.fingerprint, 'failed');
+      this.registry.markOutcome(finding.fingerprint, 'closed');
+      this.outcomeTracker.syncFinding(this.registry.getByFingerprint(finding.fingerprint) ?? finding);
       void this.registry.save();
+      void this.outcomeTracker.save();
       console.log(
         `[orchestrace][observer] Finding "${finding.title}" fix session ${sessionId} ${status}`,
       );
@@ -403,8 +430,10 @@ export class ObserverDaemon {
     }
 
     if (toAnalyze.length === 0) {
-      // No new sessions to analyze, but still try to spawn pending findings.
-      const spawned = await this.spawnPendingFindings();
+      // No new sessions to analyze, but hypotheses may still need verification/grouping.
+      const pipeline = await this.runFindingPipeline();
+      const spawned = pipeline.spawned;
+      await this.outcomeTracker.save();
       return { analyzed: 0, findings: 0, spawned };
     }
 
@@ -422,7 +451,9 @@ export class ObserverDaemon {
     }
 
     if (summaries.length === 0) {
-      const spawned = await this.spawnPendingFindings();
+      const pipeline = await this.runFindingPipeline();
+      const spawned = pipeline.spawned;
+      await this.outcomeTracker.save();
       return { analyzed: 0, findings: 0, spawned };
     }
 
@@ -477,10 +508,11 @@ export class ObserverDaemon {
       this.rateLimitBlockedUntilMs = 0;
     }
 
-    // Spawn fix sessions for pending findings, respecting concurrency limit.
-    const spawned = await this.spawnPendingFindings();
+    const pipeline = await this.runFindingPipeline();
+    const spawned = pipeline.spawned;
 
     await this.registry.save();
+    await this.outcomeTracker.save();
     this.state.lastAnalysisAt = new Date().toISOString();
     await this.saveState();
 
@@ -489,6 +521,144 @@ export class ObserverDaemon {
     );
 
     return { analyzed: analyzedCount, findings: newFindings, spawned };
+  }
+
+  private async runFindingPipeline(): Promise<{
+    verified: number;
+    rejected: number;
+    grouped: number;
+    promoted: number;
+    spawned: number;
+  }> {
+    const verification = await this.verifyHypothesesAgainstWorkspace();
+    const grouping = await this.groupVerifiedFindingsForSpawn();
+    const outcomeStats = this.outcomeTracker.getStats();
+    const promotion = await this.promoteGroupedFindingsToPending(outcomeStats);
+    const spawned = await this.spawnPendingFindings();
+
+    for (const finding of this.registry.getAll()) {
+      this.outcomeTracker.syncFinding(finding);
+    }
+
+    return {
+      verified: verification.verified,
+      rejected: verification.rejected + grouping.rejected,
+      grouped: grouping.grouped,
+      promoted: promotion.promoted,
+      spawned,
+    };
+  }
+
+  private async verifyHypothesesAgainstWorkspace(): Promise<{ verified: number; rejected: number }> {
+    const hypotheses = this.registry.getByStatuses('hypothesis');
+    if (hypotheses.length === 0) {
+      return { verified: 0, rejected: 0 };
+    }
+
+    let verified = 0;
+    let rejected = 0;
+
+    for (const finding of hypotheses) {
+      const result = await verifyFindingAgainstCode({
+        finding,
+        llm: this.llm,
+        config: this.config,
+        workspaceRoot: this.workspaceRoot,
+        resolveApiKey: this.resolveApiKey,
+        signal: this.controller.signal,
+      });
+
+      if (result.verified && result.evidence.length > 0) {
+        this.registry.markVerified(finding.fingerprint, result.evidence);
+        verified += 1;
+      } else {
+        this.registry.markRejected(finding.fingerprint, result.reason);
+        rejected += 1;
+      }
+    }
+
+    return { verified, rejected };
+  }
+
+  private async groupVerifiedFindingsForSpawn(): Promise<{ grouped: number; rejected: number }> {
+    const verifiedFindings = this.registry.getByStatuses('verified');
+    if (verifiedFindings.length === 0) {
+      return { grouped: 0, rejected: 0 };
+    }
+
+    const groupingDecisions = await groupVerifiedFindings({
+      findings: verifiedFindings,
+      llm: this.llm,
+      config: this.config,
+      resolveApiKey: this.resolveApiKey,
+      signal: this.controller.signal,
+    });
+
+    let grouped = 0;
+    let rejected = 0;
+
+    for (const decision of groupingDecisions) {
+      const canonical = this.registry.getByFingerprint(decision.canonicalFingerprint);
+      if (!canonical) {
+        continue;
+      }
+
+      const absorbedFingerprints: string[] = [];
+      for (const memberFingerprint of decision.memberFingerprints) {
+        if (memberFingerprint === canonical.fingerprint) {
+          continue;
+        }
+        this.registry.mergeIntoCanonical(
+          canonical.fingerprint,
+          memberFingerprint,
+          `Merged into ${canonical.fingerprint}: ${decision.reason}`,
+        );
+        absorbedFingerprints.push(memberFingerprint);
+        rejected += 1;
+      }
+
+      if (decision.canonicalTitle && decision.canonicalTitle.trim().length > 0) {
+        canonical.title = decision.canonicalTitle.trim();
+      }
+      if (decision.canonicalDescription && decision.canonicalDescription.trim().length > 0) {
+        canonical.description = decision.canonicalDescription.trim();
+      }
+
+      this.registry.markGrouped(canonical.fingerprint, absorbedFingerprints);
+      grouped += 1;
+    }
+
+    return { grouped, rejected };
+  }
+
+  private async promoteGroupedFindingsToPending(outcomeStats: ObserverOutcomeStats): Promise<{ promoted: number; held: number }> {
+    const groupedFindings = this.registry.getByStatuses('grouped');
+    if (groupedFindings.length === 0) {
+      return { promoted: 0, held: 0 };
+    }
+
+    const remoteBranches = await listRemoteBranches(this.workspaceRoot);
+    let promoted = 0;
+    let held = 0;
+
+    for (const finding of groupedFindings) {
+      const decision = evaluateSpawnGate({
+        finding,
+        config: this.config,
+        outcomeStats,
+        remoteBranches,
+      });
+
+      if (decision.approved) {
+        this.registry.markPending(finding.fingerprint);
+        promoted += 1;
+      } else {
+        this.registry.setGateReason(finding.fingerprint, decision.reason);
+        held += 1;
+      }
+    }
+
+    return { promoted, held };
   }
 
   /** Spawn fix sessions for all pending findings. Extracted so it can be called from early-return paths. */
@@ -516,6 +686,7 @@ export class ObserverDaemon {
       if (!this.state.observerSessionIds.has(finding.fixSessionId)) {
         this.state.observerSessionIds.add(finding.fixSessionId);
         this.activeFixSessionIds.add(finding.fixSessionId);
+        this.outcomeTracker.syncFinding(finding);
       }
     }
   }
@@ -643,6 +814,16 @@ function sanitizeObserverConfig(config: ObserverConfig): ObserverConfig {
     100,
     DEFAULT_OBSERVER_CONFIG.maxConcurrentFixSessions,
   );
+  const minSeverityForAutoFix = sanitizeSeverity(
+    config.minSeverityForAutoFix,
+    DEFAULT_OBSERVER_CONFIG.minSeverityForAutoFix,
+  );
+  const minAccuracyForAutoSpawn = clampNumber(
+    config.minAccuracyForAutoSpawn,
+    0,
+    1,
+    DEFAULT_OBSERVER_CONFIG.minAccuracyForAutoSpawn,
+  );
 
   return {
     ...config,
@@ -658,6 +839,8 @@ function sanitizeObserverConfig(config: ObserverConfig): ObserverConfig {
     rateLimitCooldownMs,
     maxRateLimitBackoffMs,
     maxConcurrentFixSessions,
+    minSeverityForAutoFix,
+    minAccuracyForAutoSpawn,
     assessmentCategories: categories.length > 0 ? categories : [...ALL_FINDING_CATEGORIES],
   };
 }
@@ -729,6 +912,25 @@ function clampInt(value: unknown, min: number, max: number, fallback: number): n
   return rounded;
 }
 
+function clampNumber(value: unknown, min: number, max: number, fallback: number): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return fallback;
+  }
+  if (value < min) return min;
+  if (value > max) return max;
+  return value;
+}
+
+function sanitizeSeverity(
+  value: unknown,
+  fallback: ObserverConfig['minSeverityForAutoFix'],
+): ObserverConfig['minSeverityForAutoFix'] {
+  if (value === 'low' || value === 'medium' || value === 'high' || value === 'critical') {
+    return value;
+  }
+  return fallback;
+}
+
 function sanitizeNonEmptyString(value: unknown, fallback: string): string {
   if (typeof value !== 'string') {
     return fallback;
@@ -739,11 +941,11 @@ function sanitizeNonEmptyString(value: unknown, fallback: string): string {
 }
 
 /**
- * Return true if the given text contains a GitHub pull-request URL.
- * Used to detect that a fix session actually opened a PR.
+ * Extract the first GitHub pull-request URL found in text.
  */
-function hasPrUrl(text: string): boolean {
-  return /https?:\/\/github\.com\/[^/\s]+\/[^/\s]+\/pull\/\d+/i.test(text);
+function extractPrUrl(text: string): string | null {
+  const match = text.match(/https?:\/\/github\.com\/[^/\s]+\/[^/\s]+\/pull\/\d+/i);
+  return match ? match[0] : null;
 }
 
 function mapLogWatcherCategory(category: LogFindingCategory): FindingCategory {

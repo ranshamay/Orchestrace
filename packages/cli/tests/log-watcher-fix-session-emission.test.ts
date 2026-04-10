@@ -1,6 +1,6 @@
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import type { EventStore } from '@orchestrace/store';
 import { DEFAULT_OBSERVER_CONFIG } from '../src/observer/types.js';
@@ -25,16 +25,61 @@ function createEventStoreStub(): EventStore {
   };
 }
 
+async function seedWorkspaceFiles(orchestraceDir: string, relativePaths: string[]): Promise<void> {
+  const workspaceRoot = dirname(orchestraceDir);
+  for (const relativePath of relativePaths) {
+    const absolutePath = join(workspaceRoot, relativePath);
+    await mkdir(dirname(absolutePath), { recursive: true });
+    await writeFile(
+      absolutePath,
+      `// fixture: ${relativePath}\nexport const fixture = true;\n`,
+      'utf-8',
+    );
+  }
+}
+
+function createVerifierLlmStub(): ObserverDaemonOptions['llm'] {
+  return {
+    complete: vi.fn(async (request: { prompt: unknown }) => {
+      const promptText = typeof request.prompt === 'string' ? request.prompt : '';
+      const matchedPath = promptText.match(/###\s+([^\n]+)/)?.[1]?.trim();
+      const file = matchedPath && matchedPath.length > 0
+        ? matchedPath
+        : 'packages/cli/src/ui-server.ts';
+
+      return {
+        text: JSON.stringify({
+          verified: true,
+          reason: 'Issue confirmed against current source snapshot.',
+          evidence: [
+            {
+              file,
+              currentCode: 'const sharedState = globalThis.__sharedState;',
+              problem: 'Shared mutable state can leak between sessions.',
+              suggestedChange: 'Scope state per session and guard shared writes.',
+            },
+          ],
+        }),
+      };
+    }),
+  } as ObserverDaemonOptions['llm'];
+}
+
 describe('log watcher fix-session emission', () => {
-    it('registers realtime session observer findings and spawns fix sessions', async () => {
+  it('registers realtime session observer findings and spawns fix sessions', async () => {
     const orchestraceDir = await mkdtemp(join(tmpdir(), 'orchestrace-observer-'));
 
     try {
+      await seedWorkspaceFiles(orchestraceDir, [
+        'packages/cli/src/ui-server.ts',
+        'packages/cli/src/observer/daemon.ts',
+      ]);
+
       const startSession = vi.fn(async () => ({ id: `fix-${String(startSession.mock.calls.length + 1)}` }));
       const daemon = new ObserverDaemon({
         orchestraceDir,
         eventStore: createEventStoreStub(),
-        llm: { complete: vi.fn() } as ObserverDaemonOptions['llm'],
+        llm: createVerifierLlmStub(),
         startSession,
         resolveApiKey: async () => undefined,
       });
@@ -65,8 +110,6 @@ describe('log watcher fix-session emission', () => {
         findingSeverity: 'high',
         routeIntent: 'code_change',
       }));
-      expect(sessionRequest?.routingAuditContext?.reason).toContain('Observer finding converted');
-      expect(sessionRequest?.routingAuditContext?.promptCharLength).toBeGreaterThan(0);
 
       const duplicate = await daemon.ingestSessionObserverFindings('session-123', [
         {
@@ -109,16 +152,17 @@ describe('log watcher fix-session emission', () => {
     }
   });
 
-
-    it('builds fix prompt task text from v2 evidence findings', async () => {
+  it('builds grounded fix prompt from verified evidence', async () => {
     const orchestraceDir = await mkdtemp(join(tmpdir(), 'orchestrace-observer-'));
 
     try {
+      await seedWorkspaceFiles(orchestraceDir, ['packages/cli/src/observer/registry.ts']);
+
       const startSession = vi.fn(async () => ({ id: `fix-${String(startSession.mock.calls.length + 1)}` }));
       const daemon = new ObserverDaemon({
         orchestraceDir,
         eventStore: createEventStoreStub(),
-        llm: { complete: vi.fn() } as ObserverDaemonOptions['llm'],
+        llm: createVerifierLlmStub(),
         startSession,
         resolveApiKey: async () => undefined,
       });
@@ -143,29 +187,34 @@ describe('log watcher fix-session emission', () => {
       expect(result).toEqual({ registered: 1, spawned: 1 });
       expect(startSession).toHaveBeenCalledTimes(1);
       const prompt = String(startSession.mock.calls[0]?.[0].prompt ?? '');
-      expect(prompt).toContain('## Task');
-      expect(prompt).toContain('1. Normalize legacy suggestedFix payloads into evidence[] at registry load time.');
-      expect(prompt).toContain('2. Stamp schemaVersion=2 before persistence and API emission.');
+      expect(prompt).toContain('## Verified Evidence');
+      expect(prompt).toContain('Suggested change:');
+      expect(prompt).toContain('Issue already resolved');
     } finally {
       await rm(orchestraceDir, { recursive: true, force: true });
     }
   });
 
   it('registers log findings and spawns fix sessions immediately', async () => {
-
     const orchestraceDir = await mkdtemp(join(tmpdir(), 'orchestrace-observer-'));
 
     try {
+      await seedWorkspaceFiles(orchestraceDir, ['packages/cli/src/ui-server.ts']);
+
       const startSession = vi.fn(async () => ({ id: `fix-${String(startSession.mock.calls.length + 1)}` }));
       const daemon = new ObserverDaemon({
         orchestraceDir,
         eventStore: createEventStoreStub(),
-        llm: { complete: vi.fn() } as ObserverDaemonOptions['llm'],
+        llm: createVerifierLlmStub(),
         startSession,
         resolveApiKey: async () => undefined,
       });
 
-      await daemon.updateConfig({ enabled: true, maxConcurrentFixSessions: 0 });
+      await daemon.updateConfig({
+        enabled: true,
+        maxConcurrentFixSessions: 0,
+        minSeverityForAutoFix: 'medium',
+      });
 
       const first = await daemon.ingestLogWatcherFindings([
         {
@@ -193,7 +242,7 @@ describe('log watcher fix-session emission', () => {
         routeIntent: 'code_change',
       }));
       expect(firstPrompt).toContain('## Issue');
-      expect(firstPrompt).toContain('\n## Task\n');
+      expect(firstPrompt).toContain('## Verified Evidence');
       const shellValidation = validateShellExecutionPrompt(firstPrompt);
       expect(shellValidation.ok).toBe(false);
       expect(shellValidation.command).toBeUndefined();
@@ -221,6 +270,7 @@ describe('log watcher fix-session emission', () => {
           description: 'Loop polls status endpoint too frequently under load.',
           suggestedFix: 'Back off polling frequency and debounce updates.',
           evidence: [],
+          relevantFiles: ['packages/cli/src/ui-server.ts'],
         },
       ]);
 
@@ -290,23 +340,26 @@ describe('log watcher fix-session emission', () => {
     }
   });
 
-    it('does not merge into completed findings when matching equivalent tasks', async () => {
+  it('does not merge into completed findings when matching equivalent tasks', async () => {
     const orchestraceDir = await mkdtemp(join(tmpdir(), 'orchestrace-observer-'));
 
     try {
+      await seedWorkspaceFiles(orchestraceDir, ['packages/cli/src/observer/daemon.ts']);
+
       const observerDir = join(orchestraceDir, 'observer');
       await mkdir(observerDir, { recursive: true });
       await writeFile(
         join(observerDir, 'findings.json'),
         JSON.stringify([
-                    {
+          {
             fingerprint: 'completed-finding-1',
             category: 'architecture',
             severity: 'medium',
             title: 'Unsafe cross-session mutable state',
             description: 'Old equivalent finding already completed.',
-                        issueSummary: 'Historical fix',
+            issueSummary: 'Historical fix',
             evidence: [],
+            relevantFiles: ['packages/cli/src/observer/daemon.ts'],
             observedInSessions: ['legacy-session'],
             detectedAt: new Date().toISOString(),
             fixSessionId: 'legacy-fix-session',
@@ -321,7 +374,7 @@ describe('log watcher fix-session emission', () => {
       const daemon = new ObserverDaemon({
         orchestraceDir,
         eventStore: createEventStoreStub(),
-        llm: { complete: vi.fn() } as ObserverDaemonOptions['llm'],
+        llm: createVerifierLlmStub(),
         startSession,
         resolveApiKey: async () => undefined,
       });
@@ -337,10 +390,11 @@ describe('log watcher fix-session emission', () => {
           description: 'Fresh finding should become a new queued task because prior one is completed.',
           suggestedFix: 'Apply synchronization and isolate state.',
           evidence: [],
+          relevantFiles: ['packages/cli/src/observer/daemon.ts'],
         },
       ]);
 
-            expect(created).toEqual({ registered: 1, spawned: 1 });
+      expect(created).toEqual({ registered: 1, spawned: 1 });
       expect(startSession).toHaveBeenCalledTimes(1);
       expect(daemon.getFindings()).toHaveLength(2);
       const historical = daemon.getFindings().find((f) => f.fingerprint === 'completed-finding-1');
@@ -352,23 +406,25 @@ describe('log watcher fix-session emission', () => {
   });
 
   it('does not count historical spawned findings against current process concurrency', async () => {
-
     const orchestraceDir = await mkdtemp(join(tmpdir(), 'orchestrace-observer-'));
 
     try {
+      await seedWorkspaceFiles(orchestraceDir, ['packages/cli/src/ui-server.ts']);
+
       const observerDir = join(orchestraceDir, 'observer');
       await mkdir(observerDir, { recursive: true });
       await writeFile(
         join(observerDir, 'findings.json'),
         JSON.stringify([
-                    {
+          {
             fingerprint: 'historical-finding-1',
             category: 'code-quality',
             severity: 'medium',
             title: 'Historical spawned finding',
             description: 'Old finding kept as spawned from a prior process.',
-                        issueSummary: 'Historical fix',
+            issueSummary: 'Historical fix',
             evidence: [],
+            relevantFiles: ['packages/cli/src/ui-server.ts'],
             observedInSessions: ['legacy-session'],
             detectedAt: new Date().toISOString(),
             fixSessionId: 'legacy-fix-session',
@@ -383,7 +439,7 @@ describe('log watcher fix-session emission', () => {
       const daemon = new ObserverDaemon({
         orchestraceDir,
         eventStore: createEventStoreStub(),
-        llm: { complete: vi.fn() } as ObserverDaemonOptions['llm'],
+        llm: createVerifierLlmStub(),
         startSession,
         resolveApiKey: async () => undefined,
       });
@@ -399,6 +455,7 @@ describe('log watcher fix-session emission', () => {
           description: 'New issue A from current process.',
           suggestedFix: 'Fix issue A.',
           evidence: [],
+          relevantFiles: ['packages/cli/src/ui-server.ts'],
         },
       ]);
 
@@ -410,6 +467,7 @@ describe('log watcher fix-session emission', () => {
           description: 'New issue B from current process.',
           suggestedFix: 'Fix issue B.',
           evidence: [],
+          relevantFiles: ['packages/cli/src/ui-server.ts'],
         },
       ]);
 

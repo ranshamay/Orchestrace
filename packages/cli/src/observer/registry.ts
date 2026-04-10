@@ -12,8 +12,11 @@ import {
   normalizeObserverFindingInput,
   type FindingRecord,
   type FindingCategory,
+  type FindingFixStatus,
+  type FindingOutcome,
   type FindingSeverity,
   type ObserverFindingInput,
+  type VerifiedEvidence,
 } from './types.js';
 
 export class FindingRegistry {
@@ -127,7 +130,7 @@ export class FindingRegistry {
       observedInSessions: sessionIds,
       detectedAt: new Date().toISOString(),
       fixSessionId: null,
-      fixStatus: 'pending',
+      fixStatus: 'hypothesis',
       additionalSessions: [],
     };
     this.findings.push(record);
@@ -135,9 +138,122 @@ export class FindingRegistry {
     return { fingerprint, isNew: true };
   }
 
+  /** Get findings by one or more lifecycle statuses. */
+  getByStatuses(status: FindingFixStatus | FindingFixStatus[]): FindingRecord[] {
+    const statuses = Array.isArray(status) ? status : [status];
+    return this.findings.filter((finding) => statuses.includes(finding.fixStatus));
+  }
+
   /** Get all findings that haven't been spawned as fix sessions yet. */
   getPending(): FindingRecord[] {
     return this.findings.filter((f) => f.fixStatus === 'pending');
+  }
+
+  markVerified(fingerprint: string, verifiedEvidence: VerifiedEvidence[]): void {
+    const record = this.findings.find((f) => f.fingerprint === fingerprint);
+    if (!record) return;
+    record.fixStatus = 'verified';
+    record.verifiedEvidence = dedupeVerifiedEvidence(verifiedEvidence);
+    record.verifiedAt = new Date().toISOString();
+    delete record.rejectionReason;
+    delete record.gateReason;
+    this.dirty = true;
+  }
+
+  markGrouped(fingerprint: string, groupedFrom: string[] = []): void {
+    const record = this.findings.find((f) => f.fingerprint === fingerprint);
+    if (!record) return;
+    record.fixStatus = 'grouped';
+    record.groupedFrom = dedupeStringValues([...(record.groupedFrom ?? []), ...groupedFrom]);
+    delete record.gateReason;
+    this.dirty = true;
+  }
+
+  markPending(fingerprint: string): void {
+    const record = this.findings.find((f) => f.fingerprint === fingerprint);
+    if (!record) return;
+    record.fixStatus = 'pending';
+    delete record.gateReason;
+    this.dirty = true;
+  }
+
+  markRejected(fingerprint: string, reason: string): void {
+    const record = this.findings.find((f) => f.fingerprint === fingerprint);
+    if (!record) return;
+    record.fixStatus = 'rejected';
+    record.rejectionReason = reason;
+    this.dirty = true;
+  }
+
+  setGateReason(fingerprint: string, reason: string): void {
+    const record = this.findings.find((f) => f.fingerprint === fingerprint);
+    if (!record) return;
+    record.gateReason = reason;
+    this.dirty = true;
+  }
+
+  mergeIntoCanonical(canonicalFingerprint: string, absorbedFingerprint: string, reason: string): void {
+    const canonical = this.findings.find((finding) => finding.fingerprint === canonicalFingerprint);
+    const absorbed = this.findings.find((finding) => finding.fingerprint === absorbedFingerprint);
+    if (!canonical || !absorbed || canonical.fingerprint === absorbed.fingerprint) {
+      return;
+    }
+
+    if (compareSeverity(absorbed.severity, canonical.severity) > 0) {
+      canonical.severity = absorbed.severity;
+    }
+
+    canonical.relevantFiles = dedupeStringValues([
+      ...(canonical.relevantFiles ?? []),
+      ...(absorbed.relevantFiles ?? []),
+    ]);
+
+    canonical.evidence = dedupeEvidence([
+      ...canonical.evidence,
+      ...absorbed.evidence,
+    ]);
+
+    canonical.verifiedEvidence = dedupeVerifiedEvidence([
+      ...(canonical.verifiedEvidence ?? []),
+      ...(absorbed.verifiedEvidence ?? []),
+    ]);
+
+    canonical.observedInSessions = dedupeStringValues([
+      ...canonical.observedInSessions,
+      ...absorbed.observedInSessions,
+    ]);
+
+    canonical.additionalSessions = dedupeStringValues([
+      ...canonical.additionalSessions,
+      ...absorbed.additionalSessions,
+    ]);
+
+    canonical.groupedFrom = dedupeStringValues([
+      ...(canonical.groupedFrom ?? []),
+      absorbed.fingerprint,
+      ...(absorbed.groupedFrom ?? []),
+    ]);
+
+    absorbed.fixStatus = 'rejected';
+    absorbed.rejectionReason = reason;
+    this.dirty = true;
+  }
+
+  markPrUrl(fingerprint: string, prUrl: string): void {
+    const record = this.findings.find((f) => f.fingerprint === fingerprint);
+    if (!record) return;
+    record.prUrl = prUrl;
+    record.outcome = 'open';
+    record.outcomeCheckedAt = new Date().toISOString();
+    this.dirty = true;
+  }
+
+  markOutcome(fingerprint: string, outcome: FindingOutcome): void {
+    const record = this.findings.find((f) => f.fingerprint === fingerprint);
+    if (!record) return;
+    record.outcome = outcome;
+    record.outcomeCheckedAt = new Date().toISOString();
+    this.dirty = true;
   }
 
   /** Mark a finding as having a fix session spawned. */
@@ -215,7 +331,11 @@ function mergeFindingSignal(
 }
 
 function isQueueStatus(status: FindingRecord['fixStatus']): boolean {
-  return status === 'pending' || status === 'spawned';
+  return status === 'hypothesis'
+    || status === 'verified'
+    || status === 'grouped'
+    || status === 'pending'
+    || status === 'spawned';
 }
 
 function isEquivalentFinding(
@@ -312,8 +432,16 @@ function parsePersistedFindingRecord(
     observedInSessions,
     detectedAt,
     fixSessionId: asNullableString(obj.fixSessionId),
-    fixStatus: asFixStatus(obj.fixStatus) ?? 'pending',
+    fixStatus: asFixStatus(obj.fixStatus) ?? 'hypothesis',
     additionalSessions,
+    verifiedEvidence: asVerifiedEvidenceArray(obj.verifiedEvidence),
+    rejectionReason: asString(obj.rejectionReason),
+    gateReason: asString(obj.gateReason),
+    verifiedAt: asString(obj.verifiedAt),
+    groupedFrom: asStringArray(obj.groupedFrom),
+    prUrl: asString(obj.prUrl),
+    outcome: asOutcome(obj.outcome),
+    outcomeCheckedAt: asString(obj.outcomeCheckedAt),
   };
 
   const hadSchemaV2 = obj.schemaVersion === '2';
@@ -360,10 +488,56 @@ function asSeverity(value: unknown): FindingSeverity | undefined {
 }
 
 function asFixStatus(value: unknown): FindingRecord['fixStatus'] | undefined {
-  if (value === 'pending' || value === 'spawned' || value === 'completed' || value === 'failed') {
+  if (
+    value === 'hypothesis'
+    || value === 'verified'
+    || value === 'grouped'
+    || value === 'pending'
+    || value === 'spawned'
+    || value === 'completed'
+    || value === 'failed'
+    || value === 'rejected'
+  ) {
     return value;
   }
   return undefined;
+}
+
+function asOutcome(value: unknown): FindingOutcome | undefined {
+  if (value === 'open' || value === 'merged' || value === 'closed') {
+    return value;
+  }
+  return undefined;
+}
+
+function asVerifiedEvidenceArray(value: unknown): VerifiedEvidence[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+
+  const parsed = value
+    .filter((entry): entry is VerifiedEvidence => {
+      if (!entry || typeof entry !== 'object') return false;
+      const record = entry as Record<string, unknown>;
+      return typeof record.file === 'string'
+        && typeof record.currentCode === 'string'
+        && typeof record.problem === 'string'
+        && typeof record.suggestedChange === 'string';
+    })
+    .map((entry) => ({
+      file: entry.file.trim(),
+      currentCode: entry.currentCode.trim(),
+      problem: entry.problem.trim(),
+      suggestedChange: entry.suggestedChange.trim(),
+    }))
+    .filter((entry) =>
+      entry.file.length > 0
+      && entry.currentCode.length > 0
+      && entry.problem.length > 0
+      && entry.suggestedChange.length > 0,
+    );
+
+  return parsed.length > 0 ? parsed : undefined;
 }
 
 function dedupeEvidence(evidence: Array<{ text: string }>): Array<{ text: string }> {
@@ -383,5 +557,21 @@ function dedupeEvidence(evidence: Array<{ text: string }>): Array<{ text: string
     deduped.push({ text: normalized });
   }
 
+  return deduped;
+}
+
+function dedupeStringValues(values: string[]): string[] {
+  return [...new Set(values.filter((value) => value.trim().length > 0))];
+}
+
+function dedupeVerifiedEvidence(evidence: VerifiedEvidence[]): VerifiedEvidence[] {
+  const seen = new Set<string>();
+  const deduped: VerifiedEvidence[] = [];
+  for (const entry of evidence) {
+    const key = `${entry.file.toLowerCase()}::${entry.problem.toLowerCase()}::${entry.suggestedChange.toLowerCase()}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(entry);
+  }
   return deduped;
 }
