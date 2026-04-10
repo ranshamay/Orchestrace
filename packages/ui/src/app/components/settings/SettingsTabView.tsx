@@ -1698,7 +1698,15 @@ function ObserverSection({
                         <span className={`rounded px-1.5 py-0.5 text-[9px] font-semibold uppercase ${fixStatusBadge(f.fixStatus)}`}>{f.fixStatus}</span>
                       </div>
                       <div className="mt-1 font-semibold text-slate-800 dark:text-slate-100">{f.title}</div>
-                      <div className="mt-0.5 text-slate-600 dark:text-slate-300">{f.description}</div>
+                                            <div className="mt-0.5 text-slate-600 dark:text-slate-300">{f.issueSummary}</div>
+                      {f.evidence.length > 0 && (
+                        <ul className="mt-1 list-disc space-y-0.5 pl-4 text-[11px] text-slate-600 dark:text-slate-300">
+                          {f.evidence.map((item, idx) => (
+                            <li key={`${f.fingerprint}-evidence-${idx}`}>{item}</li>
+                          ))}
+                        </ul>
+                      )}
+                      <div className="mt-1 text-[11px] text-slate-600 dark:text-slate-300">{f.severityRationale}</div>
                       {f.relevantFiles && f.relevantFiles.length > 0 && (
                         <div className="mt-1 font-mono text-[10px] text-slate-500 dark:text-slate-400">
                           {f.relevantFiles.join(', ')}
