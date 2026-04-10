@@ -92,8 +92,10 @@ describe('log watcher fix-session emission', () => {
           severity: 'high',
           title: 'Unsafe cross-session mutable state',
           description: 'Multiple sessions mutate a shared singleton without locks.',
-          suggestedFix: 'Scope mutable state per session and guard shared writes with synchronization.',
-          evidence: [],
+                    schemaVersion: '2',
+          evidence: [
+            { text: 'Scope mutable state per session and guard shared writes with synchronization.' },
+          ],
           relevantFiles: ['packages/cli/src/ui-server.ts'],
         },
       ]);
@@ -117,8 +119,10 @@ describe('log watcher fix-session emission', () => {
           severity: 'high',
           title: 'Unsafe cross-session mutable state',
           description: 'Multiple sessions mutate a shared singleton without locks.',
-          suggestedFix: 'Scope mutable state per session and guard shared writes with synchronization.',
-          evidence: [],
+                    schemaVersion: '2',
+          evidence: [
+            { text: 'Scope mutable state per session and guard shared writes with synchronization.' },
+          ],
         },
       ]);
 
@@ -131,8 +135,8 @@ describe('log watcher fix-session emission', () => {
           severity: 'critical',
           title: 'Unsafe cross session mutable state',
           description: 'Completely different wording for body should still merge by equivalent queue title.',
-          suggestedFix: 'Apply synchronization and isolate state.',
-          evidence: [],
+                    schemaVersion: '2',
+          evidence: [{ text: 'Apply synchronization and isolate state.' }],
           relevantFiles: ['packages/cli/src/observer/daemon.ts'],
         },
       ]);
@@ -222,8 +226,8 @@ describe('log watcher fix-session emission', () => {
           severity: 'high',
           title: 'Crash loop in API handler',
           description: 'Handler retries endlessly when upstream returns malformed payload.',
-          suggestedFix: 'Add schema guard and stop retrying on non-retryable errors.',
-          evidence: [],
+                    schemaVersion: '2',
+          evidence: [{ text: 'Add schema guard and stop retrying on non-retryable errors.' }],
           relevantFiles: ['packages/cli/src/ui-server.ts'],
         },
       ]);
@@ -254,8 +258,8 @@ describe('log watcher fix-session emission', () => {
           severity: 'high',
           title: 'Crash loop in API handler',
           description: 'Handler retries endlessly when upstream returns malformed payload.',
-          suggestedFix: 'Add schema guard and stop retrying on non-retryable errors.',
-          evidence: [],
+                    schemaVersion: '2',
+          evidence: [{ text: 'Add schema guard and stop retrying on non-retryable errors.' }],
         },
       ]);
 
@@ -268,8 +272,8 @@ describe('log watcher fix-session emission', () => {
           severity: 'medium',
           title: 'Excessive log polling',
           description: 'Loop polls status endpoint too frequently under load.',
-          suggestedFix: 'Back off polling frequency and debounce updates.',
-          evidence: [],
+                    schemaVersion: '2',
+          evidence: [{ text: 'Back off polling frequency and debounce updates.' }],
           relevantFiles: ['packages/cli/src/ui-server.ts'],
         },
       ]);
@@ -302,8 +306,8 @@ describe('log watcher fix-session emission', () => {
             severity: 'high',
             title: 'Repeated timeout',
             description: 'Service call times out repeatedly.',
-            suggestedFix: 'Increase timeout guard and add jittered retry cap.',
-            evidence: [],
+                        schemaVersion: '2',
+            evidence: [{ text: 'Increase timeout guard and add jittered retry cap.' }],
             logSnippet: 'timeout after 30000ms',
           },
         ],
@@ -388,8 +392,8 @@ describe('log watcher fix-session emission', () => {
           severity: 'high',
           title: 'Unsafe cross session mutable state',
           description: 'Fresh finding should become a new queued task because prior one is completed.',
-          suggestedFix: 'Apply synchronization and isolate state.',
-          evidence: [],
+                    schemaVersion: '2',
+          evidence: [{ text: 'Apply synchronization and isolate state.' }],
           relevantFiles: ['packages/cli/src/observer/daemon.ts'],
         },
       ]);
@@ -453,8 +457,8 @@ describe('log watcher fix-session emission', () => {
           severity: 'high',
           title: 'Fresh issue A',
           description: 'New issue A from current process.',
-          suggestedFix: 'Fix issue A.',
-          evidence: [],
+                    schemaVersion: '2',
+          evidence: [{ text: 'Fix issue A.' }],
           relevantFiles: ['packages/cli/src/ui-server.ts'],
         },
       ]);
@@ -465,8 +469,8 @@ describe('log watcher fix-session emission', () => {
           severity: 'high',
           title: 'Fresh issue B',
           description: 'New issue B from current process.',
-          suggestedFix: 'Fix issue B.',
-          evidence: [],
+                    schemaVersion: '2',
+          evidence: [{ text: 'Fix issue B.' }],
           relevantFiles: ['packages/cli/src/ui-server.ts'],
         },
       ]);
