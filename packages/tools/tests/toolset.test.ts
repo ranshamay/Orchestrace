@@ -639,7 +639,7 @@ describe('search_files tool', () => {
     runCommandSpy.mockRestore();
   });
 
-  it('treats ENOENT-like stderr as non-fatal when stdout already contains valid matches', async () => {
+    it('treats ENOENT-like stderr as non-fatal when stdout already contains valid matches', async () => {
     const cwd = await makeWorkspace();
     await writeFile(join(cwd, 'src', 'coordination-tools.ts'), 'async function mapWithAdaptiveConcurrency() {}\n', 'utf-8');
     const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
@@ -661,11 +661,13 @@ describe('search_files tool', () => {
 
     expect(result.isError).toBeFalsy();
     expect(result.content).toContain('src/coordination-tools.ts:1:async function mapWithAdaptiveConcurrency() {}');
-    expect(result.content).toContain('No such file or directory (os error 2)');
+    expect(result.content.toLowerCase()).not.toContain('no such file or directory');
+    expect(result.content.toLowerCase()).not.toContain('os error 2');
     expect(result.details).toBeUndefined();
 
     runCommandSpy.mockRestore();
   });
+
 
 
   it('marks search_files as error for genuine command failures without match output', async () => {
@@ -728,22 +730,26 @@ describe('search_files tool', () => {
     const cwd = await makeWorkspace();
     await writeFile(
       join(cwd, 'src', 'observer-identifiers.ts'),
-      [
+            [
         'function checkTokenTTL() {}',
         'function ensureGithubCopilotTokenTTL() {}',
         'const copilot = true;',
         'subagent_spawn_batch([]);',
+        'url_fetch("https://example.com");',
       ].join('\n') + '\n',
+
       'utf-8',
     );
     const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
 
-    const queries = [
+        const queries = [
       'checkTokenTTL',
       'ensureGithubCopilotTokenTTL',
       'copilot',
       'subagent_spawn_batch',
+      'url_fetch',
     ];
+
 
     for (const query of queries) {
       const result = await toolset.executeTool({

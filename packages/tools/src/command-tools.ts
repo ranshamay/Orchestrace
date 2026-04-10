@@ -76,7 +76,7 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
           })),
         }),
       },
-            execute: async (toolArgs, signal) => {
+                  execute: async (toolArgs, signal) => {
         const requestedPath = asString(toolArgs.path) ?? '.';
         const sanitizedQueryAndMode = sanitizeSearchQueryAndMode({
           query: toolArgs.query,
@@ -90,6 +90,18 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
             path: requestedPath,
           });
         }
+
+        const pathValidation = validateSearchPath(requestedPath);
+        if (!pathValidation.ok) {
+          return createSearchFilesErrorResult({
+            errorType: 'invalid_arguments',
+            message: pathValidation.error,
+            path: requestedPath,
+          });
+        }
+
+        const sanitizedRequestedPath = pathValidation.value;
+
 
         const { query, useRegex } = sanitizedQueryAndMode.value;
 
@@ -117,12 +129,14 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
         if (!resolvedCwd.ok) {
           return createSearchFilesErrorResult({
             errorType: 'invalid_working_directory',
-            message: `Invalid working directory for search_files: ${resolvedCwd.cwd}`,
-            path: requestedPath,
+                        message: `Invalid working directory for search_files: ${resolvedCwd.cwd}`,
+            path: sanitizedRequestedPath,
+
           });
         }
 
-        const normalizedRequestedPath = await normalizeRequestedSearchPath(requestedPath);
+                const normalizedRequestedPath = await normalizeRequestedSearchPath(sanitizedRequestedPath);
+
         const normalizedPathForResolution = isAbsolute(normalizedRequestedPath)
           ? (await canonicalizeExistingPath(normalizedRequestedPath)) ?? normalizedRequestedPath
           : normalizedRequestedPath;
@@ -222,7 +236,7 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
           }
         }
 
-                const output = formatCommandOutput(result, options.maxOutputChars ?? 16000);
+                        const output = formatCommandOutput(result, options.maxOutputChars ?? 16000);
         const hasMatches = result.stdout.trim().length > 0;
 
         // Prefer successful match output when available. ripgrep may emit stderr
@@ -230,10 +244,11 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
         // when there are no matches to return.
         if (hasMatches) {
           return {
-            content: output,
+            content: formatSearchSuccessOutput(result, options.maxOutputChars ?? 16000),
             isError: false,
           };
         }
+
 
         if (result.exitCode === 2 && useRegex) {
           return createSearchFilesErrorResult({
@@ -1130,7 +1145,41 @@ function validateSearchGlob(rawGlob: unknown): ValidationResult<string | undefin
   return { ok: true, value: glob.replace(/\\/g, '/') };
 }
 
+function validateSearchPath(rawPath: unknown): ValidationResult<string> {
+  if (typeof rawPath !== 'string') {
+    return {
+      ok: false,
+      error: 'Invalid search path: expected a string value.',
+    };
+  }
+
+  const trimmedPath = rawPath.trim();
+  if (trimmedPath.includes('\u0000')) {
+    return {
+      ok: false,
+      error: 'Invalid search path: null bytes are not allowed.',
+    };
+  }
+
+  if (/[\r\n]/.test(trimmedPath)) {
+    return {
+      ok: false,
+      error: 'Invalid search path: path must be a single-line string.',
+    };
+  }
+
+  if (hasUnsupportedSearchControlChars(trimmedPath)) {
+    return {
+      ok: false,
+      error: 'Invalid search path: control characters are not allowed.',
+    };
+  }
+
+  return { ok: true, value: trimmedPath.length === 0 ? '.' : trimmedPath };
+}
+
 async function normalizeRequestedSearchPath(rawPath: string): Promise<string> {
+
   const trimmed = rawPath.trim();
   if (trimmed.length === 0) {
     return '.';
@@ -1147,7 +1196,23 @@ function hasRipgrepPathError(stderr: string): boolean {
   return isDeterministicRipgrepPathError(stderr);
 }
 
+function formatSearchSuccessOutput(result: { stdout: string; stderr: string }, maxChars: number): string {
+  const stdout = result.stdout.trim();
+  const stderr = result.stderr.trim();
+
+  if (stderr.length === 0 || isDeterministicRipgrepPathError(stderr)) {
+    return truncateText(stdout, maxChars);
+  }
+
+  return formatCommandOutput({
+    exitCode: 0,
+    stdout,
+    stderr,
+  }, maxChars);
+}
+
 function isDeterministicRipgrepPathError(stderr: string): boolean {
+
   const normalized = stderr.trim();
   if (normalized.length === 0) {
     return false;
