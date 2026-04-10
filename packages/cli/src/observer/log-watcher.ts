@@ -9,6 +9,13 @@
 import type { LlmAdapter } from '@orchestrace/provider';
 import type { ObserverConfig, FindingCategory, FindingSeverity } from './types.js';
 import { ALL_FINDING_CATEGORIES } from './types.js';
+import {
+  isValidFindingCandidate,
+  parseRelevantFiles,
+  sanitizeEvidenceEntries,
+  validateEnumValue,
+  validateSeverity,
+} from './finding-validators.js';
 import type { BackendLogger } from './backend-logger.js';
 
 // ---------------------------------------------------------------------------
@@ -372,28 +379,19 @@ function parseLogFindings(text: string): LogFinding[] {
     const cleaned = text.replace(/^```(?:json)?\s*\n?/m, '').replace(/\n?```\s*$/m, '');
     const parsed = JSON.parse(cleaned);
     const raw = Array.isArray(parsed) ? parsed : parsed?.findings;
-    if (!Array.isArray(raw)) return [];
+        if (!Array.isArray(raw)) return [];
 
     return raw
-      .filter(
-        (f: Record<string, unknown>) =>
-          f && typeof f.title === 'string' && typeof f.description === 'string',
-      )
+      .filter((f: Record<string, unknown>) => isValidFindingCandidate(f))
       .map((f: Record<string, unknown>) => ({
         id: `logf-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-        category: validateLogCategory(f.category as string),
-        severity: validateSeverity(f.severity as string),
+        category: validateEnumValue(f.category, ALL_LOG_FINDING_CATEGORIES, 'error-pattern'),
+        severity: validateSeverity(f.severity),
         title: String(f.title),
         description: String(f.description),
         suggestedFix: typeof f.suggestedFix === 'string' ? f.suggestedFix : (typeof f.issueSummary === 'string' ? f.issueSummary : undefined),
-        evidence: Array.isArray(f.evidence)
-          ? f.evidence
-              .filter((x: unknown): x is { text: string } => !!x && typeof x === 'object' && typeof (x as Record<string, unknown>).text === 'string')
-              .map((x: { text: string }) => ({ text: x.text }))
-          : undefined,
-        relevantFiles: Array.isArray(f.relevantFiles)
-          ? f.relevantFiles.filter((x: unknown) => typeof x === 'string')
-          : undefined,
+        evidence: sanitizeEvidenceEntries(f.evidence),
+        relevantFiles: parseRelevantFiles(f.relevantFiles),
         logSnippet: String(f.logSnippet ?? ''),
         detectedAt: new Date().toISOString(),
       }));
@@ -402,15 +400,8 @@ function parseLogFindings(text: string): LogFinding[] {
   }
 }
 
-function validateLogCategory(cat: string): LogFindingCategory {
-  const valid: LogFindingCategory[] = ['error-pattern', 'performance', 'configuration', 'reliability', 'security'];
-  return valid.includes(cat as LogFindingCategory) ? (cat as LogFindingCategory) : 'error-pattern';
-}
 
-function validateSeverity(sev: string): FindingSeverity {
-  const valid: FindingSeverity[] = ['low', 'medium', 'high', 'critical'];
-  return valid.includes(sev as FindingSeverity) ? (sev as FindingSeverity) : 'medium';
-}
+
 
 function toErrorMessage(err: unknown): string {
   if (err instanceof Error) {

@@ -16,6 +16,13 @@ import type {
   FindingSeverity,
 } from './types.js';
 import { ALL_FINDING_CATEGORIES, normalizeFindingEvidence } from './types.js';
+import {
+  isValidFindingCandidate,
+  parseRelevantFiles,
+  sanitizeEvidenceEntries,
+  validateEnumValue,
+  validateSeverity,
+} from './finding-validators.js';
 import { REALTIME_OBSERVER_SYSTEM_PROMPT } from './prompts.js';
 
 // ---------------------------------------------------------------------------
@@ -561,46 +568,31 @@ function parseRealtimeFindings(
 
   try {
     const parsed = JSON.parse(jsonStr);
-    if (!parsed || !Array.isArray(parsed.findings)) return [];
+        if (!parsed || !Array.isArray(parsed.findings)) return [];
 
-    const validSeverities: FindingSeverity[] = ['low', 'medium', 'high', 'critical'];
     let idCounter = 0;
 
     return parsed.findings
-      .filter((f: Record<string, unknown>) => isValidRealtimeFindingCandidate(f))
+      .filter((f: Record<string, unknown>) => isValidFindingCandidate(f))
       .filter((f: Record<string, unknown>) =>
         allowedCategories.includes(f.category as FindingCategory),
       )
       .map((f: Record<string, unknown>): RealtimeFinding => {
         const evidence = normalizeFindingEvidence(
-          Array.isArray(f.evidence)
-            ? f.evidence
-                .filter((entry): entry is { text: string } => {
-                  if (!entry || typeof entry !== 'object') return false;
-                  const textValue = (entry as Record<string, unknown>).text;
-                  return typeof textValue === 'string';
-                })
-                .map((entry) => ({ text: entry.text }))
-            : undefined,
+          sanitizeEvidenceEntries(f.evidence),
           typeof f.suggestedFix === 'string' ? String(f.suggestedFix) : undefined,
         );
 
         return {
           id: `rt-${Date.now()}-${idCounter++}`,
           schemaVersion: '2',
-          category: allowedCategories.includes(f.category as FindingCategory)
-            ? (f.category as FindingCategory)
-            : 'code-quality',
-          severity: validSeverities.includes(f.severity as FindingSeverity)
-            ? (f.severity as FindingSeverity)
-            : 'medium',
+          category: validateEnumValue(f.category, allowedCategories, 'code-quality'),
+          severity: validateSeverity(f.severity),
           title: String(f.title),
           description: String(f.description),
           evidence,
           suggestedFix: evidence[0]?.text,
-          relevantFiles: Array.isArray(f.relevantFiles)
-            ? f.relevantFiles.filter((p: unknown) => typeof p === 'string')
-            : undefined,
+          relevantFiles: parseRelevantFiles(f.relevantFiles),
           phase: triggerPhase,
           detectedAt: new Date().toISOString(),
         };
@@ -611,21 +603,5 @@ function parseRealtimeFindings(
   }
 }
 
-function isValidRealtimeFindingCandidate(f: Record<string, unknown>): boolean {
-  const hasCore = typeof f.title === 'string' && typeof f.description === 'string';
-  if (!hasCore) {
-    return false;
-  }
 
-  const hasLegacy = typeof f.suggestedFix === 'string';
-  const hasEvidence =
-    Array.isArray(f.evidence)
-    && f.evidence.some((entry) => {
-      if (!entry || typeof entry !== 'object') return false;
-      const textValue = (entry as Record<string, unknown>).text;
-      return typeof textValue === 'string' && textValue.trim().length > 0;
-    });
-
-  return hasLegacy || hasEvidence;
-}
 
