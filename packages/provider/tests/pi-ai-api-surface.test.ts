@@ -25,10 +25,10 @@ describe('@mariozechner/pi-ai API surface', () => {
     const validated = validateToolCall(tools, validCall);
     expect(validated).toEqual({ a: 1, b: 2 });
 
-    const invalidCall = {
+            const invalidCall = {
       id: 'call-invalid',
       name: 'sum',
-      arguments: { a: '1', b: 2 },
+      arguments: { b: 2 },
     };
     expect(() => validateToolCall(tools, invalidCall)).toThrowError();
   });
