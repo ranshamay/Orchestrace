@@ -104,8 +104,10 @@ export interface OrchestratorConfig extends RunnerConfig {
   planningNoToolProgressTimeoutMs?: number;
   /** Polling interval used for planning no-tool progress checks. Defaults to 1 second. */
   planningNoToolProgressCheckIntervalMs?: number;
-  /** Controls whether planning no-tool guards abort attempts (`enforce`) or emit warnings only (`warn`). */
+    /** Controls whether planning no-tool guards abort attempts (`enforce`) or emit warnings only (`warn`). */
   planningNoToolGuardMode?: 'enforce' | 'warn';
+  /** Max successful planning tool calls allowed per planning attempt before forcing convergence. Defaults to 12. */
+  maxPlanningToolCallsPerAttempt?: number;
   /** Override task effort classification. When set, controls execution strategy:
    *  trivial/low = skip planning; medium = sub-agents optional; high = full orchestration. */
   taskEffort?: TaskEffort;
@@ -113,6 +115,8 @@ export interface OrchestratorConfig extends RunnerConfig {
 
 const DEFAULT_ORCHESTRATOR_PROMPT_VERSION = 'orchestrator-prompts-v2';
 const MAX_PLANNING_ATTEMPTS = 3;
+const DEFAULT_MAX_PLANNING_TOOL_CALLS_PER_ATTEMPT = 12;
+
 const PLANNING_RETRY_BASE_DELAY_MS = 2_000;
 const PLANNING_NO_TOOL_STAGNATION_ABORT_ATTEMPTS = 2;
 const PLANNING_CONTRACT_STAGNATION_ABORT_ATTEMPTS = 2;
@@ -151,13 +155,18 @@ export async function orchestrate(
     trivialTaskMaxPromptLength,
     quickStartMode,
     quickStartMaxPreDelegationToolCalls,
-    planningNoToolProgressTimeoutMs,
+        planningNoToolProgressTimeoutMs,
     planningNoToolProgressCheckIntervalMs,
     planningNoToolGuardMode,
+    maxPlanningToolCallsPerAttempt,
     taskEffort: configTaskEffort,
   } = config;
 
   const emit = onEvent ?? (() => {});
+  const resolvedMaxPlanningToolCallsPerAttempt = sanitizeMaxPlanningToolCallsPerAttempt(
+    maxPlanningToolCallsPerAttempt,
+  );
+
   const originalNodesById = new Map(graph.nodes.map((node) => [node.id, node]));
   const resolvedPromptVersion = resolvePromptVersion({
     explicitVersion: promptVersion,
@@ -303,11 +312,15 @@ export async function orchestrate(
         let planningLastToolProgressAt = planningAttemptStartedAtMs;
         let sawPlanningToolCall = false;
         let planningPreFirstToolTokenUsage = 0;
-        let planningPreFirstToolTokenNudged = false;
+                let planningPreFirstToolTokenNudged = false;
         let planningPreFirstToolTokenHardWarningEmitted = false;
-        let planningNoToolInitialWarningEmitted = false;
+                let planningNoToolInitialWarningEmitted = false;
         let planningNoToolProgressWarningEmitted = false;
         let planningNoToolAbortReason = '';
+        let planningToolCallBudgetExceeded = false;
+        let successfulPlanningToolCalls = 0;
+
+
 
         const planningNoProgressInterval = setInterval(() => {
           if (planningAttemptController.signal.aborted) {
@@ -399,17 +412,36 @@ export async function orchestrate(
                 }
               }
             },
-            onToolCall: (_event, replayRecord) => {
+                        onToolCall: (_event, replayRecord) => {
               planningLastToolProgressAt = Date.now();
               sawPlanningToolCall = true;
               planningNoToolInitialWarningEmitted = false;
               planningNoToolProgressWarningEmitted = false;
               planningToolCalls.push(replayRecord);
+
+              if (isSuccessfulToolResultRecord(replayRecord)) {
+                successfulPlanningToolCalls += 1;
+                                if (successfulPlanningToolCalls > resolvedMaxPlanningToolCallsPerAttempt) {
+                  planningNoProgressTriggered = true;
+                  planningToolCallBudgetExceeded = true;
+                  planningNoToolAbortReason =
+                    `Planning tool-call budget exceeded (${successfulPlanningToolCalls}/${resolvedMaxPlanningToolCallsPerAttempt} successful tool calls). `
+                    + 'Emit a concrete plan with explicit TODO items once key files and contract shape are identified; defer edge-case discovery to implementation.';
+                  planningNoProgressAbortController();
+                }
+
+              }
             },
+
           });
         } catch (error) {
-          const wasPlanningNoProgressAbort = planningNoProgressTriggered || isPlanningNoProgressAbortError(error);
-          const failureType = wasPlanningNoProgressAbort ? 'timeout' : resolveReplayFailureType(error);
+                    const wasPlanningNoProgressAbort = planningNoProgressTriggered || isPlanningNoProgressAbortError(error);
+          const failureType = planningToolCallBudgetExceeded
+            ? 'validation'
+            : wasPlanningNoProgressAbort
+              ? 'timeout'
+              : resolveReplayFailureType(error);
+
           const planningError = wasPlanningNoProgressAbort
             ? planningNoToolAbortReason
               || `Planning made no tool progress for ${Math.ceil(noProgressTimeoutMs / 1000)}s. ${PLANNING_NO_TOOL_PROGRESS_NUDGE}`
@@ -817,7 +849,20 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function sanitizeMaxPlanningToolCallsPerAttempt(value: number | undefined): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return DEFAULT_MAX_PLANNING_TOOL_CALLS_PER_ATTEMPT;
+  }
+
+  return Math.max(1, Math.floor(value));
+}
+
+function isSuccessfulToolResultRecord(record: ReplayToolCallRecord): boolean {
+  return record.status === 'result' && !record.isError;
+}
+
 function resolveTaskRequiresWrites(task: TaskNode): boolean {
+
   const routeCategory = readTaskMetaString(task, 'routeCategory');
   const routeStrategy = readTaskMetaString(task, 'routeStrategy');
   if (routeCategory === 'investigation' || routeStrategy === 'read_only_analysis') {
