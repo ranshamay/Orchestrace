@@ -1078,7 +1078,11 @@ function usageOrZero(usage: { input: number; output: number; cost: number } | un
   };
 }
 
-function normalizeValidationDetails(message: string): string {
+function normalizeValidationDetails(
+  message: string,
+  schema: typeof subAgentSpawnArgsSchema | typeof subAgentSpawnBatchArgsSchema,
+  args: Record<string, unknown>,
+): string {
   const normalized = message
     .replace(/\b([a-zA-Z0-9_]+(?:\/[a-zA-Z0-9_]+)+)\b/g, (match) => match.replace(/\//g, '.'));
 
@@ -1086,26 +1090,103 @@ function normalizeValidationDetails(message: string): string {
     return normalized;
   }
 
-  const pathMatch = normalized.match(/\b([a-zA-Z0-9_]+(?:\.[a-zA-Z0-9_]+)+)\b/);
-  if (!pathMatch) {
+  const additionalPropertyPaths = new Set<string>();
+  const pathRegex = /-\s+([a-zA-Z0-9_]+(?:\.[a-zA-Z0-9_]+)*):\s+[^\n]*additional properties/gi;
+  for (const match of normalized.matchAll(pathRegex)) {
+    const parentPath = match[1];
+    const valueAtPath = getValueAtDottedPath(args, parentPath);
+    const schemaAtPath = getSchemaAtDottedPath(schema, parentPath);
+    if (!isRecord(valueAtPath) || !isRecord(schemaAtPath) || !isRecord(schemaAtPath.properties)) {
+      continue;
+    }
+
+    const allowedKeys = new Set(Object.keys(schemaAtPath.properties));
+    for (const key of Object.keys(valueAtPath)) {
+      if (!allowedKeys.has(key)) {
+        additionalPropertyPaths.add(`${parentPath}.${key}`);
+      }
+    }
+  }
+
+  if (additionalPropertyPaths.size === 0) {
+    const pathMatch = normalized.match(/\b([a-zA-Z0-9_]+(?:\.[a-zA-Z0-9_]+)+)\b/);
+    const keyMatch = normalized.match(/additionalProperty\s+["']([^"']+)["']/i)
+      ?? normalized.match(/property\s+["']([^"']+)["']/i);
+    if (pathMatch && keyMatch) {
+      additionalPropertyPaths.add(`${pathMatch[1]}.${keyMatch[1]}`);
+    }
+  }
+
+  const missingPaths = [...additionalPropertyPaths].filter((path) => !normalized.includes(path));
+  if (missingPaths.length === 0) {
     return normalized;
   }
 
-  const keyMatch = normalized.match(/additionalProperty\s+["']([^"']+)["']/i)
-    ?? normalized.match(/property\s+["']([^"']+)["']/i);
-  if (!keyMatch) {
-    return normalized;
-  }
-
-  const parentPath = pathMatch[1];
-  const fullPath = `${parentPath}.${keyMatch[1]}`;
-  if (normalized.includes(fullPath)) {
-    return normalized;
-  }
-
-  // Keep canonical phrase and include explicit offending path for additionalProperties violations.
-  return `${normalized} (additional properties at ${fullPath})`;
+  // Keep canonical phrase and include explicit offending path(s) for additionalProperties violations.
+  return `${normalized} (additional properties at ${missingPaths.join(', ')})`;
 }
+
+function getValueAtDottedPath(root: unknown, dottedPath: string): unknown {
+  if (!dottedPath) {
+    return root;
+  }
+
+  const segments = dottedPath.split('.');
+  let current: unknown = root;
+  for (const segment of segments) {
+    if (Array.isArray(current)) {
+      const index = Number.parseInt(segment, 10);
+      if (!Number.isInteger(index) || index < 0 || index >= current.length) {
+        return undefined;
+      }
+      current = current[index];
+      continue;
+    }
+
+    if (!isRecord(current)) {
+      return undefined;
+    }
+
+    current = current[segment];
+  }
+
+  return current;
+}
+
+function getSchemaAtDottedPath(
+  root: unknown,
+  dottedPath: string,
+): Record<string, unknown> | undefined {
+  if (!isRecord(root)) {
+    return undefined;
+  }
+
+  if (!dottedPath) {
+    return root;
+  }
+
+  const segments = dottedPath.split('.');
+  let current: unknown = root;
+  for (const segment of segments) {
+    if (!isRecord(current)) {
+      return undefined;
+    }
+
+    if (/^\d+$/.test(segment)) {
+      current = current.items;
+      continue;
+    }
+
+    if (!isRecord(current.properties)) {
+      return undefined;
+    }
+
+    current = current.properties[segment];
+  }
+
+  return isRecord(current) ? current : undefined;
+}
+
 
 function validateSubAgentToolArgs(
   toolName: SubAgentToolName,
@@ -1119,7 +1200,11 @@ function validateSubAgentToolArgs(
     );
     return { ok: true };
   } catch (error) {
-    const details = normalizeValidationDetails(error instanceof Error ? error.message : String(error));
+        const details = normalizeValidationDetails(
+      error instanceof Error ? error.message : String(error),
+      schema,
+      args,
+    );
     const message = `${toolName} argument validation failed before spawn: ${details}`;
     console.warn(`[coordination-tools] ${message}`);
     return { ok: false, message };
