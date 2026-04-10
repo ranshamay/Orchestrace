@@ -1078,6 +1078,36 @@ function usageOrZero(usage: { input: number; output: number; cost: number } | un
   };
 }
 
+function normalizeValidationPathSegment(segment: string): string {
+  const normalized = segment.trim();
+  if (!normalized) {
+    return '';
+  }
+
+  return normalized
+    .split('/')
+    .filter((part) => part.length > 0)
+    .map((part) => part.replace(/~1/g, '/').replace(/~0/g, '~'))
+    .join('.');
+}
+
+function normalizeValidationErrorDetails(raw: string): string {
+  const withDottedPointers = raw.replace(
+    /(^|[^A-Za-z0-9_~.-])(\/(?:[A-Za-z0-9_~.-]+(?:\/[A-Za-z0-9_~.-]+)*))/g,
+    (_match, prefix: string, pointer: string) => `${prefix}${normalizeValidationPathSegment(pointer)}`,
+  );
+
+  const withDottedGenericPaths = withDottedPointers.replace(/\b([A-Za-z0-9_~.-]+(?:\/[A-Za-z0-9_~.-]+)+)\b/g, (pathValue) => {
+    return normalizeValidationPathSegment(pathValue);
+  });
+
+  return withDottedGenericPaths
+    .replace(/\badditionalProperties\b/gi, 'additional properties')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+
 function validateSubAgentToolArgs(
   toolName: SubAgentToolName,
   schema: typeof subAgentSpawnArgsSchema | typeof subAgentSpawnBatchArgsSchema,
@@ -1090,13 +1120,13 @@ function validateSubAgentToolArgs(
     );
     return { ok: true };
   } catch (error) {
-    const details = (error instanceof Error ? error.message : String(error))
-      .replace(/\b([a-zA-Z0-9_]+(?:\/[a-zA-Z0-9_]+)+)\b/g, (match) => match.replace(/\//g, '.'));
+    const details = normalizeValidationErrorDetails(error instanceof Error ? error.message : String(error));
     const message = `${toolName} argument validation failed before spawn: ${details}`;
     console.warn(`[coordination-tools] ${message}`);
     return { ok: false, message };
   }
 }
+
 
 async function buildSubAgentRequestFromToolArgs(
   cwd: string,
