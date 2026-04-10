@@ -342,13 +342,15 @@ export interface SessionObserverFindingPayload {
     category: string;
     severity: string;
     title: string;
-    description: string;
-    suggestedFix: string;
+    issueSummary: string;
+    evidence: string[];
+    severityRationale: string;
     relevantFiles?: string[];
     phase: string;
     detectedAt: string;
   };
 }
+
 
 // The discriminated union
 export type SessionEvent =

@@ -64,7 +64,7 @@ function buildAnalysisPrompt(summaries: SessionSummary[], allowedCategories: Fin
     parts.push('---\n');
   }
 
-  parts.push(
+    parts.push(
     'Respond with a JSON object matching this exact schema:\n' +
       '```json\n' +
       '{\n' +
@@ -73,8 +73,9 @@ function buildAnalysisPrompt(summaries: SessionSummary[], allowedCategories: Fin
       '      "category": "code-quality" | "performance" | "agent-efficiency" | "architecture" | "test-coverage",\n' +
       '      "severity": "low" | "medium" | "high" | "critical",\n' +
       '      "title": "Short one-line title",\n' +
-      '      "description": "Detailed description of the issue found",\n' +
-      '      "suggestedFix": "Concrete implementation instruction that could be used as a task prompt",\n' +
+      '      "issueSummary": "Detailed summary of the issue found",\n' +
+      '      "evidence": ["Evidence item 1", "Evidence item 2"],\n' +
+      '      "severityRationale": "Why this severity is justified",\n' +
       '      "relevantFiles": ["path/to/file.ts"]  // optional\n' +
       '    }\n' +
       '  ]\n' +
@@ -111,12 +112,16 @@ function parseAnalysisResponse(text: string, allowedCategories: FindingCategory[
     const validCategories: FindingCategory[] = [...ALL_FINDING_CATEGORIES];
     const validSeverities: FindingSeverity[] = ['low', 'medium', 'high', 'critical'];
 
-    const mappedFindings: AnalysisResult['findings'] = parsed.findings
+        const mappedFindings: AnalysisResult['findings'] = parsed.findings
       .filter(
         (f: Record<string, unknown>) =>
           typeof f.title === 'string' &&
-          typeof f.description === 'string' &&
-          typeof f.suggestedFix === 'string',
+          typeof f.issueSummary === 'string' &&
+          Array.isArray(f.evidence) &&
+          f.evidence.length >= 2 &&
+          f.evidence.length <= 3 &&
+          f.evidence.every((item: unknown) => typeof item === 'string' && item.trim().length > 0) &&
+          typeof f.severityRationale === 'string',
       )
       .map((f: Record<string, unknown>) => ({
         category: validCategories.includes(f.category as FindingCategory)
@@ -126,8 +131,9 @@ function parseAnalysisResponse(text: string, allowedCategories: FindingCategory[
           ? (f.severity as FindingSeverity)
           : ('medium' as FindingSeverity),
         title: String(f.title),
-        description: String(f.description),
-        suggestedFix: String(f.suggestedFix),
+        issueSummary: String(f.issueSummary),
+        evidence: (f.evidence as unknown[]).map((item) => String(item)),
+        severityRationale: String(f.severityRationale),
         relevantFiles: Array.isArray(f.relevantFiles)
           ? f.relevantFiles.filter((p: unknown) => typeof p === 'string')
           : undefined,

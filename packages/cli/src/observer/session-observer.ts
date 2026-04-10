@@ -24,8 +24,9 @@ export interface RealtimeFinding {
   category: FindingCategory;
   severity: FindingSeverity;
   title: string;
-  description: string;
-  suggestedFix: string;
+  issueSummary: string;
+  evidence: string[];
+  severityRationale: string;
   relevantFiles?: string[];
   phase: string;
   detectedAt: string;
@@ -494,7 +495,7 @@ export class SessionObserver {
     lines.push(`Allowed categories: ${allowedCategories.join(', ')}`);
     lines.push('');
     lines.push(
-      'Respond with a JSON object: { "findings": [{ "category": "...", "severity": "...", "title": "...", "description": "...", "suggestedFix": "...", "relevantFiles": [...] }] }',
+            'Respond with a JSON object: { "findings": [{ "category": "...", "severity": "...", "title": "...", "issueSummary": "...", "evidence": ["...","..."], "severityRationale": "...", "relevantFiles": [...] }] }',
     );
     lines.push('Return ONLY the JSON, no other text. If no issues found, return { "findings": [] }.');
 
@@ -560,8 +561,12 @@ function parseRealtimeFindings(
       .filter(
         (f: Record<string, unknown>) =>
           typeof f.title === 'string' &&
-          typeof f.description === 'string' &&
-          typeof f.suggestedFix === 'string',
+                    typeof f.issueSummary === 'string' &&
+          Array.isArray(f.evidence) &&
+          f.evidence.length >= 2 &&
+          f.evidence.length <= 3 &&
+          f.evidence.every((item: unknown) => typeof item === 'string' && item.trim().length > 0) &&
+          typeof f.severityRationale === 'string',
       )
       .filter((f: Record<string, unknown>) =>
         allowedCategories.includes(f.category as FindingCategory),
@@ -575,8 +580,9 @@ function parseRealtimeFindings(
           ? (f.severity as FindingSeverity)
           : 'medium',
         title: String(f.title),
-        description: String(f.description),
-        suggestedFix: String(f.suggestedFix),
+                issueSummary: String(f.issueSummary),
+        evidence: (f.evidence as unknown[]).map((item) => String(item)),
+        severityRationale: String(f.severityRationale),
         relevantFiles: Array.isArray(f.relevantFiles)
           ? f.relevantFiles.filter((p: unknown) => typeof p === 'string')
           : undefined,

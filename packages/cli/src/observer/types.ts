@@ -20,18 +20,37 @@ export const ALL_FINDING_CATEGORIES: FindingCategory[] = [
 
 export type FindingSeverity = 'low' | 'medium' | 'high' | 'critical';
 
+/** Evidence cardinality contract for observer findings. */
+export const FINDING_EVIDENCE_MIN_ITEMS = 2;
+export const FINDING_EVIDENCE_MAX_ITEMS = 3;
+
+/** Guidance used by prompts/parsers/UI when assigning high/critical severities. */
+export const SEVERITY_RUBRIC: Record<Extract<FindingSeverity, 'high' | 'critical'>, string> = {
+  high:
+    'Use only for issues that materially impact reliability, correctness, security posture, or delivery velocity and require near-term action.',
+  critical:
+    'Use only for immediate, severe risk (data loss, security exposure, production outage, or blocker that halts meaningful progress) requiring urgent intervention.',
+};
+
+export type SeverityRubric = typeof SEVERITY_RUBRIC;
+
 /** A single observation/issue found by the observer LLM. */
 export interface ObserverFinding {
-  /** Deterministic fingerprint for deduplication (hash of category + normalized description). */
+  /** Deterministic fingerprint for deduplication (hash of category + normalized issue summary). */
   fingerprint: string;
   category: FindingCategory;
   severity: FindingSeverity;
   /** One-line title of the finding. */
   title: string;
-  /** Detailed description of the issue. */
-  description: string;
-  /** Concrete fix suggestion the observer will use as a session prompt. */
-  suggestedFix: string;
+  /** Concise statement of what is wrong and why it matters. */
+  issueSummary: string;
+  /**
+   * Concrete, file/event-grounded evidence supporting the issue summary.
+   * Must contain 2-3 items (enforced by parser/runtime validation).
+   */
+  evidence: string[];
+  /** Why the selected severity is justified for this specific finding. */
+  severityRationale: string;
   /** File paths relevant to this finding (if any). */
   relevantFiles?: string[];
   /** Session IDs where this issue was observed. */
@@ -39,6 +58,7 @@ export interface ObserverFinding {
   /** When the finding was first detected. */
   detectedAt: string;
 }
+
 
 /** Persistent state of a registered finding (stored in findings.json). */
 export interface FindingRecord extends ObserverFinding {
@@ -126,8 +146,11 @@ export interface AnalysisResult {
     category: FindingCategory;
     severity: FindingSeverity;
     title: string;
-    description: string;
-    suggestedFix: string;
+    issueSummary: string;
+    /** Must contain 2-3 items (validated at parse/runtime boundaries). */
+    evidence: string[];
+    severityRationale: string;
     relevantFiles?: string[];
   }>;
 }
+
