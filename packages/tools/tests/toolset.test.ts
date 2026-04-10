@@ -572,7 +572,7 @@ describe('search_files tool', () => {
     expect(result.content).not.toContain('literal.txt:2:callXvalue');
   });
 
-  it('supports regex mode when regex=true', async () => {
+    it('supports regex mode when regex=true', async () => {
     const cwd = await makeWorkspace();
     await writeFile(join(cwd, 'src', 'regex.txt'), 'call(value)\ncallvalue\n', 'utf-8');
     const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
@@ -590,6 +590,48 @@ describe('search_files tool', () => {
     expect(result.isError).toBeFalsy();
     expect(result.content).toContain('regex.txt:2:callvalue');
     expect(result.content).not.toContain('regex.txt:1:call(value)');
+  });
+
+  it('prefers queryMode=literal when regex=true is also provided', async () => {
+    const cwd = await makeWorkspace();
+    await writeFile(join(cwd, 'src', 'querymode-literal.txt'), 'call(value)\ncallvalue\n', 'utf-8');
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+
+    const result = await toolset.executeTool({
+      id: 'querymode-literal-wins',
+      name: 'search_files',
+      arguments: {
+        query: 'call(value)',
+        regex: true,
+        queryMode: 'literal',
+        path: 'src',
+      },
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.content).toContain('querymode-literal.txt:1:call(value)');
+    expect(result.content).not.toContain('querymode-literal.txt:2:callvalue');
+  });
+
+  it('prefers queryMode=regex when regex=false is also provided', async () => {
+    const cwd = await makeWorkspace();
+    await writeFile(join(cwd, 'src', 'querymode-regex.txt'), 'call(value)\ncallvalue\n', 'utf-8');
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+
+    const result = await toolset.executeTool({
+      id: 'querymode-regex-wins',
+      name: 'search_files',
+      arguments: {
+        query: 'call(value)',
+        regex: false,
+        queryMode: 'regex',
+        path: 'src',
+      },
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.content).toContain('querymode-regex.txt:2:callvalue');
+    expect(result.content).not.toContain('querymode-regex.txt:1:call(value)');
   });
 
     it('returns (no matches) when nothing matches', async () => {
@@ -639,7 +681,7 @@ describe('search_files tool', () => {
     runCommandSpy.mockRestore();
   });
 
-  it('treats ENOENT-like stderr as non-fatal when stdout already contains valid matches', async () => {
+    it('treats ENOENT-like stderr as non-fatal when stdout already contains valid matches', async () => {
     const cwd = await makeWorkspace();
     await writeFile(join(cwd, 'src', 'coordination-tools.ts'), 'async function mapWithAdaptiveConcurrency() {}\n', 'utf-8');
     const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
@@ -663,6 +705,32 @@ describe('search_files tool', () => {
     expect(result.content).toContain('src/coordination-tools.ts:1:async function mapWithAdaptiveConcurrency() {}');
     expect(result.content).toContain('No such file or directory (os error 2)');
     expect(result.details).toBeUndefined();
+
+    runCommandSpy.mockRestore();
+  });
+
+  it('does not return (no matches) when exitCode=1 includes path-error stderr', async () => {
+    const cwd = await makeWorkspace();
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+
+    const runCommandSpy = vi.spyOn(commandRunner, 'runCommand').mockResolvedValueOnce({
+      exitCode: 1,
+      stdout: '',
+      stderr: 'rg: src/missing.txt: No such file or directory (os error 2)',
+    });
+
+    const result = await toolset.executeTool({
+      id: 'exit-one-path-error',
+      name: 'search_files',
+      arguments: {
+        query: 'value',
+        path: 'src',
+      },
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.content).not.toBe('(no matches)');
+    expect(result.content).toContain('src/file.ts:1:export const value = 1;');
 
     runCommandSpy.mockRestore();
   });
