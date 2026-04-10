@@ -109,7 +109,77 @@ describe('executeWithOptionalTools', () => {
     expect(toolEvents[3]).toMatchObject({ type: 'result', toolCallId: 'call-2', toolName: 'run_command', isError: true });
   });
 
+    it('blocks read tool call immediately after sufficient-context acknowledgment until write_file is called', async () => {
+    const consumeStreamMock = vi.mocked(consumeStream);
+
+    const firstResponse = makeAssistantMessage([
+      { type: 'text', text: 'I have enough source context to refactor safely.' },
+      { type: 'toolCall', id: 'call-read', name: 'read_file', arguments: { path: 'src/a.ts' } },
+    ], 'tool_calls');
+    const finalResponse = makeAssistantMessage([{ type: 'text', text: 'done' }]);
+
+    consumeStreamMock.mockResolvedValueOnce(firstResponse as never);
+    consumeStreamMock.mockResolvedValueOnce(finalResponse as never);
+
+    const executeTool = vi.fn().mockResolvedValue({ content: 'should not run', isError: false });
+    const context: TestContext = {
+      messages: [],
+      tools: [{ name: 'read_file', description: 'Read file', parameters: { type: 'object' } }],
+    };
+
+    await executeWithOptionalTools({
+      model: {} as never,
+      context,
+      options: {},
+      toolset: {
+        tools: [],
+        executeTool,
+      },
+      onUsage: () => {},
+    });
+
+    expect(executeTool).not.toHaveBeenCalled();
+    const guardrailResult = context.messages.find(
+      (message) => message.role === 'toolResult' && String(message.content?.[0]?.text ?? '').includes('blocked by system guardrail'),
+    );
+    expect(guardrailResult?.isError).toBe(true);
+    expect(String(guardrailResult?.content?.[0]?.text ?? '')).toContain('next tool call must be write_file');
+  });
+
+  it('allows write_file immediately after sufficient-context acknowledgment', async () => {
+    const consumeStreamMock = vi.mocked(consumeStream);
+
+    const firstResponse = makeAssistantMessage([
+      { type: 'text', text: 'I have enough source context to refactor safely.' },
+      { type: 'toolCall', id: 'call-write', name: 'write_file', arguments: { path: 'src/a.ts', content: 'ok' } },
+    ], 'tool_calls');
+    const finalResponse = makeAssistantMessage([{ type: 'text', text: 'All good.' }]);
+
+    consumeStreamMock.mockResolvedValueOnce(firstResponse as never);
+    consumeStreamMock.mockResolvedValueOnce(finalResponse as never);
+
+    const executeTool = vi.fn().mockResolvedValue({ content: 'wrote', isError: false });
+    const context: TestContext = {
+      messages: [],
+      tools: [{ name: 'write_file', description: 'Write file', parameters: { type: 'object' } }],
+    };
+
+    await executeWithOptionalTools({
+      model: {} as never,
+      context,
+      options: {},
+      toolset: {
+        tools: [],
+        executeTool,
+      },
+      onUsage: () => {},
+    });
+
+    expect(executeTool).toHaveBeenCalledTimes(1);
+  });
+
   it('does not inject retry prompt when tool call succeeds', async () => {
+
     const consumeStreamMock = vi.mocked(consumeStream);
 
     const firstResponse = makeAssistantMessage([
