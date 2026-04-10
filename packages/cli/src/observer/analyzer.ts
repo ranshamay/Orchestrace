@@ -7,10 +7,12 @@
 import type { LlmAdapter } from '@orchestrace/provider';
 import {
   ALL_FINDING_CATEGORIES,
+  normalizeFindingEvidence,
   type AnalysisResult,
   type FindingCategory,
   type FindingSeverity,
   type ObserverConfig,
+  type ObserverFindingInput,
 } from './types.js';
 import type { SessionSummary } from './summarizer.js';
 import { formatSummaryForLlm } from './summarizer.js';
@@ -42,11 +44,9 @@ export async function analyzeSessionSummaries(
     systemPrompt: OBSERVER_SYSTEM_PROMPT,
     prompt: userPrompt,
     signal,
-        apiKey,
+    apiKey,
     refreshApiKey: resolveApiKey ? () => resolveApiKey(config.provider) : undefined,
     allowAuthRefreshRetry: true,
-
-
   });
 
   return parseAnalysisResponse(result.text, allowedCategories);
@@ -70,18 +70,19 @@ function buildAnalysisPrompt(summaries: SessionSummary[], allowedCategories: Fin
       '{\n' +
       '  "findings": [\n' +
       '    {\n' +
-            `      "category": ${FINDING_CATEGORY_LIST},\n` +
+      '      "schemaVersion": "2",\n' +
+      '      "category": "code-quality" | "performance" | "agent-efficiency" | "architecture" | "test-coverage",\n' +
       '      "severity": "low" | "medium" | "high" | "critical",\n' +
       '      "title": "Short one-line title",\n' +
-            '      "description": "Detailed description of the issue found",\n' +
-      '      "issueSummary": "Concise implementation instruction that could be used as a task prompt",\n' +
-      '      "evidence": ["Specific observation that supports this finding"],\n' +
+      '      "description": "Detailed description of the issue found",\n' +
+      '      "evidence": [{ "text": "Concrete implementation instruction / evidence detail" }],\n' +
       '      "relevantFiles": ["path/to/file.ts"]  // optional\n' +
 
       '    }\n' +
       '  ]\n' +
       '}\n' +
       '```\n' +
+      'Compatibility: legacy outputs with `suggestedFix` are also accepted during rollout.\n' +
       'Return ONLY the JSON object, no other text.',
   );
 
@@ -114,31 +115,37 @@ function parseAnalysisResponse(text: string, allowedCategories: FindingCategory[
     const validSeverities: FindingSeverity[] = ['low', 'medium', 'high', 'critical'];
 
     const mappedFindings: AnalysisResult['findings'] = parsed.findings
-            .filter(
-        (f: Record<string, unknown>) =>
-          typeof f.title === 'string' &&
-          typeof f.description === 'string' &&
-          typeof f.issueSummary === 'string',
-      )
+      .filter((f: Record<string, unknown>) => isValidFindingCandidate(f))
+      .map((f: Record<string, unknown>): ObserverFindingInput => {
+        const evidence = normalizeFindingEvidence(
+          Array.isArray(f.evidence)
+            ? f.evidence
+                .filter((entry): entry is { text: string } => {
+                  if (!entry || typeof entry !== 'object') return false;
+                  const textValue = (entry as Record<string, unknown>).text;
+                  return typeof textValue === 'string';
+                })
+                .map((entry) => ({ text: entry.text }))
+            : undefined,
+          typeof f.suggestedFix === 'string' ? String(f.suggestedFix) : undefined,
+        );
 
-      .map((f: Record<string, unknown>) => ({
-        category: validCategories.includes(f.category as FindingCategory)
-          ? (f.category as FindingCategory)
-          : ('code-quality' as FindingCategory),
-        severity: validSeverities.includes(f.severity as FindingSeverity)
-          ? (f.severity as FindingSeverity)
-          : ('medium' as FindingSeverity),
-                title: String(f.title),
-        description: String(f.description),
-        issueSummary: String(f.issueSummary),
-        evidence: Array.isArray(f.evidence)
-          ? f.evidence.filter((p: unknown) => typeof p === 'string')
-          : [],
-        relevantFiles: Array.isArray(f.relevantFiles)
-          ? f.relevantFiles.filter((p: unknown) => typeof p === 'string')
-          : undefined,
-
-      }));
+        return {
+          schemaVersion: '2',
+          category: validCategories.includes(f.category as FindingCategory)
+            ? (f.category as FindingCategory)
+            : ('code-quality' as FindingCategory),
+          severity: validSeverities.includes(f.severity as FindingSeverity)
+            ? (f.severity as FindingSeverity)
+            : ('medium' as FindingSeverity),
+          title: String(f.title),
+          description: String(f.description),
+          evidence,
+          relevantFiles: Array.isArray(f.relevantFiles)
+            ? f.relevantFiles.filter((p: unknown) => typeof p === 'string')
+            : undefined,
+        };
+      });
 
     const findings: AnalysisResult['findings'] = mappedFindings.filter((finding) =>
       allowedCategories.includes(finding.category),
@@ -149,4 +156,22 @@ function parseAnalysisResponse(text: string, allowedCategories: FindingCategory[
     console.error('[orchestrace][observer] Failed to parse LLM analysis response');
     return { findings: [] };
   }
+}
+
+function isValidFindingCandidate(f: Record<string, unknown>): boolean {
+  const hasCore = typeof f.title === 'string' && typeof f.description === 'string';
+  if (!hasCore) {
+    return false;
+  }
+
+  const hasLegacy = typeof f.suggestedFix === 'string';
+  const hasEvidence =
+    Array.isArray(f.evidence)
+    && f.evidence.some((entry) => {
+      if (!entry || typeof entry !== 'object') return false;
+      const textValue = (entry as Record<string, unknown>).text;
+      return typeof textValue === 'string' && textValue.trim().length > 0;
+    });
+
+  return hasLegacy || hasEvidence;
 }

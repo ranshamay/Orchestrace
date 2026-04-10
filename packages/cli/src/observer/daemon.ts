@@ -12,10 +12,11 @@ import type { LlmAdapter } from '@orchestrace/provider';
 import {
   ALL_FINDING_CATEGORIES,
   DEFAULT_OBSERVER_CONFIG,
-  type FindingCategory,
+    type FindingCategory,
   type FindingSeverity,
   type ObserverConfig,
   type ObserverDaemonState,
+  type ObserverFindingInput,
 } from './types.js';
 import { FindingRegistry } from './registry.js';
 import { summarizeSession, formatSummaryForLlm, type SessionSummary } from './summarizer.js';
@@ -34,20 +35,14 @@ type LogWatcherFindingInput = {
   severity: FindingSeverity;
   title: string;
   description: string;
-  issueSummary: string;
-  evidence: string[];
+  schemaVersion?: '1' | '2';
+  suggestedFix?: string;
+  evidence?: Array<{ text: string }>;
   relevantFiles?: string[];
 };
 
-type RealtimeFindingInput = {
-  category: FindingCategory;
-  severity: FindingSeverity;
-  title: string;
-  description: string;
-  issueSummary: string;
-  evidence: string[];
-  relevantFiles?: string[];
-};
+
+type RealtimeFindingInput = ObserverFindingInput & { schemaVersion?: '1' | '2' };
 
 const LOG_WATCHER_SOURCE_SESSION_ID = 'log-watcher';
 
@@ -221,16 +216,29 @@ export class ObserverDaemon {
         continue;
       }
 
-            const { isNew } = this.registry.register({
-        category: mappedCategory,
-        severity: finding.severity,
-        title: finding.title,
-        description: finding.description,
-                issueSummary: finding.issueSummary,
-        evidence: finding.evidence,
+                  const findingInput: ObserverFindingInput =
+        Array.isArray(finding.evidence) && finding.evidence.length > 0
+          ? {
+              schemaVersion: '2',
+              category: mappedCategory,
+              severity: finding.severity,
+              title: finding.title,
+              description: finding.description,
+              evidence: finding.evidence,
+              suggestedFix: finding.suggestedFix,
+              relevantFiles: finding.relevantFiles,
+            }
+          : {
+              schemaVersion: '1',
+              category: mappedCategory,
+              severity: finding.severity,
+              title: finding.title,
+              description: finding.description,
+              suggestedFix: finding.suggestedFix ?? 'No suggested fix provided.',
+              relevantFiles: finding.relevantFiles,
+            };
 
-        relevantFiles: finding.relevantFiles,
-      }, [LOG_WATCHER_SOURCE_SESSION_ID]);
+      const { isNew } = this.registry.register(findingInput, [LOG_WATCHER_SOURCE_SESSION_ID]);
 
       if (isNew) {
         registered += 1;
@@ -266,16 +274,29 @@ export class ObserverDaemon {
         continue;
       }
 
-            const { isNew } = this.registry.register({
-        category: finding.category,
-        severity: finding.severity,
-        title: finding.title,
-        description: finding.description,
-                issueSummary: finding.issueSummary,
-        evidence: finding.evidence,
+                  const findingInput: ObserverFindingInput =
+        Array.isArray(finding.evidence) && finding.evidence.length > 0
+          ? {
+              schemaVersion: '2',
+              category: finding.category,
+              severity: finding.severity,
+              title: finding.title,
+              description: finding.description,
+              evidence: finding.evidence,
+              suggestedFix: finding.suggestedFix,
+              relevantFiles: finding.relevantFiles,
+            }
+          : {
+              schemaVersion: '1',
+              category: finding.category,
+              severity: finding.severity,
+              title: finding.title,
+              description: finding.description,
+              suggestedFix: finding.suggestedFix ?? 'No suggested fix provided.',
+              relevantFiles: finding.relevantFiles,
+            };
 
-        relevantFiles: finding.relevantFiles,
-      }, [sourceSessionId]);
+      const { isNew } = this.registry.register(findingInput, [sourceSessionId]);
 
       if (isNew) {
         registered += 1;

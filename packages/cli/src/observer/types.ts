@@ -219,19 +219,6 @@ export interface ObserverDaemonState {
 
 /** Structured output from the LLM analysis of a session's event log. */
 export interface AnalysisResult {
-<<<<<<< HEAD
-  findings: Array<{
-    category: FindingCategory;
-    severity: FindingSeverity;
-    title: string;
-        description: string;
-    issueSummary: string;
-    evidence: string[];
-    relevantFiles?: string[];
-
-  }>;
-}
-=======
+export interface AnalysisResult {
   findings: ObserverFindingInput[];
 }
->>>>>>> 09dc142f (refactor: define schemaVersioned finding v2 contract types)
