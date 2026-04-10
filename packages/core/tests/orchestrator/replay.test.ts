@@ -1134,8 +1134,9 @@ describe('orchestrate replay capture', () => {
       const output = outputs.get('task-1');
       expect(output?.status).toBe('completed');
       expect(capturedImplementationPrompts.length).toBeGreaterThan(0);
-      const implementationPrompt = capturedImplementationPrompts[0] ?? '';
+            const implementationPrompt = capturedImplementationPrompts[0] ?? '';
       expect(implementationPrompt).toContain('search_files uses regex; characters like ( and ) need escaping as \\( and \\).');
+      expect(implementationPrompt).toContain('Do not use run_command or run_command_batch as substitutes for targeted file reads/search when sufficient context is already gathered; proceed directly to edits.');
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }
