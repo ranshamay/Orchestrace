@@ -572,7 +572,7 @@ describe('search_files tool', () => {
     expect(result.content).not.toContain('literal.txt:2:callXvalue');
   });
 
-  it('supports regex mode when regex=true', async () => {
+    it('supports regex mode when regex=true', async () => {
     const cwd = await makeWorkspace();
     await writeFile(join(cwd, 'src', 'regex.txt'), 'call(value)\ncallvalue\n', 'utf-8');
     const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
@@ -591,6 +591,28 @@ describe('search_files tool', () => {
     expect(result.content).toContain('regex.txt:2:callvalue');
     expect(result.content).not.toContain('regex.txt:1:call(value)');
   });
+
+  it('honors explicit literal queryMode over legacy regex=true flag', async () => {
+    const cwd = await makeWorkspace();
+    await writeFile(join(cwd, 'src', 'mode-precedence.txt'), 'call(value)\ncallvalue\n', 'utf-8');
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+
+    const result = await toolset.executeTool({
+      id: 'mode-precedence-literal',
+      name: 'search_files',
+      arguments: {
+        query: 'call(value)',
+        queryMode: 'literal',
+        regex: true,
+        path: 'src',
+      },
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.content).toContain('mode-precedence.txt:1:call(value)');
+    expect(result.content).not.toContain('mode-precedence.txt:2:callvalue');
+  });
+
 
     it('returns (no matches) when nothing matches', async () => {
     const cwd = await makeWorkspace();
