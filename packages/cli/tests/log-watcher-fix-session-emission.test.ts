@@ -47,8 +47,15 @@ describe('log watcher fix-session emission', () => {
           severity: 'high',
           title: 'Unsafe cross-session mutable state',
           description: 'Multiple sessions mutate a shared singleton without locks.',
-          suggestedFix: 'Scope mutable state per session and guard shared writes with synchronization.',
+                              suggestedFix: 'Scope mutable state per session and guard shared writes with synchronization.',
+          evidence: {
+            summary: 'Same duplicate signal observed in the same session.',
+          },
           relevantFiles: ['packages/cli/src/ui-server.ts'],
+          evidence: {
+            summary: 'Observed shared singleton writes across concurrent sessions.',
+            files: ['packages/cli/src/ui-server.ts'],
+          },
         },
       ]);
 
@@ -86,8 +93,15 @@ describe('log watcher fix-session emission', () => {
           severity: 'critical',
           title: 'Unsafe cross session mutable state',
           description: 'Completely different wording for body should still merge by equivalent queue title.',
-          suggestedFix: 'Apply synchronization and isolate state.',
+                              suggestedFix: 'Apply synchronization and isolate state.',
+          evidence: {
+            summary: 'Fresh equivalent issue observed in new session.',
+          },
           relevantFiles: ['packages/cli/src/observer/daemon.ts'],
+          evidence: {
+            summary: 'Equivalent architecture issue appeared in another session.',
+            files: ['packages/cli/src/observer/daemon.ts'],
+          },
         },
       ]);
 
@@ -147,7 +161,8 @@ describe('log watcher fix-session emission', () => {
         routeIntent: 'code_change',
       }));
       expect(firstPrompt).toContain('## Issue');
-      expect(firstPrompt).toContain('\n## Task\n');
+            expect(firstPrompt).toContain('\n## Task\n');
+      expect(firstPrompt).toContain('\n## Evidence\n');
       const shellValidation = validateShellExecutionPrompt(firstPrompt);
       expect(shellValidation.ok).toBe(false);
       expect(shellValidation.command).toBeUndefined();
@@ -256,7 +271,8 @@ describe('log watcher fix-session emission', () => {
             severity: 'medium',
             title: 'Unsafe cross-session mutable state',
             description: 'Old equivalent finding already completed.',
-            suggestedFix: 'Historical fix',
+                        suggestedFix: 'Historical fix',
+            evidence: { summary: 'Historical persisted evidence.' },
             observedInSessions: ['legacy-session'],
             detectedAt: new Date().toISOString(),
             fixSessionId: 'legacy-fix-session',
@@ -313,7 +329,8 @@ describe('log watcher fix-session emission', () => {
             severity: 'medium',
             title: 'Historical spawned finding',
             description: 'Old finding kept as spawned from a prior process.',
-            suggestedFix: 'Historical fix',
+                        suggestedFix: 'Historical fix',
+            evidence: { summary: 'Historical persisted evidence.' },
             observedInSessions: ['legacy-session'],
             detectedAt: new Date().toISOString(),
             fixSessionId: 'legacy-fix-session',

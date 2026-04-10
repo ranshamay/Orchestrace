@@ -9,7 +9,12 @@
 
 import type { EventStore, SessionEvent } from '@orchestrace/store';
 import type { LlmAdapter } from '@orchestrace/provider';
-import type { ObserverConfig, FindingCategory, FindingSeverity } from './types.js';
+import type {
+  ObserverConfig,
+  FindingCategory,
+  FindingSeverity,
+  ObserverFindingEvidence,
+} from './types.js';
 import { ALL_FINDING_CATEGORIES } from './types.js';
 import { REALTIME_OBSERVER_SYSTEM_PROMPT } from './prompts.js';
 
@@ -27,9 +32,11 @@ export interface RealtimeFinding {
   description: string;
   suggestedFix: string;
   relevantFiles?: string[];
+  evidence: ObserverFindingEvidence;
   phase: string;
   detectedAt: string;
 }
+
 
 export interface SessionObserverState {
   status: ObserverSessionStatus;
@@ -493,8 +500,8 @@ export class SessionObserver {
 
     lines.push(`Allowed categories: ${allowedCategories.join(', ')}`);
     lines.push('');
-    lines.push(
-      'Respond with a JSON object: { "findings": [{ "category": "...", "severity": "...", "title": "...", "description": "...", "suggestedFix": "...", "relevantFiles": [...] }] }',
+        lines.push(
+      'Respond with a JSON object: { "findings": [{ "category": "...", "severity": "...", "title": "...", "description": "...", "suggestedFix": "...", "relevantFiles": [...], "evidence": { "summary": "...", "eventCount": 0, "durationSeconds": 0, "toolCalls": { "writes": 0, "reads": 0, "searches": 0, "total": 0 }, "implementationAttempt": { "current": 1, "max": 3 }, "files": ["..."], "snippets": ["..."] } }] }',
     );
     lines.push('Return ONLY the JSON, no other text. If no issues found, return { "findings": [] }.');
 
@@ -538,11 +545,55 @@ function parseToolCall(
   return { toolName, input: '', output: rest, isError: message.includes('[error]') };
 }
 
+function sanitizeRealtimeEvidence(value: unknown): ObserverFindingEvidence {
+  const raw = (value && typeof value === 'object' ? value : {}) as Record<string, unknown>;
+
+  const summary = typeof raw.summary === 'string' && raw.summary.trim().length > 0
+    ? raw.summary.trim()
+    : 'Evidence details were not provided by the realtime observer response.';
+
+  const toolCallsRaw = raw.toolCalls && typeof raw.toolCalls === 'object'
+    ? (raw.toolCalls as Record<string, unknown>)
+    : undefined;
+  const implementationAttemptRaw = raw.implementationAttempt && typeof raw.implementationAttempt === 'object'
+    ? (raw.implementationAttempt as Record<string, unknown>)
+    : undefined;
+  const toNumber = (v: unknown): number | undefined =>
+    typeof v === 'number' && Number.isFinite(v) ? v : undefined;
+
+  return {
+    summary,
+    eventCount: toNumber(raw.eventCount),
+    durationSeconds: toNumber(raw.durationSeconds),
+    toolCalls: toolCallsRaw
+      ? {
+        writes: toNumber(toolCallsRaw.writes),
+        reads: toNumber(toolCallsRaw.reads),
+        searches: toNumber(toolCallsRaw.searches),
+        total: toNumber(toolCallsRaw.total),
+      }
+      : undefined,
+    implementationAttempt: implementationAttemptRaw
+      ? {
+        current: toNumber(implementationAttemptRaw.current),
+        max: toNumber(implementationAttemptRaw.max),
+      }
+      : undefined,
+    files: Array.isArray(raw.files)
+      ? raw.files.filter((p: unknown) => typeof p === 'string')
+      : undefined,
+    snippets: Array.isArray(raw.snippets)
+      ? raw.snippets.filter((s: unknown) => typeof s === 'string')
+      : undefined,
+  };
+}
+
 function parseRealtimeFindings(
   text: string,
   allowedCategories: FindingCategory[],
   triggerPhase: string,
 ): RealtimeFinding[] {
+
   let jsonStr = text.trim();
   const fenceMatch = jsonStr.match(/```(?:json)?\s*\n?([\s\S]*?)\n?\s*```/);
   if (fenceMatch) {
@@ -557,11 +608,12 @@ function parseRealtimeFindings(
     let idCounter = 0;
 
     return parsed.findings
-      .filter(
+            .filter(
         (f: Record<string, unknown>) =>
           typeof f.title === 'string' &&
           typeof f.description === 'string' &&
-          typeof f.suggestedFix === 'string',
+          typeof f.suggestedFix === 'string' &&
+          f.evidence !== undefined,
       )
       .filter((f: Record<string, unknown>) =>
         allowedCategories.includes(f.category as FindingCategory),
@@ -577,9 +629,10 @@ function parseRealtimeFindings(
         title: String(f.title),
         description: String(f.description),
         suggestedFix: String(f.suggestedFix),
-        relevantFiles: Array.isArray(f.relevantFiles)
+                relevantFiles: Array.isArray(f.relevantFiles)
           ? f.relevantFiles.filter((p: unknown) => typeof p === 'string')
           : undefined,
+        evidence: sanitizeRealtimeEvidence(f.evidence),
         phase: triggerPhase,
         detectedAt: new Date().toISOString(),
       }));

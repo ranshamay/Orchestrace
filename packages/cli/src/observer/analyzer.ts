@@ -11,6 +11,7 @@ import {
   type FindingCategory,
   type FindingSeverity,
   type ObserverConfig,
+  type ObserverFindingEvidence,
 } from './types.js';
 import type { SessionSummary } from './summarizer.js';
 import { formatSummaryForLlm } from './summarizer.js';
@@ -74,8 +75,17 @@ function buildAnalysisPrompt(summaries: SessionSummary[], allowedCategories: Fin
       '      "severity": "low" | "medium" | "high" | "critical",\n' +
       '      "title": "Short one-line title",\n' +
       '      "description": "Detailed description of the issue found",\n' +
-      '      "suggestedFix": "Concrete implementation instruction that could be used as a task prompt",\n' +
-      '      "relevantFiles": ["path/to/file.ts"]  // optional\n' +
+            '      "suggestedFix": "Concrete implementation instruction that could be used as a task prompt",\n' +
+      '      "relevantFiles": ["path/to/file.ts"],  // optional\n' +
+      '      "evidence": {\n' +
+      '        "summary": "Concrete evidence observed in session events",\n' +
+      '        "eventCount": 1466,\n' +
+      '        "durationSeconds": 90,\n' +
+      '        "toolCalls": { "writes": 0, "reads": 34, "searches": 21, "total": 55 },\n' +
+      '        "implementationAttempt": { "current": 1, "max": 3 },\n' +
+      '        "files": ["packages/cli/src/observer/types.ts"],\n' +
+      '        "snippets": ["No write_file/edit_file tool calls observed in implementation phase."]\n' +
+      '      }\n' +
       '    }\n' +
       '  ]\n' +
       '}\n' +
@@ -93,7 +103,53 @@ function buildAnalysisPrompt(summaries: SessionSummary[], allowedCategories: Fin
  * Parse the LLM response text into a structured AnalysisResult.
  * Tolerates markdown fences around the JSON.
  */
+function sanitizeEvidence(value: unknown): ObserverFindingEvidence {
+  const raw = (value && typeof value === 'object' ? value : {}) as Record<string, unknown>;
+
+  const summary = typeof raw.summary === 'string' && raw.summary.trim().length > 0
+    ? raw.summary.trim()
+    : 'Evidence details were not provided by the analyzer response.';
+
+  const toolCallsRaw = raw.toolCalls && typeof raw.toolCalls === 'object'
+    ? (raw.toolCalls as Record<string, unknown>)
+    : undefined;
+
+  const implementationAttemptRaw = raw.implementationAttempt && typeof raw.implementationAttempt === 'object'
+    ? (raw.implementationAttempt as Record<string, unknown>)
+    : undefined;
+
+  const toNumber = (v: unknown): number | undefined =>
+    typeof v === 'number' && Number.isFinite(v) ? v : undefined;
+
+  return {
+    summary,
+    eventCount: toNumber(raw.eventCount),
+    durationSeconds: toNumber(raw.durationSeconds),
+    toolCalls: toolCallsRaw
+      ? {
+        writes: toNumber(toolCallsRaw.writes),
+        reads: toNumber(toolCallsRaw.reads),
+        searches: toNumber(toolCallsRaw.searches),
+        total: toNumber(toolCallsRaw.total),
+      }
+      : undefined,
+    implementationAttempt: implementationAttemptRaw
+      ? {
+        current: toNumber(implementationAttemptRaw.current),
+        max: toNumber(implementationAttemptRaw.max),
+      }
+      : undefined,
+    files: Array.isArray(raw.files)
+      ? raw.files.filter((p: unknown) => typeof p === 'string')
+      : undefined,
+    snippets: Array.isArray(raw.snippets)
+      ? raw.snippets.filter((s: unknown) => typeof s === 'string')
+      : undefined,
+  };
+}
+
 function parseAnalysisResponse(text: string, allowedCategories: FindingCategory[]): AnalysisResult {
+
   // Strip markdown code fences
   let jsonStr = text.trim();
   const fenceMatch = jsonStr.match(/```(?:json)?\s*\n?([\s\S]*?)\n?\s*```/);
@@ -112,13 +168,14 @@ function parseAnalysisResponse(text: string, allowedCategories: FindingCategory[
     const validSeverities: FindingSeverity[] = ['low', 'medium', 'high', 'critical'];
 
     const mappedFindings: AnalysisResult['findings'] = parsed.findings
-      .filter(
+            .filter(
         (f: Record<string, unknown>) =>
           typeof f.title === 'string' &&
           typeof f.description === 'string' &&
-          typeof f.suggestedFix === 'string',
+          typeof f.suggestedFix === 'string' &&
+          f.evidence !== undefined,
       )
-      .map((f: Record<string, unknown>) => ({
+      .map((f: Record<string, unknown>) => ({ 
         category: validCategories.includes(f.category as FindingCategory)
           ? (f.category as FindingCategory)
           : ('code-quality' as FindingCategory),
@@ -128,9 +185,10 @@ function parseAnalysisResponse(text: string, allowedCategories: FindingCategory[
         title: String(f.title),
         description: String(f.description),
         suggestedFix: String(f.suggestedFix),
-        relevantFiles: Array.isArray(f.relevantFiles)
+                relevantFiles: Array.isArray(f.relevantFiles)
           ? f.relevantFiles.filter((p: unknown) => typeof p === 'string')
           : undefined,
+        evidence: sanitizeEvidence(f.evidence),
       }));
 
     const findings: AnalysisResult['findings'] = mappedFindings.filter((finding) =>

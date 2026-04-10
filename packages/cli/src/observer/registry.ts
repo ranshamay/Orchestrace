@@ -7,7 +7,12 @@
 import { createHash } from 'node:crypto';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
-import type { FindingRecord, FindingCategory, FindingSeverity } from './types.js';
+import type {
+  FindingRecord,
+  FindingCategory,
+  FindingSeverity,
+  ObserverFindingEvidence,
+} from './types.js';
 
 export class FindingRegistry {
   private findings: FindingRecord[] = [];
@@ -46,13 +51,14 @@ export class FindingRegistry {
    * into additionalSessions instead of creating a duplicate.
    */
     register(
-    finding: {
+        finding: {
       category: FindingCategory;
       severity: FindingSeverity;
       title: string;
       description: string;
       suggestedFix: string;
       relevantFiles?: string[];
+      evidence: ObserverFindingEvidence;
     },
     sessionIds: string[],
   ): { fingerprint: string; isNew: boolean } {
@@ -139,9 +145,10 @@ export class FindingRegistry {
 
 function mergeFindingSignal(
   record: FindingRecord,
-  incoming: {
+    incoming: {
     severity: FindingSeverity;
     relevantFiles?: string[];
+    evidence: ObserverFindingEvidence;
   },
   sessionIds: string[],
 ): void {
@@ -160,11 +167,29 @@ function mergeFindingSignal(
     record.severity = incoming.severity;
   }
 
-  // Merge relevant file hints without duplicates.
+    // Merge relevant file hints without duplicates.
   if (incoming.relevantFiles && incoming.relevantFiles.length > 0) {
     const merged = new Set([...(record.relevantFiles ?? []), ...incoming.relevantFiles]);
     record.relevantFiles = [...merged];
   }
+
+  // Preserve latest/best available evidence summary and merge evidence files/snippets.
+  const mergedEvidenceFiles = new Set([
+    ...(record.evidence.files ?? []),
+    ...(incoming.evidence.files ?? []),
+  ]);
+  const mergedEvidenceSnippets = new Set([
+    ...(record.evidence.snippets ?? []),
+    ...(incoming.evidence.snippets ?? []),
+  ]);
+
+  record.evidence = {
+    ...record.evidence,
+    ...incoming.evidence,
+    summary: incoming.evidence.summary || record.evidence.summary,
+    files: mergedEvidenceFiles.size > 0 ? [...mergedEvidenceFiles] : undefined,
+    snippets: mergedEvidenceSnippets.size > 0 ? [...mergedEvidenceSnippets] : undefined,
+  };
 }
 
 function isQueueStatus(status: FindingRecord['fixStatus']): boolean {

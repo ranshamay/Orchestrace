@@ -34,11 +34,14 @@ export interface ObserverFinding {
   suggestedFix: string;
   /** File paths relevant to this finding (if any). */
   relevantFiles?: string[];
+  /** Evidence-first contract field: every finding carries concrete supporting signal. */
+  evidence: ObserverFindingEvidence;
   /** Session IDs where this issue was observed. */
   observedInSessions: string[];
   /** When the finding was first detected. */
   detectedAt: string;
 }
+
 
 /** Persistent state of a registered finding (stored in findings.json). */
 export interface FindingRecord extends ObserverFinding {

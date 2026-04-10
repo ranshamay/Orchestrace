@@ -16,6 +16,7 @@ import {
   type FindingSeverity,
   type ObserverConfig,
   type ObserverDaemonState,
+  type ObserverFindingEvidence,
 } from './types.js';
 import { FindingRegistry } from './registry.js';
 import { summarizeSession, formatSummaryForLlm, type SessionSummary } from './summarizer.js';
@@ -45,7 +46,9 @@ type RealtimeFindingInput = {
   description: string;
   suggestedFix: string;
   relevantFiles?: string[];
+  evidence: ObserverFindingEvidence;
 };
+
 
 const LOG_WATCHER_SOURCE_SESSION_ID = 'log-watcher';
 
@@ -219,13 +222,17 @@ export class ObserverDaemon {
         continue;
       }
 
-      const { isNew } = this.registry.register({
+            const { isNew } = this.registry.register({
         category: mappedCategory,
         severity: finding.severity,
         title: finding.title,
         description: finding.description,
         suggestedFix: finding.suggestedFix,
         relevantFiles: finding.relevantFiles,
+        evidence: {
+          summary: 'Detected by backend log watcher analysis.',
+          files: finding.relevantFiles,
+        },
       }, [LOG_WATCHER_SOURCE_SESSION_ID]);
 
       if (isNew) {
@@ -262,13 +269,14 @@ export class ObserverDaemon {
         continue;
       }
 
-      const { isNew } = this.registry.register({
+            const { isNew } = this.registry.register({
         category: finding.category,
         severity: finding.severity,
         title: finding.title,
         description: finding.description,
         suggestedFix: finding.suggestedFix,
         relevantFiles: finding.relevantFiles,
+        evidence: finding.evidence,
       }, [sourceSessionId]);
 
       if (isNew) {

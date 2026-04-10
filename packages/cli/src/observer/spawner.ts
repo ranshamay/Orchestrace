@@ -128,8 +128,34 @@ function buildFixPrompt(finding: FindingRecord): string {
   parts.push('## Issue');
   parts.push(finding.description);
   parts.push('');
-  parts.push('## Task');
+    parts.push('## Task');
   parts.push(finding.suggestedFix);
+
+  parts.push('');
+  parts.push('## Evidence');
+  parts.push(`- Summary: ${finding.evidence.summary}`);
+  if (typeof finding.evidence.eventCount === 'number') {
+    parts.push(`- Event Count: ${finding.evidence.eventCount}`);
+  }
+  if (typeof finding.evidence.durationSeconds === 'number') {
+    parts.push(`- Duration (seconds): ${finding.evidence.durationSeconds}`);
+  }
+  if (finding.evidence.toolCalls) {
+    const tc = finding.evidence.toolCalls;
+    parts.push(
+      `- Tool Calls: writes=${tc.writes ?? 'n/a'}, reads=${tc.reads ?? 'n/a'}, searches=${tc.searches ?? 'n/a'}, total=${tc.total ?? 'n/a'}`,
+    );
+  }
+  if (finding.evidence.implementationAttempt) {
+    const attempt = finding.evidence.implementationAttempt;
+    parts.push(`- Implementation Attempt: ${attempt.current ?? 'n/a'}/${attempt.max ?? 'n/a'}`);
+  }
+  if (finding.evidence.snippets && finding.evidence.snippets.length > 0) {
+    parts.push('- Evidence Snippets:');
+    for (const snippet of finding.evidence.snippets) {
+      parts.push(`  - ${snippet}`);
+    }
+  }
 
   if (finding.relevantFiles && finding.relevantFiles.length > 0) {
     parts.push('');
