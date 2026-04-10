@@ -39,7 +39,7 @@ export function createFilesystemTools(options: FilesystemToolOptions): Registere
           includeHidden: Type.Optional(Type.Boolean({ description: 'Include entries starting with a dot.' })),
         }),
       },
-      execute: async (toolArgs) => {
+            execute: async (toolArgs) => {
         const path = asString(toolArgs.path) ?? '.';
         const includeHidden = Boolean(toolArgs.includeHidden);
         const target = resolveWorkspacePath(options.cwd, path);
@@ -127,7 +127,7 @@ export function createFilesystemTools(options: FilesystemToolOptions): Registere
             ?? DEFAULT_BATCH_MIN_CONCURRENCY,
         );
 
-                                const mapper = async (request: ReadBatchRequest): Promise<ReadBatchResult> => {
+                                        const mapper = async (request: ReadBatchRequest): Promise<ReadBatchResult> => {
           const target = resolveWorkspacePath(options.cwd, request.path);
           const preflight = await preflightReadableFile(target);
           if (!preflight.ok) {

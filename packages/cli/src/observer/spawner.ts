@@ -131,7 +131,7 @@ function buildFixPrompt(finding: FindingRecord): string {
   parts.push('## Task');
   parts.push(finding.suggestedFix);
 
-    if (finding.relevantFiles && finding.relevantFiles.length > 0) {
+      if (finding.relevantFiles && finding.relevantFiles.length > 0) {
     parts.push('');
     parts.push('## Relevant Files');
     parts.push('(Validate these paths exist in the current worktree before direct reads; observer hints may be stale.)');

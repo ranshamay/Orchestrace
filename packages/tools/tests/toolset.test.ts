@@ -110,7 +110,7 @@ describe('createAgentToolset phase policy', () => {
 });
 
 describe('batch filesystem tools', () => {
-    it('read_files reports required missing files as failures', async () => {
+      it('read_files reports required missing files as failures', async () => {
     const cwd = await makeWorkspace();
     await writeFile(join(cwd, 'src', 'second.ts'), 'export const second = 2;\n', 'utf-8');
     const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
@@ -156,7 +156,7 @@ describe('batch filesystem tools', () => {
     expect(parsed.files[2].error).toContain('attempt=1');
   });
 
-    it('read_files reports optional missing files without escalating tool error', async () => {
+      it('read_files reports optional missing files without escalating tool error', async () => {
     const cwd = await makeWorkspace();
     await writeFile(join(cwd, 'src', 'second.ts'), 'export const second = 2;\n', 'utf-8');
     const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
@@ -417,7 +417,7 @@ describe('batch filesystem tools', () => {
     expect(parsedVerify.files[1].content).toContain('value = 1');
   });
 
-      it('read_file returns correct line slices for large files without full-read truncation artifacts', async () => {
+        it('read_file returns correct line slices for large files without full-read truncation artifacts', async () => {
     const cwd = await makeWorkspace();
     const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
 

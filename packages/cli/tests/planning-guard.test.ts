@@ -114,7 +114,7 @@ describe('planning guard behavior', () => {
     expect(state?.forcedImplementation).toBe(false);
   });
 
-    it('includes simple-task policy and planning budget language in planning prompt', () => {
+      it('includes simple-task policy and planning budget language in planning prompt', () => {
     const session = createSession();
     const prompt = buildSessionSystemPrompt(session, 'planning');
 
