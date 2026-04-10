@@ -173,16 +173,23 @@ function LogFindingItem({ finding, isExpanded, onToggle }: { finding: LogFinding
       {isExpanded && (
         <div className="ml-5 mt-1 space-y-1.5 pb-1">
           <p className="text-[11px] text-slate-600 dark:text-slate-300">{finding.description}</p>
-          {finding.logSnippet && (
+                    {finding.logSnippet && (
             <div className="rounded bg-slate-900 px-2 py-1.5 dark:bg-slate-800">
               <div className="mb-0.5 text-[9px] font-bold uppercase tracking-wide text-slate-400">Log Snippet</div>
               <pre className="whitespace-pre-wrap text-[10px] font-mono text-green-400">{finding.logSnippet}</pre>
             </div>
           )}
+          {finding.evidence && (
+            <div className="rounded bg-slate-100 px-2 py-1.5 dark:bg-slate-700/60">
+              <div className="mb-0.5 text-[9px] font-bold uppercase tracking-wide text-slate-400">Evidence</div>
+              <p className="text-[11px] text-slate-700 dark:text-slate-200">{finding.evidence}</p>
+            </div>
+          )}
           <div className="rounded bg-slate-50 px-2 py-1.5 dark:bg-slate-800">
-            <div className="mb-0.5 text-[9px] font-bold uppercase tracking-wide text-slate-400">Suggested Fix</div>
-            <p className="text-[11px] text-slate-700 dark:text-slate-200">{finding.suggestedFix}</p>
+            <div className="mb-0.5 text-[9px] font-bold uppercase tracking-wide text-slate-400">Recommended Action</div>
+            <p className="text-[11px] text-slate-700 dark:text-slate-200">{finding.recommendedAction}</p>
           </div>
+
           {finding.relevantFiles && finding.relevantFiles.length > 0 && (
             <div className="flex flex-wrap gap-1">
               {finding.relevantFiles.map((file) => (

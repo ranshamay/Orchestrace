@@ -46,8 +46,10 @@ describe('log watcher fix-session emission', () => {
           category: 'architecture',
           severity: 'high',
           title: 'Unsafe cross-session mutable state',
-          description: 'Multiple sessions mutate a shared singleton without locks.',
-          suggestedFix: 'Scope mutable state per session and guard shared writes with synchronization.',
+                    description: 'Multiple sessions mutate a shared singleton without locks.',
+          evidence: 'Observed shared singleton mutation across multiple session traces without synchronization.',
+          recommendedAction: 'Scope mutable state per session and guard shared writes with synchronization.',
+
           relevantFiles: ['packages/cli/src/ui-server.ts'],
         },
       ]);
@@ -72,8 +74,10 @@ describe('log watcher fix-session emission', () => {
           category: 'architecture',
           severity: 'high',
           title: 'Unsafe cross-session mutable state',
-          description: 'Multiple sessions mutate a shared singleton without locks.',
-          suggestedFix: 'Scope mutable state per session and guard shared writes with synchronization.',
+                    description: 'Multiple sessions mutate a shared singleton without locks.',
+          evidence: 'Repeated concurrent writes against shared singleton in session trace.',
+          recommendedAction: 'Scope mutable state per session and guard shared writes with synchronization.',
+
         },
       ]);
 
@@ -85,8 +89,10 @@ describe('log watcher fix-session emission', () => {
           category: 'architecture',
           severity: 'critical',
           title: 'Unsafe cross session mutable state',
-          description: 'Completely different wording for body should still merge by equivalent queue title.',
-          suggestedFix: 'Apply synchronization and isolate state.',
+                    description: 'Completely different wording for body should still merge by equivalent queue title.',
+          evidence: 'Equivalent architecture risk surfaced in another session with same underlying shared-state pattern.',
+          recommendedAction: 'Apply synchronization and isolate state.',
+
           relevantFiles: ['packages/cli/src/observer/daemon.ts'],
         },
       ]);
@@ -127,8 +133,10 @@ describe('log watcher fix-session emission', () => {
           category: 'error-pattern',
           severity: 'high',
           title: 'Crash loop in API handler',
-          description: 'Handler retries endlessly when upstream returns malformed payload.',
-          suggestedFix: 'Add schema guard and stop retrying on non-retryable errors.',
+                    description: 'Handler retries endlessly when upstream returns malformed payload.',
+          evidence: 'Retry loop observed after malformed payload errors with no non-retryable guard.',
+          recommendedAction: 'Add schema guard and stop retrying on non-retryable errors.',
+
           relevantFiles: ['packages/cli/src/ui-server.ts'],
         },
       ]);
@@ -158,8 +166,10 @@ describe('log watcher fix-session emission', () => {
           category: 'error-pattern',
           severity: 'high',
           title: 'Crash loop in API handler',
-          description: 'Handler retries endlessly when upstream returns malformed payload.',
-          suggestedFix: 'Add schema guard and stop retrying on non-retryable errors.',
+                    description: 'Handler retries endlessly when upstream returns malformed payload.',
+          evidence: 'Duplicate batch shows same malformed payload loop pattern.',
+          recommendedAction: 'Add schema guard and stop retrying on non-retryable errors.',
+
         },
       ]);
 
@@ -171,8 +181,10 @@ describe('log watcher fix-session emission', () => {
           category: 'performance',
           severity: 'medium',
           title: 'Excessive log polling',
-          description: 'Loop polls status endpoint too frequently under load.',
-          suggestedFix: 'Back off polling frequency and debounce updates.',
+                    description: 'Loop polls status endpoint too frequently under load.',
+          evidence: 'High-frequency polling lines dominate the sampled log batch.',
+          recommendedAction: 'Back off polling frequency and debounce updates.',
+
         },
       ]);
 
@@ -203,8 +215,10 @@ describe('log watcher fix-session emission', () => {
             category: 'error-pattern',
             severity: 'high',
             title: 'Repeated timeout',
-            description: 'Service call times out repeatedly.',
-            suggestedFix: 'Increase timeout guard and add jittered retry cap.',
+                        description: 'Service call times out repeatedly.',
+            evidence: 'timeout after 30000ms',
+            recommendedAction: 'Increase timeout guard and add jittered retry cap.',
+
             logSnippet: 'timeout after 30000ms',
           },
         ],
@@ -255,8 +269,10 @@ describe('log watcher fix-session emission', () => {
             category: 'architecture',
             severity: 'medium',
             title: 'Unsafe cross-session mutable state',
-            description: 'Old equivalent finding already completed.',
-            suggestedFix: 'Historical fix',
+                        description: 'Old equivalent finding already completed.',
+            evidence: 'Legacy completed record.',
+            recommendedAction: 'Historical fix',
+
             observedInSessions: ['legacy-session'],
             detectedAt: new Date().toISOString(),
             fixSessionId: 'legacy-fix-session',
@@ -284,8 +300,10 @@ describe('log watcher fix-session emission', () => {
           category: 'architecture',
           severity: 'high',
           title: 'Unsafe cross session mutable state',
-          description: 'Fresh finding should become a new queued task because prior one is completed.',
-          suggestedFix: 'Apply synchronization and isolate state.',
+                    description: 'Fresh finding should become a new queued task because prior one is completed.',
+          evidence: 'New session reveals unresolved shared-state writes despite prior completed item.',
+          recommendedAction: 'Apply synchronization and isolate state.',
+
         },
       ]);
 
@@ -312,8 +330,10 @@ describe('log watcher fix-session emission', () => {
             category: 'code-quality',
             severity: 'medium',
             title: 'Historical spawned finding',
-            description: 'Old finding kept as spawned from a prior process.',
-            suggestedFix: 'Historical fix',
+                        description: 'Old finding kept as spawned from a prior process.',
+            evidence: 'Legacy spawned record from prior process run.',
+            recommendedAction: 'Historical fix',
+
             observedInSessions: ['legacy-session'],
             detectedAt: new Date().toISOString(),
             fixSessionId: 'legacy-fix-session',
@@ -341,8 +361,10 @@ describe('log watcher fix-session emission', () => {
           category: 'error-pattern',
           severity: 'high',
           title: 'Fresh issue A',
-          description: 'New issue A from current process.',
-          suggestedFix: 'Fix issue A.',
+                    description: 'New issue A from current process.',
+          evidence: 'Current process emitted repeated error-pattern A logs.',
+          recommendedAction: 'Fix issue A.',
+
         },
       ]);
 
@@ -351,8 +373,10 @@ describe('log watcher fix-session emission', () => {
           category: 'error-pattern',
           severity: 'high',
           title: 'Fresh issue B',
-          description: 'New issue B from current process.',
-          suggestedFix: 'Fix issue B.',
+                    description: 'New issue B from current process.',
+          evidence: 'Current process emitted repeated error-pattern B logs.',
+          recommendedAction: 'Fix issue B.',
+
         },
       ]);
 

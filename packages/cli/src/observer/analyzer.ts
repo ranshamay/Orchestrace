@@ -73,8 +73,10 @@ function buildAnalysisPrompt(summaries: SessionSummary[], allowedCategories: Fin
       '      "category": "code-quality" | "performance" | "agent-efficiency" | "architecture" | "test-coverage",\n' +
       '      "severity": "low" | "medium" | "high" | "critical",\n' +
       '      "title": "Short one-line title",\n' +
-      '      "description": "Detailed description of the issue found",\n' +
-      '      "suggestedFix": "Concrete implementation instruction that could be used as a task prompt",\n' +
+            '      "description": "Detailed description of the issue found",\n' +
+      '      "evidence": "Concrete evidence observed in logs/tool traces/plan steps",\n' +
+      '      "recommendedAction": "Concrete implementation instruction that could be used as a task prompt",\n' +
+
       '      "relevantFiles": ["path/to/file.ts"]  // optional\n' +
       '    }\n' +
       '  ]\n' +
@@ -112,13 +114,14 @@ function parseAnalysisResponse(text: string, allowedCategories: FindingCategory[
     const validSeverities: FindingSeverity[] = ['low', 'medium', 'high', 'critical'];
 
     const mappedFindings: AnalysisResult['findings'] = parsed.findings
-      .filter(
+            .filter(
         (f: Record<string, unknown>) =>
           typeof f.title === 'string' &&
           typeof f.description === 'string' &&
-          typeof f.suggestedFix === 'string',
+          (typeof f.recommendedAction === 'string' || typeof f.suggestedFix === 'string'),
       )
       .map((f: Record<string, unknown>) => ({
+
         category: validCategories.includes(f.category as FindingCategory)
           ? (f.category as FindingCategory)
           : ('code-quality' as FindingCategory),
@@ -126,8 +129,10 @@ function parseAnalysisResponse(text: string, allowedCategories: FindingCategory[
           ? (f.severity as FindingSeverity)
           : ('medium' as FindingSeverity),
         title: String(f.title),
-        description: String(f.description),
-        suggestedFix: String(f.suggestedFix),
+                description: String(f.description),
+        evidence: typeof f.evidence === 'string' ? String(f.evidence) : '',
+        recommendedAction: String(f.recommendedAction ?? f.suggestedFix ?? ''),
+
         relevantFiles: Array.isArray(f.relevantFiles)
           ? f.relevantFiles.filter((p: unknown) => typeof p === 'string')
           : undefined,

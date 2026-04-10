@@ -23,9 +23,10 @@ export class FindingRegistry {
     try {
       const raw = await readFile(this.filePath, 'utf-8');
       const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed)) {
-        this.findings = parsed;
+            if (Array.isArray(parsed)) {
+        this.findings = parsed.map((raw) => normalizeFindingRecord(raw));
       }
+
     } catch {
       // File doesn't exist or is corrupted — start fresh
       this.findings = [];
@@ -50,8 +51,10 @@ export class FindingRegistry {
       category: FindingCategory;
       severity: FindingSeverity;
       title: string;
-      description: string;
-      suggestedFix: string;
+            description: string;
+      evidence: string;
+      recommendedAction: string;
+
       relevantFiles?: string[];
     },
     sessionIds: string[],
@@ -139,10 +142,12 @@ export class FindingRegistry {
 
 function mergeFindingSignal(
   record: FindingRecord,
-  incoming: {
+    incoming: {
     severity: FindingSeverity;
+    evidence?: string;
     relevantFiles?: string[];
   },
+
   sessionIds: string[],
 ): void {
   // Track additional source sessions.
@@ -155,12 +160,18 @@ function mergeFindingSignal(
     }
   }
 
-  // Escalate severity when a stronger signal appears.
+    // Escalate severity when a stronger signal appears.
   if (compareSeverity(incoming.severity, record.severity) > 0) {
     record.severity = incoming.severity;
   }
 
+  // Prefer richer evidence text if provided.
+  if (typeof incoming.evidence === 'string' && incoming.evidence.trim().length > record.evidence.trim().length) {
+    record.evidence = incoming.evidence;
+  }
+
   // Merge relevant file hints without duplicates.
+
   if (incoming.relevantFiles && incoming.relevantFiles.length > 0) {
     const merged = new Set([...(record.relevantFiles ?? []), ...incoming.relevantFiles]);
     record.relevantFiles = [...merged];
@@ -224,4 +235,34 @@ function computeFingerprint(category: string, title: string, description: string
   const normalized = `${category}::${title.toLowerCase().trim()}::${description.slice(0, 200).toLowerCase().trim()}`;
   return createHash('sha256').update(normalized).digest('hex').slice(0, 16);
 }
+
+function normalizeFindingRecord(raw: unknown): FindingRecord {
+  const value = (raw && typeof raw === 'object') ? (raw as Record<string, unknown>) : {};
+  return {
+    fingerprint: typeof value.fingerprint === 'string' ? value.fingerprint : '',
+    category: (typeof value.category === 'string' ? value.category : 'code-quality') as FindingCategory,
+    severity: (typeof value.severity === 'string' ? value.severity : 'medium') as FindingSeverity,
+    title: typeof value.title === 'string' ? value.title : '',
+    description: typeof value.description === 'string' ? value.description : '',
+    evidence: typeof value.evidence === 'string' ? value.evidence : '',
+    recommendedAction: typeof value.recommendedAction === 'string'
+      ? value.recommendedAction
+      : (typeof value.suggestedFix === 'string' ? value.suggestedFix : ''),
+    relevantFiles: Array.isArray(value.relevantFiles)
+      ? value.relevantFiles.filter((entry): entry is string => typeof entry === 'string')
+      : undefined,
+    observedInSessions: Array.isArray(value.observedInSessions)
+      ? value.observedInSessions.filter((entry): entry is string => typeof entry === 'string')
+      : [],
+    detectedAt: typeof value.detectedAt === 'string' ? value.detectedAt : new Date().toISOString(),
+    fixSessionId: typeof value.fixSessionId === 'string' ? value.fixSessionId : null,
+    fixStatus: (value.fixStatus === 'pending' || value.fixStatus === 'spawned' || value.fixStatus === 'completed' || value.fixStatus === 'failed')
+      ? value.fixStatus
+      : 'pending',
+    additionalSessions: Array.isArray(value.additionalSessions)
+      ? value.additionalSessions.filter((entry): entry is string => typeof entry === 'string')
+      : [],
+  };
+}
+
 
