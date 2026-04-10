@@ -1043,7 +1043,7 @@ describe('orchestrate replay capture', () => {
     }
   });
 
-  it('fails planning early when pre-first-tool token budget is exceeded', async () => {
+    it('fails planning early when pre-first-tool token budget is exceeded', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'orchestrace-replay-token-guard-'));
 
     try {
@@ -1078,7 +1078,111 @@ describe('orchestrate replay capture', () => {
     }
   }, 15_000);
 
+  it('fails planning when successful tool-call budget is exceeded', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'orchestrace-replay-planning-tool-budget-fail-'));
+
+    try {
+      const outputs = await orchestrate(makeSingleNodeGraph(), {
+        llm: createAdapter({
+          planningBehavior: async ({ options, signal }) => {
+            options?.onToolCall?.({
+              type: 'started',
+              toolCallId: 'plan-todo-1',
+              toolName: 'todo_set',
+              arguments: '{"items":[{"id":"p1","title":"Plan","status":"in_progress","weight":100}]}',
+            });
+            options?.onToolCall?.({
+              type: 'result',
+              toolCallId: 'plan-todo-1',
+              toolName: 'todo_set',
+              result: 'Stored 1 todo item(s).',
+              isError: false,
+            });
+            options?.onToolCall?.({
+              type: 'started',
+              toolCallId: 'plan-graph-1',
+              toolName: 'agent_graph_set',
+              arguments: '{"nodes":[{"id":"a1","prompt":"Inspect docs","weight":100}]}',
+            });
+            options?.onToolCall?.({
+              type: 'result',
+              toolCallId: 'plan-graph-1',
+              toolName: 'agent_graph_set',
+              result: 'Stored agent dependency graph with 1 node(s).',
+              isError: false,
+            });
+
+            for (let index = 0; index < 13; index += 1) {
+              if (signal?.aborted) {
+                throw signal.reason;
+              }
+              const toolCallId = `plan-read-${index + 1}`;
+              options?.onToolCall?.({
+                type: 'started',
+                toolCallId,
+                toolName: 'list_directory',
+                arguments: '{"path":"."}',
+              });
+              options?.onToolCall?.({
+                type: 'result',
+                toolCallId,
+                toolName: 'list_directory',
+                result: 'Listed entries.',
+                isError: false,
+              });
+            }
+
+            return {
+              text: 'Should not complete when budget is exceeded.',
+              usage: { input: 8, output: 4, cost: 0 },
+              metadata: { stopReason: 'end_turn', endpoint: 'https://example.test' },
+            };
+          },
+        }),
+        cwd,
+        requirePlanApproval: false,
+        planningSystemPrompt: 'planning',
+        implementationSystemPrompt: 'implementation',
+        maxPlanningToolCallsPerAttempt: 12,
+      });
+
+      const output = outputs.get('task-1');
+      expect(output?.status).toBe('failed');
+      expect(output?.error).toContain('Planning tool-call budget exceeded (13/12 successful tool calls)');
+      expect(output?.error).toContain('defer edge-case discovery to implementation');
+      expect(output?.replay?.attempts.every((attempt) => attempt.phase === 'planning')).toBe(true);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('allows planning to succeed within the configured tool-call budget', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'orchestrace-replay-planning-tool-budget-pass-'));
+
+    try {
+      const outputs = await orchestrate(makeSingleNodeGraph(), {
+        llm: createAdapter({ planningDelegationDelaySuccessfulCalls: 9 }),
+        cwd,
+        requirePlanApproval: false,
+        planningSystemPrompt: 'planning',
+        implementationSystemPrompt: 'implementation',
+        maxPlanningToolCallsPerAttempt: 12,
+      });
+
+      const output = outputs.get('task-1');
+      expect(output?.status).toBe('completed');
+      const planningAttempt = output?.replay?.attempts.find((attempt) => attempt.phase === 'planning');
+      expect(planningAttempt?.error).toBeUndefined();
+      const successfulToolResults =
+        planningAttempt?.toolCalls.filter((call) => call.status === 'result' && !call.isError) ?? [];
+      expect(successfulToolResults.length).toBeLessThanOrEqual(12);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
   it('includes granular planning contract guidance in planning prompt', async () => {
+
     const cwd = await mkdtemp(join(tmpdir(), 'orchestrace-replay-plan-prompt-'));
     const capturedPlanningPrompts: string[] = [];
 
@@ -1106,9 +1210,13 @@ describe('orchestrate replay capture', () => {
       expect(planningPrompt).toContain('agent_graph_set (required)');
       expect(planningPrompt).toContain('## Sub-agent delegation (your choice)');
       expect(planningPrompt).toContain('YOU decide whether to use sub-agents and how many');
-      expect(planningPrompt).toContain('## Effort guidance');
+            expect(planningPrompt).toContain('## Effort guidance');
       expect(planningPrompt).toContain('Scale your planning depth to match the task complexity');
+      expect(planningPrompt).toContain('Planning has a hard tool-call budget per attempt');
+      expect(planningPrompt).toContain('After identifying key files and contract shape, emit a concrete plan');
+      expect(planningPrompt).toContain('Prefer a plan-then-validate cadence over exhaustive pre-plan investigation');
     } finally {
+
       await rm(cwd, { recursive: true, force: true });
     }
   });

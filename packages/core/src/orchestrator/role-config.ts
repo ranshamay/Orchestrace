@@ -63,12 +63,16 @@ export function buildPlanningPrompt(
   const sections: PromptSection[] = [
     {
       name: PromptSectionName.Goal,
-      lines: [
+            lines: [
         'Create an implementation plan for the following task.',
         'Scale your planning depth to match the task complexity - simple tasks need minimal plans, complex tasks need detailed multi-stage plans.',
         'Within the first 1-2 thinking cycles, make a concrete tool call to gather grounding context before extended narration.',
+        'Planning has a hard tool-call budget per attempt (runtime enforced, default 12 successful calls): converge quickly after core contract discovery.',
+        'After identifying key files and contract shape, emit a concrete plan with explicit TODO items and defer edge-case discovery to implementation.',
+        'Prefer a plan-then-validate cadence over exhaustive pre-plan investigation.',
         'Before each tool call and after each tool result, narrate your reasoning briefly: what you learned, what you plan to do next, and why.',
       ],
+
     },
     {
       name: PromptSectionName.Autonomy,
