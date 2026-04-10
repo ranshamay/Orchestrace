@@ -7165,6 +7165,8 @@ type SessionIdWorkspacePathRelation = {
 type SessionPlanningGuardState = {
   consecutiveNonWriteToolCalls: number;
   forcedImplementation: boolean;
+  requireImmediateWriteEdit: boolean;
+  declarationViolationCount: number;
 };
 
 export function classifyWorkspacePathSessionIdRelation(sessionId: string, workspacePath: string): SessionIdWorkspacePathRelation {
@@ -7253,6 +7255,8 @@ export function getSessionPlanningGuardState(): SessionPlanningGuardState {
   return {
     consecutiveNonWriteToolCalls: 0,
     forcedImplementation: false,
+    requireImmediateWriteEdit: false,
+    declarationViolationCount: 0,
   };
 }
 
@@ -7316,6 +7320,46 @@ function resolvePlanningBudgetPercent(): number {
   return Math.min(100, Math.max(1, parsed));
 }
 
+function normalizePlanningGuardText(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+export function hasPlanningSufficiencyDeclaration(text: string): boolean {
+  const normalized = normalizePlanningGuardText(text);
+  if (!normalized) {
+    return false;
+  }
+
+  const declarations = [
+    /(have|ve) enough (source )?(context|information) (to|for) (refactor|edit|implement|proceed)/,
+    /(enough|sufficient) (source )?(context|information).*(refactor|edit|implement|proceed)/,
+    /(i ll|i will|i am going to) proceed (with|to) (code )?(edits|changes|implementation)/,
+    /proceed(ing)? (with|to) (code )?(edits|changes|implementation)/,
+    /(ready|prepared) to (edit|implement|write)/,
+  ];
+
+  return declarations.some((pattern) => pattern.test(normalized));
+}
+
+export function registerPlanningSufficiencyDeclaration(params: {
+  sessionId: string;
+  declarationText: string;
+  sessionPlanningGuards: Map<string, SessionPlanningGuardState>;
+}): SessionPlanningGuardState {
+  const state = params.sessionPlanningGuards.get(params.sessionId) ?? getSessionPlanningGuardState();
+  params.sessionPlanningGuards.set(params.sessionId, state);
+
+  if (hasPlanningSufficiencyDeclaration(params.declarationText)) {
+    state.requireImmediateWriteEdit = true;
+  }
+
+  return state;
+}
+
 export function enforcePlanningToolCallGuard(params: {
   session: WorkSession;
   continuationPhase: SessionPromptPhase;
@@ -7327,18 +7371,41 @@ export function enforcePlanningToolCallGuard(params: {
   const existing = params.sessionPlanningGuards.get(params.session.id) ?? getSessionPlanningGuardState();
   params.sessionPlanningGuards.set(params.session.id, existing);
 
-  if (params.continuationPhase !== 'planning') {
+    if (params.continuationPhase !== 'planning') {
+    return existing;
+  }
+
+  if (params.toolEvent.type !== 'started') {
     return existing;
   }
 
   if (isWriteToolCallEvent(params.toolEvent)) {
     existing.consecutiveNonWriteToolCalls = 0;
+    existing.requireImmediateWriteEdit = false;
     return existing;
   }
 
-  if (params.toolEvent.type === 'started') {
-    existing.consecutiveNonWriteToolCalls += 1;
+  if (existing.requireImmediateWriteEdit) {
+    existing.declarationViolationCount += 1;
+    params.session.llmStatus = {
+      ...params.session.llmStatus,
+      state: 'using-tools',
+      label: 'Using Tools',
+      detail: 'Policy violation: after declaring sufficient context, the next tool call must be write_file or edit_file. Redirecting to immediate write/edit.',
+      phase: 'planning',
+      updatedAt: now(),
+    };
+
+    void params.persistEvent(params.session.id, {
+      time: now(),
+      type: 'session:llm-status-change',
+      payload: { llmStatus: params.session.llmStatus },
+    });
+    params.uiStatePersistence.schedule();
+    return existing;
   }
+
+  existing.consecutiveNonWriteToolCalls += 1;
 
   const threshold = resolvePlanningGuardThreshold();
   if (existing.forcedImplementation || existing.consecutiveNonWriteToolCalls <= threshold) {
@@ -8139,7 +8206,9 @@ export function buildSessionSystemPrompt(session: WorkSession, phase: SessionPro
             'Produce a concrete implementation plan with explicit staged execution and validation steps.',
             'Do not perform direct code edits in planning mode.',
           'For simple single-file tasks, skip sub-agent delegation and proceed with direct plan publication.',
-          `Planning is budgeted: keep planning activity under ${planningBudgetPercent}% of total effort.`,
+                    `Planning is budgeted: keep planning activity under ${planningBudgetPercent}% of total effort.`,
+          'Hard constraint: after any statement declaring sufficient context (for example "I have enough context" or "I will proceed with edits"), the very next tool call must be write_file or edit_file.',
+          'If a read/search/recon tool call occurs immediately after such a declaration, treat it as a policy violation and redirect to immediate write/edit.',
           'If session guard thresholds are exceeded, force implementation and continue execution.',
             'Planning output must be highly granular and atomic: each task should represent one action and one completion outcome.',
             'Split broad, multi-area, or multi-step tasks into smaller independent tasks before finalizing.',
