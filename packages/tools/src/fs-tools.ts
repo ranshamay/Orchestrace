@@ -330,15 +330,8 @@ export function createFilesystemTools(options: FilesystemToolOptions): Registere
             minConcurrency: Type.Optional(Type.Number({ minimum: 1, maximum: MAX_BATCH_CONCURRENCY })),
           }),
         },
-        execute: async (toolArgs) => {
+                execute: async (toolArgs) => {
           const files = asEditBatchRequests(toolArgs.files);
-          const duplicates = findDuplicateTargets(options.cwd, files.map((entry) => entry.path));
-          if (duplicates.length > 0) {
-            return {
-              content: `Duplicate paths are not allowed: ${duplicates.join(', ')}`,
-              isError: true,
-            };
-          }
 
           const requestedConcurrency = asPositiveInteger(toolArgs.concurrency)
             ?? options.batchConcurrency
@@ -353,8 +346,32 @@ export function createFilesystemTools(options: FilesystemToolOptions): Registere
               ?? DEFAULT_BATCH_MIN_CONCURRENCY,
           );
 
-          const mapper = async (request: EditBatchRequest) => {
-            const target = resolveWorkspacePath(options.cwd, request.path);
+          const mappedRequests = files.map((request, index) => ({
+            request,
+            index,
+            target: resolveWorkspacePath(options.cwd, request.path),
+          }));
+
+          const groupedRequests = new Map<string, typeof mappedRequests>();
+          for (const entry of mappedRequests) {
+            const existing = groupedRequests.get(entry.target);
+            if (existing) {
+              existing.push(entry);
+            } else {
+              groupedRequests.set(entry.target, [entry]);
+            }
+          }
+
+          const requestGroups = [...groupedRequests.values()];
+          const results = new Array<{
+            path: string;
+            ok: boolean;
+            replaceAll?: boolean;
+            replacements?: number;
+            error?: string;
+          }>(files.length);
+
+          const runSingleEdit = async (request: EditBatchRequest, target: string) => {
             try {
               const current = await readFile(target, 'utf-8');
               const occurrences = countOccurrences(current, request.oldText);
@@ -387,19 +404,30 @@ export function createFilesystemTools(options: FilesystemToolOptions): Registere
             }
           };
 
+          const groupMapper = async (group: typeof mappedRequests) => {
+            let hadFailure = false;
+            for (const entry of group) {
+              const result = await runSingleEdit(entry.request, entry.target);
+              results[entry.index] = result;
+              if (!result.ok) {
+                hadFailure = true;
+              }
+            }
+
+            return { hadFailure };
+          };
+
           const batchRun = adaptiveConcurrency
-            ? await mapWithAdaptiveConcurrency(files, {
+            ? await mapWithAdaptiveConcurrency(requestGroups, {
                 initialConcurrency: concurrency,
                 minConcurrency,
                 maxConcurrency: MAX_BATCH_CONCURRENCY,
-              }, mapper, (entry) => !entry.ok)
+              }, groupMapper, (entry) => entry.hadFailure)
             : {
-                results: await mapWithConcurrency(files, concurrency, mapper),
+                results: await mapWithConcurrency(requestGroups, concurrency, groupMapper),
                 finalConcurrency: concurrency,
                 windows: 1,
               };
-
-          const results = batchRun.results;
 
           const failures = results.filter((entry) => !entry.ok).length;
           return {

@@ -356,7 +356,7 @@ describe('batch filesystem tools', () => {
     expect(parsedVerify.files[1].content).toContain('value = 1');
   });
 
-  it('edit_files applies replacements in parallel and reports partial failures', async () => {
+    it('edit_files applies replacements in parallel and reports partial failures', async () => {
     const cwd = await makeWorkspace();
     const toolset = createAgentToolset({ cwd, phase: 'implementation', taskType: 'code' });
 
@@ -415,6 +415,113 @@ describe('batch filesystem tools', () => {
     expect(parsedVerify.files[0].content).toContain('value = 11');
     expect(parsedVerify.files[1].content).toContain('value = 1');
   });
+
+  it('edit_files processes duplicate paths sequentially instead of rejecting the batch', async () => {
+    const cwd = await makeWorkspace();
+    const toolset = createAgentToolset({ cwd, phase: 'implementation', taskType: 'code' });
+
+    const seed = await toolset.executeTool({
+      id: '1',
+      name: 'write_file',
+      arguments: {
+        path: 'src/dup.ts',
+        content: 'const x = 1;\nconst y = 2;\n',
+      },
+    });
+    expect(seed.isError).toBeFalsy();
+
+    const editResult = await toolset.executeTool({
+      id: '2',
+      name: 'edit_files',
+      arguments: {
+        files: [
+          { path: 'src/dup.ts', oldText: 'x = 1', newText: 'x = 10' },
+          { path: 'src/dup.ts', oldText: 'y = 2', newText: 'y = 20' },
+        ],
+        concurrency: 4,
+      },
+    });
+
+    expect(editResult.isError).toBe(false);
+    const parsedEdit = JSON.parse(editResult.content) as {
+      total: number;
+      successes: number;
+      failures: number;
+      files: Array<{ path: string; ok: boolean }>;
+    };
+    expect(parsedEdit.total).toBe(2);
+    expect(parsedEdit.successes).toBe(2);
+    expect(parsedEdit.failures).toBe(0);
+    expect(parsedEdit.files).toMatchObject([
+      { path: 'src/dup.ts', ok: true },
+      { path: 'src/dup.ts', ok: true },
+    ]);
+
+    const verify = await toolset.executeTool({
+      id: '3',
+      name: 'read_file',
+      arguments: {
+        path: 'src/dup.ts',
+      },
+    });
+
+    expect(verify.isError).toBeFalsy();
+    expect(verify.content).toContain('x = 10');
+    expect(verify.content).toContain('y = 20');
+  });
+
+  it('edit_files reports partial failures for duplicate alias paths targeting the same file', async () => {
+    const cwd = await makeWorkspace();
+    const toolset = createAgentToolset({ cwd, phase: 'implementation', taskType: 'code' });
+
+    const seed = await toolset.executeTool({
+      id: '1',
+      name: 'write_file',
+      arguments: {
+        path: 'src/alias.ts',
+        content: 'export const value = 1;\n',
+      },
+    });
+    expect(seed.isError).toBeFalsy();
+
+    const editResult = await toolset.executeTool({
+      id: '2',
+      name: 'edit_files',
+      arguments: {
+        files: [
+          { path: 'src/alias.ts', oldText: 'value = 1', newText: 'value = 2' },
+          { path: './src/alias.ts', oldText: 'value = 1', newText: 'value = 3' },
+        ],
+      },
+    });
+
+    expect(editResult.isError).toBe(true);
+    const parsedEdit = JSON.parse(editResult.content) as {
+      total: number;
+      successes: number;
+      failures: number;
+      files: Array<{ path: string; ok: boolean; error?: string }>;
+    };
+
+    expect(parsedEdit.total).toBe(2);
+    expect(parsedEdit.successes).toBe(1);
+    expect(parsedEdit.failures).toBe(1);
+    expect(parsedEdit.files[0]).toMatchObject({ path: 'src/alias.ts', ok: true });
+    expect(parsedEdit.files[1]).toMatchObject({ path: './src/alias.ts', ok: false });
+    expect(parsedEdit.files[1].error).toContain('No matching text found');
+
+    const verify = await toolset.executeTool({
+      id: '3',
+      name: 'read_file',
+      arguments: {
+        path: 'src/alias.ts',
+      },
+    });
+
+    expect(verify.isError).toBeFalsy();
+    expect(verify.content).toContain('value = 2');
+  });
+
 
     it('read_file returns correct line slices for large files without full-read truncation artifacts', async () => {
     const cwd = await makeWorkspace();
