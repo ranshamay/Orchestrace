@@ -33,9 +33,13 @@ type LogWatcherFindingInput = {
   category: LogFindingCategory;
   severity: FindingSeverity;
   title: string;
-  issueSummary: string;
-  evidence: string[];
-  severityRationale: string;
+  issueSummary?: string;
+  /** Legacy alias retained for backward compatibility at ingestion boundaries. */
+  description?: string;
+  evidence?: string[];
+  severityRationale?: string;
+  /** Legacy alias retained for backward compatibility at ingestion boundaries. */
+  suggestedFix?: string;
   relevantFiles?: string[];
 };
 
@@ -43,9 +47,13 @@ type RealtimeFindingInput = {
   category: FindingCategory;
   severity: FindingSeverity;
   title: string;
-  issueSummary: string;
-  evidence: string[];
-  severityRationale: string;
+  issueSummary?: string;
+  /** Legacy alias retained for backward compatibility at ingestion boundaries. */
+  description?: string;
+  evidence?: string[];
+  severityRationale?: string;
+  /** Legacy alias retained for backward compatibility at ingestion boundaries. */
+  suggestedFix?: string;
   relevantFiles?: string[];
 };
 
@@ -221,13 +229,14 @@ export class ObserverDaemon {
         continue;
       }
 
-            const { isNew } = this.registry.register({
+                  const normalized = normalizeFindingFields(finding);
+      const { isNew } = this.registry.register({
         category: mappedCategory,
         severity: finding.severity,
         title: finding.title,
-        issueSummary: finding.issueSummary,
-        evidence: finding.evidence,
-        severityRationale: finding.severityRationale,
+        issueSummary: normalized.issueSummary,
+        evidence: normalized.evidence,
+        severityRationale: normalized.severityRationale,
         relevantFiles: finding.relevantFiles,
       }, [LOG_WATCHER_SOURCE_SESSION_ID]);
 
@@ -265,13 +274,14 @@ export class ObserverDaemon {
         continue;
       }
 
-            const { isNew } = this.registry.register({
+                  const normalized = normalizeFindingFields(finding);
+      const { isNew } = this.registry.register({
         category: finding.category,
         severity: finding.severity,
         title: finding.title,
-        issueSummary: finding.issueSummary,
-        evidence: finding.evidence,
-        severityRationale: finding.severityRationale,
+        issueSummary: normalized.issueSummary,
+        evidence: normalized.evidence,
+        severityRationale: normalized.severityRationale,
         relevantFiles: finding.relevantFiles,
       }, [sourceSessionId]);
 
@@ -737,3 +747,44 @@ function mapLogWatcherCategory(category: LogFindingCategory): FindingCategory {
       return 'code-quality';
   }
 }
+
+function normalizeFindingFields(
+  finding: {
+    issueSummary?: string;
+    description?: string;
+    evidence?: string[];
+    severityRationale?: string;
+    suggestedFix?: string;
+  },
+): { issueSummary: string; evidence: string[]; severityRationale: string } {
+  const issueSummary = sanitizeOptionalString(finding.issueSummary)
+    ?? sanitizeOptionalString(finding.description)
+    ?? 'No summary provided.';
+
+  const rawEvidence = Array.isArray(finding.evidence)
+    ? finding.evidence.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+    : [];
+
+  const evidence = rawEvidence.slice(0, 3);
+  if (evidence.length < 2) {
+    evidence.push(issueSummary);
+  }
+  if (evidence.length < 2) {
+    evidence.push(sanitizeOptionalString(finding.suggestedFix) ?? 'No additional evidence provided.');
+  }
+
+  const severityRationale = sanitizeOptionalString(finding.severityRationale)
+    ?? sanitizeOptionalString(finding.suggestedFix)
+    ?? 'Severity assessed from observer signal and available evidence.';
+
+  return { issueSummary, evidence: evidence.slice(0, 3), severityRationale };
+}
+
+function sanitizeOptionalString(value: unknown): string | undefined {
+  if (typeof value !== 'string') {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+

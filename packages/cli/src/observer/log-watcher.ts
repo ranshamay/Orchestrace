@@ -319,36 +319,49 @@ function parseLogFindings(text: string): LogFinding[] {
     const raw = Array.isArray(parsed) ? parsed : parsed?.findings;
     if (!Array.isArray(raw)) return [];
 
-        return raw
-      .filter((f: Record<string, unknown>) => {
-        if (
-          !f ||
-          typeof f.title !== 'string' ||
-          typeof f.issueSummary !== 'string' ||
-          typeof f.severityRationale !== 'string' ||
-          !Array.isArray(f.evidence)
-        ) {
-          return false;
-        }
-        const evidence = f.evidence.filter((item: unknown) => typeof item === 'string');
-        return evidence.length >= 2 && evidence.length <= 3;
-      })
-      .map((f: Record<string, unknown>) => ({
+                const findings: LogFinding[] = [];
+
+    for (const f of raw as Record<string, unknown>[]) {
+      if (!f || typeof f.title !== 'string') {
+        continue;
+      }
+
+      const issueSummary = normalizeOptionalString(f.issueSummary)
+        ?? normalizeOptionalString(f.description)
+        ?? '';
+      if (!issueSummary) {
+        continue;
+      }
+
+      const severityRationale = normalizeOptionalString(f.severityRationale)
+        ?? normalizeOptionalString(f.suggestedFix)
+        ?? 'Severity inferred from observed backend log pattern.';
+
+      const evidence = normalizeEvidence(
+        f.evidence,
+        issueSummary,
+        normalizeOptionalString(f.logSnippet),
+      );
+
+      const finding: LogFinding = {
         id: `logf-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
         category: validateLogCategory(f.category as string),
         severity: validateSeverity(f.severity as string),
         title: String(f.title),
-        issueSummary: String(f.issueSummary),
-        evidence: (f.evidence as unknown[])
-          .filter((item: unknown) => typeof item === 'string')
-          .slice(0, 3) as string[],
-        severityRationale: String(f.severityRationale),
+        issueSummary,
+        evidence,
+        severityRationale,
         relevantFiles: Array.isArray(f.relevantFiles)
-          ? f.relevantFiles.filter((x: unknown) => typeof x === 'string')
+          ? f.relevantFiles.filter((x: unknown): x is string => typeof x === 'string')
           : undefined,
         logSnippet: String(f.logSnippet ?? ''),
         detectedAt: new Date().toISOString(),
-      }));
+      };
+
+      findings.push(finding);
+    }
+
+    return findings;
   } catch {
     return [];
   }
@@ -358,6 +371,34 @@ function validateLogCategory(cat: string): LogFindingCategory {
   const valid: LogFindingCategory[] = ['error-pattern', 'performance', 'configuration', 'reliability', 'security'];
   return valid.includes(cat as LogFindingCategory) ? (cat as LogFindingCategory) : 'error-pattern';
 }
+
+function normalizeEvidence(rawEvidence: unknown, issueSummary: string, logSnippet?: string): string[] {
+  const evidence = Array.isArray(rawEvidence)
+    ? rawEvidence
+      .filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+      .map((item) => item.trim())
+      .slice(0, 3)
+    : [];
+
+  if (evidence.length < 2) {
+    evidence.push(issueSummary);
+  }
+  if (evidence.length < 2) {
+    evidence.push(logSnippet && logSnippet.trim().length > 0 ? logSnippet.trim() : 'No additional evidence provided.');
+  }
+
+  return evidence.slice(0, 3);
+}
+
+function normalizeOptionalString(value: unknown): string | undefined {
+  if (typeof value !== 'string') {
+    return undefined;
+  }
+
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
 
 function validateSeverity(sev: string): FindingSeverity {
   const valid: FindingSeverity[] = ['low', 'medium', 'high', 'critical'];

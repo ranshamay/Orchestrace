@@ -190,22 +190,27 @@ function isEquivalentFinding(
     return true;
   }
 
-    const existingDesc = normalizeForComparison(existing.issueSummary);
-  const incomingDesc = normalizeForComparison(incoming.issueSummary);
-  if (existingDesc.length === 0 || incomingDesc.length === 0) {
+  const existingSummary = normalizeForComparison(existing.issueSummary);
+  const incomingSummary = normalizeForComparison(incoming.issueSummary);
+  if (existingSummary.length === 0 || incomingSummary.length === 0) {
     return false;
   }
 
-  return existingDesc === incomingDesc;
+  return existingSummary === incomingSummary;
 }
 
-function normalizeForComparison(text: string): string {
+function normalizeForComparison(text: unknown): string {
+  if (typeof text !== 'string') {
+    return '';
+  }
+
   return text
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, ' ')
     .trim()
     .replace(/\s+/g, ' ');
 }
+
 
 function compareSeverity(a: FindingSeverity, b: FindingSeverity): number {
   const rank: Record<FindingSeverity, number> = {
@@ -222,7 +227,9 @@ function compareSeverity(a: FindingSeverity, b: FindingSeverity): number {
  * Uses category + normalized title + first 200 chars of issue summary.
  */
 function computeFingerprint(category: string, title: string, issueSummary: string): string {
-  const normalized = `${category}::${title.toLowerCase().trim()}::${issueSummary.slice(0, 200).toLowerCase().trim()}`;
+  const safeSummary = typeof issueSummary === 'string' ? issueSummary : '';
+  const normalized = `${category}::${title.toLowerCase().trim()}::${safeSummary.slice(0, 200).toLowerCase().trim()}`;
   return createHash('sha256').update(normalized).digest('hex').slice(0, 16);
 }
+
 
