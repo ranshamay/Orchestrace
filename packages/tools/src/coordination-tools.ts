@@ -1078,7 +1078,94 @@ function usageOrZero(usage: { input: number; output: number; cost: number } | un
   };
 }
 
+function normalizeValidationPathDelimiters(message: string): string {
+  return message.replace(/\b([a-zA-Z0-9_]+(?:\/[a-zA-Z0-9_]+)+)\b/g, (match) => match.replace(/\//g, '.'));
+}
+
+function valueAtPath(root: unknown, path: string): unknown {
+  if (!path) {
+    return root;
+  }
+  const segments = path.split('.').filter((segment) => segment.length > 0);
+  let cursor: unknown = root;
+  for (const segment of segments) {
+    if (Array.isArray(cursor) && /^\d+$/.test(segment)) {
+      cursor = cursor[Number(segment)];
+      continue;
+    }
+    if (isRecord(cursor)) {
+      cursor = cursor[segment];
+      continue;
+    }
+    return undefined;
+  }
+  return cursor;
+}
+
+function inferAdditionalPropertyName(
+  toolName: SubAgentToolName,
+  path: string,
+  args: Record<string, unknown>,
+): string | undefined {
+  const target = valueAtPath(args, path);
+  if (!isRecord(target)) {
+    return undefined;
+  }
+
+  const allowedTopLevelBatch = new Set(['agents', 'concurrency', 'adaptiveConcurrency', 'minConcurrency', 'maxRetries']);
+  const allowedEntry = new Set(['nodeId', 'prompt', 'contextPacket', 'systemPrompt', 'provider', 'model', 'reasoning']);
+  const allowed = path === ''
+    ? (toolName === 'subagent_spawn_batch' ? allowedTopLevelBatch : allowedEntry)
+    : /^agents\.\d+$/.test(path)
+      ? allowedEntry
+      : undefined;
+  if (!allowed) {
+    return undefined;
+  }
+
+  return Object.keys(target).find((key) => !allowed.has(key));
+}
+
+function addAdditionalPropertyPathIfMissing(
+  toolName: SubAgentToolName,
+  message: string,
+  args: Record<string, unknown>,
+): string {
+  if (!/additional properties/i.test(message)) {
+    return message;
+  }
+
+  const propertyMatch = message.match(/['"]([a-zA-Z0-9_]+)['"]\s*(?:is|are)?\s*additional properties?/i)
+    ?? message.match(/additional properties?:?\s*['"]([a-zA-Z0-9_]+)['"]/i)
+    ?? message.match(/additional properties?:?\s*\[?['"]([a-zA-Z0-9_]+)['"]\]?/i);
+  const pathMatch = message.match(/-\s+([a-zA-Z0-9_.]+):\s+.*additional properties/i)
+    ?? message.match(/\b([a-zA-Z0-9_]+(?:\.[a-zA-Z0-9_]+)*)\b(?::\s+.*additional properties)/i);
+
+  const path = pathMatch?.[1] ?? '';
+  const property = propertyMatch?.[1] ?? inferAdditionalPropertyName(toolName, path, args);
+  if (!property || !path) {
+    return message;
+  }
+
+  const fullPath = `${path}.${property}`;
+  if (message.includes(fullPath)) {
+    return message;
+  }
+  return `${message} (${fullPath})`;
+}
+
+function formatSubAgentValidationError(
+  toolName: SubAgentToolName,
+  error: unknown,
+  args: Record<string, unknown>,
+): string {
+  const raw = error instanceof Error ? error.message : String(error);
+  const normalized = normalizeValidationPathDelimiters(raw);
+  return addAdditionalPropertyPathIfMissing(toolName, normalized, args);
+}
+
 function validateSubAgentToolArgs(
+
   toolName: SubAgentToolName,
   schema: typeof subAgentSpawnArgsSchema | typeof subAgentSpawnBatchArgsSchema,
   args: Record<string, unknown>,
@@ -1089,9 +1176,8 @@ function validateSubAgentToolArgs(
       { type: 'toolCall', id: `validate-${toolName}`, name: toolName, arguments: args },
     );
     return { ok: true };
-  } catch (error) {
-    const details = (error instanceof Error ? error.message : String(error))
-      .replace(/\b([a-zA-Z0-9_]+(?:\/[a-zA-Z0-9_]+)+)\b/g, (match) => match.replace(/\//g, '.'));
+    } catch (error) {
+    const details = formatSubAgentValidationError(toolName, error, args);
     const message = `${toolName} argument validation failed before spawn: ${details}`;
     console.warn(`[coordination-tools] ${message}`);
     return { ok: false, message };
@@ -1099,6 +1185,7 @@ function validateSubAgentToolArgs(
 }
 
 async function buildSubAgentRequestFromToolArgs(
+
   cwd: string,
   toolArgs: Record<string, unknown>,
   options?: {
