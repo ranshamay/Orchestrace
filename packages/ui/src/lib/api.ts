@@ -566,8 +566,8 @@ export interface ObserverFinding {
   severity: string;
   title: string;
   description: string;
-  evidence?: Array<{ text: string }>;
-  suggestedFix?: string;
+  issueSummary: string;
+  evidence: string[];
   relevantFiles?: string[];
   observedInSessions: string[];
   detectedAt: string;
@@ -676,8 +676,8 @@ export interface SessionObserverFinding {
   severity: string;
   title: string;
   description: string;
-  evidence?: Array<{ text: string }>;
-  suggestedFix?: string;
+  issueSummary: string;
+  evidence: string[];
   relevantFiles?: string[];
   phase: string;
   detectedAt: string;
