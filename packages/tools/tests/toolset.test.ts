@@ -356,7 +356,7 @@ describe('batch filesystem tools', () => {
     expect(parsedVerify.files[1].content).toContain('value = 1');
   });
 
-  it('edit_files applies replacements in parallel and reports partial failures', async () => {
+    it('edit_files applies replacements in parallel and reports partial failures', async () => {
     const cwd = await makeWorkspace();
     const toolset = createAgentToolset({ cwd, phase: 'implementation', taskType: 'code' });
 
@@ -416,7 +416,89 @@ describe('batch filesystem tools', () => {
     expect(parsedVerify.files[1].content).toContain('value = 1');
   });
 
-    it('read_file returns correct line slices for large files without full-read truncation artifacts', async () => {
+    it('edit_file treats repeated equivalent edit as already applied and avoids duplicate insertion', async () => {
+    const cwd = await makeWorkspace();
+    const toolset = createAgentToolset({ cwd, phase: 'implementation', taskType: 'code' });
+
+    const firstEdit = await toolset.executeTool({
+      id: '1',
+      name: 'edit_file',
+      arguments: {
+        path: 'src/file.ts',
+        oldText: 'value = 1',
+        newText: 'value = 2\nexport const url_fetch = true',
+      },
+    });
+    expect(firstEdit.isError).toBeFalsy();
+
+    const secondEdit = await toolset.executeTool({
+      id: '2',
+      name: 'edit_file',
+      arguments: {
+        path: 'src/file.ts',
+        oldText: 'value = 1',
+        newText: 'value = 2\nexport const url_fetch = true',
+      },
+    });
+
+    expect(secondEdit.isError).toBeFalsy();
+    expect(secondEdit.content).toContain('Edit already applied');
+
+    const readBack = await toolset.executeTool({
+      id: '3',
+      name: 'read_file',
+      arguments: { path: 'src/file.ts' },
+    });
+
+    expect(readBack.isError).toBeFalsy();
+    expect(readBack.content.match(/url_fetch/g)?.length ?? 0).toBe(1);
+  });
+
+    it('edit_files reports already-applied replacements as success with zero replacements', async () => {
+    const cwd = await makeWorkspace();
+    const toolset = createAgentToolset({ cwd, phase: 'implementation', taskType: 'code' });
+
+    const seed = await toolset.executeTool({
+      id: '1',
+      name: 'write_file',
+      arguments: {
+        path: 'src/already.ts',
+        content: 'export const value = 2;\n',
+      },
+    });
+    expect(seed.isError).toBeFalsy();
+
+    const editResult = await toolset.executeTool({
+      id: '2',
+      name: 'edit_files',
+      arguments: {
+        files: [
+          { path: 'src/already.ts', oldText: 'value = 1;', newText: 'value = 2;', replaceAll: false },
+        ],
+      },
+    });
+
+    expect(editResult.isError).toBeFalsy();
+    const parsedEdit = JSON.parse(editResult.content) as {
+      successes: number;
+      failures: number;
+      files: Array<{ path: string; ok: boolean; replacements?: number }>;
+    };
+    expect(parsedEdit.successes).toBe(1);
+    expect(parsedEdit.failures).toBe(0);
+    expect(parsedEdit.files[0]).toMatchObject({ path: 'src/already.ts', ok: true, replacements: 0 });
+
+    const verify = await toolset.executeTool({
+      id: '3',
+      name: 'read_file',
+      arguments: { path: 'src/already.ts' },
+    });
+    expect(verify.isError).toBeFalsy();
+    expect(verify.content).toBe('export const value = 2;');
+  });
+
+  it('read_file returns correct line slices for large files without full-read truncation artifacts', async () => {
+
     const cwd = await makeWorkspace();
     const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
 

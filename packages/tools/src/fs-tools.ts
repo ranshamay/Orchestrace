@@ -353,16 +353,26 @@ export function createFilesystemTools(options: FilesystemToolOptions): Registere
               ?? DEFAULT_BATCH_MIN_CONCURRENCY,
           );
 
-          const mapper = async (request: EditBatchRequest) => {
+                    const mapper = async (request: EditBatchRequest) => {
             const target = resolveWorkspacePath(options.cwd, request.path);
             try {
               const current = await readFile(target, 'utf-8');
-              const occurrences = countOccurrences(current, request.oldText);
-              if (occurrences === 0) {
+              const evaluation = evaluateEditRequest(current, request.oldText, request.newText);
+
+              if (evaluation.outcome === 'missing_old_text') {
                 return {
                   path: request.path,
                   ok: false,
                   error: `No matching text found in ${request.path}.`,
+                };
+              }
+
+              if (evaluation.outcome === 'already_applied') {
+                return {
+                  path: request.path,
+                  ok: true,
+                  replaceAll: request.replaceAll,
+                  replacements: 0,
                 };
               }
 
@@ -376,7 +386,7 @@ export function createFilesystemTools(options: FilesystemToolOptions): Registere
                 path: request.path,
                 ok: true,
                 replaceAll: request.replaceAll,
-                replacements: request.replaceAll ? occurrences : 1,
+                replacements: request.replaceAll ? evaluation.occurrences : 1,
               };
             } catch (error) {
               return {
@@ -437,13 +447,19 @@ export function createFilesystemTools(options: FilesystemToolOptions): Registere
           const replaceAll = Boolean(toolArgs.replaceAll);
           const target = resolveWorkspacePath(options.cwd, path);
 
-          const current = await readFile(target, 'utf-8');
-          const occurrences = countOccurrences(current, oldText);
+                    const current = await readFile(target, 'utf-8');
+          const evaluation = evaluateEditRequest(current, oldText, newText);
 
-          if (occurrences === 0) {
+          if (evaluation.outcome === 'missing_old_text') {
             return {
               content: `No matching text found in ${toWorkspaceRelative(options.cwd, target)}.`,
               isError: true,
+            };
+          }
+
+          if (evaluation.outcome === 'already_applied') {
+            return {
+              content: `Edit already applied in ${toWorkspaceRelative(options.cwd, target)}.`,
             };
           }
 
@@ -456,7 +472,7 @@ export function createFilesystemTools(options: FilesystemToolOptions): Registere
 
           return {
             content: replaceAll
-              ? `Replaced ${occurrences} occurrence(s) in ${toWorkspaceRelative(options.cwd, target)}.`
+              ? `Replaced ${evaluation.occurrences} occurrence(s) in ${toWorkspaceRelative(options.cwd, target)}.`
               : `Replaced first occurrence in ${toWorkspaceRelative(options.cwd, target)}.`,
           };
         },
@@ -931,6 +947,26 @@ function countOccurrences(text: string, needle: string): number {
   }
 
   return text.split(needle).length - 1;
+}
+
+type EditRequestEvaluation =
+  | { outcome: 'apply_edit'; occurrences: number }
+  | { outcome: 'already_applied'; occurrences: 0 }
+  | { outcome: 'missing_old_text'; occurrences: 0 };
+
+// Treat repeated equivalent edits as idempotent when oldText is gone and newText is already present.
+function evaluateEditRequest(current: string, oldText: string, newText: string): EditRequestEvaluation {
+  const occurrences = countOccurrences(current, oldText);
+  if (occurrences > 0) {
+    return { outcome: 'apply_edit', occurrences };
+  }
+
+  const alreadyApplied = countOccurrences(current, newText) > 0;
+  if (alreadyApplied) {
+    return { outcome: 'already_applied', occurrences: 0 };
+  }
+
+  return { outcome: 'missing_old_text', occurrences: 0 };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
