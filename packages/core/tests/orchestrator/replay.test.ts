@@ -1113,7 +1113,8 @@ describe('orchestrate replay capture', () => {
     }
   });
 
-  it('includes search_files regex escaping reminder in implementation prompt', async () => {
+    it('includes first-attempt-safe search_files query guidance in implementation prompt', async () => {
+
     const cwd = await mkdtemp(join(tmpdir(), 'orchestrace-replay-impl-prompt-'));
     const capturedImplementationPrompts: string[] = [];
 
@@ -1135,7 +1136,8 @@ describe('orchestrate replay capture', () => {
       expect(output?.status).toBe('completed');
       expect(capturedImplementationPrompts.length).toBeGreaterThan(0);
       const implementationPrompt = capturedImplementationPrompts[0] ?? '';
-      expect(implementationPrompt).toContain('search_files uses regex; characters like ( and ) need escaping as \\( and \\).');
+            expect(implementationPrompt).toContain('For ripgrep-backed search_files calls, use a first-attempt safe query strategy: single-token patterns (e.g., log.watcher), explicit escaped-space regex (e.g., log\\swatcher), or parallel single-word searches instead of multi-word space queries.');
+
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }
