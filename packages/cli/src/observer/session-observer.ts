@@ -24,8 +24,10 @@ export interface RealtimeFinding {
   category: FindingCategory;
   severity: FindingSeverity;
   title: string;
-  description: string;
-  suggestedFix: string;
+  issueSummary: string;
+  /** Runtime validation must enforce evidence length 2-3. */
+  evidence: string[];
+  severityRationale: string;
   relevantFiles?: string[];
   phase: string;
   detectedAt: string;
@@ -493,8 +495,8 @@ export class SessionObserver {
 
     lines.push(`Allowed categories: ${allowedCategories.join(', ')}`);
     lines.push('');
-    lines.push(
-      'Respond with a JSON object: { "findings": [{ "category": "...", "severity": "...", "title": "...", "description": "...", "suggestedFix": "...", "relevantFiles": [...] }] }',
+        lines.push(
+      'Respond with a JSON object: { "findings": [{ "category": "...", "severity": "...", "title": "...", "issueSummary": "...", "evidence": ["...", "..."], "severityRationale": "...", "relevantFiles": [...] }] }',
     );
     lines.push('Return ONLY the JSON, no other text. If no issues found, return { "findings": [] }.');
 
@@ -556,13 +558,19 @@ function parseRealtimeFindings(
     const validSeverities: FindingSeverity[] = ['low', 'medium', 'high', 'critical'];
     let idCounter = 0;
 
-    return parsed.findings
-      .filter(
-        (f: Record<string, unknown>) =>
-          typeof f.title === 'string' &&
-          typeof f.description === 'string' &&
-          typeof f.suggestedFix === 'string',
-      )
+        return parsed.findings
+      .filter((f: Record<string, unknown>) => {
+        if (
+          typeof f.title !== 'string' ||
+          typeof f.issueSummary !== 'string' ||
+          typeof f.severityRationale !== 'string' ||
+          !Array.isArray(f.evidence)
+        ) {
+          return false;
+        }
+        const evidence = f.evidence.filter((item: unknown) => typeof item === 'string');
+        return evidence.length >= 2 && evidence.length <= 3;
+      })
       .filter((f: Record<string, unknown>) =>
         allowedCategories.includes(f.category as FindingCategory),
       )
@@ -575,8 +583,11 @@ function parseRealtimeFindings(
           ? (f.severity as FindingSeverity)
           : 'medium',
         title: String(f.title),
-        description: String(f.description),
-        suggestedFix: String(f.suggestedFix),
+        issueSummary: String(f.issueSummary),
+        evidence: (f.evidence as unknown[])
+          .filter((item: unknown) => typeof item === 'string')
+          .slice(0, 3) as string[],
+        severityRationale: String(f.severityRationale),
         relevantFiles: Array.isArray(f.relevantFiles)
           ? f.relevantFiles.filter((p: unknown) => typeof p === 'string')
           : undefined,

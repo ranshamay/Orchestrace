@@ -125,11 +125,19 @@ function buildFixPrompt(finding: FindingRecord): string {
   parts.push('');
   parts.push(`Category: ${finding.category} | Severity: ${finding.severity}`);
   parts.push('');
-  parts.push('## Issue');
-  parts.push(finding.description);
+    parts.push('## Issue');
+  parts.push(finding.issueSummary);
+  parts.push('');
+  parts.push('## Evidence');
+  for (const item of finding.evidence) {
+    parts.push(`- ${item}`);
+  }
+  parts.push('');
+  parts.push('## Severity Rationale');
+  parts.push(finding.severityRationale);
   parts.push('');
   parts.push('## Task');
-  parts.push(finding.suggestedFix);
+  parts.push('Implement a focused fix for the issue above, using the evidence and severity rationale to prioritize and scope changes.');
 
   if (finding.relevantFiles && finding.relevantFiles.length > 0) {
     parts.push('');

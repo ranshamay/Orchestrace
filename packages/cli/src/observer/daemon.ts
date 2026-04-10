@@ -33,8 +33,9 @@ type LogWatcherFindingInput = {
   category: LogFindingCategory;
   severity: FindingSeverity;
   title: string;
-  description: string;
-  suggestedFix: string;
+  issueSummary: string;
+  evidence: string[];
+  severityRationale: string;
   relevantFiles?: string[];
 };
 
@@ -42,8 +43,9 @@ type RealtimeFindingInput = {
   category: FindingCategory;
   severity: FindingSeverity;
   title: string;
-  description: string;
-  suggestedFix: string;
+  issueSummary: string;
+  evidence: string[];
+  severityRationale: string;
   relevantFiles?: string[];
 };
 
@@ -219,12 +221,13 @@ export class ObserverDaemon {
         continue;
       }
 
-      const { isNew } = this.registry.register({
+            const { isNew } = this.registry.register({
         category: mappedCategory,
         severity: finding.severity,
         title: finding.title,
-        description: finding.description,
-        suggestedFix: finding.suggestedFix,
+        issueSummary: finding.issueSummary,
+        evidence: finding.evidence,
+        severityRationale: finding.severityRationale,
         relevantFiles: finding.relevantFiles,
       }, [LOG_WATCHER_SOURCE_SESSION_ID]);
 
@@ -262,12 +265,13 @@ export class ObserverDaemon {
         continue;
       }
 
-      const { isNew } = this.registry.register({
+            const { isNew } = this.registry.register({
         category: finding.category,
         severity: finding.severity,
         title: finding.title,
-        description: finding.description,
-        suggestedFix: finding.suggestedFix,
+        issueSummary: finding.issueSummary,
+        evidence: finding.evidence,
+        severityRationale: finding.severityRationale,
         relevantFiles: finding.relevantFiles,
       }, [sourceSessionId]);
 
