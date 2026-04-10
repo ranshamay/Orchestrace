@@ -5,6 +5,8 @@ import { Type } from '@mariozechner/pi-ai';
 import type { AgentToolsetOptions, RegisteredAgentTool } from './types.js';
 import { resolveWorkspacePath, toWorkspaceRelative } from './path-utils.js';
 import { formatCommandOutput, runCommand } from './command-tools/command-runner.js';
+import { buildSafeRipgrepArgs } from './command-tools/safe-ripgrep.js';
+
 import {
   asRequiredString,
   asString,
@@ -169,14 +171,15 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
         }
 
 
-        const args = ['-n', '--no-heading', '--color', 'never', '-e', query];
-        if (!useRegex) {
-          args.push('--fixed-strings');
-        }
-        if (globValidation.value) {
-          args.push('--glob', globValidation.value);
-        }
-        args.push('--', relTarget);
+                // Build ripgrep argv in one canonical place so query is always passed
+        // exactly once as a pattern via -e and never ambiguously as a path.
+        const args = buildSafeRipgrepArgs({
+          query,
+          relTarget,
+          useRegex,
+          glob: globValidation.value,
+        });
+
 
         const result = await runCommand('rg', args, {
           cwd: resolvedCwd.cwd,

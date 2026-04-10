@@ -1243,7 +1243,7 @@ describe('search_files tool', () => {
     expect(result.content.toLowerCase()).not.toContain('os error 2');
   });
 
-    it('keeps missing TypeScript file path handling deterministic and skips ripgrep execution', async () => {
+      it('keeps missing TypeScript file path handling deterministic and skips ripgrep execution', async () => {
     const cwd = await makeWorkspace();
     const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
     const runCommandSpy = vi.spyOn(commandRunner, 'runCommand');
@@ -1264,7 +1264,82 @@ describe('search_files tool', () => {
 
     runCommandSpy.mockRestore();
   });
+
+  it('passes query exactly once as -e pattern and keeps target after --', async () => {
+    const cwd = await makeWorkspace();
+    await writeFile(join(cwd, 'src', 'observer-identifiers.ts'), 'github_api\n', 'utf-8');
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+
+    const runCommandSpy = vi.spyOn(commandRunner, 'runCommand').mockResolvedValueOnce({
+      exitCode: 0,
+      stdout: 'src/observer-identifiers.ts:1:github_api\n',
+      stderr: '',
+    });
+
+    const result = await toolset.executeTool({
+      id: 'argv-literal-shape',
+      name: 'search_files',
+      arguments: {
+        query: 'github_api',
+        path: 'src',
+      },
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.content).toContain('github_api');
+
+    expect(runCommandSpy).toHaveBeenCalledTimes(1);
+    const call = runCommandSpy.mock.calls[0];
+    expect(call[0]).toBe('rg');
+    const rgArgs = call[1] as string[];
+
+    expect(rgArgs).toEqual(['-n', '--no-heading', '--color', 'never', '-e', 'github_api', '--fixed-strings', '--', 'src']);
+    expect(rgArgs.filter((arg) => arg === 'github_api')).toHaveLength(1);
+    expect(rgArgs.indexOf('--')).toBe(rgArgs.length - 2);
+    expect(rgArgs[rgArgs.length - 1]).toBe('src');
+
+    runCommandSpy.mockRestore();
+  });
+
+  it('builds regex+glob argv without --fixed-strings and without positional query duplication', async () => {
+    const cwd = await makeWorkspace();
+    await writeFile(join(cwd, 'src', 'observer-identifiers.ts'), 'github_api\n', 'utf-8');
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+
+    const runCommandSpy = vi.spyOn(commandRunner, 'runCommand').mockResolvedValueOnce({
+      exitCode: 0,
+      stdout: 'src/observer-identifiers.ts:1:github_api\n',
+      stderr: '',
+    });
+
+    const result = await toolset.executeTool({
+      id: 'argv-regex-glob-shape',
+      name: 'search_files',
+      arguments: {
+        query: 'github_api',
+        queryMode: 'regex',
+        path: 'src',
+        glob: '*.ts',
+      },
+    });
+
+    expect(result.isError).toBeFalsy();
+
+    expect(runCommandSpy).toHaveBeenCalledTimes(1);
+    const call = runCommandSpy.mock.calls[0];
+    expect(call[0]).toBe('rg');
+    const rgArgs = call[1] as string[];
+
+    expect(rgArgs).toEqual(['-n', '--no-heading', '--color', 'never', '-e', 'github_api', '--glob', '*.ts', '--', 'src']);
+    expect(rgArgs).not.toContain('--fixed-strings');
+    expect(rgArgs.filter((arg) => arg === 'github_api')).toHaveLength(1);
+    expect(rgArgs.indexOf('--')).toBe(rgArgs.length - 2);
+    expect(rgArgs[rgArgs.length - 1]).toBe('src');
+
+    runCommandSpy.mockRestore();
+  });
 });
+
 
 describe('git_status and git_diff session gating', () => {
   it('returns status output in a git repository when task requires writes', async () => {
