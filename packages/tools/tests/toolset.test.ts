@@ -572,7 +572,7 @@ describe('search_files tool', () => {
     expect(result.content).not.toContain('literal.txt:2:callXvalue');
   });
 
-  it('supports regex mode when regex=true', async () => {
+    it('supports regex mode when regex=true', async () => {
     const cwd = await makeWorkspace();
     await writeFile(join(cwd, 'src', 'regex.txt'), 'call(value)\ncallvalue\n', 'utf-8');
     const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
@@ -591,6 +591,76 @@ describe('search_files tool', () => {
     expect(result.content).toContain('regex.txt:2:callvalue');
     expect(result.content).not.toContain('regex.txt:1:call(value)');
   });
+
+  it('passes literal queries to rg via -e before -- path delimiter', async () => {
+    const cwd = await makeWorkspace();
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+
+    const runCommandSpy = vi.spyOn(commandRunner, 'runCommand').mockResolvedValueOnce({
+      exitCode: 0,
+      stdout: 'src/file.ts:1:export const value = 1;\n',
+      stderr: '',
+    });
+
+    const result = await toolset.executeTool({
+      id: 'args-literal-order',
+      name: 'search_files',
+      arguments: {
+        query: 'registerCommandTools',
+        path: 'src',
+      },
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(runCommandSpy).toHaveBeenCalledOnce();
+        expect(runCommandSpy).toHaveBeenCalledWith(
+      'rg',
+      ['-n', '--no-heading', '--color', 'never', '-e', 'registerCommandTools', '--fixed-strings', '--', 'src'],
+      expect.objectContaining({
+        cwd: expect.any(String),
+        timeoutMs: 20000,
+      }),
+    );
+
+
+    runCommandSpy.mockRestore();
+  });
+
+  it('passes regex queries to rg via -e without --fixed-strings', async () => {
+    const cwd = await makeWorkspace();
+    const toolset = createAgentToolset({ cwd, phase: 'planning', taskType: 'code' });
+
+    const runCommandSpy = vi.spyOn(commandRunner, 'runCommand').mockResolvedValueOnce({
+      exitCode: 0,
+      stdout: 'src/file.ts:1:export const value = 1;\n',
+      stderr: '',
+    });
+
+    const result = await toolset.executeTool({
+      id: 'args-regex-order',
+      name: 'search_files',
+      arguments: {
+        query: 'registerCommandTools',
+        queryMode: 'regex',
+        path: 'src',
+      },
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(runCommandSpy).toHaveBeenCalledOnce();
+        expect(runCommandSpy).toHaveBeenCalledWith(
+      'rg',
+      ['-n', '--no-heading', '--color', 'never', '-e', 'registerCommandTools', '--', 'src'],
+      expect.objectContaining({
+        cwd: expect.any(String),
+        timeoutMs: 20000,
+      }),
+    );
+
+
+    runCommandSpy.mockRestore();
+  });
+
 
     it('returns (no matches) when nothing matches', async () => {
     const cwd = await makeWorkspace();
