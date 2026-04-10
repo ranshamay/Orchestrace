@@ -450,10 +450,12 @@ export interface ObserverFinding {
   fingerprint: string;
   category: string;
   severity: string;
-  title: string;
+    title: string;
   description: string;
-  suggestedFix: string;
+  issueSummary: string;
+  evidence: string[];
   relevantFiles?: string[];
+
   observedInSessions: string[];
   detectedAt: string;
   fixSessionId: string | null;
@@ -557,10 +559,12 @@ export interface SessionObserverFinding {
   id: string;
   category: string;
   severity: string;
-  title: string;
+    title: string;
   description: string;
-  suggestedFix: string;
+  issueSummary: string;
+  evidence: string[];
   relevantFiles?: string[];
+
   phase: string;
   detectedAt: string;
 }
@@ -597,10 +601,12 @@ export interface LogFinding {
   id: string;
   category: LogFindingCategory;
   severity: string;
-  title: string;
+    title: string;
   description: string;
-  suggestedFix: string;
+  issueSummary: string;
+  evidence: string[];
   relevantFiles?: string[];
+
   logSnippet: string;
   detectedAt: string;
 }
