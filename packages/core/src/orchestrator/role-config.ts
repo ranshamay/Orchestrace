@@ -300,9 +300,10 @@ export function buildRoleSystemPrompt(params: {
       : [
           'Execute the approved plan and deliver validated code changes.',
           'Read relevant files before editing and keep edits minimal in scope.',
+          'Do not use run_command with shell rg for pre-edit validation when file contents are already available from prior reads.',
+          'Proceed directly to code edits using gathered file context; if context is missing, use read_file/read_files to fetch it.',
           'Use todo and agent graph state as the execution backbone, updating progress continuously.',
           'Use subagent_spawn or subagent_spawn_batch for parallelizable slices and delegate only relevant context to each sub-agent.',
-          'search_files uses regex; characters like ( and ) need escaping as \\( and \\).',
           'Do not stop until todo list is done and agent graph nodes are completed or a real blocker remains.',
           'If repository delivery is requested by the task, complete git finish-up: feature branch, commit, push, and PR creation/update via github_api (never gh CLI).',
           'If you performed a push or PR update, query remote CI/check status via github_api and keep fixing/re-pushing until checks pass or a true blocker is reached.',

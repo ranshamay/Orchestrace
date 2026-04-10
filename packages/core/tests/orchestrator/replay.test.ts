@@ -1113,7 +1113,7 @@ describe('orchestrate replay capture', () => {
     }
   });
 
-  it('includes search_files regex escaping reminder in implementation prompt', async () => {
+    it('includes anti-shell-rg pre-edit guidance in implementation prompt', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'orchestrace-replay-impl-prompt-'));
     const capturedImplementationPrompts: string[] = [];
 
@@ -1135,7 +1135,8 @@ describe('orchestrate replay capture', () => {
       expect(output?.status).toBe('completed');
       expect(capturedImplementationPrompts.length).toBeGreaterThan(0);
       const implementationPrompt = capturedImplementationPrompts[0] ?? '';
-      expect(implementationPrompt).toContain('search_files uses regex; characters like ( and ) need escaping as \\( and \\).');
+            expect(implementationPrompt).toContain('Do not use run_command with shell rg for pre-edit validation when file contents are already available from prior reads.');
+      expect(implementationPrompt).toContain('Proceed directly to code edits using gathered file context; if context is missing, use read_file/read_files to fetch it.');
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }

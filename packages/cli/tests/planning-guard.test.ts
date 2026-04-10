@@ -114,7 +114,7 @@ describe('planning guard behavior', () => {
     expect(state?.forcedImplementation).toBe(false);
   });
 
-  it('includes simple-task policy and planning budget language in planning prompt', () => {
+    it('includes simple-task policy and planning budget language in planning prompt', () => {
     const session = createSession();
     const prompt = buildSessionSystemPrompt(session, 'planning');
 
@@ -122,5 +122,13 @@ describe('planning guard behavior', () => {
     expect(prompt).toContain('For simple single-file tasks, skip sub-agent delegation');
     expect(prompt).toContain('Planning is budgeted: keep planning activity under 25%');
     expect(prompt).toContain('If session guard thresholds are exceeded');
+  });
+
+  it('includes anti-shell-rg pre-edit guidance in implementation prompt', () => {
+    const session = createSession();
+    const prompt = buildSessionSystemPrompt(session, 'implementation');
+
+    expect(prompt).toContain('Do not use run_command with shell rg for pre-edit validation when files are already read.');
+    expect(prompt).toContain('Proceed directly to code edits from gathered context; if context is missing, use read_file/read_files.');
   });
 });

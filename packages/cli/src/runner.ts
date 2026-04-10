@@ -2810,6 +2810,8 @@ function buildSystemPrompt(config: SessionConfig, phase: 'planning' | 'implement
     : [
       'Execute approved work with minimal, scoped edits and verify outcomes.',
       'Read before editing, and use tool output to adapt after failures.',
+      'Do not use run_command with shell rg for pre-edit validation when files are already read.',
+      'Proceed directly to code edits from gathered context; if context is missing, use read_file/read_files.',
       ...(isLowEffort
         ? []
         : [
