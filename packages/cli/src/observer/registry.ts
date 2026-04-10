@@ -45,13 +45,14 @@ export class FindingRegistry {
    * If a finding with the same fingerprint already exists, merges the session
    * into additionalSessions instead of creating a duplicate.
    */
-    register(
+      register(
     finding: {
       category: FindingCategory;
       severity: FindingSeverity;
       title: string;
       description: string;
-      suggestedFix: string;
+      issueSummary: string;
+      evidence: string[];
       relevantFiles?: string[];
     },
     sessionIds: string[],
