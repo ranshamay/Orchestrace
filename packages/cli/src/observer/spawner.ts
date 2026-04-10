@@ -129,7 +129,16 @@ function buildFixPrompt(finding: FindingRecord): string {
   parts.push(finding.description);
   parts.push('');
   parts.push('## Task');
-  parts.push(finding.suggestedFix);
+    parts.push(finding.issueSummary);
+
+  if (finding.evidence.length > 0) {
+    parts.push('');
+    parts.push('## Evidence');
+    for (const entry of finding.evidence) {
+      parts.push(`- ${entry}`);
+    }
+  }
+
 
   if (finding.relevantFiles && finding.relevantFiles.length > 0) {
     parts.push('');

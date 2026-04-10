@@ -146,8 +146,19 @@ function FindingItem({ finding, isExpanded, onToggle }: { finding: SessionObserv
         <div className="ml-5 mt-1 space-y-1.5 pb-1">
           <p className="text-[11px] text-slate-600 dark:text-slate-300">{finding.description}</p>
           <div className="rounded bg-slate-50 px-2 py-1.5 dark:bg-slate-800">
-            <div className="mb-0.5 text-[9px] font-bold uppercase tracking-wide text-slate-400">Suggested Fix</div>
-            <p className="text-[11px] text-slate-700 dark:text-slate-200">{finding.suggestedFix}</p>
+                        <div className="mb-0.5 text-[9px] font-bold uppercase tracking-wide text-slate-400">Issue Summary</div>
+            <p className="text-[11px] text-slate-700 dark:text-slate-200">{finding.issueSummary}</p>
+          </div>
+          {finding.evidence.length > 0 && (
+            <div className="rounded bg-slate-50 px-2 py-1.5 dark:bg-slate-800">
+              <div className="mb-0.5 text-[9px] font-bold uppercase tracking-wide text-slate-400">Evidence</div>
+              <ul className="list-disc space-y-0.5 pl-4 text-[11px] text-slate-700 dark:text-slate-200">
+                {finding.evidence.map((entry) => (
+                  <li key={entry}>{entry}</li>
+                ))}
+              </ul>
+            </div>
+
           </div>
           {finding.relevantFiles && finding.relevantFiles.length > 0 && (
             <div className="flex flex-wrap gap-1">

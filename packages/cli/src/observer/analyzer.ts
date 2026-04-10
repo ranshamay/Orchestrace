@@ -74,8 +74,10 @@ function buildAnalysisPrompt(summaries: SessionSummary[], allowedCategories: Fin
       '      "severity": "low" | "medium" | "high" | "critical",\n' +
       '      "title": "Short one-line title",\n' +
       '      "description": "Detailed description of the issue found",\n' +
-      '      "suggestedFix": "Concrete implementation instruction that could be used as a task prompt",\n' +
+            '      "issueSummary": "Concise statement of the issue and desired outcome",\n' +
+      '      "evidence": ["Concrete observation that supports this finding"],\n' +
       '      "relevantFiles": ["path/to/file.ts"]  // optional\n' +
+
       '    }\n' +
       '  ]\n' +
       '}\n' +
@@ -116,7 +118,9 @@ function parseAnalysisResponse(text: string, allowedCategories: FindingCategory[
         (f: Record<string, unknown>) =>
           typeof f.title === 'string' &&
           typeof f.description === 'string' &&
-          typeof f.suggestedFix === 'string',
+                    typeof f.issueSummary === 'string' &&
+          Array.isArray(f.evidence),
+
       )
       .map((f: Record<string, unknown>) => ({
         category: validCategories.includes(f.category as FindingCategory)
@@ -127,7 +131,13 @@ function parseAnalysisResponse(text: string, allowedCategories: FindingCategory[
           : ('medium' as FindingSeverity),
         title: String(f.title),
         description: String(f.description),
-        suggestedFix: String(f.suggestedFix),
+                issueSummary: String(f.issueSummary),
+                evidence: (f.evidence as unknown[])
+          .filter((entry: unknown) => typeof entry === 'string')
+          .map((entry) => entry.trim())
+          .filter((entry) => entry.length > 0),
+
+
         relevantFiles: Array.isArray(f.relevantFiles)
           ? f.relevantFiles.filter((p: unknown) => typeof p === 'string')
           : undefined,

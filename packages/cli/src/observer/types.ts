@@ -30,8 +30,11 @@ export interface ObserverFinding {
   title: string;
   /** Detailed description of the issue. */
   description: string;
-  /** Concrete fix suggestion the observer will use as a session prompt. */
-  suggestedFix: string;
+    /** Concise summary of the issue and desired outcome. */
+  issueSummary: string;
+  /** Concrete evidence snippets supporting the finding. */
+  evidence: string[];
+
   /** File paths relevant to this finding (if any). */
   relevantFiles?: string[];
   /** Session IDs where this issue was observed. */
@@ -127,7 +130,9 @@ export interface AnalysisResult {
     severity: FindingSeverity;
     title: string;
     description: string;
-    suggestedFix: string;
+        issueSummary: string;
+    evidence: string[];
     relevantFiles?: string[];
+
   }>;
 }
