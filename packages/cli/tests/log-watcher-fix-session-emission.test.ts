@@ -297,7 +297,7 @@ describe('log watcher fix-session emission', () => {
     }
   });
 
-  it('does not count historical spawned findings against current process concurrency', async () => {
+    it('does not count historical spawned findings against current process concurrency', async () => {
 
     const orchestraceDir = await mkdtemp(join(tmpdir(), 'orchestrace-observer-'));
 
@@ -363,4 +363,70 @@ describe('log watcher fix-session emission', () => {
       await rm(orchestraceDir, { recursive: true, force: true });
     }
   });
+
+  it('normalizes legacy persisted findings with missing evidence fields', async () => {
+    const orchestraceDir = await mkdtemp(join(tmpdir(), 'orchestrace-observer-'));
+
+    try {
+      const observerDir = join(orchestraceDir, 'observer');
+      await mkdir(observerDir, { recursive: true });
+      await writeFile(
+        join(observerDir, 'findings.json'),
+        JSON.stringify([
+          {
+            category: 'architecture',
+            severity: 'high',
+            title: 'Legacy finding with suggestedFix only',
+            description: 'Persisted before evidence field existed.',
+            suggestedFix: 'Migrate this record safely.',
+            observedInSessions: ['legacy-session'],
+            detectedAt: new Date().toISOString(),
+            fixStatus: 'pending',
+            additionalSessions: ['legacy-session-2'],
+          },
+          {
+            category: 'code-quality',
+            severity: 'medium',
+            title: 'Legacy finding without suggested fix',
+            description: 'Persisted record missing both suggestedFix and evidence.',
+            observedInSessions: ['legacy-session-3'],
+            fixStatus: 'pending',
+          },
+          {
+            category: 'not-a-valid-category',
+            severity: 'high',
+            title: 'Malformed entry',
+            description: 'Should be dropped by normalization.',
+          },
+        ], null, 2),
+        'utf-8',
+      );
+
+      const daemon = new ObserverDaemon({
+        orchestraceDir,
+        eventStore: createEventStoreStub(),
+        llm: { complete: vi.fn() } as ObserverDaemonOptions['llm'],
+        startSession: vi.fn(async () => ({ id: 'fix-1' })),
+        resolveApiKey: async () => undefined,
+      });
+
+      await daemon.start();
+
+      const findings = daemon.getFindings();
+      expect(findings).toHaveLength(2);
+
+      const migrated = findings.find((f) => f.title === 'Legacy finding with suggestedFix only');
+      expect(migrated?.evidence).toEqual([]);
+      expect(migrated?.suggestedFix).toBe('Migrate this record safely.');
+      expect(migrated?.fixSessionId).toBeNull();
+      expect(migrated?.additionalSessions).toEqual(['legacy-session-2']);
+
+      const fallback = findings.find((f) => f.title === 'Legacy finding without suggested fix');
+      expect(fallback?.evidence).toEqual([]);
+      expect(fallback?.suggestedFix).toContain('Review the finding details');
+    } finally {
+      await rm(orchestraceDir, { recursive: true, force: true });
+    }
+  });
 });
+

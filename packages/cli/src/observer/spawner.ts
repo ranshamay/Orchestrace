@@ -129,7 +129,7 @@ function buildFixPrompt(finding: FindingRecord): string {
   parts.push(finding.description);
   parts.push('');
   parts.push('## Task');
-  parts.push(finding.suggestedFix);
+  parts.push(resolveFindingTask(finding));
 
   if (finding.relevantFiles && finding.relevantFiles.length > 0) {
     parts.push('');
@@ -146,3 +146,20 @@ function buildFixPrompt(finding: FindingRecord): string {
 
   return parts.join('\n');
 }
+
+function resolveFindingTask(finding: FindingRecord): string {
+  const suggestedFix = finding.suggestedFix?.trim();
+  if (suggestedFix && suggestedFix.length > 0) {
+    return suggestedFix;
+  }
+
+  const evidence = Array.isArray(finding.evidence)
+    ? finding.evidence.map((line) => line.trim()).filter((line) => line.length > 0)
+    : [];
+  if (evidence.length > 0) {
+    return evidence.join('\n');
+  }
+
+  return 'Review the finding details and implement an appropriate fix.';
+}
+
