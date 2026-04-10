@@ -11,7 +11,8 @@ import type { EventStore } from '@orchestrace/store';
 import type { LlmAdapter } from '@orchestrace/provider';
 import {
   ALL_FINDING_CATEGORIES,
-  DEFAULT_OBSERVER_CONFIG,
+    DEFAULT_OBSERVER_CONFIG,
+  normalizeFindingEvidence,
   type FindingCategory,
   type FindingRecord,
   type FindingSeverity,
@@ -229,27 +230,15 @@ export class ObserverDaemon {
         continue;
       }
 
-                  const findingInput: ObserverFindingInput =
-        Array.isArray(finding.evidence) && finding.evidence.length > 0
-          ? {
-              schemaVersion: '2',
-              category: mappedCategory,
-              severity: finding.severity,
-              title: finding.title,
-              description: finding.description,
-              evidence: finding.evidence,
-              suggestedFix: finding.suggestedFix,
-              relevantFiles: finding.relevantFiles,
-            }
-          : {
-              schemaVersion: '1',
-              category: mappedCategory,
-              severity: finding.severity,
-              title: finding.title,
-              description: finding.description,
-              suggestedFix: finding.suggestedFix ?? 'No suggested fix provided.',
-              relevantFiles: finding.relevantFiles,
-            };
+                        const findingInput: ObserverFindingInput = {
+        schemaVersion: '2',
+        category: mappedCategory,
+        severity: finding.severity,
+        title: finding.title,
+        description: finding.description,
+        evidence: normalizeFindingEvidence(finding.evidence, finding.suggestedFix),
+        relevantFiles: finding.relevantFiles,
+      };
 
       const { isNew } = this.registry.register(findingInput, [LOG_WATCHER_SOURCE_SESSION_ID]);
 
@@ -289,27 +278,15 @@ export class ObserverDaemon {
         continue;
       }
 
-                  const findingInput: ObserverFindingInput =
-        Array.isArray(finding.evidence) && finding.evidence.length > 0
-          ? {
-              schemaVersion: '2',
-              category: finding.category,
-              severity: finding.severity,
-              title: finding.title,
-              description: finding.description,
-              evidence: finding.evidence,
-              suggestedFix: finding.suggestedFix,
-              relevantFiles: finding.relevantFiles,
-            }
-          : {
-              schemaVersion: '1',
-              category: finding.category,
-              severity: finding.severity,
-              title: finding.title,
-              description: finding.description,
-              suggestedFix: finding.suggestedFix ?? 'No suggested fix provided.',
-              relevantFiles: finding.relevantFiles,
-            };
+                        const findingInput: ObserverFindingInput = {
+        schemaVersion: '2',
+        category: finding.category,
+        severity: finding.severity,
+        title: finding.title,
+        description: finding.description,
+        evidence: normalizeFindingEvidence(finding.evidence, finding.suggestedFix),
+        relevantFiles: finding.relevantFiles,
+      };
 
       const { isNew } = this.registry.register(findingInput, [sourceSessionId]);
 

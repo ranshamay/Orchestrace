@@ -671,13 +671,12 @@ export type SessionObserverStatus = 'idle' | 'watching' | 'analyzing' | 'done';
 
 export interface SessionObserverFinding {
   id: string;
-  schemaVersion: '1' | '2';
+  schemaVersion: '2';
   category: string;
   severity: string;
   title: string;
   description: string;
-  evidence?: Array<{ text: string }>;
-  suggestedFix?: string;
+  evidence: Array<{ text: string }>;
   relevantFiles?: string[];
   phase: string;
   detectedAt: string;
