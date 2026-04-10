@@ -110,7 +110,49 @@ describe('log watcher fix-session emission', () => {
   });
 
 
+    it('builds fix prompt task text from v2 evidence findings', async () => {
+    const orchestraceDir = await mkdtemp(join(tmpdir(), 'orchestrace-observer-'));
+
+    try {
+      const startSession = vi.fn(async () => ({ id: `fix-${String(startSession.mock.calls.length + 1)}` }));
+      const daemon = new ObserverDaemon({
+        orchestraceDir,
+        eventStore: createEventStoreStub(),
+        llm: { complete: vi.fn() } as ObserverDaemonOptions['llm'],
+        startSession,
+        resolveApiKey: async () => undefined,
+      });
+
+      await daemon.updateConfig({ enabled: true, maxConcurrentFixSessions: 0 });
+
+      const result = await daemon.ingestSessionObserverFindings('session-v2', [
+        {
+          schemaVersion: '2',
+          category: 'architecture',
+          severity: 'high',
+          title: 'Missing migration strategy for schema transition',
+          description: 'Existing persisted records are not normalized before consumers read them.',
+          evidence: [
+            { text: 'Normalize legacy suggestedFix payloads into evidence[] at registry load time.' },
+            { text: 'Stamp schemaVersion=2 before persistence and API emission.' },
+          ],
+          relevantFiles: ['packages/cli/src/observer/registry.ts'],
+        },
+      ]);
+
+      expect(result).toEqual({ registered: 1, spawned: 1 });
+      expect(startSession).toHaveBeenCalledTimes(1);
+      const prompt = String(startSession.mock.calls[0]?.[0].prompt ?? '');
+      expect(prompt).toContain('## Task');
+      expect(prompt).toContain('1. Normalize legacy suggestedFix payloads into evidence[] at registry load time.');
+      expect(prompt).toContain('2. Stamp schemaVersion=2 before persistence and API emission.');
+    } finally {
+      await rm(orchestraceDir, { recursive: true, force: true });
+    }
+  });
+
   it('registers log findings and spawns fix sessions immediately', async () => {
+
     const orchestraceDir = await mkdtemp(join(tmpdir(), 'orchestrace-observer-'));
 
     try {
@@ -257,7 +299,7 @@ describe('log watcher fix-session emission', () => {
       await writeFile(
         join(observerDir, 'findings.json'),
         JSON.stringify([
-          {
+                    {
             fingerprint: 'completed-finding-1',
             category: 'architecture',
             severity: 'medium',
@@ -298,9 +340,12 @@ describe('log watcher fix-session emission', () => {
         },
       ]);
 
-      expect(created).toEqual({ registered: 1, spawned: 1 });
+            expect(created).toEqual({ registered: 1, spawned: 1 });
       expect(startSession).toHaveBeenCalledTimes(1);
       expect(daemon.getFindings()).toHaveLength(2);
+      const historical = daemon.getFindings().find((f) => f.fingerprint === 'completed-finding-1');
+      expect(historical?.schemaVersion).toBe('2');
+      expect(historical?.evidence?.[0]?.text).toBe('Historical fix');
     } finally {
       await rm(orchestraceDir, { recursive: true, force: true });
     }
@@ -316,7 +361,7 @@ describe('log watcher fix-session emission', () => {
       await writeFile(
         join(observerDir, 'findings.json'),
         JSON.stringify([
-          {
+                    {
             fingerprint: 'historical-finding-1',
             category: 'code-quality',
             severity: 'medium',
