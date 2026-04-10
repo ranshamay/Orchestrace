@@ -121,6 +121,7 @@ describe('planning guard behavior', () => {
     expect(isSimpleSessionTaskPrompt(session.prompt)).toBe(true);
     expect(prompt).toContain('For simple single-file tasks, skip sub-agent delegation');
     expect(prompt).toContain('Planning is budgeted: keep planning activity under 25%');
-    expect(prompt).toContain('If session guard thresholds are exceeded');
+        expect(prompt).toContain('If session guard thresholds are exceeded');
+    expect(prompt).toContain('For reads/searches, issue individual sequential tool calls by default; only batch when unavoidable and cap concurrency to 2.');
   });
 });
