@@ -9,9 +9,9 @@ import {
   ALL_FINDING_CATEGORIES,
   type AnalysisResult,
   type FindingCategory,
-  type FindingSeverity,
   type ObserverConfig,
 } from './types.js';
+import { parseLlmFindingsResponse } from './llm-analysis.js';
 import type { SessionSummary } from './summarizer.js';
 import { formatSummaryForLlm } from './summarizer.js';
 import { OBSERVER_SYSTEM_PROMPT } from './prompts.js';
@@ -91,55 +91,12 @@ function buildAnalysisPrompt(summaries: SessionSummary[], allowedCategories: Fin
 
 /**
  * Parse the LLM response text into a structured AnalysisResult.
- * Tolerates markdown fences around the JSON.
  */
-function parseAnalysisResponse(text: string, allowedCategories: FindingCategory[]): AnalysisResult {
-  // Strip markdown code fences
-  let jsonStr = text.trim();
-  const fenceMatch = jsonStr.match(/```(?:json)?\s*\n?([\s\S]*?)\n?\s*```/);
-  if (fenceMatch) {
-    jsonStr = fenceMatch[1].trim();
-  }
-
-  try {
-    const parsed = JSON.parse(jsonStr);
-    if (!parsed || !Array.isArray(parsed.findings)) {
-      return { findings: [] };
-    }
-
-    // Validate and sanitize each finding
-    const validCategories: FindingCategory[] = [...ALL_FINDING_CATEGORIES];
-    const validSeverities: FindingSeverity[] = ['low', 'medium', 'high', 'critical'];
-
-    const mappedFindings: AnalysisResult['findings'] = parsed.findings
-      .filter(
-        (f: Record<string, unknown>) =>
-          typeof f.title === 'string' &&
-          typeof f.description === 'string' &&
-          typeof f.suggestedFix === 'string',
-      )
-      .map((f: Record<string, unknown>) => ({
-        category: validCategories.includes(f.category as FindingCategory)
-          ? (f.category as FindingCategory)
-          : ('code-quality' as FindingCategory),
-        severity: validSeverities.includes(f.severity as FindingSeverity)
-          ? (f.severity as FindingSeverity)
-          : ('medium' as FindingSeverity),
-        title: String(f.title),
-        description: String(f.description),
-        suggestedFix: String(f.suggestedFix),
-        relevantFiles: Array.isArray(f.relevantFiles)
-          ? f.relevantFiles.filter((p: unknown) => typeof p === 'string')
-          : undefined,
-      }));
-
-    const findings: AnalysisResult['findings'] = mappedFindings.filter((finding) =>
-      allowedCategories.includes(finding.category),
-    );
-
-    return { findings };
-  } catch {
-    console.error('[orchestrace][observer] Failed to parse LLM analysis response');
-    return { findings: [] };
-  }
+export function parseAnalysisResponse(text: string, allowedCategories: FindingCategory[]): AnalysisResult {
+  return {
+    findings: parseLlmFindingsResponse(text, allowedCategories, {
+      contextLabel: 'LLM analysis',
+    }),
+  };
 }
+
