@@ -110,6 +110,40 @@ describe('validate dependency guard', () => {
     expect(execMock).toHaveBeenCalledTimes(1);
   });
 
+    it('normalizes pnpm -C validation commands into cwd + cleaned command', async () => {
+    accessMock.mockImplementation(async () => {
+      throw new Error('missing');
+    });
+    mockExecSequence([{ err: null, stdout: 'test ok\n' }]);
+
+    const config: ValidationConfig = { commands: ['pnpm -C packages/cli test'] };
+    const results = await validate(makeOutput(), config, '/tmp/repo');
+
+    expect(results).toHaveLength(1);
+    expect(results[0]?.passed).toBe(true);
+    expect(execMock).toHaveBeenCalledTimes(1);
+    expect(execMock).toHaveBeenCalledWith(
+      'pnpm test',
+      expect.objectContaining({ cwd: '/tmp/repo/packages/cli' }),
+      expect.any(Function),
+    );
+  });
+
+  it('fails validation command with explicit message when pnpm dir escapes workspace root', async () => {
+    accessMock.mockImplementation(async () => {
+      throw new Error('missing');
+    });
+
+    const config: ValidationConfig = { commands: ['pnpm --dir ../../outside test'] };
+    const results = await validate(makeOutput(), config, '/tmp/repo');
+
+    expect(results).toHaveLength(1);
+    expect(results[0]?.passed).toBe(false);
+    expect(results[0]?.output).toContain('Invalid pnpm command');
+    expect(results[0]?.output).toContain('escapes workspace root');
+    expect(execMock).toHaveBeenCalledTimes(0);
+  });
+
   it('preserves retry-once behavior for validation commands', async () => {
     accessMock.mockImplementation(async () => {
       throw new Error('missing');

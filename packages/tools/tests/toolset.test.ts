@@ -1468,6 +1468,86 @@ describe('run_command safety', () => {
     expect(parsed.commands[3].output).toContain('Blocked non-command payload');
   });
 
+    it('normalizes pnpm -C commands to execute from explicit cwd', async () => {
+    const cwd = await makeWorkspace();
+    await mkdir(join(cwd, 'packages', 'cli'), { recursive: true });
+    const toolset = createAgentToolset({ cwd, phase: 'implementation', taskType: 'code' });
+
+    const runCommandSpy = vi.spyOn(commandRunner, 'runCommand').mockResolvedValueOnce({
+      exitCode: 0,
+      stdout: 'ok\n',
+      stderr: '',
+    });
+
+    try {
+      const result = await toolset.executeTool({
+        id: '1',
+        name: 'run_command',
+        arguments: { command: 'pnpm -C packages/cli test' },
+      });
+
+      expect(result.isError).toBeFalsy();
+      expect(result.content).toContain('cwd: packages/cli');
+      expect(runCommandSpy).toHaveBeenCalledWith(
+        expect.any(String),
+        ['-lc', 'pnpm test'],
+        expect.objectContaining({ cwd: join(cwd, 'packages', 'cli') }),
+      );
+    } finally {
+      runCommandSpy.mockRestore();
+    }
+  });
+
+  it('run_command rejects pnpm dir values that escape workspace root', async () => {
+    const cwd = await makeWorkspace();
+    const toolset = createAgentToolset({ cwd, phase: 'implementation', taskType: 'code' });
+
+    const result = await toolset.executeTool({
+      id: '1',
+      name: 'run_command',
+      arguments: { command: 'pnpm --dir ../../outside test' },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content).toContain('Invalid pnpm command');
+    expect(result.content).toContain('escapes workspace root');
+  });
+
+  it('run_command_batch normalizes pnpm --dir commands and reports normalized cwd', async () => {
+    const cwd = await makeWorkspace();
+    await mkdir(join(cwd, 'packages', 'cli'), { recursive: true });
+    const toolset = createAgentToolset({ cwd, phase: 'implementation', taskType: 'code' });
+
+    const runCommandSpy = vi.spyOn(commandRunner, 'runCommand').mockResolvedValueOnce({
+      exitCode: 0,
+      stdout: 'batch ok\n',
+      stderr: '',
+    });
+
+    try {
+      const result = await toolset.executeTool({
+        id: '1',
+        name: 'run_command_batch',
+        arguments: {
+          commands: [{ command: 'pnpm --dir packages/cli test' }],
+        },
+      });
+
+      expect(result.isError).toBeFalsy();
+      const parsed = JSON.parse(result.content) as {
+        commands: Array<{ cwd: string; ok: boolean }>;
+      };
+      expect(parsed.commands[0]).toMatchObject({ cwd: 'packages/cli', ok: true });
+      expect(runCommandSpy).toHaveBeenCalledWith(
+        expect.any(String),
+        ['-lc', 'pnpm test'],
+        expect.objectContaining({ cwd: join(cwd, 'packages', 'cli') }),
+      );
+    } finally {
+      runCommandSpy.mockRestore();
+    }
+  });
+
   it('run_command_batch supports adaptive concurrency metadata', async () => {
     const cwd = await makeWorkspace();
     const toolset = createAgentToolset({ cwd, phase: 'implementation', taskType: 'code' });
@@ -1501,6 +1581,7 @@ describe('run_command safety', () => {
     expect(parsed.finalConcurrency).toBeGreaterThanOrEqual(1);
     expect(parsed.windows).toBeGreaterThanOrEqual(1);
   });
+
 
   it('run_command_batch uses run-level adaptive defaults when tool args omit them', async () => {
     const cwd = await makeWorkspace();
