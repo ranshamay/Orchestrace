@@ -49,10 +49,12 @@ export class FindingRegistry {
     finding: {
       category: FindingCategory;
       severity: FindingSeverity;
-      title: string;
+            title: string;
       description: string;
-      suggestedFix: string;
+      issueSummary: string;
+      evidence: string;
       relevantFiles?: string[];
+
     },
     sessionIds: string[],
   ): { fingerprint: string; isNew: boolean } {

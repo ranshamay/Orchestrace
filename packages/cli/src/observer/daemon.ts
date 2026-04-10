@@ -32,19 +32,23 @@ type AnalysisSummaryEntry = {
 type LogWatcherFindingInput = {
   category: LogFindingCategory;
   severity: FindingSeverity;
-  title: string;
+    title: string;
   description: string;
-  suggestedFix: string;
+  issueSummary: string;
+  evidence: string;
   relevantFiles?: string[];
+
 };
 
 type RealtimeFindingInput = {
   category: FindingCategory;
   severity: FindingSeverity;
-  title: string;
+    title: string;
   description: string;
-  suggestedFix: string;
+  issueSummary: string;
+  evidence: string;
   relevantFiles?: string[];
+
 };
 
 const LOG_WATCHER_SOURCE_SESSION_ID = 'log-watcher';
@@ -223,9 +227,11 @@ export class ObserverDaemon {
         category: mappedCategory,
         severity: finding.severity,
         title: finding.title,
-        description: finding.description,
-        suggestedFix: finding.suggestedFix,
+                description: finding.description,
+        issueSummary: finding.issueSummary,
+        evidence: finding.evidence,
         relevantFiles: finding.relevantFiles,
+
       }, [LOG_WATCHER_SOURCE_SESSION_ID]);
 
       if (isNew) {
@@ -266,9 +272,11 @@ export class ObserverDaemon {
         category: finding.category,
         severity: finding.severity,
         title: finding.title,
-        description: finding.description,
-        suggestedFix: finding.suggestedFix,
+                description: finding.description,
+        issueSummary: finding.issueSummary,
+        evidence: finding.evidence,
         relevantFiles: finding.relevantFiles,
+
       }, [sourceSessionId]);
 
       if (isNew) {

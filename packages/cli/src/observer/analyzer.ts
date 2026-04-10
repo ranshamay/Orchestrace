@@ -73,9 +73,11 @@ function buildAnalysisPrompt(summaries: SessionSummary[], allowedCategories: Fin
       '      "category": "code-quality" | "performance" | "agent-efficiency" | "architecture" | "test-coverage",\n' +
       '      "severity": "low" | "medium" | "high" | "critical",\n' +
       '      "title": "Short one-line title",\n' +
-      '      "description": "Detailed description of the issue found",\n' +
-      '      "suggestedFix": "Concrete implementation instruction that could be used as a task prompt",\n' +
+            '      "description": "Detailed description of the issue found",\n' +
+      '      "issueSummary": "Concise summary of the core issue",\n' +
+      '      "evidence": "Concrete evidence from session logs/tool calls that supports this finding",\n' +
       '      "relevantFiles": ["path/to/file.ts"]  // optional\n' +
+
       '    }\n' +
       '  ]\n' +
       '}\n' +
@@ -114,9 +116,11 @@ function parseAnalysisResponse(text: string, allowedCategories: FindingCategory[
     const mappedFindings: AnalysisResult['findings'] = parsed.findings
       .filter(
         (f: Record<string, unknown>) =>
-          typeof f.title === 'string' &&
+                    typeof f.title === 'string' &&
           typeof f.description === 'string' &&
-          typeof f.suggestedFix === 'string',
+          typeof f.issueSummary === 'string' &&
+          typeof f.evidence === 'string',
+
       )
       .map((f: Record<string, unknown>) => ({
         category: validCategories.includes(f.category as FindingCategory)
@@ -125,9 +129,11 @@ function parseAnalysisResponse(text: string, allowedCategories: FindingCategory[
         severity: validSeverities.includes(f.severity as FindingSeverity)
           ? (f.severity as FindingSeverity)
           : ('medium' as FindingSeverity),
-        title: String(f.title),
+                title: String(f.title),
         description: String(f.description),
-        suggestedFix: String(f.suggestedFix),
+        issueSummary: String(f.issueSummary),
+        evidence: String(f.evidence),
+
         relevantFiles: Array.isArray(f.relevantFiles)
           ? f.relevantFiles.filter((p: unknown) => typeof p === 'string')
           : undefined,
