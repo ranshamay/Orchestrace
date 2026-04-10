@@ -73,13 +73,16 @@ function buildAnalysisPrompt(summaries: SessionSummary[], allowedCategories: Fin
       '      "category": "code-quality" | "performance" | "agent-efficiency" | "architecture" | "test-coverage",\n' +
       '      "severity": "low" | "medium" | "high" | "critical",\n' +
       '      "title": "Short one-line title",\n' +
-      '      "description": "Detailed description of the issue found",\n' +
-      '      "suggestedFix": "Concrete implementation instruction that could be used as a task prompt",\n' +
+            '      "description": "Detailed description of the issue found",\n' +
+      '      "evidence": [\n' +
+      '        { "title": "Short evidence title", "detail": "Concrete evidence detail", "source": "optional source" }\n' +
+      '      ],\n' +
       '      "relevantFiles": ["path/to/file.ts"]  // optional\n' +
       '    }\n' +
       '  ]\n' +
       '}\n' +
       '```\n' +
+      'Evidence must be specific, directly grounded in the provided session data, and include at least one entry per finding.\n' +
       'Return ONLY the JSON object, no other text.',
   );
 
@@ -112,11 +115,12 @@ function parseAnalysisResponse(text: string, allowedCategories: FindingCategory[
     const validSeverities: FindingSeverity[] = ['low', 'medium', 'high', 'critical'];
 
     const mappedFindings: AnalysisResult['findings'] = parsed.findings
-      .filter(
+            .filter(
         (f: Record<string, unknown>) =>
           typeof f.title === 'string' &&
           typeof f.description === 'string' &&
-          typeof f.suggestedFix === 'string',
+          Array.isArray(f.evidence) &&
+          f.evidence.length > 0,
       )
       .map((f: Record<string, unknown>) => ({
         category: validCategories.includes(f.category as FindingCategory)
@@ -127,11 +131,24 @@ function parseAnalysisResponse(text: string, allowedCategories: FindingCategory[
           : ('medium' as FindingSeverity),
         title: String(f.title),
         description: String(f.description),
-        suggestedFix: String(f.suggestedFix),
+        evidence: (f.evidence as unknown[])
+          .filter(
+            (entry): entry is { title: string; detail: string; source?: string } =>
+              typeof entry === 'object' &&
+              entry !== null &&
+              typeof (entry as { title?: unknown }).title === 'string' &&
+              typeof (entry as { detail?: unknown }).detail === 'string',
+          )
+          .map((entry) => ({
+            title: entry.title,
+            detail: entry.detail,
+            source: typeof entry.source === 'string' ? entry.source : undefined,
+          })),
         relevantFiles: Array.isArray(f.relevantFiles)
           ? f.relevantFiles.filter((p: unknown) => typeof p === 'string')
           : undefined,
-      }));
+      }))
+      .filter((f) => f.evidence.length > 0);
 
     const findings: AnalysisResult['findings'] = mappedFindings.filter((finding) =>
       allowedCategories.includes(finding.category),

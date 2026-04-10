@@ -20,6 +20,15 @@ export const ALL_FINDING_CATEGORIES: FindingCategory[] = [
 
 export type FindingSeverity = 'low' | 'medium' | 'high' | 'critical';
 
+export interface FindingEvidence {
+  /** Short evidence title. */
+  title: string;
+  /** Evidence detail (quote/log/tool output excerpt or concrete observation). */
+  detail: string;
+  /** Optional location metadata (file path, log origin, etc). */
+  source?: string;
+}
+
 /** A single observation/issue found by the observer LLM. */
 export interface ObserverFinding {
   /** Deterministic fingerprint for deduplication (hash of category + normalized description). */
@@ -30,8 +39,8 @@ export interface ObserverFinding {
   title: string;
   /** Detailed description of the issue. */
   description: string;
-  /** Concrete fix suggestion the observer will use as a session prompt. */
-  suggestedFix: string;
+  /** Concrete evidence entries backing this finding. */
+  evidence: FindingEvidence[];
   /** File paths relevant to this finding (if any). */
   relevantFiles?: string[];
   /** Session IDs where this issue was observed. */
@@ -39,6 +48,7 @@ export interface ObserverFinding {
   /** When the finding was first detected. */
   detectedAt: string;
 }
+
 
 /** Persistent state of a registered finding (stored in findings.json). */
 export interface FindingRecord extends ObserverFinding {
@@ -127,7 +137,8 @@ export interface AnalysisResult {
     severity: FindingSeverity;
     title: string;
     description: string;
-    suggestedFix: string;
+    evidence: FindingEvidence[];
     relevantFiles?: string[];
   }>;
 }
+
