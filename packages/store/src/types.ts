@@ -8,7 +8,7 @@
 // ---- Shared value types (mirrored from @orchestrace/cli ui-server/types) ----
 // Intentionally duplicated here so the store package has zero workspace deps.
 
-export type WorkState = 'running' | 'completed' | 'failed' | 'cancelled';
+export type WorkState = 'running' | 'completed' | 'failed' | 'cancelled' | 'merged';
 export type SessionCreationReason = 'start' | 'retry';
 export type ReasoningLevel = 'minimal' | 'low' | 'medium' | 'high';
 export type SessionAgentRole = 'router' | 'planner' | 'implementer' | 'reviewer' | 'investigator';
@@ -336,22 +336,32 @@ export interface SessionObserverStatusChangePayload {
   lastAnalyzedAt: string | null;
 }
 
+export type ObserverFindingCategory =
+  | 'code-quality'
+  | 'performance'
+  | 'agent-efficiency'
+  | 'architecture'
+  | 'test-coverage';
+
+export type ObserverFindingSeverity = 'low' | 'medium' | 'high' | 'critical';
+
+export type ObserverFindingPhase = 'planning' | 'implementation' | 'unknown';
+
 export interface SessionObserverFindingPayload {
   finding: {
     id: string;
-    category: string;
-    severity: string;
+    category: ObserverFindingCategory;
+    severity: ObserverFindingSeverity;
     title: string;
     description: string;
-    evidence: Array<{
-      summary: string;
-      details?: string;
-    }>;
+    issueSummary: string;
+    evidence: string[];
     relevantFiles?: string[];
-    phase: string;
+    phase: ObserverFindingPhase;
     detectedAt: string;
   };
 }
+
 
 // The discriminated union
 export type SessionEvent =

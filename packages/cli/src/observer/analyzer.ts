@@ -14,7 +14,7 @@ import {
 } from './types.js';
 import type { SessionSummary } from './summarizer.js';
 import { formatSummaryForLlm } from './summarizer.js';
-import { OBSERVER_SYSTEM_PROMPT } from './prompts.js';
+import { FINDING_CATEGORY_LIST, OBSERVER_SYSTEM_PROMPT } from './prompts.js';
 
 /**
  * Analyze one or more session summaries via LLM and return structured findings.
@@ -70,12 +70,14 @@ function buildAnalysisPrompt(summaries: SessionSummary[], allowedCategories: Fin
       '{\n' +
       '  "findings": [\n' +
       '    {\n' +
-      '      "category": "code-quality" | "performance" | "agent-efficiency" | "architecture" | "test-coverage",\n' +
+            `      "category": ${FINDING_CATEGORY_LIST},\n` +
       '      "severity": "low" | "medium" | "high" | "critical",\n' +
       '      "title": "Short one-line title",\n' +
-      '      "description": "Detailed description of the issue found",\n' +
-      '      "evidence": [{"summary": "Actionable implementation guidance", "details": "Optional supporting context"}],\n' +
+            '      "description": "Detailed description of the issue found",\n' +
+      '      "issueSummary": "Concise implementation instruction that could be used as a task prompt",\n' +
+      '      "evidence": ["Specific observation that supports this finding"],\n' +
       '      "relevantFiles": ["path/to/file.ts"]  // optional\n' +
+
       '    }\n' +
       '  ]\n' +
       '}\n' +
@@ -116,16 +118,10 @@ function parseAnalysisResponse(text: string, allowedCategories: FindingCategory[
         (f: Record<string, unknown>) =>
           typeof f.title === 'string' &&
           typeof f.description === 'string' &&
-          Array.isArray(f.evidence) &&
-          f.evidence.some(
-            (item: unknown) =>
-              !!item &&
-              typeof item === 'object' &&
-              typeof (item as { summary?: unknown }).summary === 'string',
-          ),
+          typeof f.issueSummary === 'string',
       )
-      .map((f: Record<string, unknown>) => ({
 
+      .map((f: Record<string, unknown>) => ({
         category: validCategories.includes(f.category as FindingCategory)
           ? (f.category as FindingCategory)
           : ('code-quality' as FindingCategory),
@@ -134,21 +130,9 @@ function parseAnalysisResponse(text: string, allowedCategories: FindingCategory[
           : ('medium' as FindingSeverity),
                 title: String(f.title),
         description: String(f.description),
+        issueSummary: String(f.issueSummary),
         evidence: Array.isArray(f.evidence)
-          ? f.evidence
-            .filter(
-              (item: unknown) =>
-                !!item &&
-                typeof item === 'object' &&
-                typeof (item as { summary?: unknown }).summary === 'string',
-            )
-            .map((item: unknown) => {
-              const candidate = item as { summary: unknown; details?: unknown };
-              return {
-                summary: String(candidate.summary),
-                details: typeof candidate.details === 'string' ? candidate.details : undefined,
-              };
-            })
+          ? f.evidence.filter((p: unknown) => typeof p === 'string')
           : [],
         relevantFiles: Array.isArray(f.relevantFiles)
           ? f.relevantFiles.filter((p: unknown) => typeof p === 'string')

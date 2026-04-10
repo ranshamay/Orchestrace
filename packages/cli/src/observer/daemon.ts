@@ -34,7 +34,8 @@ type LogWatcherFindingInput = {
   severity: FindingSeverity;
   title: string;
   description: string;
-  suggestedFix: string;
+  issueSummary: string;
+  evidence: string[];
   relevantFiles?: string[];
 };
 
@@ -43,12 +44,8 @@ type RealtimeFindingInput = {
   severity: FindingSeverity;
   title: string;
   description: string;
-  evidence?: Array<{
-    summary: string;
-    details?: string;
-  }>;
-  /** Legacy compatibility for older realtime emitters/tests. */
-  suggestedFix?: string;
+  issueSummary: string;
+  evidence: string[];
   relevantFiles?: string[];
 };
 
@@ -229,7 +226,9 @@ export class ObserverDaemon {
         severity: finding.severity,
         title: finding.title,
         description: finding.description,
-        evidence: [{ summary: finding.suggestedFix }],
+                issueSummary: finding.issueSummary,
+        evidence: finding.evidence,
+
         relevantFiles: finding.relevantFiles,
       }, [LOG_WATCHER_SOURCE_SESSION_ID]);
 
@@ -267,29 +266,14 @@ export class ObserverDaemon {
         continue;
       }
 
-                        const evidence: Array<{ summary: string; details?: string }> = Array.isArray(finding.evidence)
-        ? finding.evidence
-          .filter((item) => item && typeof item.summary === 'string' && item.summary.trim().length > 0)
-          .map((item) => ({
-            summary: item.summary.trim(),
-            details: typeof item.details === 'string' && item.details.trim().length > 0
-              ? item.details.trim()
-              : undefined,
-          }))
-        : [];
-      if (evidence.length === 0 && typeof finding.suggestedFix === 'string' && finding.suggestedFix.trim().length > 0) {
-        evidence.push({ summary: finding.suggestedFix.trim() });
-      }
-      if (evidence.length === 0) {
-        continue;
-      }
-
-      const { isNew } = this.registry.register({
+            const { isNew } = this.registry.register({
         category: finding.category,
         severity: finding.severity,
         title: finding.title,
         description: finding.description,
-        evidence,
+                issueSummary: finding.issueSummary,
+        evidence: finding.evidence,
+
         relevantFiles: finding.relevantFiles,
       }, [sourceSessionId]);
 

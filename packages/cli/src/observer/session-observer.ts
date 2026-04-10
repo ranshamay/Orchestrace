@@ -25,10 +25,8 @@ export interface RealtimeFinding {
   severity: FindingSeverity;
   title: string;
   description: string;
-  evidence: Array<{
-    summary: string;
-    details?: string;
-  }>;
+  issueSummary: string;
+  evidence: string[];
   relevantFiles?: string[];
   phase: string;
   detectedAt: string;
@@ -498,7 +496,7 @@ export class SessionObserver {
     lines.push(`Allowed categories: ${allowedCategories.join(', ')}`);
     lines.push('');
     lines.push(
-            'Respond with a JSON object: { "findings": [{ "category": "...", "severity": "...", "title": "...", "description": "...", "evidence": [{ "summary": "...", "details": "optional" }], "relevantFiles": [...] }] }',
+      'Respond with a JSON object: { "findings": [{ "category": "...", "severity": "...", "title": "...", "description": "...", "issueSummary": "...", "evidence": ["..."], "relevantFiles": [...] }] }',
     );
     lines.push('Return ONLY the JSON, no other text. If no issues found, return { "findings": [] }.');
 
@@ -560,18 +558,12 @@ function parseRealtimeFindings(
     const validSeverities: FindingSeverity[] = ['low', 'medium', 'high', 'critical'];
     let idCounter = 0;
 
-        return parsed.findings
-      .filter(
+    return parsed.findings
+            .filter(
         (f: Record<string, unknown>) =>
           typeof f.title === 'string' &&
           typeof f.description === 'string' &&
-          Array.isArray(f.evidence) &&
-          f.evidence.some(
-            (item: unknown) =>
-              !!item &&
-              typeof item === 'object' &&
-              typeof (item as { summary?: unknown }).summary === 'string',
-          ),
+          typeof f.issueSummary === 'string',
       )
 
       .filter((f: Record<string, unknown>) =>
@@ -587,21 +579,9 @@ function parseRealtimeFindings(
           : 'medium',
                 title: String(f.title),
         description: String(f.description),
+        issueSummary: String(f.issueSummary),
         evidence: Array.isArray(f.evidence)
-          ? f.evidence
-            .filter(
-              (item: unknown) =>
-                !!item &&
-                typeof item === 'object' &&
-                typeof (item as { summary?: unknown }).summary === 'string',
-            )
-            .map((item: unknown) => {
-              const candidate = item as { summary: unknown; details?: unknown };
-              return {
-                summary: String(candidate.summary),
-                details: typeof candidate.details === 'string' ? candidate.details : undefined,
-              };
-            })
+          ? f.evidence.filter((p: unknown) => typeof p === 'string')
           : [],
         relevantFiles: Array.isArray(f.relevantFiles)
           ? f.relevantFiles.filter((p: unknown) => typeof p === 'string')
