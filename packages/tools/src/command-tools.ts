@@ -75,8 +75,8 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
             description: 'How to interpret query: regex (default) or literal fixed-string search.',
           })),
         }),
-      },
-            execute: async (toolArgs, signal) => {
+            },
+      execute: async (toolArgs, signal) => {
         const requestedPath = asString(toolArgs.path) ?? '.';
         const sanitizedQueryAndMode = sanitizeSearchQueryAndMode({
           query: toolArgs.query,
@@ -91,20 +91,10 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
           });
         }
 
-        const { query, useRegex } = sanitizedQueryAndMode.value;
-
-        if (useRegex) {
-          const regexValidation = validateRegexQuery(query);
-          if (!regexValidation.ok) {
-            return createSearchFilesErrorResult({
-              errorType: 'invalid_regex',
-              message: regexValidation.error,
-              path: requestedPath,
-            });
-          }
-        }
+        let { query, useRegex } = sanitizedQueryAndMode.value;
 
         const globValidation = validateSearchGlob(toolArgs.glob);
+
         if (!globValidation.ok) {
           return createSearchFilesErrorResult({
             errorType: 'invalid_arguments',
@@ -113,7 +103,7 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
           });
         }
 
-        const resolvedCwd = await normalizeSearchCwd(options.cwd);
+                const resolvedCwd = await normalizeSearchCwd(options.cwd);
         if (!resolvedCwd.ok) {
           return createSearchFilesErrorResult({
             errorType: 'invalid_working_directory',
@@ -122,13 +112,45 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
           });
         }
 
-        const normalizedRequestedPath = await normalizeRequestedSearchPath(requestedPath);
+        const normalizedRequestedPathResult = normalizeRequestedSearchPath(requestedPath);
+        if (!normalizedRequestedPathResult.ok) {
+          return createSearchFilesErrorResult({
+            errorType: 'invalid_arguments',
+            message: normalizedRequestedPathResult.error,
+            path: requestedPath,
+          });
+        }
+
+        let normalizedRequestedPath = normalizedRequestedPathResult.value;
+
+        const correctedPathAndQuery = await maybeRepairSwappedSearchPathAndQuery({
+          cwd: resolvedCwd.cwd,
+          requestedPath: normalizedRequestedPath,
+          query,
+          useRegex,
+          glob: globValidation.value,
+        });
+        normalizedRequestedPath = correctedPathAndQuery.path;
+        query = correctedPathAndQuery.query;
+        useRegex = correctedPathAndQuery.useRegex;
+
+        if (useRegex) {
+          const regexValidation = validateRegexQuery(query);
+          if (!regexValidation.ok) {
+            return createSearchFilesErrorResult({
+              errorType: 'invalid_regex',
+              message: regexValidation.error,
+              path: normalizedRequestedPath,
+            });
+          }
+        }
+
         const normalizedPathForResolution = isAbsolute(normalizedRequestedPath)
           ? (await canonicalizeExistingPath(normalizedRequestedPath)) ?? normalizedRequestedPath
           : normalizedRequestedPath;
 
         let target: string;
-                try {
+        try {
           target = resolveWorkspacePath(resolvedCwd.cwd, normalizedPathForResolution);
         } catch {
           return {
@@ -136,6 +158,7 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
             isError: false,
           };
         }
+
 
 
         const canonicalTarget = await canonicalizeExistingPath(target);
@@ -1154,18 +1177,120 @@ function validateSearchGlob(rawGlob: unknown): ValidationResult<string | undefin
   return { ok: true, value: glob.replace(/\\/g, '/') };
 }
 
-async function normalizeRequestedSearchPath(rawPath: string): Promise<string> {
+function normalizeRequestedSearchPath(rawPath: string): ValidationResult<string> {
   const trimmed = rawPath.trim();
   if (trimmed.length === 0) {
-    return '.';
+    return { ok: true, value: '.' };
   }
 
   if (trimmed.includes('\u0000')) {
-    throw new Error('Invalid search path: null bytes are not allowed.');
+    return {
+      ok: false,
+      error: 'Invalid search path: null bytes are not allowed.',
+    };
   }
 
-    return trimmed;
+  return { ok: true, value: trimmed };
 }
+
+interface SearchPathAndQueryPair {
+  path: string;
+  query: string;
+  useRegex: boolean;
+}
+
+interface MaybeRepairSwappedSearchPathAndQueryInput {
+  cwd: string;
+  requestedPath: string;
+  query: string;
+  useRegex: boolean;
+  glob: string | undefined;
+}
+
+async function maybeRepairSwappedSearchPathAndQuery(
+  input: MaybeRepairSwappedSearchPathAndQueryInput,
+): Promise<SearchPathAndQueryPair> {
+  const fallback: SearchPathAndQueryPair = {
+    path: input.requestedPath,
+    query: input.query,
+    useRegex: input.useRegex,
+  };
+
+  // Keep behavior deterministic: only attempt correction for literal mode
+  // and when no explicit glob scope is provided.
+  if (input.useRegex || input.glob !== undefined || input.requestedPath === '.') {
+    return fallback;
+  }
+
+  const requestedPathKind = await getPathKindForWorkspaceSearchTarget(input.cwd, input.requestedPath);
+  if (requestedPathKind !== 'missing') {
+    return fallback;
+  }
+
+  const queryAsPath = input.query.trim();
+  if (!looksLikeSearchPathCandidate(queryAsPath)) {
+    return fallback;
+  }
+
+  const queryPathKind = await getPathKindForWorkspaceSearchTarget(input.cwd, queryAsPath);
+  if (queryPathKind === 'missing') {
+    return fallback;
+  }
+
+  if (!looksLikeSearchQueryText(input.requestedPath)) {
+    return fallback;
+  }
+
+  return {
+    path: queryAsPath,
+    query: input.requestedPath.trim(),
+    useRegex: false,
+  };
+}
+
+async function getPathKindForWorkspaceSearchTarget(cwd: string, candidatePath: string): Promise<PathKind> {
+  try {
+    const normalizedPathForResolution = isAbsolute(candidatePath)
+      ? (await canonicalizeExistingPath(candidatePath)) ?? candidatePath
+      : candidatePath;
+    const resolved = resolveWorkspacePath(cwd, normalizedPathForResolution);
+    const canonicalResolved = await canonicalizeExistingPath(resolved);
+    return await getPathKind(canonicalResolved ?? resolved);
+  } catch {
+    return 'missing';
+  }
+}
+
+function looksLikeSearchPathCandidate(value: string): boolean {
+  const trimmed = value.trim();
+  if (trimmed.length === 0) {
+    return false;
+  }
+
+  if (trimmed.includes('\u0000') || /[\r\n]/.test(trimmed)) {
+    return false;
+  }
+
+  if (trimmed === '.' || trimmed === '..' || isAbsolute(trimmed)) {
+    return true;
+  }
+
+  if (trimmed.includes('/') || trimmed.includes('\\')) {
+    return true;
+  }
+
+  return /\.[A-Za-z0-9_-]+$/.test(trimmed);
+}
+
+function looksLikeSearchQueryText(value: string): boolean {
+  const trimmed = value.trim();
+  if (trimmed.length === 0) {
+    return false;
+  }
+
+  return /\s|[:();\[\]{}'"`]/.test(trimmed);
+}
+
 
 function hasRipgrepPathError(stderr: string): boolean {
   return isDeterministicRipgrepPathError(stderr);
