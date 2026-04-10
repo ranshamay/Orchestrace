@@ -718,8 +718,8 @@ export interface LogFinding {
   severity: string;
   title: string;
   description: string;
-  issueSummary: string;
-  evidence: string[];
+  suggestedFix?: string;
+  evidence?: Array<{ text: string }>;
   relevantFiles?: string[];
   logSnippet: string;
   detectedAt: string;

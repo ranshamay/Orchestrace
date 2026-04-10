@@ -23,8 +23,9 @@ export interface LogFinding {
   severity: FindingSeverity;
   title: string;
   description: string;
-  issueSummary: string;
-  evidence: string[];
+  schemaVersion?: '1' | '2';
+  suggestedFix?: string;
+  evidence?: Array<{ text: string }>;
   relevantFiles?: string[];
   logSnippet: string;
   detectedAt: string;
@@ -105,7 +106,7 @@ You look for these categories:
 Guidelines:
 - Only report CONCRETE, ACTIONABLE issues backed by evidence from the logs
 - Include the relevant log snippet (1-3 key lines) in each finding
-- Each issueSummary must be a specific code change or configuration adjustment
+- Each evidence entry must be a specific code change or configuration adjustment
 
 - Don't flag normal operational logs (startup messages, successful operations)
 - Focus on patterns — a single transient error is less important than a recurring one
@@ -120,16 +121,16 @@ Respond ONLY with valid JSON matching this schema:
       "category": "error-pattern|performance|configuration|reliability|security",
       "severity": "low|medium|high|critical",
       "title": "Short one-line title",
-            "description": "Detailed description of the issue with context from the logs",
-      "issueSummary": "Concrete fix — specific code change, config adjustment, or action to take",
-      "evidence": ["The 1-3 key log lines that support this issue"],
+      "description": "Detailed description of the issue with context from the logs",
+      "evidence": [{ "text": "Concrete fix — specific code change, config adjustment, or action to take" }],
       "relevantFiles": ["path/to/file.ts"],
       "logSnippet": "The 1-3 key log lines that evidence this issue"
 
     }
   ]
 }
-\`\`\``;
+\`\`\`
+Compatibility: legacy outputs with \`suggestedFix\` string are also accepted during rollout.`;
 
 // ---------------------------------------------------------------------------
 // LogWatcher
@@ -382,17 +383,18 @@ function parseLogFindings(text: string): LogFinding[] {
         id: `logf-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
         category: validateLogCategory(f.category as string),
         severity: validateSeverity(f.severity as string),
-                title: String(f.title),
+        title: String(f.title),
         description: String(f.description),
-        issueSummary: String(f.issueSummary ?? ''),
+        suggestedFix: typeof f.suggestedFix === 'string' ? f.suggestedFix : (typeof f.issueSummary === 'string' ? f.issueSummary : undefined),
         evidence: Array.isArray(f.evidence)
-          ? f.evidence.filter((x: unknown) => typeof x === 'string')
-          : [],
+          ? f.evidence
+              .filter((x: unknown): x is { text: string } => !!x && typeof x === 'object' && typeof (x as Record<string, unknown>).text === 'string')
+              .map((x: { text: string }) => ({ text: x.text }))
+          : undefined,
         relevantFiles: Array.isArray(f.relevantFiles)
           ? f.relevantFiles.filter((x: unknown) => typeof x === 'string')
           : undefined,
         logSnippet: String(f.logSnippet ?? ''),
-
         detectedAt: new Date().toISOString(),
       }));
   } catch {
