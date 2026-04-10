@@ -336,6 +336,24 @@ export interface SessionObserverStatusChangePayload {
   lastAnalyzedAt: string | null;
 }
 
+export interface SessionObserverFindingEvidence {
+  summary: string;
+  eventCount?: number;
+  durationSeconds?: number;
+  toolCalls?: {
+    writes?: number;
+    reads?: number;
+    searches?: number;
+    total?: number;
+  };
+  implementationAttempt?: {
+    current?: number;
+    max?: number;
+  };
+  files?: string[];
+  snippets?: string[];
+}
+
 export interface SessionObserverFindingPayload {
   finding: {
     id: string;
@@ -345,10 +363,12 @@ export interface SessionObserverFindingPayload {
     description: string;
     suggestedFix: string;
     relevantFiles?: string[];
+    evidence: SessionObserverFindingEvidence;
     phase: string;
     detectedAt: string;
   };
 }
+
 
 // The discriminated union
 export type SessionEvent =

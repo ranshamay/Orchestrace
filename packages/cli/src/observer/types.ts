@@ -120,14 +120,46 @@ export interface ObserverDaemonState {
   observerSessionIds: Set<string>;
 }
 
+/** Concrete evidence attached to an observer finding. */
+export interface ObserverFindingEvidence {
+  /** Human-readable summary of the strongest evidence for this finding. */
+  summary: string;
+  /** Optional event-count context supporting the finding. */
+  eventCount?: number;
+  /** Optional elapsed implementation duration in seconds supporting the finding. */
+  durationSeconds?: number;
+  /** Optional tool-call counters supporting the finding. */
+  toolCalls?: {
+    writes?: number;
+    reads?: number;
+    searches?: number;
+    total?: number;
+  };
+  /** Optional implementation attempt context. */
+  implementationAttempt?: {
+    current?: number;
+    max?: number;
+  };
+  /** Optional sample files referenced by the evidence. */
+  files?: string[];
+  /** Optional sample event snippets or facts. */
+  snippets?: string[];
+}
+
+/** Minimal finding shape used by analysis + realtime observer outputs. */
+export interface ObserverFindingDraft {
+  category: FindingCategory;
+  severity: FindingSeverity;
+  title: string;
+  description: string;
+  suggestedFix: string;
+  relevantFiles?: string[];
+  /** Evidence-first contract field: findings must include supporting evidence. */
+  evidence: ObserverFindingEvidence;
+}
+
 /** Structured output from the LLM analysis of a session's event log. */
 export interface AnalysisResult {
-  findings: Array<{
-    category: FindingCategory;
-    severity: FindingSeverity;
-    title: string;
-    description: string;
-    suggestedFix: string;
-    relevantFiles?: string[];
-  }>;
+  findings: ObserverFindingDraft[];
 }
+
