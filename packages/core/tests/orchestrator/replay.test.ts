@@ -4,6 +4,8 @@ import { tmpdir } from 'node:os';
 import { describe, expect, it } from 'vitest';
 import type { LlmAdapter, LlmAgent, LlmCompletionOptions, LlmPromptInput, LlmRequest, SpawnAgentRequest } from '@orchestrace/provider';
 import { orchestrate } from '../../src/orchestrator/orchestrator.js';
+import { buildRoleSystemPrompt } from '../../src/orchestrator/role-config.js';
+
 import type { DagEvent, TaskGraph } from '../../src/dag/types.js';
 
 function makeSingleNodeGraph(prompt = 'Perform a comprehensive multi-file refactoring across the entire core orchestrator module and the CLI runner package to completely restructure the internal execution pipeline, redesign the task scheduling layer, overhaul the validation subsystem, improve cross-package reliability guarantees, and update all downstream consumer packages to conform to the new architecture. This involves changes across packages/core, packages/cli, packages/provider, packages/store, and packages/tools, with coordination between multiple interdependent workstreams that must be staged carefully to avoid breaking existing functionality.'): TaskGraph {
@@ -577,7 +579,29 @@ describe('orchestrate replay capture', () => {
     }
   });
 
+      it('includes write-after-acknowledgment commitment rule in implementation system prompt', () => {
+    const prompt = buildRoleSystemPrompt({
+      role: 'implementer',
+      task: {
+        id: 'task-1',
+        name: 'Task 1',
+        type: 'code',
+        prompt: 'Apply update',
+        dependencies: [],
+      },
+      graphId: 'graph-1',
+      cwd: '/tmp/workspace',
+      provider: 'github-copilot',
+      model: 'gpt-5',
+    });
+
+    expect(prompt).toContain('after explicitly acknowledging sufficient context, your immediate next tool call must be write_file');
+    expect(prompt).toContain('Do not perform additional read/search/list tool calls');
+  });
+
+
   it('aborts repeated identical planning-contract failures as stagnation', async () => {
+
     const cwd = await mkdtemp(join(tmpdir(), 'orchestrace-replay-planning-contract-stagnation-'));
 
     try {

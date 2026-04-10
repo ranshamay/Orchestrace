@@ -14,6 +14,16 @@ import { createTimeoutSignal } from './timeout.js';
 
 const MAX_TOOL_ROUNDS = resolveMaxToolRounds();
 const SUBAGENT_BATCH_RETRY_MAX_ATTEMPTS = resolveSubagentBatchRetryMaxAttempts();
+const ACKNOWLEDGMENT_READ_AFTER_WRITE_ESCALATION_THRESHOLD = 2;
+
+const SUFFICIENT_CONTEXT_ACK_PATTERNS: RegExp[] = [
+  /\benough\s+(?:source\s+)?context\b/i,
+  /\bsufficient\s+context\b/i,
+  /\bmapped\s+all\s+touchpoints\b/i,
+  /\bconfirmed\s+(?:ui[-\s]?server\s+)?wiring\b/i,
+  /\b(i\s+have\s+)?all\s+the\s+context\s+i\s+need\b/i,
+];
+
 
 export async function executeWithOptionalTools(params: {
   model: ReturnType<typeof import('@mariozechner/pi-ai').getModel>;
@@ -36,9 +46,12 @@ export async function executeWithOptionalTools(params: {
     onUsage,
   } = params;
 
-  let round = 0;
+    let round = 0;
   let previousRoundHadToolError = false;
   let toolErrorRecoveryAttempts = 0;
+  let writeRequiredNext = false;
+  let readAfterAcknowledgmentViolations = 0;
+
   for (;;) {
     round += 1;
     if (MAX_TOOL_ROUNDS !== undefined && round > MAX_TOOL_ROUNDS) {
@@ -78,19 +91,38 @@ export async function executeWithOptionalTools(params: {
 
     toolErrorRecoveryAttempts = 0;
 
+        const acknowledgedSufficientContext = hasSufficientContextAcknowledgment(response);
+    if (acknowledgedSufficientContext) {
+      writeRequiredNext = true;
+    }
+
     const toolCalls = getToolCalls(response);
     if (toolCalls.length === 0) {
       return response;
     }
 
     context.messages.push(response);
-    const { results: toolResults, retryPrompts, hadErrors } = await executeToolCalls(
+    const { results: toolResults, retryPrompts, hadErrors, writeRequirementSatisfied, readAfterAckViolation } = await executeToolCalls(
       toolset,
       context.tools ?? [],
       toolCalls,
       signal,
       completionOptions,
+      writeRequiredNext,
     );
+    if (writeRequirementSatisfied) {
+      writeRequiredNext = false;
+      readAfterAcknowledgmentViolations = 0;
+    } else if (readAfterAckViolation) {
+      readAfterAcknowledgmentViolations += 1;
+      if (readAfterAcknowledgmentViolations >= ACKNOWLEDGMENT_READ_AFTER_WRITE_ESCALATION_THRESHOLD) {
+        retryPrompts.unshift(
+          `System escalation: repeated read-after-acknowledgment violations (${readAfterAcknowledgmentViolations}). `
+          + 'You already acknowledged sufficient context. The very next tool call must be write_file with concrete content.',
+        );
+      }
+    }
+
     context.messages.push(...toolResults);
     for (const retryPrompt of retryPrompts) {
       context.messages.push({
@@ -141,23 +173,68 @@ async function executeToolCalls(
   toolCalls: ToolCall[],
   signal?: AbortSignal,
   completionOptions?: LlmCompletionOptions,
-): Promise<{ results: ToolResultMessage[]; retryPrompts: string[]; hadErrors: boolean }> {
+  writeRequiredNext = false,
+): Promise<{
+  results: ToolResultMessage[];
+  retryPrompts: string[];
+  hadErrors: boolean;
+  writeRequirementSatisfied: boolean;
+  readAfterAckViolation: boolean;
+}> {
   const results: ToolResultMessage[] = [];
   const retryPrompts: string[] = [];
   let hadErrors = false;
+  let writeRequirementSatisfied = false;
+  let readAfterAckViolation = false;
+
 
   for (const toolCall of toolCalls) {
     let payload: { content: string; isError: boolean; details?: unknown };
     let validatedArgs: Record<string, unknown> | undefined;
 
-    completionOptions?.onToolCall?.({
+        completionOptions?.onToolCall?.({
       type: 'started',
       toolCallId: toolCall.id,
       toolName: toolCall.name,
       arguments: formatToolPayload(toolCall.arguments),
     });
 
+    if (writeRequiredNext && toolCall.name !== 'write_file') {
+      readAfterAckViolation = true;
+      payload = {
+        content: buildAcknowledgmentWriteGuardViolationMessage(toolCall),
+        isError: true,
+      };
+      completionOptions?.onToolCall?.({
+        type: 'result',
+        toolCallId: toolCall.id,
+        toolName: toolCall.name,
+        arguments: formatToolPayload(toolCall.arguments),
+        result: formatToolPayload(payload.content),
+        isError: true,
+        details: payload.details,
+      });
+      hadErrors = true;
+      results.push({
+        role: 'toolResult',
+        toolCallId: toolCall.id,
+        toolName: toolCall.name,
+        content: [{ type: 'text', text: payload.content }],
+        details: payload.details,
+        isError: payload.isError,
+        timestamp: Date.now(),
+      });
+      retryPrompts.push(payload.content);
+      continue;
+    }
+
+    if (writeRequiredNext && toolCall.name === 'write_file') {
+      writeRequirementSatisfied = true;
+      writeRequiredNext = false;
+    }
+
     try {
+
       coerceStringifiedArrayArgs(toolCall);
       validatedArgs = validateToolCall(tools, toolCall) as Record<string, unknown>;
             const toolResult = await executeToolWithEditFilesDedup({
@@ -223,8 +300,15 @@ async function executeToolCalls(
     }
   }
 
-  return { results, retryPrompts, hadErrors };
+    return {
+    results,
+    retryPrompts,
+    hadErrors,
+    writeRequirementSatisfied,
+    readAfterAckViolation,
+  };
 }
+
 
 
 type ToolExecutionPayload = {
@@ -795,6 +879,7 @@ async function sleepWithSignal(ms: number, signal?: AbortSignal): Promise<void> 
 }
 
 function buildToolCallRetryMessage(toolCall: ToolCall, errorContent: string): string {
+
   const deterministicEditFailure = isDeterministicEditValidationFailure(toolCall.name, errorContent);
   const remediationLine = deterministicEditFailure
     ? 'This failure is deterministic. Revise the edit plan/arguments (or skip this edit) before issuing another edit tool call.'
@@ -807,7 +892,35 @@ function buildToolCallRetryMessage(toolCall: ToolCall, errorContent: string): st
   ].join('\n');
 }
 
+function buildAcknowledgmentWriteGuardViolationMessage(toolCall: ToolCall): string {
+  return [
+    `Tool call ${toolCall.name} (${toolCall.id}) blocked by system guardrail.`,
+    'You acknowledged that context is sufficient, so the immediate next tool call must be write_file.',
+    'Call write_file next with concrete content before any additional read/search/list tool calls.',
+  ].join('\n');
+}
+
+function hasSufficientContextAcknowledgment(message: AssistantMessage): boolean {
+  for (const block of message.content) {
+    if (block.type !== 'text') {
+      continue;
+    }
+
+    const text = typeof block.text === 'string' ? block.text : '';
+    if (!text.trim()) {
+      continue;
+    }
+
+    if (SUFFICIENT_CONTEXT_ACK_PATTERNS.some((pattern) => pattern.test(text))) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 function isDeterministicEditValidationFailure(toolName: string, errorContent: string): boolean {
+
   if (toolName !== 'edit_file' && toolName !== 'edit_files') {
     return false;
   }

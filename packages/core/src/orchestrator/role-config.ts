@@ -310,8 +310,11 @@ export function buildRoleSystemPrompt(params: {
           'When PR delivery is in scope, do not stop at green checks alone: verify PR mergeability, required checks, and review state via github_api before considering it done.',
           'When git/PR finish-up is in scope and fails, retry using the failure reason and continue from the same point.',
           'Implementation responses must end with 1-3 concrete next follow-up suggestions.',
-          'Run verification and iterate until checks pass or a true blocker is reached.',
+                    'Run verification and iterate until checks pass or a true blocker is reached.',
+          'Hard commitment rule: after explicitly acknowledging sufficient context, your immediate next tool call must be write_file.',
+          'Do not perform additional read/search/list tool calls between that acknowledgment and the required write_file call.',
           'When blocked, report the blocker clearly and propose the best next step.',
+
         ];
 
   return renderPromptSections([

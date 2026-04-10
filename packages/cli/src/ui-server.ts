@@ -7553,7 +7553,9 @@ type SessionIdWorkspacePathRelation = {
 type SessionPlanningGuardState = {
   consecutiveNonWriteToolCalls: number;
   forcedImplementation: boolean;
+  readAfterAcknowledgmentViolations: number;
 };
+
 
 export function classifyWorkspacePathSessionIdRelation(sessionId: string, workspacePath: string): SessionIdWorkspacePathRelation {
   const normalizedPath = workspacePath.replace(/\\/g, '/');
@@ -7641,8 +7643,10 @@ export function getSessionPlanningGuardState(): SessionPlanningGuardState {
   return {
     consecutiveNonWriteToolCalls: 0,
     forcedImplementation: false,
+    readAfterAcknowledgmentViolations: 0,
   };
 }
+
 
 export function isSimpleSessionTaskPrompt(prompt: string): boolean {
   const normalized = prompt.toLowerCase();
@@ -7704,6 +7708,21 @@ function resolvePlanningBudgetPercent(): number {
   return Math.min(100, Math.max(1, parsed));
 }
 
+function resolveReadAfterAckViolationThreshold(): number {
+  return parsePositiveSetting(process.env.ORCHESTRACE_MAX_READ_AFTER_ACK_VIOLATIONS) ?? 2;
+}
+
+function isReadAfterAcknowledgmentViolationEvent(toolEvent: LlmToolCallEvent): boolean {
+  if (toolEvent.type !== 'result' || !toolEvent.isError) {
+    return false;
+  }
+
+  const result = String(toolEvent.result ?? '').toLowerCase();
+  return result.includes('blocked by system guardrail')
+    && result.includes('next tool call must be write_file');
+}
+
+
 export function enforcePlanningToolCallGuard(params: {
   session: WorkSession;
   continuationPhase: SessionPromptPhase;
@@ -7715,14 +7734,39 @@ export function enforcePlanningToolCallGuard(params: {
   const existing = params.sessionPlanningGuards.get(params.session.id) ?? getSessionPlanningGuardState();
   params.sessionPlanningGuards.set(params.session.id, existing);
 
-  if (params.continuationPhase !== 'planning') {
+    if (params.continuationPhase !== 'planning') {
+    return existing;
+  }
+
+  if (isReadAfterAcknowledgmentViolationEvent(params.toolEvent)) {
+    existing.readAfterAcknowledgmentViolations += 1;
+    const violationThreshold = resolveReadAfterAckViolationThreshold();
+    if (!existing.forcedImplementation && existing.readAfterAcknowledgmentViolations >= violationThreshold) {
+      existing.forcedImplementation = true;
+      params.session.llmStatus = {
+        ...params.session.llmStatus,
+        state: 'implementing',
+        label: 'Implementing',
+        detail: `Planning guard triggered after repeated read-after-ack violations (${existing.readAfterAcknowledgmentViolations}); forcing implementation/write.`,
+        phase: 'implementation',
+        updatedAt: now(),
+      };
+      void params.persistEvent(params.session.id, {
+        time: now(),
+        type: 'session:llm-status-change',
+        payload: { llmStatus: params.session.llmStatus },
+      });
+      params.uiStatePersistence.schedule();
+    }
     return existing;
   }
 
   if (isWriteToolCallEvent(params.toolEvent)) {
     existing.consecutiveNonWriteToolCalls = 0;
+    existing.readAfterAcknowledgmentViolations = 0;
     return existing;
   }
+
 
   if (params.toolEvent.type === 'started') {
     existing.consecutiveNonWriteToolCalls += 1;
@@ -8558,9 +8602,12 @@ export function buildSessionSystemPrompt(session: WorkSession, phase: SessionPro
             'Read todo_get and agent_graph_get before coding, then keep todo_update current while implementing.',
             'Use subagent_spawn or subagent_spawn_batch to execute parallelizable slices with minimal relevant context per agent.',
             'For independent nodes, use subagent_spawn_batch so work runs in parallel.',
-            'For multi-file inspection, use read_files with concurrency to reduce latency; avoid repeated single-file reads when possible.',
+                        'For multi-file inspection, use read_files with concurrency to reduce latency; avoid repeated single-file reads when possible.',
+            'Hard commitment rule: after explicitly acknowledging sufficient context, the very next tool call must be write_file.',
+            'If the write-after-acknowledgment guardrail fires, immediately issue write_file before any further reads.',
             'Pass nodeId for each sub-agent request so graph status stays current.',
             'Use github_api for GitHub REST/GraphQL operations; do not use gh CLI.',
+
             'Iterate until validation passes or a true blocker is reached.',
             'After each push or PR update, query remote CI/check status with github_api and keep fixing/re-pushing until checks pass or a true blocker is reached.',
             'Do not stop at green checks alone: verify PR mergeability, required checks, and review state via github_api, then keep iterating until the PR is merge-ready or a true blocker is reached.',
