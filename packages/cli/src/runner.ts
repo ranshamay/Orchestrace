@@ -36,7 +36,15 @@ import {
 } from '@orchestrace/tools';
 import { InMemorySharedContextStore } from '@orchestrace/context';
 import { FileEventStore, materializeSession } from '@orchestrace/store';
-import type { SessionEventInput, SessionConfig, SessionLlmStatus, LlmSessionState, SessionAgentGraphNode } from '@orchestrace/store';
+import type {
+  SessionEventInput,
+  SessionConfig,
+  SessionLlmStatus,
+  LlmSessionState,
+  SessionAgentGraphNode,
+  SessionAgentGraphNodeStatus,
+  AgentTodoStatus,
+} from '@orchestrace/store';
 import {
   llmStatusIdentityKey,
   parseTimestamp,
@@ -2206,8 +2214,9 @@ async function main(): Promise<void> {
         const input = JSON.parse(event.input) as Record<string, unknown>;
         const nodeIds = resolveNodeIds(agentGraph, event.toolName, input);
         if (nodeIds.length === 0) return;
-        pendingNodeIds.set(event.toolCallId, nodeIds);
-        if (setNodeStatus(nodeIds, 'running')) {
+                pendingNodeIds.set(event.toolCallId, nodeIds);
+        if (setNodeStatus(nodeIds, 'in_progress')) {
+
           void emit({ time: iso(), type: 'session:agent-graph-set', payload: { graph: agentGraph } });
         }
       } catch { /* ignore */ }
@@ -2256,7 +2265,9 @@ async function main(): Promise<void> {
     }
   }
 
-  function setNodeStatus(nodeIds: string[], status: 'running' | 'completed' | 'failed'): boolean {
+    
+  function setNodeStatus(nodeIds: string[], status: SessionAgentGraphNodeStatus): boolean {
+
     let changed = false;
     const targets = new Set(nodeIds);
     for (let i = 0; i < agentGraph.length; i++) {
@@ -3075,7 +3086,7 @@ function resolveNodeIds(nodes: SessionAgentGraphNode[], toolName: string, input:
   return [...new Set(resolved)];
 }
 
-function normalizeTodoStatus(value: unknown): 'todo' | 'in_progress' | 'done' | undefined {
+function normalizeTodoStatus(value: unknown): AgentTodoStatus | undefined {
   const raw = str(value);
   if (!raw) return undefined;
   const n = raw.toLowerCase().replace(/[-\s]+/g, '_');

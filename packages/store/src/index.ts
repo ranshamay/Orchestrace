@@ -36,8 +36,11 @@ export type {
   WorkState,
   SessionCreationReason,
   ReasoningLevel,
-  SessionAgentRole,
+    SessionAgentRole,
+  SessionAgentGraphNodeStatus,
+  AgentTodoStatus,
   SessionAgentModelConfig,
+
   SessionAgentModels,
   LlmSessionState,
   SessionLlmStatus,

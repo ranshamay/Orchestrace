@@ -128,8 +128,16 @@ function buildFixPrompt(finding: FindingRecord): string {
   parts.push('## Issue');
   parts.push(finding.description);
   parts.push('');
-  parts.push('## Task');
+    parts.push('## Task');
   parts.push(finding.suggestedFix);
+
+  parts.push('');
+  parts.push('## Execution Requirements');
+  parts.push('- Begin implementation immediately; do not spend the first implementation pass on planning-only output.');
+  parts.push('- First edits must target schema/type files referenced by this finding when applicable (types-first).');
+  parts.push('- Batch related file edits together before re-reading the same files.');
+  parts.push('- Update todo/agent graph statuses to in_progress/completed as coding proceeds; do not leave all nodes pending/todo after implementation starts.');
+
 
   if (finding.relevantFiles && finding.relevantFiles.length > 0) {
     parts.push('');

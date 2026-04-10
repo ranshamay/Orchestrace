@@ -4,9 +4,11 @@ import type {
   SessionConfig,
   WorkState,
   SessionLlmStatus,
-  UiDagEvent,
+    UiDagEvent,
   SessionAgentGraphNode,
+  SessionAgentGraphNodeStatus,
   SessionChatMessage,
+
   AgentTodoItem,
   SharedContextFact,
   ContextCompactionState,
@@ -208,8 +210,9 @@ function applyDagEvent(state: MaterializedSession, dagEvent: UiDagEvent): void {
 
 function applyGraphNodeStatus(
   state: MaterializedSession,
-  nodeId: string,
-  status: 'pending' | 'running' | 'completed' | 'failed',
+    nodeId: string,
+  status: SessionAgentGraphNodeStatus,
+
 ): void {
   const node = state.agentGraph.find((n) => n.id === nodeId);
   if (node) {

@@ -13,6 +13,12 @@ export type SessionCreationReason = 'start' | 'retry';
 export type ReasoningLevel = 'minimal' | 'low' | 'medium' | 'high';
 export type SessionAgentRole = 'router' | 'planner' | 'implementer' | 'reviewer' | 'investigator';
 
+/** Canonical agent graph node statuses (accepts legacy running + explicit in_progress). */
+export type SessionAgentGraphNodeStatus = 'pending' | 'running' | 'in_progress' | 'completed' | 'failed';
+/** Canonical todo item statuses. */
+export type AgentTodoStatus = 'todo' | 'in_progress' | 'done';
+
+
 export interface SessionAgentModelConfig {
   provider?: string;
   model?: string;
@@ -56,8 +62,9 @@ export interface SessionAgentGraphNode {
   name?: string;
   prompt: string;
   weight?: number;
-  dependencies: string[];
-  status?: 'pending' | 'running' | 'completed' | 'failed';
+    dependencies: string[];
+  status?: SessionAgentGraphNodeStatus;
+
   provider?: string;
   model?: string;
   reasoning?: ReasoningLevel;
@@ -91,8 +98,9 @@ export interface SessionChatMessage {
 
 export interface AgentTodoItem {
   id: string;
-  text: string;
-  status?: 'todo' | 'in_progress' | 'done';
+    text: string;
+  status?: AgentTodoStatus;
+
   done: boolean;
   weight?: number;
   createdAt: string;
@@ -245,7 +253,7 @@ export interface SessionAgentGraphSetPayload {
 
 export interface SessionAgentGraphNodeStatusPayload {
   nodeId: string;
-  status: 'pending' | 'running' | 'completed' | 'failed';
+    status: SessionAgentGraphNodeStatus;
 }
 
 export interface SessionChatThreadCreatedPayload {
@@ -270,7 +278,7 @@ export interface SessionTodoItemAddedPayload {
 export interface SessionTodoItemToggledPayload {
   itemId: string;
   done: boolean;
-  status?: 'todo' | 'in_progress' | 'done';
+    status?: AgentTodoStatus;
 }
 
 export interface SessionTodoItemRemovedPayload {

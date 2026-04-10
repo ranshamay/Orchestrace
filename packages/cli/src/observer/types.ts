@@ -20,6 +20,11 @@ export const ALL_FINDING_CATEGORIES: FindingCategory[] = [
 
 export type FindingSeverity = 'low' | 'medium' | 'high' | 'critical';
 
+/** Execution status semantics used in observer analyses and fix prompts. */
+export type ObserverAgentGraphNodeStatus = 'pending' | 'running' | 'in_progress' | 'completed' | 'failed';
+export type ObserverTodoStatus = 'todo' | 'in_progress' | 'done';
+
+
 /** A single observation/issue found by the observer LLM. */
 export interface ObserverFinding {
   /** Deterministic fingerprint for deduplication (hash of category + normalized description). */

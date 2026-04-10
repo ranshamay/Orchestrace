@@ -13,6 +13,9 @@ export type ExecutionContext = 'workspace' | 'git-worktree';
 export type SessionWorktreePathSessionIdRelation = 'match' | 'mismatch' | 'none';
 export type ReasoningLevel = 'minimal' | 'low' | 'medium' | 'high';
 export type SessionAgentRole = 'router' | 'planner' | 'implementer' | 'reviewer' | 'investigator';
+export type SessionAgentGraphNodeStatus = 'pending' | 'running' | 'in_progress' | 'completed' | 'failed';
+export type AgentTodoStatus = 'todo' | 'in_progress' | 'done';
+
 
 export interface SessionAgentModelConfig {
   provider?: string;
@@ -66,8 +69,9 @@ export interface SessionAgentGraphNode {
   name?: string;
   prompt: string;
   weight?: number;
-  dependencies: string[];
-  status?: 'pending' | 'running' | 'completed' | 'failed';
+    dependencies: string[];
+  status?: SessionAgentGraphNodeStatus;
+
   provider?: string;
   model?: string;
   reasoning?: ReasoningLevel;
@@ -136,8 +140,9 @@ export interface SessionChatThread {
 
 export interface AgentTodoItem {
   id: string;
-  text: string;
-  status?: 'todo' | 'in_progress' | 'done';
+    text: string;
+  status?: AgentTodoStatus;
+
   done: boolean;
   weight?: number;
   createdAt: string;

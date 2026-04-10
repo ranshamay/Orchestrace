@@ -162,13 +162,15 @@ export interface WorkSession {
     message: string;
   }>;
 
+    
   agentGraph?: Array<{
+
     id: string;
     name?: string;
     prompt: string;
     weight?: number;
     dependencies: string[];
-    status?: 'pending' | 'running' | 'completed' | 'failed';
+    status?: 'pending' | 'running' | 'in_progress' | 'completed' | 'failed';
   }>;
   progress?: WorkSessionProgress;
   output?: { text?: string; planPath?: string; failureType?: string };
@@ -205,8 +207,9 @@ export interface WorkSessionDiffResponse {
 
 export interface AgentTodo {
   id: string;
-  text: string;
+    text: string;
   status?: 'todo' | 'in_progress' | 'done';
+
   done: boolean;
   weight?: number;
   createdAt: string;

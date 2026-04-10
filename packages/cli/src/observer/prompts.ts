@@ -57,6 +57,9 @@ CRITICAL real-time guidelines:
 - Focus on the CURRENT phase boundary: if the agent just finished planning, assess the plan quality; if it just made tool calls, assess tool usage patterns
 - Be concise — the agent is still running and findings appear in real-time in the UI
 - Each suggestedFix must be detailed enough for another agent to act on independently
+- When the issue is implementation stall, require immediate code edits and specify a concrete first file/type change to start with
+- Prefer fixes that batch related edits and avoid repeated exploratory reads of the same files
 - Rate severity honestly: critical = data loss/security, high = bugs, medium = perf/quality, low = style/minor
 
 Respond ONLY with valid JSON matching the requested schema.`;
+
