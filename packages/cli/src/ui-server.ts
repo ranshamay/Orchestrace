@@ -85,7 +85,9 @@ import { materializeSession as materializeFromEvents } from '@orchestrace/store'
 import type {
   SessionCheckpointPayload,
   SessionConfig,
+  SessionEvent,
   SessionEventInput,
+  SessionLlmStatusChangePayload,
   SessionRecoveryDetectedPayload,
 } from '@orchestrace/store';
 import { ObserverDaemon, SessionObserver, BackendLogger, LogWatcher } from './observer/index.js';
@@ -577,8 +579,10 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
             const unwatch = eventStore.watch(sessionId, lastSeq, (event) => {
               session.updatedAt = event.time;
               switch (event.type) {
-                case 'session:llm-status-change':
-                  session.llmStatus = event.payload.llmStatus as SessionLlmStatus;
+                                case 'session:llm-status-change':
+                  if (isSessionLlmStatusChangeEvent(event)) {
+                    session.llmStatus = event.payload.llmStatus;
+                  }
                   break;
                 case 'session:status-change': {
                   const newStatus = event.payload.status as WorkState;
@@ -1311,8 +1315,10 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       session.updatedAt = event.time;
 
       switch (event.type) {
-        case 'session:llm-status-change':
-          session.llmStatus = event.payload.llmStatus as SessionLlmStatus;
+                case 'session:llm-status-change':
+          if (isSessionLlmStatusChangeEvent(event)) {
+            session.llmStatus = event.payload.llmStatus;
+          }
           break;
 
         case 'session:status-change': {
@@ -5366,6 +5372,11 @@ function parseGithubScopes(scopes: string | undefined): string[] {
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
+
+function isSessionLlmStatusChangeEvent(event: SessionEvent): event is Extract<SessionEvent, { type: 'session:llm-status-change'; payload: SessionLlmStatusChangePayload }> {
+  return event.type === 'session:llm-status-change';
+}
+
 
 function resolveDefaultModelFromEnv(): string | undefined {
   const value = asString(process.env.ORCHESTRACE_DEFAULT_MODEL)?.trim();
