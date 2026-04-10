@@ -4,6 +4,7 @@ import type { NodeTokenStream } from '../types';
 import { upsertSessionWithActivityTransition } from '../utils/sessionSort';
 
 type Params = {
+  enabled?: boolean;
   selectedSessionId: string;
   setSessions: (updater: WorkSession[] | ((current: WorkSession[]) => WorkSession[])) => void;
   setChatMessages: (updater: ChatMessage[] | ((current: ChatMessage[]) => ChatMessage[])) => void;
@@ -17,10 +18,17 @@ type Params = {
  * real-time incremental updates to sessions, chat messages, and todos.
  * Falls back gracefully — if SSE disconnects, the polling fallback still works.
  */
-export function useSessionStream({ selectedSessionId, setSessions, setChatMessages, setTodos, setNodeTokenStreams, setObserverState }: Params) {
+export function useSessionStream({ enabled = true, selectedSessionId, setSessions, setChatMessages, setTodos, setNodeTokenStreams, setObserverState }: Params) {
   const connectedIdRef = useRef<string>('');
 
   useEffect(() => {
+    if (!enabled) {
+      connectedIdRef.current = '';
+      setNodeTokenStreams({});
+      setObserverState(null);
+      return;
+    }
+
     if (!selectedSessionId) {
       connectedIdRef.current = '';
       setNodeTokenStreams({});
@@ -229,5 +237,5 @@ export function useSessionStream({ selectedSessionId, setSessions, setChatMessag
       setObserverState(null);
       es.close();
     };
-  }, [selectedSessionId, setSessions, setChatMessages, setNodeTokenStreams, setObserverState, setTodos]);
+  }, [enabled, selectedSessionId, setSessions, setChatMessages, setNodeTokenStreams, setObserverState, setTodos]);
 }

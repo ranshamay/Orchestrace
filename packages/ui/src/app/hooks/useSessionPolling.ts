@@ -3,6 +3,7 @@ import { fetchSessions, fetchWorkAgent, type AgentTodo, type ChatMessage, type W
 import { sortSessionsByActivityAndRecency } from '../utils/sessionSort';
 
 type Params = {
+  enabled?: boolean;
   selectedSessionId: string;
   setSelectedSessionId: (id: string) => void;
   setSessions: (updater: WorkSession[] | ((current: WorkSession[]) => WorkSession[])) => void;
@@ -10,8 +11,12 @@ type Params = {
   setTodos: (updater: AgentTodo[] | ((current: AgentTodo[]) => AgentTodo[])) => void;
 };
 
-export function useSessionPolling({ selectedSessionId, setSelectedSessionId, setSessions, setChatMessages, setTodos }: Params) {
+export function useSessionPolling({ enabled = true, selectedSessionId, setSelectedSessionId, setSessions, setChatMessages, setTodos }: Params) {
   useEffect(() => {
+    if (!enabled) {
+      return;
+    }
+
     if (!selectedSessionId) {
       setChatMessages([]);
       setTodos([]);
@@ -67,5 +72,5 @@ export function useSessionPolling({ selectedSessionId, setSelectedSessionId, set
       cancelled = true;
       clearInterval(interval);
     };
-  }, [selectedSessionId, setChatMessages, setSelectedSessionId, setSessions, setTodos]);
+  }, [enabled, selectedSessionId, setChatMessages, setSelectedSessionId, setSessions, setTodos]);
 }

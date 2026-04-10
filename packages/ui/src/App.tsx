@@ -34,6 +34,66 @@ import { LoginGate } from './app/components/auth/LoginGate';
 import type { SettingsSaveToastState } from './app/components/overlays/SettingsSaveToast';
 import { readTabFromUrl, updateTabInUrl } from './app/utils/viewRoute';
 
+const LOGIN_PATH = '/login';
+
+function normalizeRoutePath(pathname: string): string {
+  if (!pathname) {
+    return '/';
+  }
+
+  const trimmed = pathname.trim();
+  if (trimmed.length > 1 && trimmed.endsWith('/')) {
+    return trimmed.slice(0, -1);
+  }
+
+  return trimmed;
+}
+
+function resolveSafePostLoginPath(): string {
+  if (typeof window === 'undefined') {
+    return '/';
+  }
+
+  const url = new URL(window.location.href);
+  const requested = (url.searchParams.get('next') ?? '').trim();
+  if (!requested || !requested.startsWith('/') || requested.startsWith('//')) {
+    return '/';
+  }
+
+  if (normalizeRoutePath(requested) === LOGIN_PATH) {
+    return '/';
+  }
+
+  return requested;
+}
+
+function redirectToLoginRoute(): void {
+  if (typeof window === 'undefined') {
+    return;
+  }
+
+  const currentUrl = new URL(window.location.href);
+  if (normalizeRoutePath(currentUrl.pathname) === LOGIN_PATH) {
+    return;
+  }
+
+  const nextPath = `${currentUrl.pathname}${currentUrl.search}${currentUrl.hash}`;
+  currentUrl.pathname = LOGIN_PATH;
+  currentUrl.search = '';
+  currentUrl.searchParams.set('next', nextPath.startsWith('/') ? nextPath : '/');
+  window.history.replaceState({}, '', currentUrl);
+}
+
+function replaceRoute(path: string): void {
+  if (typeof window === 'undefined') {
+    return;
+  }
+
+  const target = path.trim().length > 0 ? path : '/';
+  const absolute = new URL(target, window.location.origin);
+  window.history.replaceState({}, '', absolute);
+}
+
 export default function App() {
   const [activeTab, setActiveTabState] = useState<Tab>(() => readTabFromUrl());
     const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
@@ -57,8 +117,11 @@ export default function App() {
   const preferencesSyncInitializedRef = useRef(false);
   const preferenceSaveRequestIdRef = useRef(0);
   const preferenceSaveQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const isLoginRoute = typeof window !== 'undefined'
+    && normalizeRoutePath(window.location.pathname) === LOGIN_PATH;
+  const canUseAuthedApis = authReady && (!authEnabled || authenticated);
 
-  const bootstrap = useBootstrapData();
+  const bootstrap = useBootstrapData(canUseAuthedApis);
   const {
     providers, providerStatuses, workspaces, activeWorkspaceId,
     sessions, setSessions, selectedSessionId, setSelectedSessionId,
@@ -106,12 +169,16 @@ export default function App() {
     updateTabInUrl(tab, 'push');
   }, []);
 
-  useSessionsStatusStream({ selectedSessionId, setSelectedSessionId: setSessionSelection, setSessions });
-  useSessionPolling({ selectedSessionId, setSelectedSessionId: setSessionSelection, setSessions, setChatMessages, setTodos });
-  useSessionStream({ selectedSessionId, setSessions, setChatMessages, setTodos, setNodeTokenStreams, setObserverState });
+  useSessionsStatusStream({ enabled: canUseAuthedApis, selectedSessionId, setSelectedSessionId: setSessionSelection, setSessions });
+  useSessionPolling({ enabled: canUseAuthedApis, selectedSessionId, setSelectedSessionId: setSessionSelection, setSessions, setChatMessages, setTodos });
+  useSessionStream({ enabled: canUseAuthedApis, selectedSessionId, setSessions, setChatMessages, setTodos, setNodeTokenStreams, setObserverState });
   useRunUrlSync(selectedSessionId, setSessionSelection);
 
   useEffect(() => {
+    if (typeof window !== 'undefined' && normalizeRoutePath(window.location.pathname) === LOGIN_PATH) {
+      return;
+    }
+
     updateTabInUrl(activeTab, 'replace');
   }, [activeTab]);
 
@@ -129,6 +196,26 @@ export default function App() {
       window.removeEventListener('popstate', handlePopState);
     };
   }, []);
+
+  useEffect(() => {
+    if (!authReady) {
+      return;
+    }
+
+    if (authEnabled && !authenticated && !isLoginRoute) {
+      redirectToLoginRoute();
+    }
+  }, [authEnabled, authReady, authenticated, isLoginRoute]);
+
+  useEffect(() => {
+    if (!authReady) {
+      return;
+    }
+
+    if ((!authEnabled || authenticated) && isLoginRoute) {
+      replaceRoute(resolveSafePostLoginPath());
+    }
+  }, [authEnabled, authReady, authenticated, isLoginRoute]);
 
   useEffect(() => {
     return () => {
@@ -841,6 +928,7 @@ export default function App() {
             setStoredAuthToken(token);
             setAuthenticated(true);
             setAuthError('');
+            replaceRoute(resolveSafePostLoginPath());
           }}
         />
         {authError && (

@@ -432,7 +432,15 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       return true;
     }
 
-    if (pathname === '/' || pathname === '/settings' || pathname === '/settings/' || pathname === '/logs' || pathname === '/logs/') {
+    if (
+      pathname === '/'
+      || pathname === '/login'
+      || pathname === '/login/'
+      || pathname === '/settings'
+      || pathname === '/settings/'
+      || pathname === '/logs'
+      || pathname === '/logs/'
+    ) {
       return true;
     }
 
@@ -461,6 +469,11 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     const token = resolveRequestJwt(req, url);
     if (!token) {
       sendJson(res, 401, { error: 'Authentication required' });
+      return undefined;
+    }
+
+    if (!appAuthConfig.jwtSecret) {
+      sendJson(res, 503, { error: 'JWT signing secret is not configured. Set ORCHESTRACE_APP_JWT_SECRET.' });
       return undefined;
     }
 
@@ -2097,7 +2110,18 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       const url = new URL(req.url ?? '/', 'http://localhost');
       const { pathname } = url;
 
-      if (req.method === 'GET' && (pathname === '/' || pathname === '/settings' || pathname === '/settings/' || pathname === '/logs' || pathname === '/logs/')) {
+      if (
+        req.method === 'GET'
+        && (
+          pathname === '/'
+          || pathname === '/login'
+          || pathname === '/login/'
+          || pathname === '/settings'
+          || pathname === '/settings/'
+          || pathname === '/logs'
+          || pathname === '/logs/'
+        )
+      ) {
         sendHtml(res, renderDashboardHtml(hmrEnabled));
         return;
       }
@@ -2137,6 +2161,11 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           return;
         }
 
+        if (!appAuthConfig.jwtSecret) {
+          sendJson(res, 200, { authenticated: false, authEnabled: true });
+          return;
+        }
+
         const payload = verifyJwtToken(token, appAuthConfig.jwtSecret);
         if (!payload) {
           sendJson(res, 200, { authenticated: false, authEnabled: true });
@@ -2159,6 +2188,16 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       if (req.method === 'POST' && pathname === '/api/app-auth/google') {
         if (!appAuthEnabled) {
           sendJson(res, 400, { error: 'App authentication is disabled.' });
+          return;
+        }
+
+        if (!appAuthConfig.googleClientId) {
+          sendJson(res, 503, { error: 'Google Sign-In is not configured. Set ORCHESTRACE_GOOGLE_CLIENT_ID.' });
+          return;
+        }
+
+        if (!appAuthConfig.jwtSecret) {
+          sendJson(res, 503, { error: 'JWT signing secret is not configured. Set ORCHESTRACE_APP_JWT_SECRET.' });
           return;
         }
 
@@ -5037,10 +5076,11 @@ function asPositiveInt(value: unknown): number | undefined {
 }
 
 function resolveAppAuthConfig(): AppAuthConfig {
+  const authRequired = parseBooleanSetting(process.env.ORCHESTRACE_APP_AUTH_REQUIRED) ?? true;
   const googleClientId = asString(process.env.ORCHESTRACE_GOOGLE_CLIENT_ID)?.trim() ?? '';
   const jwtSecret = asString(process.env.ORCHESTRACE_APP_JWT_SECRET)?.trim() ?? '';
   const tokenTtlSeconds = parsePositiveSetting(process.env.ORCHESTRACE_APP_JWT_TTL_SECONDS) ?? 60 * 60 * 8;
-  const enabled = Boolean(googleClientId && jwtSecret);
+  const enabled = authRequired;
 
   return {
     enabled,

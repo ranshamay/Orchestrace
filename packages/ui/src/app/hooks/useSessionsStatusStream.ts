@@ -3,6 +3,7 @@ import { API_BASE, buildAuthedSseUrl, type WorkSession } from '../../lib/api';
 import { sortSessionsByActivityAndRecency, upsertSessionWithActivityTransition } from '../utils/sessionSort';
 
 type Params = {
+  enabled?: boolean;
   selectedSessionId: string;
   setSelectedSessionId: (id: string) => void;
   setSessions: (updater: WorkSession[] | ((current: WorkSession[]) => WorkSession[])) => void;
@@ -12,7 +13,7 @@ type Params = {
  * Keeps the sessions rail synchronized in real time from the server-wide
  * session status stream, independent from the selected session stream.
  */
-export function useSessionsStatusStream({ selectedSessionId, setSelectedSessionId, setSessions }: Params) {
+export function useSessionsStatusStream({ enabled = true, selectedSessionId, setSelectedSessionId, setSessions }: Params) {
   const selectedSessionIdRef = useRef(selectedSessionId);
 
   useEffect(() => {
@@ -20,7 +21,11 @@ export function useSessionsStatusStream({ selectedSessionId, setSelectedSessionI
   }, [selectedSessionId]);
 
   useEffect(() => {
-        const es = new EventSource(buildAuthedSseUrl(`${API_BASE}/work/sessions/stream`));
+    if (!enabled) {
+      return;
+    }
+
+    const es = new EventSource(buildAuthedSseUrl(`${API_BASE}/work/sessions/stream`));
 
     const handleReady = (ev: MessageEvent) => {
       try {
@@ -83,5 +88,5 @@ export function useSessionsStatusStream({ selectedSessionId, setSelectedSessionI
     return () => {
       es.close();
     };
-  }, [setSelectedSessionId, setSessions]);
+  }, [enabled, setSelectedSessionId, setSessions]);
 }

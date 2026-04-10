@@ -19,7 +19,7 @@ import { readTabFromUrl } from '../utils/viewRoute';
 
 type ProviderStatus = { provider: string; source: string };
 
-export function useBootstrapData() {
+export function useBootstrapData(enabled = true) {
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [providerStatuses, setProviderStatuses] = useState<ProviderStatus[]>([]);
   const [githubAuthStatus, setGithubAuthStatus] = useState<GithubAuthStatus>({
@@ -65,6 +65,10 @@ export function useBootstrapData() {
   const [bootstrapComplete, setBootstrapComplete] = useState(false);
 
   useEffect(() => {
+    if (!enabled) {
+      return;
+    }
+
     const bootstrap = async () => {
       try {
         const [providersResult, workspacesResult, sessionsResult, githubAuthStatusResult, preferencesResult] = await Promise.allSettled([
@@ -234,7 +238,7 @@ export function useBootstrapData() {
     };
 
     void bootstrap();
-  }, []);
+  }, [enabled]);
 
   return {
     providers,
