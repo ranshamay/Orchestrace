@@ -1,5 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  clearStoredAuthToken,
+  fetchAppAuthConfig,
+  fetchAppAuthStatus,
+  setStoredAuthToken,
   type AgentModels,
   type AgentTodo,
   type ChatMessage,
@@ -26,13 +30,19 @@ import { selectCurrentSession, selectSessionViewState, selectSidebarSummaries } 
 import { buildSessionSidebarProps } from './app/shell/props/buildSessionSidebarProps';
 import { buildLlmModalProps } from './app/shell/props/buildLlmModalProps';
 import { AppShell } from './app/shell/AppShell';
+import { LoginGate } from './app/components/auth/LoginGate';
 import type { SettingsSaveToastState } from './app/components/overlays/SettingsSaveToast';
 import { readTabFromUrl, updateTabInUrl } from './app/utils/viewRoute';
 
 export default function App() {
   const [activeTab, setActiveTabState] = useState<Tab>(() => readTabFromUrl());
-  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+    const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [todos, setTodos] = useState<AgentTodo[]>([]);
+  const [authReady, setAuthReady] = useState(false);
+  const [authEnabled, setAuthEnabled] = useState(false);
+  const [googleClientId, setGoogleClientId] = useState('');
+  const [authenticated, setAuthenticated] = useState(false);
+  const [authError, setAuthError] = useState('');
   const [composerText, setComposerText] = useState('');
   const [composerImages, setComposerImages] = useState<ComposerImageAttachment[]>([]);
   const [showToolsPanel, setShowToolsPanel] = useState(false);
@@ -756,14 +766,94 @@ export default function App() {
     onChangeBatchMinConcurrency: (next) => updateActiveLlmControls({ batchMinConcurrency: next }),
   });
 
-  const warningMessage = missingModelWarning
+    const warningMessage = missingModelWarning
     ? `Model "${missingModelWarning.missingModel}" is not currently available for provider "${missingModelWarning.provider}".`
     : '';
   const warningActionLabel = missingModelWarning?.fallbackModel
     ? `Switch to "${missingModelWarning.fallbackModel}"`
     : '';
 
+  useEffect(() => {
+    let cancelled = false;
+
+    const bootstrapAuth = async () => {
+      try {
+        const config = await fetchAppAuthConfig();
+        if (cancelled) {
+          return;
+        }
+
+        setAuthEnabled(config.authEnabled);
+        setGoogleClientId(config.googleClientId ?? '');
+
+        if (!config.authEnabled) {
+          setAuthenticated(true);
+          setAuthError('');
+          return;
+        }
+
+        const status = await fetchAppAuthStatus();
+        if (cancelled) {
+          return;
+        }
+
+        if (status.authenticated) {
+          setAuthenticated(true);
+          setAuthError('');
+          return;
+        }
+
+        clearStoredAuthToken();
+        setAuthenticated(false);
+      } catch (error) {
+        if (!cancelled) {
+          setAuthError(error instanceof Error ? error.message : String(error));
+          setAuthenticated(false);
+        }
+      } finally {
+        if (!cancelled) {
+          setAuthReady(true);
+        }
+      }
+    };
+
+    void bootstrapAuth();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  if (!authReady) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-slate-50 text-sm text-slate-700 dark:bg-slate-950 dark:text-slate-200">
+        Checking authentication…
+      </div>
+    );
+  }
+
+  if (authEnabled && !authenticated) {
+    return (
+      <>
+        <LoginGate
+          googleClientId={googleClientId}
+          onAuthenticated={(token) => {
+            setStoredAuthToken(token);
+            setAuthenticated(true);
+            setAuthError('');
+          }}
+        />
+        {authError && (
+          <div className="fixed bottom-4 left-1/2 -translate-x-1/2 rounded-md border border-red-300 bg-red-50 px-3 py-2 text-xs text-red-700 shadow dark:border-red-900/70 dark:bg-red-950/30 dark:text-red-200">
+            Authentication error: {authError}
+          </div>
+        )}
+      </>
+    );
+  }
+
   return (
+
     <AppShell
       sessionSidebarProps={sessionSidebarProps}
       mainContentProps={mainContentProps}
