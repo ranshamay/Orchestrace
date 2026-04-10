@@ -356,11 +356,12 @@ export interface SessionObserverFindingPayload {
     category: ObserverFindingCategory;
     severity: ObserverFindingSeverity;
     title: string;
-    description: string;
+        description: string;
     issueSummary?: string;
-    suggestedFix?: string;
     evidence?: Array<{ text: string }>;
+    severityRationale?: string;
     relevantFiles?: string[];
+
     phase: ObserverFindingPhase;
     detectedAt: string;
   };

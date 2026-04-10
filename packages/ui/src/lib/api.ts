@@ -565,10 +565,12 @@ export interface ObserverFinding {
   category: string;
   severity: string;
   title: string;
-  description: string;
+    description: string;
+  issueSummary?: string;
   evidence?: Array<{ text: string }>;
-  suggestedFix?: string;
+  severityRationale?: string;
   relevantFiles?: string[];
+
   observedInSessions: string[];
   detectedAt: string;
   fixSessionId: string | null;
@@ -675,11 +677,13 @@ export interface SessionObserverFinding {
   category: string;
   severity: string;
   title: string;
-  description: string;
+    description: string;
+  issueSummary?: string;
   evidence?: Array<{ text: string }>;
-  suggestedFix?: string;
+  severityRationale?: string;
   relevantFiles?: string[];
   phase: string;
+
   detectedAt: string;
 }
 
@@ -716,11 +720,13 @@ export interface LogFinding {
   id: string;
   category: LogFindingCategory;
   severity: string;
-  title: string;
+    title: string;
   description: string;
-  suggestedFix?: string;
+  issueSummary?: string;
   evidence?: Array<{ text: string }>;
+  severityRationale?: string;
   relevantFiles?: string[];
+
   logSnippet: string;
   detectedAt: string;
 }
