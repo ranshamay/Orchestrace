@@ -569,34 +569,38 @@ function parseRealtimeFindings(
       .filter((f: Record<string, unknown>) =>
         allowedCategories.includes(f.category as FindingCategory),
       )
-      .map((f: Record<string, unknown>): RealtimeFinding => ({
-        id: `rt-${Date.now()}-${idCounter++}`,
-        category: allowedCategories.includes(f.category as FindingCategory)
-          ? (f.category as FindingCategory)
-          : 'code-quality',
-        severity: validSeverities.includes(f.severity as FindingSeverity)
-          ? (f.severity as FindingSeverity)
-          : 'medium',
-                title: String(f.title),
-        evidence: {
-          summary:
-            typeof (f.evidence as { summary?: unknown }).summary === 'string'
-              ? String((f.evidence as { summary: string }).summary)
-              : String(f.description),
-          snippets: Array.isArray((f.evidence as { snippets?: unknown }).snippets)
-            ? (f.evidence as { snippets: unknown[] }).snippets.filter(
-              (p: unknown) => typeof p === 'string',
-            )
+            .map((f: Record<string, unknown>): RealtimeFinding => {
+        const evidence = (typeof f.evidence === 'object' && f.evidence !== null)
+          ? (f.evidence as { summary?: unknown; snippets?: unknown })
+          : undefined;
+
+        return {
+          id: `rt-${Date.now()}-${idCounter++}`,
+          category: allowedCategories.includes(f.category as FindingCategory)
+            ? (f.category as FindingCategory)
+            : 'code-quality',
+          severity: validSeverities.includes(f.severity as FindingSeverity)
+            ? (f.severity as FindingSeverity)
+            : 'medium',
+          title: String(f.title),
+          evidence: {
+            summary:
+              typeof evidence?.summary === 'string'
+                ? String(evidence.summary)
+                : String(f.description),
+            snippets: Array.isArray(evidence?.snippets)
+              ? evidence.snippets.filter((p: unknown) => typeof p === 'string')
+              : undefined,
+          },
+          description: String(f.description),
+          suggestedFix: String(f.suggestedFix),
+          relevantFiles: Array.isArray(f.relevantFiles)
+            ? f.relevantFiles.filter((p: unknown) => typeof p === 'string')
             : undefined,
-        },
-        description: String(f.description),
-        suggestedFix: String(f.suggestedFix),
-        relevantFiles: Array.isArray(f.relevantFiles)
-          ? f.relevantFiles.filter((p: unknown) => typeof p === 'string')
-          : undefined,
-        phase: triggerPhase,
-        detectedAt: new Date().toISOString(),
-      }));
+          phase: triggerPhase,
+          detectedAt: new Date().toISOString(),
+        };
+      });
   } catch {
     console.error('[orchestrace][observer] Failed to parse real-time analysis response');
     return [];

@@ -45,7 +45,7 @@ type RealtimeFindingInput = {
   category: FindingCategory;
   severity: FindingSeverity;
   title: string;
-  evidence: ObserverFindingEvidence;
+  evidence?: ObserverFindingEvidence;
   description: string;
   suggestedFix: string;
   relevantFiles?: string[];
@@ -270,11 +270,11 @@ export class ObserverDaemon {
         continue;
       }
 
-            const { isNew } = this.registry.register({
+                  const { isNew } = this.registry.register({
         category: finding.category,
         severity: finding.severity,
         title: finding.title,
-        evidence: finding.evidence,
+        evidence: finding.evidence ?? { summary: finding.description },
         description: finding.description,
         suggestedFix: finding.suggestedFix,
         relevantFiles: finding.relevantFiles,
