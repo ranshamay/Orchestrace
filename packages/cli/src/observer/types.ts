@@ -26,9 +26,9 @@ export interface ObserverFinding {
   fingerprint: string;
   category: FindingCategory;
   severity: FindingSeverity;
-  /** One-line title of the finding. */
-      title: string;
-      /** Detailed description of the issue. */
+    /** One-line title of the finding. */
+  title: string;
+  /** Detailed description of the issue. */
   description: string;
   /** Concise summary of the core issue to be fixed. */
   issueSummary: string;
@@ -126,8 +126,8 @@ export interface ObserverDaemonState {
 export interface AnalysisResult {
   findings: Array<{
     category: FindingCategory;
-    severity: FindingSeverity;
-        title: string;
+        severity: FindingSeverity;
+    title: string;
     description: string;
     issueSummary: string;
     evidence: string[];
