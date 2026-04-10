@@ -9,7 +9,9 @@
 import type { LlmAdapter } from '@orchestrace/provider';
 import type { ObserverConfig, FindingCategory, FindingSeverity } from './types.js';
 import { ALL_FINDING_CATEGORIES } from './types.js';
+import { LOG_WATCHER_SYSTEM_PROMPT } from './prompts.js';
 import type { BackendLogger } from './backend-logger.js';
+
 
 // ---------------------------------------------------------------------------
 // Types
@@ -81,56 +83,8 @@ export interface LogWatcherOptions {
 }
 
 
-// ---------------------------------------------------------------------------
-// System Prompt
-// ---------------------------------------------------------------------------
+// Uses shared LOG_WATCHER_SYSTEM_PROMPT from prompts.ts.
 
-const LOG_WATCHER_SYSTEM_PROMPT = `You are a backend log analysis agent for the Orchestrace system — an AI-powered coding orchestration platform.
-You receive batches of backend log lines from the running system and your job is to identify issues, patterns, and improvements.
-
-The logs contain:
-- **ui-server logs**: HTTP requests, SSE connections, session lifecycle, API calls
-- **runner process logs**: Child process output from AI coding agents (tool calls, LLM interactions, file operations)
-- **observer logs**: Observer daemon and per-session observer activity
-- **auth logs**: Provider authentication, OAuth flows, API key resolution
-- **event store logs**: Session event persistence, file I/O
-
-You look for these categories:
-
-1. **Error Patterns** — recurring errors, unhandled exceptions, failed operations, error cascades
-2. **Performance** — slow operations, high-frequency redundant calls, memory concerns, bottlenecks
-3. **Configuration** — misconfigurations, missing env vars, auth issues, incorrect settings
-4. **Reliability** — race conditions, timeout patterns, retry storms, connection instability
-5. **Security** — credential exposure, unsafe operations, missing validation
-
-Guidelines:
-- Only report CONCRETE, ACTIONABLE issues backed by evidence from the logs
-- Include the relevant log snippet (1-3 key lines) in each finding
-- Each evidence entry must be a specific code change or configuration adjustment
-
-- Don't flag normal operational logs (startup messages, successful operations)
-- Focus on patterns — a single transient error is less important than a recurring one
-- Rate severity honestly: critical = data loss/security, high = breaking errors, medium = perf/reliability, low = minor improvements
-- If no significant issues are found in the batch, return an empty findings array
-
-Respond ONLY with valid JSON matching this schema:
-\`\`\`json
-{
-  "findings": [
-    {
-      "category": "error-pattern|performance|configuration|reliability|security",
-      "severity": "low|medium|high|critical",
-      "title": "Short one-line title",
-      "description": "Detailed description of the issue with context from the logs",
-      "evidence": [{ "text": "Concrete fix — specific code change, config adjustment, or action to take" }],
-      "relevantFiles": ["path/to/file.ts"],
-      "logSnippet": "The 1-3 key log lines that evidence this issue"
-
-    }
-  ]
-}
-\`\`\`
-Compatibility: legacy outputs with \`suggestedFix\` string are also accepted during rollout.`;
 
 // ---------------------------------------------------------------------------
 // LogWatcher
