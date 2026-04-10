@@ -1113,7 +1113,7 @@ describe('orchestrate replay capture', () => {
     }
   });
 
-  it('includes search_files regex escaping reminder in implementation prompt', async () => {
+    it('includes run_command rg search policy in implementation prompt', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'orchestrace-replay-impl-prompt-'));
     const capturedImplementationPrompts: string[] = [];
 
@@ -1135,7 +1135,7 @@ describe('orchestrate replay capture', () => {
       expect(output?.status).toBe('completed');
       expect(capturedImplementationPrompts.length).toBeGreaterThan(0);
       const implementationPrompt = capturedImplementationPrompts[0] ?? '';
-      expect(implementationPrompt).toContain('search_files uses regex; characters like ( and ) need escaping as \\( and \\).');
+            expect(implementationPrompt).toContain('For multi-word or special-character search queries, use run_command with explicit rg invocation instead of retrying search_files argument permutations.');
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }
