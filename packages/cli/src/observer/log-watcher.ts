@@ -7,8 +7,11 @@
 // ---------------------------------------------------------------------------
 
 import type { LlmAdapter } from '@orchestrace/provider';
-import type { ObserverConfig, FindingCategory, FindingSeverity } from './types.js';
-import { ALL_FINDING_CATEGORIES } from './types.js';
+import {
+  buildObserverFindingsJsonSchemaBlock,
+  parseObserverFindingsResponse,
+} from '@orchestrace/shared';
+import type { ObserverConfig, FindingSeverity } from './types.js';
 import type { BackendLogger } from './backend-logger.js';
 
 // ---------------------------------------------------------------------------
@@ -99,21 +102,10 @@ Guidelines:
 - If no significant issues are found in the batch, return an empty findings array
 
 Respond ONLY with valid JSON matching this schema:
-\`\`\`json
-{
-  "findings": [
-    {
-      "category": "error-pattern|performance|configuration|reliability|security",
-      "severity": "low|medium|high|critical",
-      "title": "Short one-line title",
-      "description": "Detailed description of the issue with context from the logs",
-      "suggestedFix": "Concrete fix — specific code change, config adjustment, or action to take",
-      "relevantFiles": ["path/to/file.ts"],
-      "logSnippet": "The 1-3 key log lines that evidence this issue"
-    }
-  ]
-}
-\`\`\``;
+${buildObserverFindingsJsonSchemaBlock({
+  categories: ALL_LOG_FINDING_CATEGORIES,
+  includeLogSnippet: true,
+})}`;
 
 // ---------------------------------------------------------------------------
 // LogWatcher
@@ -308,45 +300,25 @@ export class LogWatcher {
 // ---------------------------------------------------------------------------
 
 function parseLogFindings(text: string): LogFinding[] {
-  try {
-    // Strip markdown fences if present
-    const cleaned = text.replace(/^```(?:json)?\s*\n?/m, '').replace(/\n?```\s*$/m, '');
-    const parsed = JSON.parse(cleaned);
-    const raw = Array.isArray(parsed) ? parsed : parsed?.findings;
-    if (!Array.isArray(raw)) return [];
+  const parsed = parseObserverFindingsResponse(text, {
+    categories: ALL_LOG_FINDING_CATEGORIES,
+    categoryValidation: { type: 'coerce', fallback: 'error-pattern' },
+    includeLogSnippet: true,
+  });
 
-    return raw
-      .filter(
-        (f: Record<string, unknown>) =>
-          f && typeof f.title === 'string' && typeof f.description === 'string',
-      )
-      .map((f: Record<string, unknown>) => ({
-        id: `logf-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-        category: validateLogCategory(f.category as string),
-        severity: validateSeverity(f.severity as string),
-        title: String(f.title),
-        description: String(f.description),
-        suggestedFix: String(f.suggestedFix ?? ''),
-        relevantFiles: Array.isArray(f.relevantFiles)
-          ? f.relevantFiles.filter((x: unknown) => typeof x === 'string')
-          : undefined,
-        logSnippet: String(f.logSnippet ?? ''),
-        detectedAt: new Date().toISOString(),
-      }));
-  } catch {
-    return [];
-  }
+  return parsed.findings.map((f) => ({
+    id: `logf-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    category: f.category,
+    severity: f.severity as FindingSeverity,
+    title: f.title,
+    description: f.description,
+    suggestedFix: f.suggestedFix,
+    relevantFiles: f.relevantFiles,
+    logSnippet: f.logSnippet ?? '',
+    detectedAt: new Date().toISOString(),
+  }));
 }
 
-function validateLogCategory(cat: string): LogFindingCategory {
-  const valid: LogFindingCategory[] = ['error-pattern', 'performance', 'configuration', 'reliability', 'security'];
-  return valid.includes(cat as LogFindingCategory) ? (cat as LogFindingCategory) : 'error-pattern';
-}
-
-function validateSeverity(sev: string): FindingSeverity {
-  const valid: FindingSeverity[] = ['low', 'medium', 'high', 'critical'];
-  return valid.includes(sev as FindingSeverity) ? (sev as FindingSeverity) : 'medium';
-}
 
 function pickModelSetting(value: unknown, fallback: string): string {
   if (typeof value !== 'string') {

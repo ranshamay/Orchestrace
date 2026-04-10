@@ -6,6 +6,10 @@
 
 import type { LlmAdapter } from '@orchestrace/provider';
 import {
+  buildObserverFindingsJsonSchemaBlock,
+  parseObserverFindingsResponse,
+} from '@orchestrace/shared';
+import {
   ALL_FINDING_CATEGORIES,
   type AnalysisResult,
   type FindingCategory,
@@ -64,24 +68,13 @@ function buildAnalysisPrompt(summaries: SessionSummary[], allowedCategories: Fin
     parts.push('---\n');
   }
 
+    parts.push('Respond with a JSON object matching this exact schema:\n');
   parts.push(
-    'Respond with a JSON object matching this exact schema:\n' +
-      '```json\n' +
-      '{\n' +
-      '  "findings": [\n' +
-      '    {\n' +
-      '      "category": "code-quality" | "performance" | "agent-efficiency" | "architecture" | "test-coverage",\n' +
-      '      "severity": "low" | "medium" | "high" | "critical",\n' +
-      '      "title": "Short one-line title",\n' +
-      '      "description": "Detailed description of the issue found",\n' +
-      '      "suggestedFix": "Concrete implementation instruction that could be used as a task prompt",\n' +
-      '      "relevantFiles": ["path/to/file.ts"]  // optional\n' +
-      '    }\n' +
-      '  ]\n' +
-      '}\n' +
-      '```\n' +
-      'Return ONLY the JSON object, no other text.',
+    buildObserverFindingsJsonSchemaBlock({
+      categories: allowedCategories,
+    }),
   );
+  parts.push('Return ONLY the JSON object, no other text.');
 
   parts.push('');
   parts.push(`Only include findings in these categories: ${allowedCategories.join(', ')}`);
@@ -94,48 +87,22 @@ function buildAnalysisPrompt(summaries: SessionSummary[], allowedCategories: Fin
  * Tolerates markdown fences around the JSON.
  */
 function parseAnalysisResponse(text: string, allowedCategories: FindingCategory[]): AnalysisResult {
-  // Strip markdown code fences
-  let jsonStr = text.trim();
-  const fenceMatch = jsonStr.match(/```(?:json)?\s*\n?([\s\S]*?)\n?\s*```/);
-  if (fenceMatch) {
-    jsonStr = fenceMatch[1].trim();
-  }
-
   try {
-    const parsed = JSON.parse(jsonStr);
-    if (!parsed || !Array.isArray(parsed.findings)) {
-      return { findings: [] };
-    }
+    const parsed = parseObserverFindingsResponse(text, {
+      categories: ALL_FINDING_CATEGORIES,
+      categoryValidation: { type: 'coerce', fallback: 'code-quality' },
+    });
 
-    // Validate and sanitize each finding
-    const validCategories: FindingCategory[] = [...ALL_FINDING_CATEGORIES];
-    const validSeverities: FindingSeverity[] = ['low', 'medium', 'high', 'critical'];
-
-    const mappedFindings: AnalysisResult['findings'] = parsed.findings
-      .filter(
-        (f: Record<string, unknown>) =>
-          typeof f.title === 'string' &&
-          typeof f.description === 'string' &&
-          typeof f.suggestedFix === 'string',
-      )
-      .map((f: Record<string, unknown>) => ({
-        category: validCategories.includes(f.category as FindingCategory)
-          ? (f.category as FindingCategory)
-          : ('code-quality' as FindingCategory),
-        severity: validSeverities.includes(f.severity as FindingSeverity)
-          ? (f.severity as FindingSeverity)
-          : ('medium' as FindingSeverity),
-        title: String(f.title),
-        description: String(f.description),
-        suggestedFix: String(f.suggestedFix),
-        relevantFiles: Array.isArray(f.relevantFiles)
-          ? f.relevantFiles.filter((p: unknown) => typeof p === 'string')
-          : undefined,
+    const findings: AnalysisResult['findings'] = parsed.findings
+      .filter((finding) => allowedCategories.includes(finding.category))
+      .map((finding) => ({
+        category: finding.category,
+        severity: finding.severity as FindingSeverity,
+        title: finding.title,
+        description: finding.description,
+        suggestedFix: finding.suggestedFix,
+        relevantFiles: finding.relevantFiles,
       }));
-
-    const findings: AnalysisResult['findings'] = mappedFindings.filter((finding) =>
-      allowedCategories.includes(finding.category),
-    );
 
     return { findings };
   } catch {

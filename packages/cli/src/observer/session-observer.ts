@@ -9,6 +9,10 @@
 
 import type { EventStore, SessionEvent } from '@orchestrace/store';
 import type { LlmAdapter } from '@orchestrace/provider';
+import {
+  buildObserverFindingsJsonSchemaBlock,
+  parseObserverFindingsResponse,
+} from '@orchestrace/shared';
 import type { ObserverConfig, FindingCategory, FindingSeverity } from './types.js';
 import { ALL_FINDING_CATEGORIES } from './types.js';
 import { REALTIME_OBSERVER_SYSTEM_PROMPT } from './prompts.js';
@@ -493,10 +497,13 @@ export class SessionObserver {
 
     lines.push(`Allowed categories: ${allowedCategories.join(', ')}`);
     lines.push('');
+        lines.push('Respond ONLY with valid JSON matching this schema:');
     lines.push(
-      'Respond with a JSON object: { "findings": [{ "category": "...", "severity": "...", "title": "...", "description": "...", "suggestedFix": "...", "relevantFiles": [...] }] }',
+      buildObserverFindingsJsonSchemaBlock({
+        categories: allowedCategories,
+      }),
     );
-    lines.push('Return ONLY the JSON, no other text. If no issues found, return { "findings": [] }.');
+    lines.push('Return ONLY the JSON object, no other text. If no issues found, return { "findings": [] }.');
 
     return lines.join('\n');
   }
@@ -543,46 +550,26 @@ function parseRealtimeFindings(
   allowedCategories: FindingCategory[],
   triggerPhase: string,
 ): RealtimeFinding[] {
-  let jsonStr = text.trim();
-  const fenceMatch = jsonStr.match(/```(?:json)?\s*\n?([\s\S]*?)\n?\s*```/);
-  if (fenceMatch) {
-    jsonStr = fenceMatch[1].trim();
-  }
-
   try {
-    const parsed = JSON.parse(jsonStr);
-    if (!parsed || !Array.isArray(parsed.findings)) return [];
+    const parsed = parseObserverFindingsResponse(text, {
+      categories: allowedCategories,
+      categoryValidation: { type: 'filter' },
+    });
 
-    const validSeverities: FindingSeverity[] = ['low', 'medium', 'high', 'critical'];
     let idCounter = 0;
-
-    return parsed.findings
-      .filter(
-        (f: Record<string, unknown>) =>
-          typeof f.title === 'string' &&
-          typeof f.description === 'string' &&
-          typeof f.suggestedFix === 'string',
-      )
-      .filter((f: Record<string, unknown>) =>
-        allowedCategories.includes(f.category as FindingCategory),
-      )
-      .map((f: Record<string, unknown>): RealtimeFinding => ({
+    return parsed.findings.map(
+      (f): RealtimeFinding => ({
         id: `rt-${Date.now()}-${idCounter++}`,
-        category: allowedCategories.includes(f.category as FindingCategory)
-          ? (f.category as FindingCategory)
-          : 'code-quality',
-        severity: validSeverities.includes(f.severity as FindingSeverity)
-          ? (f.severity as FindingSeverity)
-          : 'medium',
-        title: String(f.title),
-        description: String(f.description),
-        suggestedFix: String(f.suggestedFix),
-        relevantFiles: Array.isArray(f.relevantFiles)
-          ? f.relevantFiles.filter((p: unknown) => typeof p === 'string')
-          : undefined,
+        category: f.category,
+        severity: f.severity as FindingSeverity,
+        title: f.title,
+        description: f.description,
+        suggestedFix: f.suggestedFix,
+        relevantFiles: f.relevantFiles,
         phase: triggerPhase,
         detectedAt: new Date().toISOString(),
-      }));
+      }),
+    );
   } catch {
     console.error('[orchestrace][observer] Failed to parse real-time analysis response');
     return [];
