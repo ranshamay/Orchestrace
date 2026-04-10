@@ -30,10 +30,17 @@ export interface ObserverFinding {
   title: string;
   /** Detailed description of the issue. */
   description: string;
-  /** Concrete fix suggestion the observer will use as a session prompt. */
-  suggestedFix: string;
+    /**
+   * Concrete fix suggestion the observer will use as a session prompt.
+   * Optional for backward/forward compatibility while persisted schema transitions
+   * to evidence-oriented task context.
+   */
+  suggestedFix?: string;
+  /** Evidence/context items supporting this finding and remediation path. */
+  evidence?: string[];
   /** File paths relevant to this finding (if any). */
   relevantFiles?: string[];
+
   /** Session IDs where this issue was observed. */
   observedInSessions: string[];
   /** When the finding was first detected. */
