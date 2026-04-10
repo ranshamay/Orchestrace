@@ -2,11 +2,13 @@
 // Observer Agent — type definitions
 // ---------------------------------------------------------------------------
 
-import type { ObserverFindingCategory, ObserverFindingSeverity } from '@orchestrace/store';
-
 /** Categories of issues the observer can identify. */
-export type FindingCategory = ObserverFindingCategory;
-
+export type FindingCategory =
+  | 'code-quality'
+  | 'performance'
+  | 'agent-efficiency'
+  | 'architecture'
+  | 'test-coverage';
 
 export const ALL_FINDING_CATEGORIES: FindingCategory[] = [
   'code-quality',
@@ -16,7 +18,12 @@ export const ALL_FINDING_CATEGORIES: FindingCategory[] = [
   'test-coverage',
 ];
 
-export type FindingSeverity = ObserverFindingSeverity;
+export type FindingSeverity = 'low' | 'medium' | 'high' | 'critical';
+
+export interface FindingEvidenceItem {
+  summary: string;
+  details?: string;
+}
 
 /** A single observation/issue found by the observer LLM. */
 export interface ObserverFinding {
@@ -27,11 +34,9 @@ export interface ObserverFinding {
   /** One-line title of the finding. */
   title: string;
   /** Detailed description of the issue. */
-  description: string;
-  /** Concise task-ready summary of the implementation work needed. */
-  issueSummary: string;
-  /** Supporting evidence snippets that justify this finding. */
-  evidence: string[];
+    description: string;
+  /** Supporting evidence and actionable guidance used when building a fix-session prompt. */
+  evidence: FindingEvidenceItem[];
   /** File paths relevant to this finding (if any). */
   relevantFiles?: string[];
   /** Session IDs where this issue was observed. */
@@ -126,9 +131,8 @@ export interface AnalysisResult {
     category: FindingCategory;
     severity: FindingSeverity;
     title: string;
-    description: string;
-    issueSummary: string;
-    evidence: string[];
+        description: string;
+    evidence: FindingEvidenceItem[];
     relevantFiles?: string[];
   }>;
 }
