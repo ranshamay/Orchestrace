@@ -1,9 +1,8 @@
 import { Copy, Wrench } from 'lucide-react';
 import type { WorkSession } from '../../../lib/api';
-import type { FailureType, LlmSessionStatus, TimelineItem } from '../../types';
+import type { TimelineItem } from '../../types';
 import { Loader2 } from 'lucide-react';
 import { useRef, type MouseEvent } from 'react';
-import { SessionSummaryCard } from './SessionSummaryCard';
 import { ToolsPanel } from './ToolsPanel';
 import { TimelineList } from './TimelineList';
 
@@ -11,8 +10,6 @@ type Props = {
   selectedSessionId: string;
   selectedSession?: WorkSession;
   selectedSessionRunning: boolean;
-  selectedFailureType: FailureType | null;
-  selectedLlmStatus: LlmSessionStatus;
   showToolsPanel: boolean;
   setShowToolsPanel: (next: boolean | ((current: boolean) => boolean)) => void;
   toolsMode: '' | 'chat' | 'planning' | 'implementation';
@@ -37,8 +34,6 @@ export function TimelinePanel(props: Props) {
     selectedSessionId,
     selectedSession,
     selectedSessionRunning,
-    selectedFailureType,
-    selectedLlmStatus,
     showToolsPanel,
     setShowToolsPanel,
     toolsMode,
@@ -106,7 +101,6 @@ export function TimelinePanel(props: Props) {
         </div>
 
         {showToolsPanel && <ToolsPanel availableTools={availableTools} isToolsLoading={isToolsLoading} selectedSessionMode={selectedSession?.mode} toolsLoadError={toolsLoadError} toolsMode={toolsMode} />}
-        <SessionSummaryCard selectedFailureType={selectedFailureType} selectedLlmStatus={selectedLlmStatus} selectedSession={selectedSession} />
       </header>
 
       <div ref={timelineContainerRef} className="min-h-0 flex-1 space-y-1.5 overflow-auto bg-slate-50/50 p-3 dark:bg-slate-950/50" onScroll={onTimelineScroll}>

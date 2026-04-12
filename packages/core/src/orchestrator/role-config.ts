@@ -192,6 +192,10 @@ export function buildTesterPrompt(params: {
     ].join('\n')
     : '';
 
+  const touchesConversationUiSurface = (changedFiles ?? []).some((path) =>
+    /packages\/ui\/src\/(App\.tsx|app\/components\/work\/(ComposerPanel|TimelinePanel|SessionSummaryCard)\.tsx)/.test(path),
+  );
+
   const sections: PromptSection[] = [
     {
       name: PromptSectionName.Goal,
@@ -202,7 +206,10 @@ export function buildTesterPrompt(params: {
         'Maintain or improve codebase quality by covering changed behavior and likely regressions.',
         'Always include explicit coverageAssessment and qualityAssessment in your verdict.',
         'When UI changes are detected and UI tests are required, you must run UI test commands and provide screenshot evidence paths.',
-        'You must execute at least one test command using run_command or run_command_batch before producing a verdict.',
+        'You must execute at least one test command using run_command, run_command_batch, or playwright_run before producing a verdict.',
+        touchesConversationUiSurface
+          ? 'This changeset touches conversation/composer UI surfaces; include a VERIFY-ONLY step confirming the prompt input remains visible and usable after tester verdict emission.'
+          : '',
       ],
     },
     {
@@ -248,10 +255,11 @@ export function buildTesterPrompt(params: {
         'After running tests, end with a JSON object (no markdown fences) using this exact shape:',
         '{"approved":boolean,"testPlan":string[],"testedAreas":string[],"executedTestCommands":string[],"testsPassed":number,"testsFailed":number,"coverageAssessment":string,"qualityAssessment":string,"uiChangesDetected":boolean,"uiTestsRequired":boolean,"uiTestsRun":boolean,"screenshotPaths":string[],"rejectionReason":string,"suggestedFixes":string[]}',
         'testPlan must contain at least one concrete test item tied to changed behavior.',
+        'Prefix each testPlan item with either "ADD-CODEBASE:" (persistent automated test to add/update) or "VERIFY-ONLY:" (one-off/manual/runtime verification).',
         'testedAreas should reflect what was actually validated (for example: ["unit","api","ui"]).',
-        'executedTestCommands must include concrete test commands you ran.',
+        'executedTestCommands must include concrete test commands you ran (including run_command, run_command_batch, and/or playwright_run evidence).',
         'If uiTestsRequired=true, set uiTestsRun=true only if you actually ran UI test commands.',
-        'If screenshotEvidenceRequired=true, include at least minScreenshotCount repository-relative image paths in screenshotPaths.',
+        'If screenshotEvidenceRequired=true, include at least minScreenshotCount repository-relative image paths in screenshotPaths. Use repository-tracked paths (do not use .orchestrace/).',
         'When approved=true, set rejectionReason to an empty string and suggestedFixes to an empty array.',
       ],
     },

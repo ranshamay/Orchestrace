@@ -531,6 +531,8 @@ export async function executeTesterRole(params: {
   const toolCalls: ReplayToolCallRecord[] = [];
   const testCommandOutputs: string[] = [];
   const executedTestCommands: string[] = [];
+  const successfulTestCommands: string[] = [];
+  const pendingCommandsByToolCallId = new Map<string, string[]>();
   let ranTestCommand = false;
 
   const result = await executeRole({
@@ -544,13 +546,25 @@ export async function executeTesterRole(params: {
     onToolCall: (event, replayRecord) => {
       toolCalls.push(replayRecord);
 
-      const isTestCommandTool = event.toolName === 'run_command' || event.toolName === 'run_command_batch';
+      const isTestCommandTool = isTesterExecutionTool(event.toolName);
       if (isTestCommandTool && event.type === 'started') {
-        executedTestCommands.push(...extractTestCommandsFromToolCall(event.toolName, event.arguments));
+        const extractedCommands = extractTestCommandsFromToolCall(event.toolName, event.arguments);
+        executedTestCommands.push(...extractedCommands);
+        if (event.toolCallId) {
+          pendingCommandsByToolCallId.set(event.toolCallId, extractedCommands);
+        }
       }
 
       if (isTestCommandTool && event.type === 'result') {
         ranTestCommand = true;
+        const extractedCommands = (event.toolCallId && pendingCommandsByToolCallId.get(event.toolCallId))
+          ?? extractTestCommandsFromToolCall(event.toolName, event.arguments);
+        if (!event.isError) {
+          successfulTestCommands.push(...extractedCommands);
+        }
+        if (event.toolCallId) {
+          pendingCommandsByToolCallId.delete(event.toolCallId);
+        }
         if (typeof event.result === 'string' && event.result.trim().length > 0) {
           testCommandOutputs.push(event.result.trim());
         }
@@ -561,10 +575,11 @@ export async function executeTesterRole(params: {
   const parsedVerdict = parseTesterVerdict(result.text);
   const condensedOutput = collapseTesterOutput(testCommandOutputs);
   const mergedExecutedCommands = dedupeStrings(executedTestCommands);
+  const mergedSuccessfulCommands = dedupeStrings(successfulTestCommands);
   const effectiveUiPatterns = uiTestCommandPatterns.length > 0
     ? uiTestCommandPatterns
     : DEFAULT_UI_TEST_COMMAND_PATTERNS;
-  const uiTestCommandRan = hasUiTestCommandEvidence(mergedExecutedCommands, effectiveUiPatterns);
+  const uiTestCommandRan = hasUiTestCommandEvidence(mergedSuccessfulCommands, effectiveUiPatterns);
 
   const parsedScreenshotEvidence = await resolveScreenshotEvidence(
     parsedVerdict?.screenshotPaths ?? [],
@@ -587,9 +602,10 @@ export async function executeTesterRole(params: {
       uiTestsRequired: requireUiTests,
       uiTestsRun: uiTestCommandRan,
       screenshotPaths,
-      rejectionReason: 'Tester agent did not execute a test command (run_command or run_command_batch).',
+      rejectionReason:
+        'Tester agent did not execute a test command (run_command, run_command_batch, or playwright_run).',
       suggestedFixes: [
-        'Run targeted tests with run_command before emitting a tester verdict.',
+        'Run targeted tests with run_command, run_command_batch, or playwright_run before emitting a tester verdict.',
       ],
       testOutput: condensedOutput,
     };
@@ -659,9 +675,9 @@ export async function executeTesterRole(params: {
       approved: false,
       testsFailed: Math.max(1, parsedVerdict.testsFailed),
       rejectionReason:
-        'UI changes were detected but no UI test command execution evidence was found.',
+        'UI changes were detected but no successful UI test command execution evidence was found.',
       suggestedFixes: [
-        'Run UI tests using run_command or run_command_batch (for example, playwright or UI test suite commands).',
+        'Run UI tests using run_command, run_command_batch, or playwright_run (for example, playwright or UI test suite commands).',
         'Include the executed UI test command(s) in executedTestCommands.',
       ],
       testOutput: condensedOutput,
@@ -679,7 +695,7 @@ export async function executeTesterRole(params: {
       rejectionReason:
         `UI changes require at least ${minUiScreenshotCount} screenshot evidence file(s); found ${screenshotPaths.length}.`,
       suggestedFixes: [
-        `Capture at least ${minUiScreenshotCount} UI screenshots and include their repository-relative paths in screenshotPaths.`,
+        `Capture at least ${minUiScreenshotCount} UI screenshots into repository-tracked image files (avoid .orchestrace/) and include their repository-relative paths in screenshotPaths.`,
         ...parsedScreenshotEvidence.missingPaths.slice(0, 5).map((path) => `Ensure screenshot file exists and is an image: ${path}`),
       ],
       testOutput: condensedOutput,
@@ -897,7 +913,8 @@ function mergeStringArrays(...values: string[][]): string[] {
 }
 
 function extractTestCommandsFromToolCall(toolName: string, argumentsJson: string | undefined): string[] {
-  if (!argumentsJson || (toolName !== 'run_command' && toolName !== 'run_command_batch')) {
+  const normalizedToolName = normalizeToolName(toolName);
+  if (!argumentsJson || !isTesterExecutionTool(normalizedToolName)) {
     return [];
   }
 
@@ -913,11 +930,17 @@ function extractTestCommandsFromToolCall(toolName: string, argumentsJson: string
   }
 
   const record = parsed as Record<string, unknown>;
-  if (toolName === 'run_command') {
+  if (normalizedToolName === 'run_command') {
     const command = asOptionalString(record.command);
     return command ? [command] : [];
   }
 
+  if (normalizedToolName === 'playwright_run') {
+    const command = asOptionalString(record.command) ?? 'test';
+    const args = asStringArray(record.args);
+    const fullCommand = ['playwright', command, ...args].join(' ').trim();
+    return fullCommand ? [fullCommand] : [];
+  }
   const commands = record.commands;
   if (!Array.isArray(commands)) {
     return [];
@@ -984,6 +1007,15 @@ async function resolveScreenshotEvidence(
       continue;
     }
 
+    if (
+      repoRelativePath === '.orchestrace'
+      || repoRelativePath.startsWith('.orchestrace/')
+      || repoRelativePath === '.git'
+      || repoRelativePath.startsWith('.git/')
+    ) {
+      missingPaths.push(repoRelativePath);
+      continue;
+    }
     if (!isScreenshotImagePath(repoRelativePath)) {
       missingPaths.push(repoRelativePath);
       continue;
@@ -1005,4 +1037,21 @@ async function resolveScreenshotEvidence(
 
 function isScreenshotImagePath(path: string): boolean {
   return /\.(png|jpe?g|webp|gif)$/i.test(path);
+}
+
+function normalizeToolName(toolName: string): string {
+  const trimmed = toolName.trim();
+  if (!trimmed) {
+    return '';
+  }
+
+  const parts = trimmed.split('.');
+  return (parts[parts.length - 1] ?? '').trim();
+}
+
+function isTesterExecutionTool(toolName: string): boolean {
+  const normalized = normalizeToolName(toolName);
+  return normalized === 'run_command'
+    || normalized === 'run_command_batch'
+    || normalized === 'playwright_run';
 }

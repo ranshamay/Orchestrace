@@ -1402,7 +1402,75 @@ function TesterSection({
                 markDirty();
               }}
             />
-            <span>Require run_command / run_command_batch in tester phase</span>
+            <span>Require run_command / run_command_batch / playwright_run in tester phase</span>
+          </label>
+
+          <label className="mt-2 flex items-center gap-2 text-xs text-slate-700 dark:text-slate-200">
+            <input
+              type="checkbox"
+              className="h-3.5 w-3.5 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500 dark:border-slate-700"
+              checked={editEnforceUiTestsForUiChanges}
+              onChange={(event) => {
+                setEditEnforceUiTestsForUiChanges(event.target.checked);
+                markDirty();
+              }}
+            />
+            <span>Always require UI tests when UI files change</span>
+          </label>
+
+          <label className="mt-2 flex items-center gap-2 text-xs text-slate-700 dark:text-slate-200">
+            <input
+              type="checkbox"
+              className="h-3.5 w-3.5 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500 dark:border-slate-700"
+              checked={editRequireUiScreenshotsForUiChanges}
+              onChange={(event) => {
+                setEditRequireUiScreenshotsForUiChanges(event.target.checked);
+                markDirty();
+              }}
+            />
+            <span>Require screenshot evidence for UI changes</span>
+          </label>
+
+          <label className="mt-2 flex max-w-xs flex-col gap-1 text-xs text-slate-700 dark:text-slate-200">
+            <span className="text-[10px] uppercase tracking-wide text-slate-500 dark:text-slate-400">Min UI Screenshot Count</span>
+            <input
+              className="rounded border border-slate-200 px-2 py-1.5 text-xs dark:border-slate-700 dark:bg-slate-900"
+              type="number"
+              min={1}
+              value={editMinUiScreenshotCount}
+              onChange={(event) => {
+                setEditMinUiScreenshotCount(event.target.value);
+                markDirty();
+              }}
+            />
+          </label>
+        </div>
+
+        <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
+          <label className="flex flex-col gap-1 text-xs text-slate-700 dark:text-slate-200">
+            <span className="text-[10px] uppercase tracking-wide text-slate-500 dark:text-slate-400">UI Change Patterns (one per line)</span>
+            <textarea
+              className="min-h-28 rounded border border-slate-200 px-2 py-1.5 text-xs font-mono dark:border-slate-700 dark:bg-slate-900"
+              value={editUiChangePatternsText}
+              onChange={(event) => {
+                setEditUiChangePatternsText(event.target.value);
+                markDirty();
+              }}
+              spellCheck={false}
+            />
+          </label>
+
+          <label className="flex flex-col gap-1 text-xs text-slate-700 dark:text-slate-200">
+            <span className="text-[10px] uppercase tracking-wide text-slate-500 dark:text-slate-400">UI Test Command Matchers (one per line)</span>
+            <textarea
+              className="min-h-28 rounded border border-slate-200 px-2 py-1.5 text-xs font-mono dark:border-slate-700 dark:bg-slate-900"
+              value={editUiTestCommandPatternsText}
+              onChange={(event) => {
+                setEditUiTestCommandPatternsText(event.target.value);
+                markDirty();
+              }}
+              spellCheck={false}
+            />
           </label>
 
           <label className="mt-2 flex items-center gap-2 text-xs text-slate-700 dark:text-slate-200">

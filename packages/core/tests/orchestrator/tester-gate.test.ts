@@ -29,7 +29,12 @@ function makeImplementationOutput(): TaskOutput {
 
 function makeTesterAgent(params: {
   verdict: Record<string, unknown>;
-  commands: string[];
+  commands: Array<{
+    toolName?: 'run_command' | 'run_command_batch' | 'playwright_run';
+    command: string;
+    args?: string[];
+    isError?: boolean;
+  }>;
 }): LlmAgent {
   const { verdict, commands } = params;
 
@@ -39,20 +44,24 @@ function makeTesterAgent(params: {
       _signal?: AbortSignal,
       options?: LlmCompletionOptions,
     ) {
-      commands.forEach((command, index) => {
+      commands.forEach((entry, index) => {
+        const toolName = entry.toolName ?? 'run_command';
         const toolCallId = `tool-${index + 1}`;
+        const startedArgs = toolName === 'playwright_run'
+          ? JSON.stringify({ command: entry.command, args: entry.args ?? [] })
+          : JSON.stringify({ command: entry.command });
         options?.onToolCall?.({
           type: 'started',
           toolCallId,
-          toolName: 'run_command',
-          arguments: JSON.stringify({ command }),
+          toolName,
+          arguments: startedArgs,
         });
         options?.onToolCall?.({
           type: 'result',
           toolCallId,
-          toolName: 'run_command',
-          result: `ok: ${command}`,
-          isError: false,
+          toolName,
+          result: `ok: ${entry.command}`,
+          isError: entry.isError ?? false,
         });
       });
 
@@ -100,7 +109,7 @@ describe('tester gate UI policy', () => {
       implementationOutput: makeImplementationOutput(),
       testerAgent: makeTesterAgent({
         verdict,
-        commands: ['pnpm --filter @orchestrace/cli test'],
+        commands: [{ command: 'pnpm --filter @orchestrace/cli test' }],
       }),
       attempt: 1,
       emit: () => undefined,
@@ -114,7 +123,7 @@ describe('tester gate UI policy', () => {
     });
 
     expect(result.verdict.approved).toBe(false);
-    expect(result.verdict.rejectionReason).toContain('no UI test command execution evidence');
+    expect(result.verdict.rejectionReason).toContain('no successful UI test command execution evidence');
     expect(result.verdict.uiTestsRequired).toBe(true);
     expect(result.verdict.uiTestsRun).toBe(false);
   });
@@ -151,7 +160,7 @@ describe('tester gate UI policy', () => {
       implementationOutput: makeImplementationOutput(),
       testerAgent: makeTesterAgent({
         verdict,
-        commands: ['pnpm exec playwright test'],
+        commands: [{ command: 'pnpm exec playwright test' }],
       }),
       attempt: 1,
       emit: () => undefined,
@@ -168,5 +177,151 @@ describe('tester gate UI policy', () => {
     expect(result.verdict.rejectionReason).toContain('at least 2 screenshot evidence');
     expect(result.verdict.screenshotPaths).toEqual(['artifacts/ui/home.png']);
     expect(result.verdict.uiTestsRun).toBe(true);
+  });
+
+  it('treats playwright_run execution as satisfying requireRunTests', async () => {
+    const workspacePath = await mkdtemp(join(tmpdir(), 'orchestrace-tester-gate-playwright-run-'));
+    tempDirs.push(workspacePath);
+
+    const verdict = {
+      approved: true,
+      testPlan: ['VERIFY-ONLY: Run focused UI check with Playwright'],
+      testedAreas: ['ui'],
+      executedTestCommands: ['playwright test --grep @smoke'],
+      testsPassed: 1,
+      testsFailed: 0,
+      coverageAssessment: 'Focused smoke path validated.',
+      qualityAssessment: 'No regressions observed in UI smoke path.',
+      uiChangesDetected: false,
+      uiTestsRequired: false,
+      uiTestsRun: false,
+      screenshotPaths: [],
+      rejectionReason: '',
+      suggestedFixes: [],
+    };
+
+    const result = await executeTesterRole({
+      task: makeTask(),
+      approvedPlan: 'Update UI flow',
+      implementationOutput: makeImplementationOutput(),
+      testerAgent: makeTesterAgent({
+        verdict,
+        commands: [{ toolName: 'playwright_run', command: 'test', args: ['--grep', '@smoke'] }],
+      }),
+      attempt: 1,
+      emit: () => undefined,
+      requireRunTests: true,
+      requireUiTests: false,
+      requireUiScreenshots: false,
+      minUiScreenshotCount: 1,
+      uiChangesDetected: false,
+      uiTestCommandPatterns: ['playwright'],
+      workspacePath,
+    });
+
+    expect(result.verdict.approved).toBe(true);
+    expect(result.verdict.executedTestCommands).toContain('playwright test --grep @smoke');
+  });
+
+  it('rejects screenshot evidence paths under .orchestrace', async () => {
+    const workspacePath = await mkdtemp(join(tmpdir(), 'orchestrace-tester-gate-shot-scope-'));
+    tempDirs.push(workspacePath);
+
+    const screenshotDir = join(workspacePath, '.orchestrace', 'ui');
+    await mkdir(screenshotDir, { recursive: true });
+    await writeFile(join(screenshotDir, 'home.png'), 'fake-image-content', 'utf-8');
+
+    const verdict = {
+      approved: true,
+      testPlan: ['VERIFY-ONLY: Run UI smoke and capture evidence'],
+      testedAreas: ['ui'],
+      executedTestCommands: ['pnpm exec playwright test'],
+      testsPassed: 1,
+      testsFailed: 0,
+      coverageAssessment: 'UI flow exercised.',
+      qualityAssessment: 'No functional regressions seen.',
+      uiChangesDetected: true,
+      uiTestsRequired: true,
+      uiTestsRun: true,
+      screenshotPaths: ['.orchestrace/ui/home.png'],
+      rejectionReason: '',
+      suggestedFixes: [],
+    };
+
+    const result = await executeTesterRole({
+      task: makeTask(),
+      approvedPlan: 'Update UI flow',
+      implementationOutput: makeImplementationOutput(),
+      testerAgent: makeTesterAgent({
+        verdict,
+        commands: [{ command: 'pnpm exec playwright test' }],
+      }),
+      attempt: 1,
+      emit: () => undefined,
+      requireRunTests: true,
+      requireUiTests: true,
+      requireUiScreenshots: true,
+      minUiScreenshotCount: 1,
+      uiChangesDetected: true,
+      uiTestCommandPatterns: ['playwright'],
+      workspacePath,
+    });
+
+    expect(result.verdict.approved).toBe(false);
+    expect(result.verdict.screenshotPaths).toEqual([]);
+    expect(result.verdict.rejectionReason).toContain('at least 1 screenshot evidence');
+    expect(result.verdict.suggestedFixes?.join('\n') ?? '').toContain('avoid .orchestrace');
+  });
+
+  it('does not accept failed playwright_run as successful UI test evidence', async () => {
+    const workspacePath = await mkdtemp(join(tmpdir(), 'orchestrace-tester-gate-playwright-fail-'));
+    tempDirs.push(workspacePath);
+
+    const verdict = {
+      approved: true,
+      testPlan: ['VERIFY-ONLY: Run Playwright smoke checks for updated UI behavior'],
+      testedAreas: ['ui'],
+      executedTestCommands: ['playwright test --grep @smoke'],
+      testsPassed: 1,
+      testsFailed: 0,
+      coverageAssessment: 'Smoke path appears covered.',
+      qualityAssessment: 'No obvious regressions from smoke path.',
+      uiChangesDetected: true,
+      uiTestsRequired: true,
+      uiTestsRun: true,
+      screenshotPaths: [],
+      rejectionReason: '',
+      suggestedFixes: [],
+    };
+
+    const result = await executeTesterRole({
+      task: makeTask(),
+      approvedPlan: 'Update UI flow',
+      implementationOutput: makeImplementationOutput(),
+      testerAgent: makeTesterAgent({
+        verdict,
+        commands: [
+          {
+            toolName: 'playwright_run',
+            command: 'test',
+            args: ['--grep', '@smoke'],
+            isError: true,
+          },
+        ],
+      }),
+      attempt: 1,
+      emit: () => undefined,
+      requireRunTests: true,
+      requireUiTests: true,
+      requireUiScreenshots: false,
+      minUiScreenshotCount: 1,
+      uiChangesDetected: true,
+      uiTestCommandPatterns: ['playwright'],
+      workspacePath,
+    });
+
+    expect(result.verdict.approved).toBe(false);
+    expect(result.verdict.uiTestsRun).toBe(false);
+    expect(result.verdict.rejectionReason).toContain('no successful UI test command execution evidence');
   });
 });

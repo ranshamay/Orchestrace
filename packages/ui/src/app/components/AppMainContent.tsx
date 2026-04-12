@@ -121,8 +121,6 @@ export function AppMainContent(props: AppMainContentProps) {
         selectedSessionId={props.selectedSessionId}
         selectedSession={props.selectedSession}
         selectedSessionRunning={props.selectedSessionRunning}
-        selectedFailureType={props.selectedFailureType}
-        selectedLlmStatus={props.selectedLlmStatus}
         showToolsPanel={props.showToolsPanel}
         setShowToolsPanel={props.setShowToolsPanel}
         toolsMode={props.toolsMode}
