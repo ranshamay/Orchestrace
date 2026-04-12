@@ -515,7 +515,7 @@ export class SessionObserver {
     lines.push('Requirements: every finding must use schemaVersion="2" and include non-empty evidence[].');
     lines.push('Do not output exploratory advice; provide direct, action-now findings when evidence is already sufficient.');
     lines.push('Compatibility: legacy `suggestedFix` output is accepted during rollout, but prefer schemaVersion=2 + evidence[].');
-    lines.push('Return ONLY the JSON, no other text. If no issues found, return { "findings": [] }.');
+        lines.push('Return ONLY the JSON, no other text. If no issues found, return { "findings": [] }. Do not request further investigation when current evidence already supports a concrete finding.');
 
     return lines.join('\n');
   }

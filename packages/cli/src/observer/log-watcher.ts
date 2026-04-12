@@ -132,7 +132,8 @@ Respond ONLY with valid JSON matching this schema:
   ]
 }
 \`\`\`
-Compatibility: legacy outputs with \`suggestedFix\` string are also accepted during rollout.`;
+Compatibility: legacy outputs with \`suggestedFix\` string are also accepted during rollout.
+Return ONLY the JSON object. If no significant issues are present, return { "findings": [] } and do not request additional investigation.`;
 
 // ---------------------------------------------------------------------------
 // LogWatcher

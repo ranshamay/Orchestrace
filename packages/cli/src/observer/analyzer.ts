@@ -85,7 +85,7 @@ function buildAnalysisPrompt(summaries: SessionSummary[], allowedCategories: Fin
             'Requirements: every finding must use `schemaVersion: "2"` and include non-empty `evidence[]`.\n' +
       'Do not output exploratory advice; if evidence is sufficient, provide direct next-action findings.\n' +
       'Compatibility: legacy outputs with `suggestedFix` are also accepted during rollout.\n' +
-      'Return ONLY the JSON object, no other text.',
+            'Return ONLY the JSON object, no other text. If no significant issues are found, return { "findings": [] }. Do not ask for additional investigation tasks when current evidence is sufficient.',
   );
 
   parts.push('');
