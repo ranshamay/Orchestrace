@@ -380,9 +380,16 @@ export class SessionObserver {
 
       const findings = parseRealtimeFindings(result.text, allowedCategories, triggerPhase);
 
-      for (const finding of findings) {
-        // Deduplicate against existing findings by title
-        if (this.state.findings.some((f) => f.title === finding.title)) continue;
+            for (const finding of findings) {
+        // Deduplicate against existing findings by normalized category+title.
+        const dedupeKey = `${finding.category}:${finding.title}`.trim().toLowerCase();
+        if (
+          this.state.findings.some(
+            (f) => `${f.category}:${f.title}`.trim().toLowerCase() === dedupeKey,
+          )
+        ) {
+          continue;
+        }
         this.state.findings.push(finding);
         this.emit({
           type: 'session:observer-finding',
@@ -502,9 +509,11 @@ export class SessionObserver {
 
     lines.push(`Allowed categories: ${allowedCategories.join(', ')}`);
     lines.push('');
-        lines.push(
-      'Respond with a JSON object: { "findings": [{ "schemaVersion": "2", "category": "...", "severity": "...", "title": "...", "description": "...", "evidence": [{ "text": "..." }], "relevantFiles": [...] }] }',
+            lines.push(
+      'Respond with a JSON object: { "findings": [{ "schemaVersion": "2", "category": "...", "severity": "...", "title": "...", "description": "...", "evidence": [{ "text": "concrete issue evidence + immediate next action" }], "relevantFiles": [...] }] }',
     );
+    lines.push('Requirements: every finding must use schemaVersion="2" and include non-empty evidence[].');
+    lines.push('Do not output exploratory advice; provide direct, action-now findings when evidence is already sufficient.');
     lines.push('Compatibility: legacy `suggestedFix` output is accepted during rollout, but prefer schemaVersion=2 + evidence[].');
     lines.push('Return ONLY the JSON, no other text. If no issues found, return { "findings": [] }.');
 
@@ -573,14 +582,14 @@ function parseRealtimeFindings(
       )
       .map((f: Record<string, unknown>): RealtimeFinding => {
         const evidence = normalizeFindingEvidence(
-          Array.isArray(f.evidence)
+                    Array.isArray(f.evidence)
             ? f.evidence
                 .filter((entry): entry is { text: string } => {
                   if (!entry || typeof entry !== 'object') return false;
                   const textValue = (entry as Record<string, unknown>).text;
-                  return typeof textValue === 'string';
+                  return typeof textValue === 'string' && textValue.trim().length > 0;
                 })
-                .map((entry) => ({ text: entry.text }))
+                .map((entry) => ({ text: entry.text.trim() }))
             : undefined,
           typeof f.suggestedFix === 'string' ? String(f.suggestedFix) : undefined,
         );

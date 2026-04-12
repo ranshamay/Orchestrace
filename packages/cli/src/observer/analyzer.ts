@@ -55,8 +55,8 @@ export async function analyzeSessionSummaries(
 function buildAnalysisPrompt(summaries: SessionSummary[], allowedCategories: FindingCategory[]): string {
   const parts: string[] = [];
 
-  parts.push(
-    `Analyze the following ${summaries.length} session log(s) for optimization opportunities.\n`,
+    parts.push(
+    `Analyze the following ${summaries.length} session log(s) and report concrete, actionable issues.\n`,
   );
 
   for (const summary of summaries) {
@@ -75,13 +75,15 @@ function buildAnalysisPrompt(summaries: SessionSummary[], allowedCategories: Fin
       '      "severity": "low" | "medium" | "high" | "critical",\n' +
       '      "title": "Short one-line title",\n' +
       '      "description": "Detailed description of the issue found",\n' +
-      '      "evidence": [{ "text": "Concrete implementation instruction / evidence detail" }],\n' +
+            '      "evidence": [{ "text": "Concrete, actionable evidence with what to change and where" }],\n' +
       '      "relevantFiles": ["path/to/file.ts"]  // optional\n' +
 
       '    }\n' +
       '  ]\n' +
       '}\n' +
       '```\n' +
+            'Requirements: every finding must use `schemaVersion: "2"` and include non-empty `evidence[]`.\n' +
+      'Do not output exploratory advice; if evidence is sufficient, provide direct next-action findings.\n' +
       'Compatibility: legacy outputs with `suggestedFix` are also accepted during rollout.\n' +
       'Return ONLY the JSON object, no other text.',
   );
@@ -118,14 +120,14 @@ function parseAnalysisResponse(text: string, allowedCategories: FindingCategory[
       .filter((f: Record<string, unknown>) => isValidFindingCandidate(f))
       .map((f: Record<string, unknown>): ObserverFindingInput => {
         const evidence = normalizeFindingEvidence(
-          Array.isArray(f.evidence)
+                    Array.isArray(f.evidence)
             ? f.evidence
                 .filter((entry): entry is { text: string } => {
                   if (!entry || typeof entry !== 'object') return false;
                   const textValue = (entry as Record<string, unknown>).text;
-                  return typeof textValue === 'string';
+                  return typeof textValue === 'string' && textValue.trim().length > 0;
                 })
-                .map((entry) => ({ text: entry.text }))
+                .map((entry) => ({ text: entry.text.trim() }))
             : undefined,
           typeof f.suggestedFix === 'string' ? String(f.suggestedFix) : undefined,
         );

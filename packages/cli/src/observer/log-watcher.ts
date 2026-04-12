@@ -105,13 +105,15 @@ You look for these categories:
 
 Guidelines:
 - Only report CONCRETE, ACTIONABLE issues backed by evidence from the logs
+- Output MUST use schemaVersion=2 and each finding MUST include non-empty evidence[]
 - Include the relevant log snippet (1-3 key lines) in each finding
-- Each evidence entry must be a specific code change or configuration adjustment
-
+- Each evidence entry must specify immediate next action (code/config change), location (file/service when known), and expected outcome
 - Don't flag normal operational logs (startup messages, successful operations)
 - Focus on patterns — a single transient error is less important than a recurring one
+- Avoid exploratory-only advice; if current logs are sufficient, emit direct findings now
 - Rate severity honestly: critical = data loss/security, high = breaking errors, medium = perf/reliability, low = minor improvements
 - If no significant issues are found in the batch, return an empty findings array
+
 
 Respond ONLY with valid JSON matching this schema:
 \`\`\`json
@@ -276,9 +278,16 @@ export class LogWatcher {
       const findings = parseLogFindings(result.text);
       const newlyDetected: LogFinding[] = [];
 
-      for (const finding of findings) {
-        // Deduplicate by title
-        if (this.state.findings.some((f) => f.title === finding.title)) continue;
+            for (const finding of findings) {
+        // Deduplicate by normalized category+title.
+        const dedupeKey = `${finding.category}:${finding.title}`.trim().toLowerCase();
+        if (
+          this.state.findings.some(
+            (f) => `${f.category}:${f.title}`.trim().toLowerCase() === dedupeKey,
+          )
+        ) {
+          continue;
+        }
         this.state.findings.push(finding);
         newlyDetected.push(finding);
       }
@@ -386,10 +395,16 @@ function parseLogFindings(text: string): LogFinding[] {
         title: String(f.title),
         description: String(f.description),
         suggestedFix: typeof f.suggestedFix === 'string' ? f.suggestedFix : (typeof f.issueSummary === 'string' ? f.issueSummary : undefined),
-        evidence: Array.isArray(f.evidence)
+                evidence: Array.isArray(f.evidence)
           ? f.evidence
-              .filter((x: unknown): x is { text: string } => !!x && typeof x === 'object' && typeof (x as Record<string, unknown>).text === 'string')
-              .map((x: { text: string }) => ({ text: x.text }))
+              .filter(
+                (x: unknown): x is { text: string } =>
+                  !!x
+                  && typeof x === 'object'
+                  && typeof (x as Record<string, unknown>).text === 'string'
+                  && ((x as Record<string, unknown>).text as string).trim().length > 0,
+              )
+              .map((x: { text: string }) => ({ text: x.text.trim() }))
           : undefined,
         relevantFiles: Array.isArray(f.relevantFiles)
           ? f.relevantFiles.filter((x: unknown) => typeof x === 'string')
