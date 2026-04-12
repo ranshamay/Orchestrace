@@ -27,12 +27,14 @@ Valid finding categories: ${FINDING_CATEGORY_LIST}
 
 Guidelines:
 - Only report CONCRETE, ACTIONABLE issues — not vague suggestions
-- Each evidence entry must be detailed enough to serve as a complete task prompt for another agent
-
+- Output MUST use schemaVersion=2 and each finding MUST include non-empty evidence[]
+- Each evidence entry must stand alone: reference concrete event/tool behavior, impacted file/path (if known), and why it proves the issue
+- Each finding must include a direct next action another agent can execute immediately (what to edit, where, and expected outcome)
 - Include relevant file paths when you can identify them from tool calls
 - Prioritize issues that affect correctness over style
 - Don't flag issues that are clearly intentional design decisions
 - Focus on patterns that repeat across sessions when analyzing multiple logs
+- Avoid analysis-loop guidance: if evidence is already sufficient, emit the finding instead of requesting more exploration
 - Rate severity honestly: critical = data loss/security, high = bugs, medium = perf/quality, low = style/minor
 
 Respond ONLY with valid JSON matching the requested schema.`;
@@ -64,9 +66,10 @@ CRITICAL real-time guidelines:
 - Do NOT flag things the agent might fix in a later step
 - Do NOT repeat findings already listed in "Previously Reported Findings"
 - Focus on the CURRENT phase boundary: if the agent just finished planning, assess the plan quality; if it just made tool calls, assess tool usage patterns
-- Be concise — the agent is still running and findings appear in real-time in the UI
-- Each evidence entry must be detailed enough for another agent to act on independently
-
+- Be concise — findings are shown while the run is active
+- Output MUST use schemaVersion=2 and each finding MUST include non-empty evidence[]
+- Each evidence entry must be independently actionable: include concrete observed behavior, impacted files/paths when known, and why it is an issue
+- Prefer action-now findings over exploratory advice; do not ask for more investigation when current evidence is already sufficient
 - Rate severity honestly: critical = data loss/security, high = bugs, medium = perf/quality, low = style/minor
 
 Respond ONLY with valid JSON matching the requested schema.`;
