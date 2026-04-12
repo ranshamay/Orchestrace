@@ -4,8 +4,10 @@ import {
   type AppAuthStatusResponse,
   fetchAppAuthConfig,
   fetchAppAuthStatus,
+  fetchSessions,
   logoutAppAuth,
   setStoredAuthToken,
+  startWork,
   type AgentModels,
   type AgentTodo,
   type ChatMessage,
@@ -26,6 +28,9 @@ import { useToolsPanel } from './app/hooks/useToolsPanel';
 import { useLlmControls } from './app/hooks/useLlmControls';
 import { useSessionActions } from './app/hooks/useSessionActions';
 import { useThemePreference } from './app/hooks/useThemePreference';
+import { useNewPromptHotkey } from './app/hooks/useNewPromptHotkey';
+import { sortSessionsByActivityAndRecency } from './app/utils/sessionSort';
+import { toErrorMessage } from './app/hooks/useSessionActions.helpers';
 import { useSessionSelectionController } from './app/hooks/useSessionSelectionController';
 import { useLlmControlsModalState } from './app/hooks/useLlmControlsModalState';
 import { selectCurrentSession, selectSessionViewState } from './app/selectors/sessionViewSelectors';
@@ -105,8 +110,11 @@ export default function App() {
   const [authenticated, setAuthenticated] = useState(false);
   const [authUser, setAuthUser] = useState<AppAuthStatusResponse['user'] | null>(null);
   const [authError, setAuthError] = useState('');
-  const [composerText, setComposerText] = useState('');
+    const [composerText, setComposerText] = useState('');
   const [composerImages, setComposerImages] = useState<ComposerImageAttachment[]>([]);
+  const [isNewPromptModalOpen, setIsNewPromptModalOpen] = useState(false);
+  const [newPromptText, setNewPromptText] = useState('');
+  const [isNewPromptSubmitting, setIsNewPromptSubmitting] = useState(false);
   const [showToolsPanel, setShowToolsPanel] = useState(false);
   const [todoInput, setTodoInput] = useState('');
   const [copyTraceState, setCopyTraceState] = useState<{ sessionId: string; state: 'idle' | 'copied' | 'failed' }>({ sessionId: '', state: 'idle' });
@@ -593,7 +601,7 @@ export default function App() {
     setDefaultAgentRoleModel('investigator', nextModel);
   }, [setDefaultAgentRoleModel]);
 
-  const handleStartNewSessionDraft = useCallback(() => {
+      const handleStartNewSessionDraft = useCallback(() => {
     setActiveTab('graph');
     setSessionSelection('');
     updateActiveLlmControls({
@@ -617,6 +625,97 @@ export default function App() {
     setSessionSelection,
     updateActiveLlmControls,
   ]);
+
+  const openNewPromptModal = useCallback(() => {
+    setNewPromptText('');
+    setIsNewPromptModalOpen(true);
+  }, []);
+
+  const closeNewPromptModal = useCallback(() => {
+    if (isNewPromptSubmitting) {
+      return;
+    }
+    setIsNewPromptModalOpen(false);
+  }, [isNewPromptSubmitting]);
+
+  const submitNewPromptModal = useCallback(async () => {
+    const prompt = newPromptText.trim();
+    if (!prompt || isNewPromptSubmitting) {
+      return;
+    }
+
+    if (!workProvider || !workModel || !workWorkspaceId) {
+      setErrorMessage('Select workspace, provider, and model before starting a new prompt.');
+      return;
+    }
+
+    setIsNewPromptSubmitting(true);
+    setErrorMessage('');
+
+    try {
+      const result = await startWork({
+        workspaceId: workWorkspaceId,
+        prompt,
+        provider: workProvider,
+        model: workModel,
+        agentModels: {
+          ...defaultLlmControls.agentModels,
+          planner: {
+            ...(defaultLlmControls.agentModels.planner ?? {}),
+            provider: workPlanningProvider,
+            model: workPlanningModel,
+          },
+          implementer: {
+            ...(defaultLlmControls.agentModels.implementer ?? {}),
+            provider: workProvider,
+            model: workModel,
+          },
+        },
+        planningProvider: workPlanningProvider,
+        planningModel: workPlanningModel,
+        implementationProvider: workProvider,
+        implementationModel: workModel,
+        deliveryStrategy,
+        planningNoToolGuardMode,
+        autoApprove,
+        adaptiveConcurrency,
+        batchConcurrency,
+        batchMinConcurrency,
+      });
+
+      const sessionsState = await fetchSessions();
+      const sortedSessions = sortSessionsByActivityAndRecency(sessionsState.sessions);
+      setSessions(sortedSessions);
+      setSelectedSessionId(result.id);
+      setActiveTab('graph');
+      setNewPromptText('');
+      setIsNewPromptModalOpen(false);
+    } catch (error) {
+      setErrorMessage(toErrorMessage(error));
+    } finally {
+      setIsNewPromptSubmitting(false);
+    }
+  }, [
+    adaptiveConcurrency,
+    autoApprove,
+    batchConcurrency,
+    batchMinConcurrency,
+    defaultLlmControls.agentModels,
+    deliveryStrategy,
+    isNewPromptSubmitting,
+    newPromptText,
+    planningNoToolGuardMode,
+    setActiveTab,
+    setSelectedSessionId,
+    setSessions,
+    workPlanningModel,
+    workPlanningProvider,
+    workModel,
+    workProvider,
+    workWorkspaceId,
+  ]);
+
+      useNewPromptHotkey(openNewPromptModal, canUseAuthedApis && authReady && !isLoginRoute);
 
   const modalTargetsPlanningPhase = composerMode === 'planning';
   const modalWorkProvider = modalTargetsPlanningPhase ? workPlanningProvider : workProvider;
@@ -954,27 +1053,89 @@ export default function App() {
     );
   }
 
-  return (
+      return (
+    <>
+      <AppShell
+        sessionSidebarProps={sessionSidebarProps}
+        mainContentProps={mainContentProps}
+        llmModalProps={llmModalProps}
+        authUser={authUser ?? null}
+        onLogout={() => {
+          void logoutAppAuth();
+          clearStoredAuthToken();
+          setAuthenticated(false);
+          setAuthUser(null);
+          setAuthError('');
+        }}
+        errorMessage={errorMessage}
+        warningMessage={warningMessage}
+        warningActionLabel={warningActionLabel}
+        onWarningConfirm={confirmMissingModelSwitch}
+        onWarningDismiss={dismissMissingModelWarning}
+        settingsSaveToastState={settingsSaveToastState}
+        settingsSaveToastMessage={settingsSaveToastMessage}
+      />
 
-    <AppShell
-      sessionSidebarProps={sessionSidebarProps}
-      mainContentProps={mainContentProps}
-      llmModalProps={llmModalProps}
-      authUser={authUser ?? null}
-      onLogout={() => {
-        void logoutAppAuth();
-        clearStoredAuthToken();
-        setAuthenticated(false);
-        setAuthUser(null);
-        setAuthError('');
-      }}
-      errorMessage={errorMessage}
-      warningMessage={warningMessage}
-      warningActionLabel={warningActionLabel}
-      onWarningConfirm={confirmMissingModelSwitch}
-      onWarningDismiss={dismissMissingModelWarning}
-      settingsSaveToastState={settingsSaveToastState}
-      settingsSaveToastMessage={settingsSaveToastMessage}
-    />
+      {isNewPromptModalOpen && (
+        <div
+          aria-modal="true"
+          className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-950/60 p-4"
+          role="dialog"
+          onClick={(event) => {
+            if (event.target === event.currentTarget) {
+              closeNewPromptModal();
+            }
+          }}
+        >
+          <div className="w-full max-w-2xl rounded-lg border border-slate-200 bg-white p-4 shadow-xl dark:border-slate-700 dark:bg-slate-900">
+            <div className="mb-3 flex items-center justify-between">
+              <h2 className="text-sm font-bold uppercase tracking-widest text-slate-500 dark:text-slate-400">New Prompt</h2>
+              <button
+                className="rounded border border-slate-200 px-2 py-1 text-xs text-slate-600 hover:bg-slate-100 disabled:opacity-60 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
+                onClick={closeNewPromptModal}
+                type="button"
+                disabled={isNewPromptSubmitting}
+              >
+                Close
+              </button>
+            </div>
+
+            <textarea
+              autoFocus
+              className="h-36 w-full resize-y rounded border border-slate-200 px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-950"
+              placeholder="Describe task and start autonomous execution..."
+              value={newPromptText}
+              onChange={(event) => setNewPromptText(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Escape') {
+                  event.preventDefault();
+                  closeNewPromptModal();
+                  return;
+                }
+
+                if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+                  event.preventDefault();
+                  void submitNewPromptModal();
+                }
+              }}
+            />
+
+            <div className="mt-3 flex items-center justify-between">
+              <p className="text-xs text-slate-500 dark:text-slate-400">Press Cmd/Ctrl+Enter to run. Open anytime with Cmd/Ctrl+K.</p>
+              <button
+                className="inline-flex items-center rounded bg-blue-600 px-3 py-1.5 text-sm font-medium text-white disabled:opacity-60"
+                disabled={isNewPromptSubmitting || newPromptText.trim().length === 0}
+                onClick={() => {
+                  void submitNewPromptModal();
+                }}
+                type="button"
+              >
+                {isNewPromptSubmitting ? 'Starting…' : 'Start'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
   );
 }
