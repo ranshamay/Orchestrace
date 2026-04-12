@@ -14,7 +14,6 @@ async function main() {
   const routePrompt = \`
 ORCHESTRACE_UI_PORT: \${process.env.ORCHESTRACE_UI_PORT || 'MISSING'}
 PLAYWRIGHT_BASE_URL: \${process.env.PLAYWRIGHT_BASE_URL || 'MISSING'}
-CYPRESS_BASE_URL: \${process.env.CYPRESS_BASE_URL || 'MISSING'}
 \`.trim();
 
   // 1) Create session

@@ -16,11 +16,9 @@ async function main() {
         const errorEvt = [...events].reverse().find((e) => e.type === "session:error-change");
         const text = String(outputEvt?.payload?.output?.text ?? "");
         const pw = text.match(/^PLAYWRIGHT_BASE_URL=.*$/m)?.[0] ?? "PLAYWRIGHT_BASE_URL=missing";
-        const cy = text.match(/^CYPRESS_BASE_URL=.*$/m)?.[0] ?? "CYPRESS_BASE_URL=missing";
         const ui = text.match(/^ORCHESTRACE_UI_PORT=.*$/m)?.[0] ?? "ORCHESTRACE_UI_PORT=missing";
         console.log("SESSION_STATUS=" + (statusEvt?.payload?.status ?? "missing"));
         console.log(pw);
-        console.log(cy);
         console.log(ui);
         console.log("SESSION_ERROR=" + (errorEvt?.payload?.error ?? ""));
         const runnerLog = readFileSync("/tmp/" + sessionId + ".runner.log", "utf-8");

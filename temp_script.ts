@@ -23,7 +23,7 @@ async function run() {
     });
 
     // 2) Set prompt
-    const prompt = 'node -e "console.log([\'UI=\'+(process.env.ORCHESTRACE_UI_PORT||\'MISSING\'),\'PW=\'+(process.env.PLAYWRIGHT_BASE_URL||\'MISSING\'),\'CY=\'+(process.env.CYPRESS_BASE_URL||\'MISSING\')].join(\'|\'))"';
+    const prompt = 'node -e "console.log([\'UI=\'+(process.env.ORCHESTRACE_UI_PORT||\'MISSING\'),\'PW=\'+(process.env.PLAYWRIGHT_BASE_URL||\'MISSING\')].join(\'|\'))"';
     await store.updateSession(sessionId, { prompt });
 
     // 3) Run runner

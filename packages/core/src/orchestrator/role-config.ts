@@ -236,7 +236,7 @@ export function buildTesterPrompt(params: {
         `- uiTestsRequired: ${uiTestsRequired}`,
         `- screenshotEvidenceRequired: ${screenshotEvidenceRequired}`,
         `- minScreenshotCount: ${minScreenshotCount}`,
-        `- uiTestCommandPatterns: ${(uiTestCommandPatterns.length > 0 ? uiTestCommandPatterns : ['playwright', 'cypress', 'test:ui']).join(', ')}`,
+        `- uiTestCommandPatterns: ${(uiTestCommandPatterns.length > 0 ? uiTestCommandPatterns : ['playwright', 'test:ui']).join(', ')}`,
         '',
         'Prior validation command results:',
         validationSummary,

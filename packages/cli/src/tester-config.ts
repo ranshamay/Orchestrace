@@ -35,7 +35,7 @@ export const DEFAULT_TESTER_AGENT_CONFIG: TesterAgentConfig = {
   timeoutMs: 300_000,
   testFilePatterns: ['**/tests/**', '**/*.test.*', '**/*.spec.*'],
   uiChangePatterns: ['packages/ui/**', '**/*.tsx', '**/*.jsx', '**/*.css', '**/*.scss', '**/*.html'],
-  uiTestCommandPatterns: ['playwright', 'cypress', 'test:ui', '--ui', '@orchestrace/ui test'],
+  uiTestCommandPatterns: ['playwright', 'test:ui', '--ui', '@orchestrace/ui test'],
   approvalThreshold: 1,
 };
 

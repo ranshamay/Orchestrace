@@ -34,7 +34,6 @@ import type { TaskEffort } from './task-complexity.js';
 
 const DEFAULT_UI_TEST_COMMAND_PATTERNS = [
   'playwright',
-  'cypress',
   'test:ui',
   '--ui',
   '@orchestrace/ui test',
