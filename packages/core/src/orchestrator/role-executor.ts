@@ -941,7 +941,6 @@ function extractTestCommandsFromToolCall(toolName: string, argumentsJson: string
     const fullCommand = ['playwright', command, ...args].join(' ').trim();
     return fullCommand ? [fullCommand] : [];
   }
-
   const commands = record.commands;
   if (!Array.isArray(commands)) {
     return [];
@@ -1017,7 +1016,6 @@ async function resolveScreenshotEvidence(
       missingPaths.push(repoRelativePath);
       continue;
     }
-
     if (!isScreenshotImagePath(repoRelativePath)) {
       missingPaths.push(repoRelativePath);
       continue;

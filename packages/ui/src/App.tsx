@@ -662,9 +662,14 @@ export default function App() {
     setDefaultAgentRoleModel('investigator', nextModel);
   }, [setDefaultAgentRoleModel]);
 
-  const handleStartNewSessionDraft = useCallback(() => {
+      const handleStartNewSessionDraft = useCallback(() => {
     setActiveTab('graph');
     setSessionSelection('');
+    setChatMessages([]);
+    setTodos([]);
+    setNodeTokenStreams({});
+    setObserverState(null);
+    setShowToolsPanel(false);
     updateActiveLlmControls({
       planningProvider: defaultLlmControls.planningProvider,
       planningModel: defaultLlmControls.planningModel,
@@ -683,7 +688,12 @@ export default function App() {
     defaultLlmControls.planningModel,
     defaultLlmControls.planningProvider,
     setActiveTab,
+    setChatMessages,
+    setNodeTokenStreams,
+    setObserverState,
     setSessionSelection,
+    setShowToolsPanel,
+    setTodos,
     updateActiveLlmControls,
   ]);
 
