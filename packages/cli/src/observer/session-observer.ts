@@ -112,7 +112,9 @@ export class SessionObserver {
   private analysisPending = false;
   private abortController = new AbortController();
   private currentPhase: string = 'unknown';
-  private analysisCounter = 0;
+    private analysisCounter = 0;
+  private consecutiveInvalidResponses = 0;
+
 
   constructor(options: {
     sessionId: string;
@@ -378,9 +380,28 @@ export class SessionObserver {
 
       });
 
-      const findings = parseRealtimeFindings(result.text, allowedCategories, triggerPhase);
+            const parsed = parseRealtimeFindings(result.text, allowedCategories, triggerPhase);
 
-      for (const finding of findings) {
+      if (parsed.invalidCount > 0) {
+        console.warn(
+          `[orchestrace][observer] Session ${this.sessionId} rejected ${parsed.invalidCount} malformed realtime finding(s)`,
+        );
+      }
+
+      if (parsed.hadParseFailure || parsed.invalidCount > 0) {
+        this.consecutiveInvalidResponses++;
+      } else {
+        this.consecutiveInvalidResponses = 0;
+      }
+
+      if (this.consecutiveInvalidResponses >= 3) {
+        console.warn(
+          `[orchestrace][observer] Session ${this.sessionId} received repeated invalid realtime analysis payloads; using deterministic empty fallback`,
+        );
+      }
+
+      for (const finding of parsed.findings) {
+
         // Deduplicate against existing findings by title
         if (this.state.findings.some((f) => f.title === finding.title)) continue;
         this.state.findings.push(finding);
@@ -552,7 +573,11 @@ function parseRealtimeFindings(
   text: string,
   allowedCategories: FindingCategory[],
   triggerPhase: string,
-): RealtimeFinding[] {
+): {
+  findings: RealtimeFinding[];
+  invalidCount: number;
+  hadParseFailure: boolean;
+} {
   let jsonStr = text.trim();
   const fenceMatch = jsonStr.match(/```(?:json)?\s*\n?([\s\S]*?)\n?\s*```/);
   if (fenceMatch) {
@@ -560,14 +585,24 @@ function parseRealtimeFindings(
   }
 
   try {
-    const parsed = JSON.parse(jsonStr);
-    if (!parsed || !Array.isArray(parsed.findings)) return [];
+    const parsed: unknown = JSON.parse(jsonStr);
+    if (!parsed || typeof parsed !== 'object' || !Array.isArray((parsed as { findings?: unknown }).findings)) {
+      return { findings: [], invalidCount: 1, hadParseFailure: false };
+    }
 
     const validSeverities: FindingSeverity[] = ['low', 'medium', 'high', 'critical'];
     let idCounter = 0;
+    const rawFindings = (parsed as { findings: unknown[] }).findings;
+    let invalidCount = 0;
 
-    return parsed.findings
-      .filter((f: Record<string, unknown>) => isValidRealtimeFindingCandidate(f))
+    const findings = rawFindings
+      .filter((f): f is Record<string, unknown> => {
+        const accepted = !!f && typeof f === 'object' && isValidRealtimeFindingCandidate(f as Record<string, unknown>);
+        if (!accepted) {
+          invalidCount++;
+        }
+        return accepted;
+      })
       .filter((f: Record<string, unknown>) =>
         allowedCategories.includes(f.category as FindingCategory),
       )
@@ -594,8 +629,8 @@ function parseRealtimeFindings(
           severity: validSeverities.includes(f.severity as FindingSeverity)
             ? (f.severity as FindingSeverity)
             : 'medium',
-          title: String(f.title),
-          description: String(f.description),
+          title: String(f.title).trim(),
+          description: String(f.description).trim(),
           evidence,
           suggestedFix: evidence[0]?.text,
           relevantFiles: Array.isArray(f.relevantFiles)
@@ -605,17 +640,25 @@ function parseRealtimeFindings(
           detectedAt: new Date().toISOString(),
         };
       });
+
+    return { findings, invalidCount, hadParseFailure: false };
   } catch {
     console.error('[orchestrace][observer] Failed to parse real-time analysis response');
-    return [];
+    return { findings: [], invalidCount: 1, hadParseFailure: true };
   }
 }
 
+
 function isValidRealtimeFindingCandidate(f: Record<string, unknown>): boolean {
-  const hasCore = typeof f.title === 'string' && typeof f.description === 'string';
+  const hasCore =
+    typeof f.title === 'string'
+    && f.title.trim().length > 0
+    && typeof f.description === 'string'
+    && f.description.trim().length > 0;
   if (!hasCore) {
     return false;
   }
+
 
   const hasLegacy = typeof f.suggestedFix === 'string';
   const hasEvidence =
