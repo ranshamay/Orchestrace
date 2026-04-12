@@ -71,12 +71,16 @@ describe('log watcher runtime error reporting', () => {
         complete: vi.fn(async () => ({
           text: JSON.stringify({
             findings: [
-              {
+                            {
+                schemaVersion: '2',
                 category: 'error-pattern',
                 severity: 'high',
                 title: 'Tool failure surfaced',
                 description: 'A tool failed during analysis',
-                suggestedFix: 'Handle tool error path and report upstream',
+                evidence: [
+                  { text: 'Add explicit error handling for tool call failures in the watcher pipeline.' },
+                  { text: 'Propagate tool-call error metadata into structured runtime error events.' },
+                ],
                 logSnippet: 'task:tool-call [error] search_files',
               },
             ],

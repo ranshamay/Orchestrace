@@ -297,13 +297,16 @@ describe('log watcher fix-session emission', () => {
     const complete = vi.fn(async () => ({
       text: JSON.stringify({
         findings: [
-          {
+                    {
+            schemaVersion: '2',
             category: 'error-pattern',
             severity: 'high',
             title: 'Repeated timeout',
             description: 'Service call times out repeatedly.',
-            suggestedFix: 'Increase timeout guard and add jittered retry cap.',
-            evidence: [],
+            evidence: [
+              { text: 'Increase timeout guard thresholds in the service call retry path.' },
+              { text: 'Add jittered retry caps to prevent synchronized timeout cascades.' },
+            ],
             logSnippet: 'timeout after 30000ms',
           },
         ],
