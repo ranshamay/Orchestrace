@@ -11,6 +11,7 @@ export async function runCommand(
     cwd: string;
     timeoutMs: number;
     signal?: AbortSignal;
+    env?: NodeJS.ProcessEnv;
   },
 ): Promise<CommandResult> {
   try {
@@ -19,6 +20,7 @@ export async function runCommand(
       timeout: options.timeoutMs,
       maxBuffer: 10 * 1024 * 1024,
       signal: options.signal,
+      env: options.env,
     });
 
     return {

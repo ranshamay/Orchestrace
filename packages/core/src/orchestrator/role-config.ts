@@ -156,6 +156,11 @@ export function buildTesterPrompt(params: {
   changedFiles?: string[];
   validationResults?: ValidationResult[];
   attempt: number;
+  uiChangesDetected: boolean;
+  uiTestsRequired: boolean;
+  screenshotEvidenceRequired: boolean;
+  minScreenshotCount: number;
+  uiTestCommandPatterns: string[];
   previousFailureReason?: string;
 }): string {
   const {
@@ -165,6 +170,11 @@ export function buildTesterPrompt(params: {
     changedFiles,
     validationResults,
     attempt,
+    uiChangesDetected,
+    uiTestsRequired,
+    screenshotEvidenceRequired,
+    minScreenshotCount,
+    uiTestCommandPatterns,
     previousFailureReason,
   } = params;
 
@@ -187,7 +197,11 @@ export function buildTesterPrompt(params: {
       name: PromptSectionName.Goal,
       lines: [
         'You are the testing gate for this implementation.',
-        'Read the approved plan and implementation output, create/update tests as needed, and run verification commands.',
+        'Read the approved plan and implementation output, then produce a concrete test plan before writing or running tests.',
+        'Implement the test plan by creating/updating tests as needed and running verification commands.',
+        'Maintain or improve codebase quality by covering changed behavior and likely regressions.',
+        'Always include explicit coverageAssessment and qualityAssessment in your verdict.',
+        'When UI changes are detected and UI tests are required, you must run UI test commands and provide screenshot evidence paths.',
         'You must execute at least one test command using run_command or run_command_batch before producing a verdict.',
       ],
     },
@@ -217,6 +231,13 @@ export function buildTesterPrompt(params: {
           ? changedFiles.slice(0, 120).map((path) => `- ${path}`).join('\n')
           : '- (unknown)',
         '',
+        'UI validation policy for this attempt:',
+        `- uiChangesDetected: ${uiChangesDetected}`,
+        `- uiTestsRequired: ${uiTestsRequired}`,
+        `- screenshotEvidenceRequired: ${screenshotEvidenceRequired}`,
+        `- minScreenshotCount: ${minScreenshotCount}`,
+        `- uiTestCommandPatterns: ${(uiTestCommandPatterns.length > 0 ? uiTestCommandPatterns : ['playwright', 'test:ui']).join(', ')}`,
+        '',
         'Prior validation command results:',
         validationSummary,
       ],
@@ -225,7 +246,12 @@ export function buildTesterPrompt(params: {
       name: PromptSectionName.OutputContract,
       lines: [
         'After running tests, end with a JSON object (no markdown fences) using this exact shape:',
-        '{"approved":boolean,"testsPassed":number,"testsFailed":number,"rejectionReason":string,"suggestedFixes":string[]}',
+        '{"approved":boolean,"testPlan":string[],"testedAreas":string[],"executedTestCommands":string[],"testsPassed":number,"testsFailed":number,"coverageAssessment":string,"qualityAssessment":string,"uiChangesDetected":boolean,"uiTestsRequired":boolean,"uiTestsRun":boolean,"screenshotPaths":string[],"rejectionReason":string,"suggestedFixes":string[]}',
+        'testPlan must contain at least one concrete test item tied to changed behavior.',
+        'testedAreas should reflect what was actually validated (for example: ["unit","api","ui"]).',
+        'executedTestCommands must include concrete test commands you ran.',
+        'If uiTestsRequired=true, set uiTestsRun=true only if you actually ran UI test commands.',
+        'If screenshotEvidenceRequired=true, include at least minScreenshotCount repository-relative image paths in screenshotPaths.',
         'When approved=true, set rejectionReason to an empty string and suggestedFixes to an empty array.',
       ],
     },
@@ -419,8 +445,12 @@ export function buildRoleSystemPrompt(params: {
         ]
         : [
           'Act as the mandatory testing gate between implementation and delivery.',
-          'Read the approved plan, inspect implementation output, and generate or update tests where needed.',
+          'Read the approved plan, inspect implementation output, and produce a concrete test plan for the changed behavior.',
+          'Implement the test plan by generating or updating tests, then run the planned tests.',
+          'Maintain or increase effective test coverage for changed behavior and high-risk regressions.',
+          'Protect code quality by prioritizing determinism, regression safety, and meaningful assertions over superficial checks.',
           'You must execute at least one run_command or run_command_batch invocation that runs tests.',
+          'For UI changes, run UI tests and provide screenshot evidence paths in the tester verdict.',
           'Reject the implementation if tests fail, if coverage is obviously insufficient for the changed behavior, or if no test command is executed.',
           'When rejecting, provide specific, actionable fix instructions for the implementer.',
           'Keep changes focused to test artifacts; do not rewrite product logic in tester role.',

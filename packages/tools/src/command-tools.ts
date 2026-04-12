@@ -524,6 +524,7 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
             cwd: normalized.cwd,
             timeoutMs: options.commandTimeoutMs ?? 120000,
             signal,
+            env: options.commandEnv ? { ...process.env, ...options.commandEnv } : undefined,
           });
 
           const output = formatCommandOutput(result, options.maxOutputChars ?? 24000);
@@ -630,6 +631,7 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
               cwd: normalized.cwd,
               timeoutMs: options.commandTimeoutMs ?? 120000,
               signal,
+              env: options.commandEnv ? { ...process.env, ...options.commandEnv } : undefined,
             });
 
             return {
@@ -726,6 +728,7 @@ export function createCommandTools(options: CommandToolOptions): RegisteredAgent
               cwd,
               timeoutMs,
               signal,
+              env: options.commandEnv ? { ...process.env, ...options.commandEnv } : undefined,
             });
 
             if (result.exitCode === -1) {

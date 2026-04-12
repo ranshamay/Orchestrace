@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  AUTH_EXPIRED_EVENT,
+  PROVIDER_REAUTH_REQUIRED_EVENT,
   clearStoredAuthToken,
   type AppAuthStatusResponse,
   fetchAppAuthConfig,
@@ -115,6 +117,10 @@ export default function App() {
   const [nodeTokenStreams, setNodeTokenStreams] = useState<Record<string, NodeTokenStream>>({});
   const [observerState, setObserverState] = useState<SessionObserverState | null>(null);
   const settingsSaveToastTimerRef = useRef<number | undefined>(undefined);
+  const providerReauthNoticeAtRef = useRef(0);
+  const [isDocumentVisible, setIsDocumentVisible] = useState(() => (
+    typeof document === 'undefined' ? true : document.visibilityState === 'visible'
+  ));
   const hydratedActiveTabPreferenceRef = useRef(false);
   const preferencesSyncInitializedRef = useRef(false);
   const preferenceSaveRequestIdRef = useRef(0);
@@ -122,6 +128,7 @@ export default function App() {
   const isLoginRoute = typeof window !== 'undefined'
     && normalizeRoutePath(window.location.pathname) === LOGIN_PATH;
   const canUseAuthedApis = authReady && (!authEnabled || authenticated);
+  const canUseRealtimeApis = canUseAuthedApis && isDocumentVisible;
 
   const bootstrap = useBootstrapData(canUseAuthedApis);
   const {
@@ -171,10 +178,25 @@ export default function App() {
     updateTabInUrl(tab, 'push');
   }, []);
 
-  useSessionsStatusStream({ enabled: canUseAuthedApis, selectedSessionId, setSelectedSessionId: setSessionSelection, setSessions });
-  useSessionPolling({ enabled: canUseAuthedApis, selectedSessionId, setSelectedSessionId: setSessionSelection, setSessions, setChatMessages, setTodos });
-  useSessionStream({ enabled: canUseAuthedApis, selectedSessionId, setSessions, setChatMessages, setTodos, setNodeTokenStreams, setObserverState });
+  useSessionsStatusStream({ enabled: canUseRealtimeApis, selectedSessionId, setSelectedSessionId: setSessionSelection, setSessions });
+  useSessionPolling({ enabled: canUseRealtimeApis, selectedSessionId, setSelectedSessionId: setSessionSelection, setSessions, setChatMessages, setTodos });
+  useSessionStream({ enabled: canUseRealtimeApis, selectedSessionId, setSessions, setChatMessages, setTodos, setNodeTokenStreams, setObserverState });
   useRunUrlSync(selectedSessionId, setSessionSelection);
+
+  useEffect(() => {
+    if (typeof document === 'undefined') {
+      return;
+    }
+
+    const handleVisibilityChange = () => {
+      setIsDocumentVisible(document.visibilityState === 'visible');
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, []);
 
   useEffect(() => {
     if (typeof window !== 'undefined' && normalizeRoutePath(window.location.pathname) === LOGIN_PATH) {
@@ -208,6 +230,53 @@ export default function App() {
       redirectToLoginRoute();
     }
   }, [authEnabled, authReady, authenticated, isLoginRoute]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    const handleAuthExpired = () => {
+      if (!authEnabled) {
+        return;
+      }
+
+      clearStoredAuthToken();
+      setAuthenticated(false);
+      setAuthUser(null);
+      setAuthError('Session expired. Please sign in again.');
+    };
+
+    window.addEventListener(AUTH_EXPIRED_EVENT, handleAuthExpired as EventListener);
+    return () => {
+      window.removeEventListener(AUTH_EXPIRED_EVENT, handleAuthExpired as EventListener);
+    };
+  }, [authEnabled]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    const handleProviderReauthRequired = (event: Event) => {
+      const nowMs = Date.now();
+      if (nowMs - providerReauthNoticeAtRef.current < 3000) {
+        return;
+      }
+
+      providerReauthNoticeAtRef.current = nowMs;
+      const detail = (event as CustomEvent<{ provider?: string }>).detail;
+      const providerLabel = detail?.provider ? `Provider ${detail.provider}` : 'Provider';
+      onSettingsSaveStatus('error', `${providerLabel} needs re-login. Reconnect it in Settings > Providers.`);
+      setActiveTabState('settings');
+      updateTabInUrl('settings', 'replace');
+    };
+
+    window.addEventListener(PROVIDER_REAUTH_REQUIRED_EVENT, handleProviderReauthRequired as EventListener);
+    return () => {
+      window.removeEventListener(PROVIDER_REAUTH_REQUIRED_EVENT, handleProviderReauthRequired as EventListener);
+    };
+  }, [onSettingsSaveStatus]);
 
   useEffect(() => {
     if (!authReady) {

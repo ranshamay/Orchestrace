@@ -31,6 +31,8 @@ export interface AgentToolsetOptions {
   reasoning?: 'minimal' | 'low' | 'medium' | 'high';
   commandTimeoutMs?: number;
   maxOutputChars?: number;
+  /** Optional environment variables injected into run_command/run_command_batch/playwright_run processes. */
+  commandEnv?: Record<string, string>;
   batchConcurrency?: number;
   batchMinConcurrency?: number;
   adaptiveConcurrency?: boolean;

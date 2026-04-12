@@ -1,6 +1,59 @@
 export const API_BASE = '/api';
+export const AUTH_EXPIRED_EVENT = 'orchestrace:auth-expired';
+export const PROVIDER_REAUTH_REQUIRED_EVENT = 'orchestrace:provider-reauth-required';
 
 const AUTH_TOKEN_STORAGE_KEY = 'orchestrace.appAuthToken';
+const UI_API_DEBUG_STORAGE_KEY = 'orchestrace.uiApiDebug';
+
+function isUiApiDebugEnabled(): boolean {
+  if (typeof window === 'undefined') {
+    return false;
+  }
+
+  return window.localStorage.getItem(UI_API_DEBUG_STORAGE_KEY) === '1';
+}
+
+function notifyAuthExpired(status: number, path: string): void {
+  if (typeof window === 'undefined') {
+    return;
+  }
+
+  window.dispatchEvent(new CustomEvent(AUTH_EXPIRED_EVENT, {
+    detail: {
+      status,
+      path,
+      time: Date.now(),
+    },
+  }));
+}
+
+function resolveProviderReauthPath(path: string): string | undefined {
+  try {
+    const url = new URL(path, 'http://localhost');
+    if (url.pathname !== `${API_BASE}/models`) {
+      return undefined;
+    }
+
+    const provider = url.searchParams.get('provider')?.trim();
+    return provider && provider.length > 0 ? provider : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function notifyProviderReauthRequired(provider: string, path: string): void {
+  if (typeof window === 'undefined') {
+    return;
+  }
+
+  window.dispatchEvent(new CustomEvent(PROVIDER_REAUTH_REQUIRED_EVENT, {
+    detail: {
+      provider,
+      path,
+      time: Date.now(),
+    },
+  }));
+}
 
 function getStoredAuthToken(): string | undefined {
   if (typeof window === 'undefined') {
@@ -47,7 +100,59 @@ function withAuthHeaders(init?: RequestInit): RequestInit {
 }
 
 async function authedFetch(path: string, init?: RequestInit): Promise<Response> {
-  return fetch(path, withAuthHeaders(init));
+  const method = (init?.method ?? 'GET').toUpperCase();
+  const timeoutMs = method === 'GET' ? 15_000 : 30_000;
+  const debugEnabled = isUiApiDebugEnabled();
+  const startedAt = Date.now();
+
+  const timeoutController = new AbortController();
+  const timeoutId = setTimeout(() => {
+    timeoutController.abort();
+  }, timeoutMs);
+
+  let upstreamAbortListener: (() => void) | undefined;
+  if (init?.signal) {
+    upstreamAbortListener = () => timeoutController.abort();
+    init.signal.addEventListener('abort', upstreamAbortListener, { once: true });
+  }
+
+  if (debugEnabled) {
+    console.debug(`[orchestrace][ui-api] -> ${method} ${path}`);
+  }
+
+  let response: Response;
+  try {
+    response = await fetch(path, withAuthHeaders({
+      ...(init ?? {}),
+      signal: timeoutController.signal,
+    }));
+  } catch (error) {
+    if ((error as { name?: string } | undefined)?.name === 'AbortError') {
+      throw new Error(`Request timed out after ${timeoutMs}ms: ${method} ${path}`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+    if (init?.signal && upstreamAbortListener) {
+      init.signal.removeEventListener('abort', upstreamAbortListener);
+    }
+  }
+
+  if (debugEnabled) {
+    console.debug(`[orchestrace][ui-api] <- ${method} ${path} ${response.status} (${Date.now() - startedAt}ms)`);
+  }
+
+  if (response.status === 401) {
+    clearStoredAuthToken();
+    notifyAuthExpired(response.status, path);
+  } else if (response.status === 403) {
+    const provider = resolveProviderReauthPath(path);
+    if (provider) {
+      notifyProviderReauthRequired(provider, path);
+    }
+  }
+
+  return response;
 }
 
 export interface AppAuthConfigResponse {
@@ -76,6 +181,19 @@ export interface AppGoogleAuthResponse {
     name?: string;
     picture?: string;
   };
+}
+
+export interface ApiHealthResponse {
+  status: 'ok' | 'draining' | string;
+  sessions?: { total: number; running: number };
+  uptime?: number;
+  capabilities?: {
+    testerApi?: boolean;
+  };
+}
+
+export async function fetchApiHealth(): Promise<ApiHealthResponse> {
+  return readJson(await fetch(`${API_BASE}/health`));
 }
 
 export async function fetchAppAuthConfig(): Promise<AppAuthConfigResponse> {
@@ -230,6 +348,11 @@ export interface WorkSession {
   adaptiveConcurrency?: boolean;
   batchConcurrency?: number;
   batchMinConcurrency?: number;
+  testingPorts?: {
+    basePort: number;
+    apiPort: number;
+    uiPort: number;
+  };
   worktreePath?: string;
   worktreeBranch?: string;
   creationReason?: SessionCreationReason;
@@ -258,6 +381,19 @@ export interface WorkSession {
     attempt?: number;
     maxRetries?: number;
     totalDurationMs?: number;
+    testsPassed?: number;
+    testsFailed?: number;
+    rejectionReason?: string;
+    testPlan?: string[];
+    coverageAssessment?: string;
+    qualityAssessment?: string;
+    testedAreas?: string[];
+    executedTestCommands?: string[];
+    uiChangesDetected?: boolean;
+    uiTestsRequired?: boolean;
+    uiTestsRun?: boolean;
+    screenshotsRequired?: boolean;
+    screenshotPaths?: string[];
     toolName?: string;
     toolStatus?: 'started' | 'result';
     toolCallId?: string;
@@ -369,12 +505,30 @@ export interface GithubDeviceAuthSession {
   error?: string;
 }
 
+const inFlightAuthedJsonGet = new Map<string, Promise<unknown>>();
+
 async function readJson<T>(res: Response): Promise<T> {
   if (!res.ok) {
     const body = await res.text();
     throw new Error(body || `Request failed (${res.status})`);
   }
   return res.json();
+}
+
+async function authedGetJson<T>(path: string): Promise<T> {
+  const cached = inFlightAuthedJsonGet.get(path) as Promise<T> | undefined;
+  if (cached) {
+    return cached;
+  }
+
+  const request = (async () => readJson<T>(await authedFetch(path)))();
+  inFlightAuthedJsonGet.set(path, request as Promise<unknown>);
+
+  try {
+    return await request;
+  } finally {
+    inFlightAuthedJsonGet.delete(path);
+  }
 }
 
 export async function fetchProviders(): Promise<ProvidersResponse> {
@@ -424,7 +578,7 @@ export async function fetchGithubDeviceAuthSession(id: string): Promise<{ sessio
 }
 
 export async function fetchModels(provider: string): Promise<{ provider: string; models: string[] }> {
-  return readJson(await authedFetch(`${API_BASE}/models?provider=${encodeURIComponent(provider)}`));
+  return authedGetJson(`${API_BASE}/models?provider=${encodeURIComponent(provider)}`);
 }
 
 export async function fetchWorkspaces(): Promise<WorkspacesResponse> {
@@ -620,18 +774,15 @@ export interface ObserverFailedSessionMonitor {
 }
 
 export async function fetchObserverStatus(): Promise<ObserverStatusResponse> {
-  const res = await authedFetch(`${API_BASE}/observer/status`);
-  return readJson(res);
+  return authedGetJson(`${API_BASE}/observer/status`);
 }
 
 export async function fetchObserverFindings(): Promise<{ findings: ObserverFinding[] }> {
-  const res = await authedFetch(`${API_BASE}/observer/findings`);
-  return readJson(res);
+  return authedGetJson(`${API_BASE}/observer/findings`);
 }
 
 export async function fetchObserverFailedSessions(): Promise<{ sessions: ObserverFailedSessionMonitor[] }> {
-  const res = await authedFetch(`${API_BASE}/observer/failed-sessions`);
-  return readJson(res);
+  return authedGetJson(`${API_BASE}/observer/failed-sessions`);
 }
 
 export async function enableObserver(): Promise<{ enabled: boolean }> {
@@ -674,10 +825,15 @@ export interface TesterConfig {
   model: string;
   reasoning?: TesterReasoningLevel;
   requireRunTests: boolean;
+  enforceUiTestsForUiChanges: boolean;
+  requireUiScreenshotsForUiChanges: boolean;
+  minUiScreenshotCount: number;
   testCategories: TesterCategory[];
   maxTestRetries: number;
   timeoutMs: number;
   testFilePatterns: string[];
+  uiChangePatterns: string[];
+  uiTestCommandPatterns: string[];
   approvalThreshold: number;
 }
 
@@ -686,8 +842,7 @@ export interface TesterStatusResponse {
 }
 
 export async function fetchTesterStatus(): Promise<TesterStatusResponse> {
-  const res = await authedFetch(`${API_BASE}/tester/status`);
-  return readJson(res);
+  return authedGetJson(`${API_BASE}/tester/status`);
 }
 
 export async function enableTester(): Promise<{ enabled: boolean; config: TesterConfig }> {

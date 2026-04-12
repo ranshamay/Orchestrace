@@ -402,7 +402,18 @@ export function parseToolCallEvent(event: {
 }
 
 
-export function formatTimelineEvent(event: { type: string; message: string; taskId?: string; failureType?: string }): Pick<TimelineItem, 'title' | 'subtitle' | 'content' | 'tone' | 'failureType'> {
+export function formatTimelineEvent(event: {
+  type: string;
+  message: string;
+  taskId?: string;
+  failureType?: string;
+  testsPassed?: number;
+  testsFailed?: number;
+  uiTestsRequired?: boolean;
+  uiTestsRun?: boolean;
+  screenshotPaths?: string[];
+  rejectionReason?: string;
+}): Pick<TimelineItem, 'title' | 'subtitle' | 'content' | 'tone' | 'failureType'> {
   const clean = stripRunTag(event.message);
   if (event.type === 'task:tool-call') {
     const toolMatch = clean.match(/^([^:]+):\s+tool\s+([a-zA-Z0-9_.-]+)\s+(input|output)(\s+\[error\])?\s*([\s\S]*)$/);
@@ -427,15 +438,33 @@ export function formatTimelineEvent(event: { type: string; message: string; task
       return { title: 'Awaiting approval', subtitle: event.taskId, tone: 'neutral', content: detail || 'Waiting for plan approval.' };
     case 'task:implementation-attempt':
       return { title: 'Implementing', subtitle: event.taskId, tone: 'neutral', content: detail || 'Starting implementation attempt.' };
-    case 'task:testing':
-      return { title: 'Testing', subtitle: event.taskId, tone: 'neutral', content: detail || 'Tester agent is generating and running tests.' };
+    case 'task:testing': {
+      const uiNote = event.uiTestsRequired ? ' UI changes detected; UI tests required.' : '';
+      return {
+        title: 'Testing',
+        subtitle: event.taskId,
+        tone: 'neutral',
+        content: detail || `Tester agent is generating and running tests.${uiNote}`,
+      };
+    }
     case 'task:tester-verdict': {
-      const rejected = /rejected/i.test(clean);
+      const rejected = event.testsFailed !== undefined ? event.testsFailed > 0 : /rejected/i.test(clean);
+      const summaryParts = [
+        event.testsPassed !== undefined ? `passed=${event.testsPassed}` : undefined,
+        event.testsFailed !== undefined ? `failed=${event.testsFailed}` : undefined,
+        event.uiTestsRequired ? `uiTests=${event.uiTestsRun ? 'ran' : 'missing'}` : undefined,
+        event.screenshotPaths ? `screenshots=${event.screenshotPaths.length}` : undefined,
+      ].filter((value): value is string => Boolean(value));
+
+      const fallback = rejected
+        ? 'Tester agent requested implementation rework.'
+        : 'Tester agent approved the implementation.';
+
       return {
         title: rejected ? 'Tester Rejected' : 'Tester Approved',
         subtitle: event.taskId,
         tone: rejected ? 'error' : 'success',
-        content: detail || (rejected ? 'Tester agent requested implementation rework.' : 'Tester agent approved the implementation.'),
+        content: detail || `${fallback}${summaryParts.length > 0 ? ` (${summaryParts.join(', ')})` : ''}${event.rejectionReason ? ` Reason: ${event.rejectionReason}` : ''}`,
       };
     }
     case 'task:validating':

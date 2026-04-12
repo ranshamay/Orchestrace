@@ -21,6 +21,7 @@ import {
   updateObserverConfig,
   triggerObserverAnalysis,
   clearObserverPendingQueue,
+  fetchApiHealth,
   fetchTesterStatus,
   enableTester,
   disableTester,
@@ -983,6 +984,7 @@ function TesterSection({
 }: TesterSectionProps) {
   const [status, setStatus] = useState<TesterStatusResponse | null>(null);
   const [loading, setLoading] = useState(true);
+  const [testerApiSupported, setTesterApiSupported] = useState<boolean | null>(null);
   const [toggling, setToggling] = useState(false);
   const [savingConfig, setSavingConfig] = useState(false);
   const [configDirty, setConfigDirty] = useState(false);
@@ -990,6 +992,11 @@ function TesterSection({
   const [editProvider, setEditProvider] = useState('');
   const [editModel, setEditModel] = useState('');
   const [editRequireRunTests, setEditRequireRunTests] = useState(true);
+  const [editEnforceUiTestsForUiChanges, setEditEnforceUiTestsForUiChanges] = useState(true);
+  const [editRequireUiScreenshotsForUiChanges, setEditRequireUiScreenshotsForUiChanges] = useState(true);
+  const [editMinUiScreenshotCount, setEditMinUiScreenshotCount] = useState('2');
+  const [editUiChangePatternsText, setEditUiChangePatternsText] = useState('');
+  const [editUiTestCommandPatternsText, setEditUiTestCommandPatternsText] = useState('');
   const [editCategories, setEditCategories] = useState<TesterCategory[]>(['unit', 'integration']);
   const [editMaxRetries, setEditMaxRetries] = useState('1');
   const [editTimeoutSeconds, setEditTimeoutSeconds] = useState('300');
@@ -1003,7 +1010,49 @@ function TesterSection({
     return providers.filter((provider) => connectedProviderIds.has(provider.id));
   }, [providerStatuses, providers]);
 
+  useEffect(() => {
+    let cancelled = false;
+
+    const probeTesterApiSupport = async () => {
+      try {
+        const health = await fetchApiHealth();
+        if (cancelled) {
+          return;
+        }
+
+        const supported = health.capabilities?.testerApi === true;
+        setTesterApiSupported(supported);
+        if (!supported) {
+          setLoading(false);
+        }
+      } catch {
+        if (cancelled) {
+          return;
+        }
+
+        setTesterApiSupported(false);
+        setLoading(false);
+      }
+    };
+
+    void probeTesterApiSupport();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const refresh = useCallback(async () => {
+    if (testerApiSupported === false) {
+      setStatus(null);
+      setLoading(false);
+      return;
+    }
+
+    if (testerApiSupported === null) {
+      return;
+    }
+
     try {
       const nextStatus = await fetchTesterStatus();
       setStatus(nextStatus);
@@ -1016,6 +1065,11 @@ function TesterSection({
       setEditProvider(nextProvider);
       setEditModel(nextProvider === nextStatus.config.provider ? nextStatus.config.model : '');
       setEditRequireRunTests(nextStatus.config.requireRunTests);
+      setEditEnforceUiTestsForUiChanges(nextStatus.config.enforceUiTestsForUiChanges);
+      setEditRequireUiScreenshotsForUiChanges(nextStatus.config.requireUiScreenshotsForUiChanges);
+      setEditMinUiScreenshotCount(String(nextStatus.config.minUiScreenshotCount));
+      setEditUiChangePatternsText(nextStatus.config.uiChangePatterns.join('\n'));
+      setEditUiTestCommandPatternsText(nextStatus.config.uiTestCommandPatterns.join('\n'));
       setEditCategories(nextStatus.config.testCategories);
       setEditMaxRetries(String(nextStatus.config.maxTestRetries));
       setEditTimeoutSeconds(String(Math.max(1, Math.round(nextStatus.config.timeoutMs / 1000))));
@@ -1026,11 +1080,15 @@ function TesterSection({
     } finally {
       setLoading(false);
     }
-  }, [connectedProviders]);
+  }, [connectedProviders, testerApiSupported]);
 
   useEffect(() => {
+    if (testerApiSupported === null) {
+      return;
+    }
+
     void refresh();
-  }, [refresh]);
+  }, [refresh, testerApiSupported]);
 
   useEffect(() => {
     if (connectedProviders.length === 0) {
@@ -1117,8 +1175,12 @@ function TesterSection({
   };
 
   const enabled = status?.config.enabled ?? false;
+  const testerApiUnsupported = testerApiSupported === false;
+  const testerApiAvailable = testerApiSupported !== false && status !== null;
   const models = editProvider ? (providerModels[editProvider] ?? []) : [];
   const canSaveConfig =
+    testerApiAvailable
+    &&
     configDirty
     && !savingConfig
     && connectedProviders.length > 0
@@ -1146,13 +1208,22 @@ function TesterSection({
   }, [onSettingsSaveStatus, refresh, status]);
 
   const handleSaveConfig = useCallback(async () => {
-    if (!canSaveConfig) {
+    if (!canSaveConfig || !testerApiAvailable) {
       return;
     }
 
     const maxTestRetries = Math.max(1, Math.round(Number(editMaxRetries) || 1));
     const timeoutMs = Math.max(30, Number(editTimeoutSeconds) || 300) * 1000;
     const approvalThreshold = Math.min(1, Math.max(0, (Number(editApprovalPercent) || 100) / 100));
+    const minUiScreenshotCount = Math.max(1, Math.round(Number(editMinUiScreenshotCount) || 2));
+    const uiChangePatterns = editUiChangePatternsText
+      .split(/\r?\n/)
+      .map((value) => value.trim())
+      .filter((value) => value.length > 0);
+    const uiTestCommandPatterns = editUiTestCommandPatternsText
+      .split(/\r?\n/)
+      .map((value) => value.trim())
+      .filter((value) => value.length > 0);
 
     setSavingConfig(true);
     onSettingsSaveStatus('saving', 'Saving settings...');
@@ -1161,6 +1232,11 @@ function TesterSection({
         provider: editProvider,
         model: editModel,
         requireRunTests: editRequireRunTests,
+        enforceUiTestsForUiChanges: editEnforceUiTestsForUiChanges,
+        requireUiScreenshotsForUiChanges: editRequireUiScreenshotsForUiChanges,
+        minUiScreenshotCount,
+        uiChangePatterns,
+        uiTestCommandPatterns,
         testCategories: editCategories,
         maxTestRetries,
         timeoutMs,
@@ -1177,13 +1253,19 @@ function TesterSection({
     canSaveConfig,
     editApprovalPercent,
     editCategories,
+    editEnforceUiTestsForUiChanges,
     editMaxRetries,
     editModel,
+    editMinUiScreenshotCount,
     editProvider,
+    editRequireUiScreenshotsForUiChanges,
     editRequireRunTests,
     editTimeoutSeconds,
+    editUiChangePatternsText,
+    editUiTestCommandPatternsText,
     onSettingsSaveStatus,
     refresh,
+    testerApiAvailable,
   ]);
 
   return (
@@ -1197,11 +1279,11 @@ function TesterSection({
         ) : (
           <button
             className={`rounded px-3 py-1 text-xs font-semibold ${enabled ? 'bg-red-100 text-red-700 hover:bg-red-200 dark:bg-red-900/40 dark:text-red-300 dark:hover:bg-red-900/60' : 'bg-emerald-600 text-white hover:bg-emerald-500'}`}
-            disabled={toggling}
+            disabled={toggling || !testerApiAvailable}
             onClick={() => { void handleToggle(); }}
             type="button"
           >
-            {toggling ? 'Updating...' : enabled ? 'Disable' : 'Enable'}
+            {toggling ? 'Updating...' : !testerApiAvailable ? 'Unavailable' : enabled ? 'Disable' : 'Enable'}
           </button>
         )}
       </div>
@@ -1216,6 +1298,18 @@ function TesterSection({
         {connectedProviders.length === 0 && (
           <div className="mb-3 rounded border border-amber-200 bg-amber-50 px-2 py-1.5 text-[11px] text-amber-800 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-300">
             No authenticated providers are connected. Connect a provider above to configure tester models.
+          </div>
+        )}
+
+        {!loading && testerApiUnsupported && (
+          <div className="mb-3 rounded border border-amber-200 bg-amber-50 px-2 py-1.5 text-[11px] text-amber-800 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-300">
+            Tester API is not supported by this backend version.
+          </div>
+        )}
+
+        {!loading && !testerApiUnsupported && !testerApiAvailable && (
+          <div className="mb-3 rounded border border-amber-200 bg-amber-50 px-2 py-1.5 text-[11px] text-amber-800 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-300">
+            Tester API is unavailable from this backend, so config changes cannot be saved yet.
           </div>
         )}
 
@@ -1309,6 +1403,74 @@ function TesterSection({
               }}
             />
             <span>Require run_command / run_command_batch in tester phase</span>
+          </label>
+
+          <label className="mt-2 flex items-center gap-2 text-xs text-slate-700 dark:text-slate-200">
+            <input
+              type="checkbox"
+              className="h-3.5 w-3.5 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500 dark:border-slate-700"
+              checked={editEnforceUiTestsForUiChanges}
+              onChange={(event) => {
+                setEditEnforceUiTestsForUiChanges(event.target.checked);
+                markDirty();
+              }}
+            />
+            <span>Always require UI tests when UI files change</span>
+          </label>
+
+          <label className="mt-2 flex items-center gap-2 text-xs text-slate-700 dark:text-slate-200">
+            <input
+              type="checkbox"
+              className="h-3.5 w-3.5 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500 dark:border-slate-700"
+              checked={editRequireUiScreenshotsForUiChanges}
+              onChange={(event) => {
+                setEditRequireUiScreenshotsForUiChanges(event.target.checked);
+                markDirty();
+              }}
+            />
+            <span>Require screenshot evidence for UI changes</span>
+          </label>
+
+          <label className="mt-2 flex max-w-xs flex-col gap-1 text-xs text-slate-700 dark:text-slate-200">
+            <span className="text-[10px] uppercase tracking-wide text-slate-500 dark:text-slate-400">Min UI Screenshot Count</span>
+            <input
+              className="rounded border border-slate-200 px-2 py-1.5 text-xs dark:border-slate-700 dark:bg-slate-900"
+              type="number"
+              min={1}
+              value={editMinUiScreenshotCount}
+              onChange={(event) => {
+                setEditMinUiScreenshotCount(event.target.value);
+                markDirty();
+              }}
+            />
+          </label>
+        </div>
+
+        <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
+          <label className="flex flex-col gap-1 text-xs text-slate-700 dark:text-slate-200">
+            <span className="text-[10px] uppercase tracking-wide text-slate-500 dark:text-slate-400">UI Change Patterns (one per line)</span>
+            <textarea
+              className="min-h-28 rounded border border-slate-200 px-2 py-1.5 text-xs font-mono dark:border-slate-700 dark:bg-slate-900"
+              value={editUiChangePatternsText}
+              onChange={(event) => {
+                setEditUiChangePatternsText(event.target.value);
+                markDirty();
+              }}
+              spellCheck={false}
+            />
+          </label>
+
+          <label className="flex flex-col gap-1 text-xs text-slate-700 dark:text-slate-200">
+            <span className="text-[10px] uppercase tracking-wide text-slate-500 dark:text-slate-400">UI Test Command Matchers (one per line)</span>
+            <textarea
+              className="min-h-28 rounded border border-slate-200 px-2 py-1.5 text-xs font-mono dark:border-slate-700 dark:bg-slate-900"
+              value={editUiTestCommandPatternsText}
+              onChange={(event) => {
+                setEditUiTestCommandPatternsText(event.target.value);
+                markDirty();
+              }}
+              spellCheck={false}
+            />
           </label>
         </div>
 

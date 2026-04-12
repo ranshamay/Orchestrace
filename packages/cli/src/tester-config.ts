@@ -10,10 +10,15 @@ export interface TesterAgentConfig {
   model: string;
   reasoning?: TesterReasoningLevel;
   requireRunTests: boolean;
+  enforceUiTestsForUiChanges: boolean;
+  requireUiScreenshotsForUiChanges: boolean;
+  minUiScreenshotCount: number;
   testCategories: TesterCategory[];
   maxTestRetries: number;
   timeoutMs: number;
   testFilePatterns: string[];
+  uiChangePatterns: string[];
+  uiTestCommandPatterns: string[];
   approvalThreshold: number;
 }
 
@@ -22,10 +27,15 @@ export const DEFAULT_TESTER_AGENT_CONFIG: TesterAgentConfig = {
   provider: '',
   model: '',
   requireRunTests: true,
+  enforceUiTestsForUiChanges: true,
+  requireUiScreenshotsForUiChanges: true,
+  minUiScreenshotCount: 2,
   testCategories: ['unit', 'integration'],
   maxTestRetries: 1,
   timeoutMs: 300_000,
   testFilePatterns: ['**/tests/**', '**/*.test.*', '**/*.spec.*'],
+  uiChangePatterns: ['packages/ui/**', '**/*.tsx', '**/*.jsx', '**/*.css', '**/*.scss', '**/*.html'],
+  uiTestCommandPatterns: ['playwright', 'test:ui', '--ui', '@orchestrace/ui test'],
   approvalThreshold: 1,
 };
 
@@ -65,10 +75,27 @@ export function normalizeTesterAgentConfig(
     model: asString(record.model).trim() || fallback.model,
     reasoning: normalizeReasoning(record.reasoning) ?? fallback.reasoning,
     requireRunTests: asBoolean(record.requireRunTests, fallback.requireRunTests),
+    enforceUiTestsForUiChanges: asBoolean(
+      record.enforceUiTestsForUiChanges,
+      fallback.enforceUiTestsForUiChanges,
+    ),
+    requireUiScreenshotsForUiChanges: asBoolean(
+      record.requireUiScreenshotsForUiChanges,
+      fallback.requireUiScreenshotsForUiChanges,
+    ),
+    minUiScreenshotCount: normalizeMinUiScreenshotCount(
+      record.minUiScreenshotCount,
+      fallback.minUiScreenshotCount,
+    ),
     testCategories: normalizeCategories(record.testCategories, fallback.testCategories),
     maxTestRetries: normalizePositiveInt(record.maxTestRetries, fallback.maxTestRetries),
     timeoutMs: normalizePositiveInt(record.timeoutMs, fallback.timeoutMs),
     testFilePatterns: normalizeStringArray(record.testFilePatterns, fallback.testFilePatterns),
+    uiChangePatterns: normalizeStringArray(record.uiChangePatterns, fallback.uiChangePatterns),
+    uiTestCommandPatterns: normalizeStringArray(
+      record.uiTestCommandPatterns,
+      fallback.uiTestCommandPatterns,
+    ),
     approvalThreshold: normalizeThreshold(record.approvalThreshold, fallback.approvalThreshold),
   };
 }
@@ -122,6 +149,11 @@ function normalizePositiveInt(value: unknown, fallback: number): number {
   }
 
   return fallback;
+}
+
+function normalizeMinUiScreenshotCount(value: unknown, fallback: number): number {
+  const resolved = normalizePositiveInt(value, fallback);
+  return Math.max(1, resolved);
 }
 
 function normalizeThreshold(value: unknown, fallback: number): number {
