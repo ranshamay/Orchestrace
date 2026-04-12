@@ -566,45 +566,53 @@ function parseRealtimeFindings(
     const validSeverities: FindingSeverity[] = ['low', 'medium', 'high', 'critical'];
     let idCounter = 0;
 
-    return parsed.findings
+        return parsed.findings
+      .filter((f: unknown): f is Record<string, unknown> => !!f && typeof f === 'object')
       .filter((f: Record<string, unknown>) => isValidRealtimeFindingCandidate(f))
-      .filter((f: Record<string, unknown>) =>
-        allowedCategories.includes(f.category as FindingCategory),
-      )
-      .map((f: Record<string, unknown>): RealtimeFinding => {
+      .map((f: Record<string, unknown>): RealtimeFinding | null => {
+        const category = String(f.category ?? '').trim() as FindingCategory;
+        if (!allowedCategories.includes(category)) {
+          return null;
+        }
+
+        const title = String(f.title ?? '').trim();
+        const description = String(f.description ?? '').trim();
+        if (title.length === 0 || description.length === 0) {
+          return null;
+        }
+
         const evidence = normalizeFindingEvidence(
           Array.isArray(f.evidence)
             ? f.evidence
                 .filter((entry): entry is { text: string } => {
                   if (!entry || typeof entry !== 'object') return false;
                   const textValue = (entry as Record<string, unknown>).text;
-                  return typeof textValue === 'string';
+                  return typeof textValue === 'string' && textValue.trim().length > 0;
                 })
-                .map((entry) => ({ text: entry.text }))
+                .map((entry) => ({ text: entry.text.trim() }))
             : undefined,
-          typeof f.suggestedFix === 'string' ? String(f.suggestedFix) : undefined,
+          typeof f.suggestedFix === 'string' ? String(f.suggestedFix).trim() : undefined,
         );
 
         return {
           id: `rt-${Date.now()}-${idCounter++}`,
           schemaVersion: '2',
-          category: allowedCategories.includes(f.category as FindingCategory)
-            ? (f.category as FindingCategory)
-            : 'code-quality',
+          category,
           severity: validSeverities.includes(f.severity as FindingSeverity)
             ? (f.severity as FindingSeverity)
             : 'medium',
-          title: String(f.title),
-          description: String(f.description),
+          title,
+          description,
           evidence,
           suggestedFix: evidence[0]?.text,
           relevantFiles: Array.isArray(f.relevantFiles)
-            ? f.relevantFiles.filter((p: unknown) => typeof p === 'string')
+            ? f.relevantFiles.filter((p: unknown): p is string => typeof p === 'string' && p.trim().length > 0).map((p) => p.trim())
             : undefined,
           phase: triggerPhase,
           detectedAt: new Date().toISOString(),
         };
-      });
+      })
+      .filter((finding): finding is RealtimeFinding => finding !== null);
   } catch {
     console.error('[orchestrace][observer] Failed to parse real-time analysis response');
     return [];
@@ -612,12 +620,18 @@ function parseRealtimeFindings(
 }
 
 function isValidRealtimeFindingCandidate(f: Record<string, unknown>): boolean {
-  const hasCore = typeof f.title === 'string' && typeof f.description === 'string';
-  if (!hasCore) {
+  const title = typeof f.title === 'string' ? f.title.trim() : '';
+  const description = typeof f.description === 'string' ? f.description.trim() : '';
+  if (title.length === 0 || description.length === 0) {
     return false;
   }
 
-  const hasLegacy = typeof f.suggestedFix === 'string';
+  const category = typeof f.category === 'string' ? f.category.trim() : '';
+  if (!ALL_FINDING_CATEGORIES.includes(category as FindingCategory)) {
+    return false;
+  }
+
+  const hasLegacy = typeof f.suggestedFix === 'string' && f.suggestedFix.trim().length > 0;
   const hasEvidence =
     Array.isArray(f.evidence)
     && f.evidence.some((entry) => {

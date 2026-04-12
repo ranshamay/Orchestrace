@@ -370,42 +370,80 @@ function parseLogFindings(text: string): LogFinding[] {
   try {
     // Strip markdown fences if present
     const cleaned = text.replace(/^```(?:json)?\s*\n?/m, '').replace(/\n?```\s*$/m, '');
-    const parsed = JSON.parse(cleaned);
-    const raw = Array.isArray(parsed) ? parsed : parsed?.findings;
+    const parsed = JSON.parse(cleaned) as unknown;
+    const root = Array.isArray(parsed)
+      ? { findings: parsed }
+      : parsed && typeof parsed === 'object'
+        ? (parsed as { findings?: unknown })
+        : null;
+    const raw = root?.findings;
     if (!Array.isArray(raw)) return [];
 
     return raw
-      .filter(
-        (f: Record<string, unknown>) =>
-          f && typeof f.title === 'string' && typeof f.description === 'string',
-      )
-      .map((f: Record<string, unknown>) => ({
-        id: `logf-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-        category: validateLogCategory(f.category as string),
-        severity: validateSeverity(f.severity as string),
-        title: String(f.title),
-        description: String(f.description),
-        suggestedFix: typeof f.suggestedFix === 'string' ? f.suggestedFix : (typeof f.issueSummary === 'string' ? f.issueSummary : undefined),
-        evidence: Array.isArray(f.evidence)
+      .filter((f: unknown): f is Record<string, unknown> => !!f && typeof f === 'object')
+      .filter((f: Record<string, unknown>) => isValidLogFindingCandidate(f))
+      .map((f: Record<string, unknown>) => {
+        const evidence = Array.isArray(f.evidence)
           ? f.evidence
-              .filter((x: unknown): x is { text: string } => !!x && typeof x === 'object' && typeof (x as Record<string, unknown>).text === 'string')
-              .map((x: { text: string }) => ({ text: x.text }))
-          : undefined,
-        relevantFiles: Array.isArray(f.relevantFiles)
-          ? f.relevantFiles.filter((x: unknown) => typeof x === 'string')
-          : undefined,
-        logSnippet: String(f.logSnippet ?? ''),
-        detectedAt: new Date().toISOString(),
-      }));
+              .filter((x: unknown): x is { text: string } => !!x && typeof x === 'object' && typeof (x as Record<string, unknown>).text === 'string' && (x as Record<string, unknown>).text!.toString().trim().length > 0)
+              .map((x: { text: string }) => ({ text: x.text.trim() }))
+          : undefined;
+        const fallbackSuggestedFix =
+          typeof f.suggestedFix === 'string'
+            ? f.suggestedFix.trim()
+            : (typeof f.issueSummary === 'string' ? f.issueSummary.trim() : undefined);
+
+        return {
+          id: `logf-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          category: f.category as LogFindingCategory,
+          severity: validateSeverity(f.severity as string),
+          title: String(f.title).trim(),
+          description: String(f.description).trim(),
+          suggestedFix: fallbackSuggestedFix && fallbackSuggestedFix.length > 0 ? fallbackSuggestedFix : undefined,
+          evidence,
+          relevantFiles: Array.isArray(f.relevantFiles)
+            ? f.relevantFiles
+                .filter((x: unknown): x is string => typeof x === 'string' && x.trim().length > 0)
+                .map((x) => x.trim())
+            : undefined,
+          logSnippet: String(f.logSnippet ?? '').trim(),
+          detectedAt: new Date().toISOString(),
+        };
+      });
   } catch {
     return [];
   }
 }
 
-function validateLogCategory(cat: string): LogFindingCategory {
-  const valid: LogFindingCategory[] = ['error-pattern', 'performance', 'configuration', 'reliability', 'security'];
-  return valid.includes(cat as LogFindingCategory) ? (cat as LogFindingCategory) : 'error-pattern';
+function isValidLogFindingCandidate(f: Record<string, unknown>): boolean {
+  const title = typeof f.title === 'string' ? f.title.trim() : '';
+  const description = typeof f.description === 'string' ? f.description.trim() : '';
+  if (title.length === 0 || description.length === 0) {
+    return false;
+  }
+
+  const category = typeof f.category === 'string' ? f.category.trim() : '';
+  if (!ALL_LOG_FINDING_CATEGORIES.includes(category as LogFindingCategory)) {
+    return false;
+  }
+
+  const hasLegacy = typeof f.suggestedFix === 'string' && f.suggestedFix.trim().length > 0;
+  const hasIssueSummary = typeof f.issueSummary === 'string' && f.issueSummary.trim().length > 0;
+  const hasEvidence =
+    Array.isArray(f.evidence)
+    && f.evidence.some((entry) => {
+      if (!entry || typeof entry !== 'object') return false;
+      const textValue = (entry as Record<string, unknown>).text;
+      return typeof textValue === 'string' && textValue.trim().length > 0;
+    });
+
+  return hasLegacy || hasIssueSummary || hasEvidence;
 }
+
+// category validation is enforced by isValidLogFindingCandidate before mapping.
+
+
+
 
 function validateSeverity(sev: string): FindingSeverity {
   const valid: FindingSeverity[] = ['low', 'medium', 'high', 'critical'];

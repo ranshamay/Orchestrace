@@ -114,38 +114,49 @@ function parseAnalysisResponse(text: string, allowedCategories: FindingCategory[
     const validCategories: FindingCategory[] = [...ALL_FINDING_CATEGORIES];
     const validSeverities: FindingSeverity[] = ['low', 'medium', 'high', 'critical'];
 
-    const mappedFindings: AnalysisResult['findings'] = parsed.findings
+        const mappedFindings: AnalysisResult['findings'] = parsed.findings
+      .filter((f: unknown): f is Record<string, unknown> => !!f && typeof f === 'object')
       .filter((f: Record<string, unknown>) => isValidFindingCandidate(f))
-      .map((f: Record<string, unknown>): ObserverFindingInput => {
+      .map((f: Record<string, unknown>): ObserverFindingInput | null => {
+        const category = String(f.category ?? '').trim();
+        if (!validCategories.includes(category as FindingCategory)) {
+          return null;
+        }
+
+        const title = String(f.title ?? '').trim();
+        const description = String(f.description ?? '').trim();
+        if (title.length === 0 || description.length === 0) {
+          return null;
+        }
+
         const evidence = normalizeFindingEvidence(
           Array.isArray(f.evidence)
             ? f.evidence
                 .filter((entry): entry is { text: string } => {
                   if (!entry || typeof entry !== 'object') return false;
                   const textValue = (entry as Record<string, unknown>).text;
-                  return typeof textValue === 'string';
+                  return typeof textValue === 'string' && textValue.trim().length > 0;
                 })
-                .map((entry) => ({ text: entry.text }))
+                .map((entry) => ({ text: entry.text.trim() }))
             : undefined,
-          typeof f.suggestedFix === 'string' ? String(f.suggestedFix) : undefined,
+          typeof f.suggestedFix === 'string' ? String(f.suggestedFix).trim() : undefined,
         );
 
         return {
           schemaVersion: '2',
-          category: validCategories.includes(f.category as FindingCategory)
-            ? (f.category as FindingCategory)
-            : ('code-quality' as FindingCategory),
+          category: category as FindingCategory,
           severity: validSeverities.includes(f.severity as FindingSeverity)
             ? (f.severity as FindingSeverity)
             : ('medium' as FindingSeverity),
-          title: String(f.title),
-          description: String(f.description),
+          title,
+          description,
           evidence,
           relevantFiles: Array.isArray(f.relevantFiles)
-            ? f.relevantFiles.filter((p: unknown) => typeof p === 'string')
+            ? f.relevantFiles.filter((p: unknown): p is string => typeof p === 'string' && p.trim().length > 0).map((p) => p.trim())
             : undefined,
         };
-      });
+      })
+      .filter((finding): finding is ObserverFindingInput => finding !== null);
 
     const findings: AnalysisResult['findings'] = mappedFindings.filter((finding) =>
       allowedCategories.includes(finding.category),
@@ -159,12 +170,18 @@ function parseAnalysisResponse(text: string, allowedCategories: FindingCategory[
 }
 
 function isValidFindingCandidate(f: Record<string, unknown>): boolean {
-  const hasCore = typeof f.title === 'string' && typeof f.description === 'string';
-  if (!hasCore) {
+  const title = typeof f.title === 'string' ? f.title.trim() : '';
+  const description = typeof f.description === 'string' ? f.description.trim() : '';
+  if (title.length === 0 || description.length === 0) {
     return false;
   }
 
-  const hasLegacy = typeof f.suggestedFix === 'string';
+  const category = typeof f.category === 'string' ? f.category.trim() : '';
+  if (!ALL_FINDING_CATEGORIES.includes(category as FindingCategory)) {
+    return false;
+  }
+
+  const hasLegacy = typeof f.suggestedFix === 'string' && f.suggestedFix.trim().length > 0;
   const hasEvidence =
     Array.isArray(f.evidence)
     && f.evidence.some((entry) => {
