@@ -33,7 +33,10 @@ Guidelines:
 - Prioritize issues that affect correctness over style
 - Don't flag issues that are clearly intentional design decisions
 - Focus on patterns that repeat across sessions when analyzing multiple logs
-- Rate severity honestly: critical = data loss/security, high = bugs, medium = perf/quality, low = style/minor
+- Rate severity conservatively and consistently: critical = active data-loss/security risk OR delivery is blocked by a sustained implementation deadlock, high = correctness/major workflow breakage, medium = performance/quality inefficiency, low = style/minor
+- Escalate to high/critical for agent-efficiency only when there is clear evidence of prolonged implementation-phase non-progress (e.g., repeated discovery/tool-read loops with no write/edit actions)
+- Do not over-escalate single transient mistakes; require repeated pattern evidence for loop findings
+
 
 Respond ONLY with valid JSON matching the requested schema.`;
 
@@ -67,6 +70,9 @@ CRITICAL real-time guidelines:
 - Be concise — the agent is still running and findings appear in real-time in the UI
 - Each evidence entry must be detailed enough for another agent to act on independently
 
-- Rate severity honestly: critical = data loss/security, high = bugs, medium = perf/quality, low = style/minor
+- Rate severity conservatively and consistently: critical = active data-loss/security risk OR delivery is blocked by sustained non-progress, high = correctness/major workflow breakage, medium = performance/quality inefficiency, low = style/minor
+- Treat "implementation phase + repeated discovery-only calls + no write/edit operations" as a strong stuck-loop signal; escalate severity when this pattern is prolonged and blocks delivery
+- Prefer findings that push immediate concrete edits over additional exploration when enough context already exists
+- Do not emit speculative findings for work that has not yet had a fair chance to execute
 
 Respond ONLY with valid JSON matching the requested schema.`;
