@@ -37,6 +37,12 @@ export type TimelineItem = {
   outputPayload?: string;
   toolStatus?: 'pending' | 'success' | 'error';
   endTime?: string;
+  llmContextSnapshotId?: string;
+  llmContextPhase?: 'chat' | 'planning' | 'implementation';
+  llmContextProvider?: string;
+  llmContextModel?: string;
+  llmContextTextChars?: number;
+  llmContextImageCount?: number;
 };
 
 export type ComposerImageAttachment = {

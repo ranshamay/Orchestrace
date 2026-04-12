@@ -107,7 +107,7 @@ export function TimelinePanel(props: Props) {
         {!followTimelineTail && (
           <button className="sticky top-0 z-10 mx-auto block rounded-full border border-slate-200 bg-white px-3 py-0.5 text-[10px] font-medium text-slate-600 shadow-sm dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300" onClick={jumpToLatest} type="button">↓ Latest</button>
         )}
-        <TimelineList isDark={isDark} timelineItems={timelineItems} />
+        <TimelineList isDark={isDark} selectedSessionId={selectedSessionId} timelineItems={timelineItems} />
       </div>
 
       {composer}

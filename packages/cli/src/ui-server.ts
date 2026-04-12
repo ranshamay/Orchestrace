@@ -135,6 +135,7 @@ const PERSIST_TEXT_MAX_CHARS = 3_000;
 const PERSIST_EVENT_MESSAGE_MAX_CHARS = 1_200;
 const PERSIST_CHAT_MESSAGE_MAX_CHARS = 2_400;
 const SESSION_EVENT_HISTORY_LIMIT = 2_000;
+const SESSION_LLM_CONTEXT_SNAPSHOT_LIMIT = 300;
 const TOOL_EVENT_PREVIEW_MAX_CHARS = parsePositiveSetting(process.env.ORCHESTRACE_TOOL_EVENT_PREVIEW_MAX_CHARS) ?? 200_000;
 const WORK_DIFF_MAX_CHARS = 300_000;
 const PHASE_PROGRESS_PLAN_WEIGHT_DEFAULT = 30;
@@ -196,6 +197,18 @@ interface GithubDeviceAuthSession {
 interface SessionContextState {
   turnsSinceLastCompaction: number;
   previousCompressedHistory?: string;
+}
+
+interface SessionLlmContextSnapshot {
+  id: string;
+  time: string;
+  phase: SessionPromptPhase;
+  provider: string;
+  model: string;
+  textChars: number;
+  imageCount: number;
+  systemPrompt: string;
+  promptText: string;
 }
 
 type NativeGitWorktree = {
@@ -325,6 +338,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
   const sessionFileReadCaches = new Map<string, ReturnType<typeof createFileReadCache>>();
   const sessionContextEngines = new Map<string, ContextEngine>();
   const sessionContextStates = new Map<string, SessionContextState>();
+  const sessionLlmContextSnapshots = new Map<string, SessionLlmContextSnapshot[]>();
   const pendingSubagentNodeIdsBySession = new Map<string, Map<string, string[]>>();
   const worktreePathLocks = new Map<string, string>();
   const sessionObservers = new Map<string, SessionObserver>();
@@ -1272,6 +1286,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     sessionSharedContextStores.delete(id);
     sessionContextEngines.delete(id);
     sessionContextStates.delete(id);
+    sessionLlmContextSnapshots.delete(id);
     pendingSubagentNodeIdsBySession.delete(id);
 
     for (const [streamId, streamState] of [...chatStreams.entries()]) {
@@ -1823,6 +1838,32 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
 
     try {
       await appendSessionCreatedEvent(session, retryStartedAt);
+
+      const runnerPhase: SessionPromptPhase = resolveSessionToolMode(session) === 'implementation'
+        ? 'implementation'
+        : 'planning';
+      const runnerPromptInput: LlmPromptInput = session.promptParts && session.promptParts.length > 0
+        ? session.promptParts.map((part) => {
+          if (part.type === 'text') {
+            return { type: 'text' as const, text: part.text };
+          }
+
+          return { type: 'image' as const, data: part.data, mimeType: part.mimeType };
+        })
+        : (session.executionPromptOverride ?? session.prompt);
+
+      appendLlmContextSnapshot({
+        session,
+        phase: runnerPhase,
+        provider: session.provider,
+        model: session.model,
+        systemPrompt: runnerPhase === 'implementation'
+          ? buildImplementationSystemPrompt(session)
+          : buildPlanningSystemPrompt(session),
+        prompt: runnerPromptInput,
+        sessionLlmContextSnapshots,
+        persistEvent: emitSessionEvent,
+      });
     } catch (error) {
       session.status = 'failed';
       session.error = `Failed to persist retry session config: ${toErrorMessage(error)}`;
@@ -2087,6 +2128,32 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           },
         });
       }
+
+      const runnerPhase: SessionPromptPhase = resolveSessionToolMode(session) === 'implementation'
+        ? 'implementation'
+        : 'planning';
+      const runnerPromptInput: LlmPromptInput = session.promptParts && session.promptParts.length > 0
+        ? session.promptParts.map((part) => {
+          if (part.type === 'text') {
+            return { type: 'text' as const, text: part.text };
+          }
+
+          return { type: 'image' as const, data: part.data, mimeType: part.mimeType };
+        })
+        : (session.executionPromptOverride ?? session.prompt);
+
+      appendLlmContextSnapshot({
+        session,
+        phase: runnerPhase,
+        provider: session.provider,
+        model: session.model,
+        systemPrompt: runnerPhase === 'implementation'
+          ? buildImplementationSystemPrompt(session)
+          : buildPlanningSystemPrompt(session),
+        prompt: runnerPromptInput,
+        sessionLlmContextSnapshots,
+        persistEvent: emitSessionEvent,
+      });
     } catch (error) {
       void managedWorkspace.cleanupWorktree().catch(() => {});
       workSessions.delete(id);
@@ -2095,6 +2162,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       sessionSharedContextStores.delete(id);
       sessionContextEngines.delete(id);
       sessionContextStates.delete(id);
+      sessionLlmContextSnapshots.delete(id);
       pendingSubagentNodeIdsBySession.delete(id);
       return {
         error: `Failed to persist initial session events: ${toErrorMessage(error)}`,
@@ -3384,6 +3452,62 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         return;
       }
 
+      if (req.method === 'GET' && pathname === '/api/work/chat/context') {
+        const id = asString(url.searchParams.get('id'));
+        if (!id) {
+          sendJson(res, 400, { error: 'Missing id' });
+          return;
+        }
+
+        const session = workSessions.get(id);
+        if (!session) {
+          sendJson(res, 404, { error: 'Unknown work session' });
+          return;
+        }
+
+        const snapshotId = asString(url.searchParams.get('snapshotId'));
+        const cachedSnapshots = sessionLlmContextSnapshots.get(id) ?? [];
+        const snapshots = cachedSnapshots.length > 0
+          ? cachedSnapshots
+          : listFallbackLlmContextSnapshots(session);
+
+        if (snapshotId) {
+          const snapshot = snapshots.find((entry) => entry.id === snapshotId);
+          if (!snapshot) {
+            sendJson(res, 404, { error: 'Unknown context snapshot' });
+            return;
+          }
+
+          sendJson(res, 200, {
+            snapshot: {
+              id: snapshot.id,
+              time: snapshot.time,
+              phase: snapshot.phase,
+              provider: snapshot.provider,
+              model: snapshot.model,
+              textChars: snapshot.textChars,
+              imageCount: snapshot.imageCount,
+              systemPrompt: snapshot.systemPrompt,
+              promptText: snapshot.promptText,
+            },
+          });
+          return;
+        }
+
+        sendJson(res, 200, {
+          snapshots: snapshots.map((snapshot) => ({
+            id: snapshot.id,
+            time: snapshot.time,
+            phase: snapshot.phase,
+            provider: snapshot.provider,
+            model: snapshot.model,
+            textChars: snapshot.textChars,
+            imageCount: snapshot.imageCount,
+          })),
+        });
+        return;
+      }
+
       if (req.method === 'GET' && pathname === '/api/work/chat/stream') {
         const streamId = asString(url.searchParams.get('streamId'));
         if (!streamId) {
@@ -3525,7 +3649,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           payload: { message: userMessage },
         });
 
-        const continuationPhase = resolveSessionToolMode(session);
+        const continuationPhase = resolveChatContinuationPhase(session);
         const previousSessionStatus = session.status;
         const chatStartedAt = now();
                         session.status = 'running';
@@ -3592,6 +3716,24 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
               sharedContextStore,
             });
             sessionContextStates.set(session.id, managedContext.nextState);
+
+            appendLlmContextSnapshot({
+              session,
+              phase: continuationPhase,
+              provider: session.provider,
+              model: session.model,
+              systemPrompt,
+              prompt: managedContext.prompt,
+              sessionLlmContextSnapshots,
+              persistEvent: emitSessionEvent,
+            });
+            uiStatePersistence.schedule();
+            broadcastSessionUpdate(
+              workStreamClients,
+              session.id,
+              serializeWorkSession(session, sessionTodos.get(session.id) ?? []),
+            );
+
             const sessionCommandEnv = buildSessionCommandEnvFromTestingPorts(session.testingPorts);
 
             const chatAgent = await llm.spawnAgent({
@@ -3959,7 +4101,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         const userMessage = createSessionChatMessage('user', message, messageParts);
         thread.messages.push(userMessage);
         trimThreadMessages(thread);
-        const continuationPhase = resolveSessionToolMode(session);
+        const continuationPhase = resolveChatContinuationPhase(session);
         const previousSessionStatus = session.status;
         const chatStartedAt = now();
                 thread.updatedAt = chatStartedAt;
@@ -4006,6 +4148,24 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
             sharedContextStore,
           });
           sessionContextStates.set(session.id, managedContext.nextState);
+
+          appendLlmContextSnapshot({
+            session,
+            phase: continuationPhase,
+            provider: session.provider,
+            model: session.model,
+            systemPrompt,
+            prompt: managedContext.prompt,
+            sessionLlmContextSnapshots,
+            persistEvent: emitSessionEvent,
+          });
+          uiStatePersistence.schedule();
+          broadcastSessionUpdate(
+            workStreamClients,
+            session.id,
+            serializeWorkSession(session, sessionTodos.get(session.id) ?? []),
+          );
+
           const sessionCommandEnv = buildSessionCommandEnvFromTestingPorts(session.testingPorts);
 
           const chatAgent = await llm.spawnAgent({
@@ -8607,6 +8767,161 @@ type SessionPromptPhase = 'chat' | 'planning' | 'implementation';
 
 type FollowUpSuggestionPhase = 'chat' | 'planning' | 'implementation';
 
+function resolveChatContinuationPhase(_session: WorkSession): SessionPromptPhase {
+  return 'chat';
+}
+
+function summarizePromptInputForSnapshot(prompt: LlmPromptInput): {
+  promptText: string;
+  textChars: number;
+  imageCount: number;
+} {
+  if (typeof prompt === 'string') {
+    const normalized = prompt.trim();
+    return {
+      promptText: normalized,
+      textChars: normalized.length,
+      imageCount: 0,
+    };
+  }
+
+  const lines: string[] = [];
+  let textChars = 0;
+  let imageCount = 0;
+
+  for (const part of prompt) {
+    if (part.type === 'text') {
+      const text = asString(part.text);
+      if (text) {
+        lines.push(text);
+        textChars += text.length;
+      }
+      continue;
+    }
+
+    imageCount += 1;
+    const mime = asString(part.mimeType) || 'unknown';
+    lines.push(`[image omitted: ${mime}]`);
+  }
+
+  return {
+    promptText: lines.join('\n\n').trim(),
+    textChars,
+    imageCount,
+  };
+}
+
+function appendLlmContextSnapshot(params: {
+  session: WorkSession;
+  phase: SessionPromptPhase;
+  provider: string;
+  model: string;
+  systemPrompt: string;
+  prompt: LlmPromptInput;
+  sessionLlmContextSnapshots: Map<string, SessionLlmContextSnapshot[]>;
+  persistEvent: (sessionId: string, event: SessionEventInput) => void;
+}): SessionLlmContextSnapshot {
+  const time = now();
+  const inputSummary = summarizePromptInputForSnapshot(params.prompt);
+
+  const snapshot: SessionLlmContextSnapshot = {
+    id: randomUUID(),
+    time,
+    phase: params.phase,
+    provider: params.provider,
+    model: params.model,
+    textChars: inputSummary.textChars,
+    imageCount: inputSummary.imageCount,
+    systemPrompt: params.systemPrompt,
+    promptText: inputSummary.promptText,
+  };
+
+  const current = params.sessionLlmContextSnapshots.get(params.session.id) ?? [];
+  current.push(snapshot);
+  while (current.length > SESSION_LLM_CONTEXT_SNAPSHOT_LIMIT) {
+    current.shift();
+  }
+  params.sessionLlmContextSnapshots.set(params.session.id, current);
+
+  const uiEvent: UiDagEvent = {
+    time,
+    runId: params.session.id,
+    type: 'session:llm-context',
+    taskId: 'chat',
+    llmContextSnapshotId: snapshot.id,
+    llmContextPhase: snapshot.phase,
+    llmContextProvider: snapshot.provider,
+    llmContextModel: snapshot.model,
+    llmContextTextChars: snapshot.textChars,
+    llmContextImageCount: snapshot.imageCount,
+    message: `LLM context snapshot captured (${snapshot.textChars} chars, ${snapshot.imageCount} images).`,
+  };
+
+  params.session.events.push(uiEvent);
+  if (params.session.events.length > SESSION_EVENT_HISTORY_LIMIT) {
+    params.session.events.shift();
+  }
+
+  params.persistEvent(params.session.id, {
+    time,
+    type: 'session:dag-event',
+    payload: { event: uiEvent },
+  });
+
+  return snapshot;
+}
+
+function listFallbackLlmContextSnapshots(session: WorkSession): SessionLlmContextSnapshot[] {
+  const seen = new Set<string>();
+  const snapshots: SessionLlmContextSnapshot[] = [];
+
+  for (const event of session.events) {
+    if (event.type !== 'session:llm-context') {
+      continue;
+    }
+
+    const snapshotId = asString(event.llmContextSnapshotId);
+    if (!snapshotId || seen.has(snapshotId)) {
+      continue;
+    }
+    seen.add(snapshotId);
+
+    const phase = event.llmContextPhase === 'implementation'
+      ? 'implementation'
+      : event.llmContextPhase === 'chat'
+        ? 'chat'
+        : 'planning';
+    const provider = asString(event.llmContextProvider) || session.provider;
+    const model = asString(event.llmContextModel) || session.model;
+
+    const promptText = asString(session.executionPromptOverride) || asString(session.prompt);
+    const imageCount = typeof event.llmContextImageCount === 'number'
+      ? event.llmContextImageCount
+      : (session.promptParts ?? []).filter((part) => part.type === 'image').length;
+    const textChars = typeof event.llmContextTextChars === 'number'
+      ? event.llmContextTextChars
+      : promptText.length;
+
+    snapshots.push({
+      id: snapshotId,
+      time: event.time,
+      phase,
+      provider,
+      model,
+      textChars,
+      imageCount,
+      systemPrompt: phase === 'implementation'
+        ? buildImplementationSystemPrompt(session)
+        : phase === 'chat'
+          ? buildChatSystemPrompt(session)
+          : buildPlanningSystemPrompt(session),
+      promptText,
+    });
+  }
+
+  return snapshots;
+}
+
 function mergeRetryPromptWithFollowUp(params: {
   prompt: string;
   retryContext?: string;
@@ -8859,7 +9174,7 @@ async function buildManagedChatContinuationInput(params: {
     const contextResult = await params.contextEngine.buildContext({
       systemPrompt: params.systemPrompt,
       turns,
-      executionState: buildContextExecutionStateSummary(params.session, params.todos),
+      executionState: '',
       sharedFacts: params.sharedContextStore.list(params.session.id),
       turnsSinceLastCompaction: params.contextState.turnsSinceLastCompaction,
       previousCompressedHistory: params.contextState.previousCompressedHistory,
@@ -8890,18 +9205,13 @@ async function buildManagedChatContinuationInput(params: {
 
     const basePromptText = typeof contextResult.userPrompt === 'string'
       ? contextResult.userPrompt
-      : 'Continue from the conversation context and respond to the latest multimodal user message.';
+      : 'Respond to the latest multimodal user message.';
 
     return {
       prompt: [
         {
           type: 'text',
-          text: [
-            basePromptText,
-            '',
-            'The latest user message follows as multimodal content (text + image attachments).',
-            'Reply as ASSISTANT and continue from that latest user message.',
-          ].join('\n'),
+          text: basePromptText,
         },
         ...multimodalParts,
       ],
@@ -8918,32 +9228,6 @@ async function buildManagedChatContinuationInput(params: {
   }
 }
 
-function buildContextExecutionStateSummary(session: WorkSession, todos: AgentTodoItem[]): string {
-  const doneCount = todos.filter((todo) => todo.done || todo.status === 'done').length;
-  const pendingTodos = todos
-    .filter((todo) => !(todo.done || todo.status === 'done'))
-    .slice(0, 12)
-    .map((todo) => {
-      const status = todo.status ?? (todo.done ? 'done' : 'todo');
-      const weight = Number.isFinite(todo.weight) ? ` (${todo.weight}%)` : '';
-      return `- ${todo.id}: ${todo.text} [${status}]${weight}`;
-    });
-
-  const lines = [
-    `Session status: ${session.status}`,
-    `LLM status: ${session.llmStatus.state}${session.llmStatus.phase ? ` (${session.llmStatus.phase})` : ''}`,
-    session.llmStatus.detail ? `LLM detail: ${session.llmStatus.detail}` : '',
-    `Todo progress: ${doneCount}/${todos.length} completed`,
-  ].filter(Boolean);
-
-  if (pendingTodos.length > 0) {
-    lines.push('Pending todo items:');
-    lines.push(...pendingTodos);
-  }
-
-  return lines.join('\n');
-}
-
 export function resolveRunnerTaskRouteEnvValue(
   routeOverrideRaw: string | undefined,
 ): 'shell_command' | 'investigation' | 'code_change' | 'refactor' {
@@ -8951,85 +9235,17 @@ export function resolveRunnerTaskRouteEnvValue(
 }
 
 export function buildSessionSystemPrompt(session: WorkSession, phase: SessionPromptPhase): string {
-
-  const quickStartMode = session.quickStartMode
-    ?? (parseBooleanSetting(process.env.ORCHESTRACE_QUICK_START_MODE) ?? false);
-  const quickStartMaxPreDelegationToolCalls = normalizePositiveSetting(
-    session.quickStartMaxPreDelegationToolCalls,
-    parsePositiveSetting(process.env.ORCHESTRACE_QUICK_START_MAX_PRE_DELEGATION_TOOL_CALLS) ?? 3,
-  );
-  const planningBudgetPercent = resolvePlanningBudgetPercent();
-
-  const phaseRules =
-    phase === 'chat'
+  const phaseGuidance =
+    phase === 'planning'
       ? [
-          'Keep continuity with prior messages and avoid repeating completed work.',
-          'Use chat responses to clarify intent, summarize progress, and gather missing context.',
-          'When direct implementation is requested, proceed with concrete action-oriented steps.',
-          'When the user asks for planning, switch to planning mode and perform todo_set + agent_graph_set before presenting the plan.',
-          'In planning mode, todo_set items must include numeric weight values that sum to 100 for planning-progress tracking.',
-          'In planning mode, agent_graph_set nodes must include numeric weight values that sum to 100 for implementation-progress tracking.',
-          'When planning, require atomic task granularity: one action per task with explicit done criteria and verification commands.',
-          'Reject broad bundled tasks; split work into smaller units before finalizing the plan.',
-          'When publishing agent_graph_set, use descriptive node ids/names instead of generic n1/n2 labels.',
-          'Planning requests must also use subagent_spawn or subagent_spawn_batch with focused, task-relevant context per sub-agent.',
-          'Pass nodeId on each sub-agent request so graph progress stays visible and current.',
-          'When asked to inspect or change todos/agent graph, call the corresponding tools instead of simulating success.',
-          'For reading multiple files, prefer read_files with concurrency over repeated one-by-one read_file calls.',
-          'When calling todo tools, use canonical statuses only: todo, in_progress, done.',
-          'Always run `git fetch origin` before checking remote branch state, merge status, or pushing. Never trust local tracking refs without fetching first.',
-          'Do not ask the user to continue after partial progress; continue autonomously until completion or a concrete blocker is reached.',
-          'For transient tool or sub-agent failures (timeouts, aborts, rate limits), retry automatically before surfacing a blocker.',
-          'If no tool was executed, explicitly state that no tool output is available.',
+          'Plan the work clearly before implementation, but adapt to user intent and new evidence.',
         ]
-      : phase === 'planning'
+      : phase === 'implementation'
         ? [
-            'Produce a concrete implementation plan with explicit staged execution and validation steps.',
-            'Do not perform direct code edits in planning mode.',
-          'For simple single-file tasks, skip sub-agent delegation and proceed with direct plan publication.',
-          `Planning is budgeted: keep planning activity under ${planningBudgetPercent}% of total effort.`,
-          'If session guard thresholds are exceeded, force implementation and continue execution.',
-            'Planning output must be highly granular and atomic: each task should represent one action and one completion outcome.',
-            'Split broad, multi-area, or multi-step tasks into smaller independent tasks before finalizing.',
-            'Each planned task must include explicit dependencies, concrete done criteria, and at least one verification command.',
-            'Planning must produce and maintain todo_set and agent_graph_set state.',
-            'todo_set items must include numeric weight values and the total todo weight must sum to 100.',
-            'agent_graph_set nodes must include numeric weight values and the total node weight must sum to 100.',
-            'Planning must use subagent_spawn or subagent_spawn_batch for focused parallel research and delegate only relevant context.',
-            'Quick-start mode for well-scoped tasks: keep parent pre-delegation orientation to at most 3-4 calls and delegate within the first 2-3 calls whenever possible.',
-            'Keep parent orientation lightweight and push detailed file reading/search into sub-agent scopes.',
-            'For independent nodes, use subagent_spawn_batch so work runs in parallel.',
-            'For multi-file inspection, use read_files with concurrency to reduce latency; avoid repeated single-file reads when possible.',
-            'Pass nodeId for each sub-agent request so graph status stays current.',
-            'Keep todo and dependency graph state synchronized.',
-            'Do not ask the user to continue after partial progress; continue autonomously until completion or a concrete blocker is reached.',
-            'For transient tool or sub-agent failures (timeouts, aborts, rate limits), retry automatically before surfacing a blocker.',
-            ...(quickStartMode
-              ? [
-                `Quick-start mode is enabled: delegate focused discovery to sub-agents within the first 2-3 tool calls and no later than ${quickStartMaxPreDelegationToolCalls} successful pre-delegation tool call(s).`,
-                'Limit parent orientation to 3-4 initial tool calls (e.g., root listing, manifest read, git status) before delegating.',
-                'Push detailed file reads/searches into sub-agent scopes unless a direct blocker requires immediate local inspection.',
-              ]
-              : []),
+            'Implement requested changes with verifiable outcomes and adapt your approach from tool feedback.',
           ]
         : [
-            'Execute approved work with minimal, scoped edits and verify outcomes.',
-            'Read before editing, and use tool output to adapt after failures.',
-            'Read todo_get and agent_graph_get before coding, then keep todo_update current while implementing.',
-            'Use subagent_spawn or subagent_spawn_batch to execute parallelizable slices with minimal relevant context per agent.',
-            'For independent nodes, use subagent_spawn_batch so work runs in parallel.',
-                        'For multi-file inspection, use read_files with concurrency to reduce latency; avoid repeated single-file reads when possible.',
-            'Hard commitment rule: after explicitly acknowledging sufficient context, the very next tool call must be write_file.',
-            'If the write-after-acknowledgment guardrail fires, immediately issue write_file before any further reads.',
-            'Pass nodeId for each sub-agent request so graph status stays current.',
-            'Use github_api for GitHub REST/GraphQL operations; do not use gh CLI.',
-
-            'Iterate until validation passes or a true blocker is reached.',
-            'After each push or PR update, query remote CI/check status with github_api and keep fixing/re-pushing until checks pass or a true blocker is reached.',
-            'Do not stop at green checks alone: verify PR mergeability, required checks, and review state via github_api, then keep iterating until the PR is merge-ready or a true blocker is reached.',
-            'Always run `git fetch origin` before checking remote branch state, merge status, or pushing. Never trust local tracking refs without fetching first.',
-            'Do not ask the user to continue after partial progress; continue autonomously until completion or a concrete blocker is reached.',
-            'For transient tool or sub-agent failures (timeouts, aborts, rate limits), retry automatically before surfacing a blocker.',
+            'Infer user intent from conversation context and continue naturally.',
           ];
 
   const sections: PromptSection[] = [
@@ -9037,20 +9253,16 @@ export function buildSessionSystemPrompt(session: WorkSession, phase: SessionPro
       name: PromptSectionName.Identity,
       lines: [
         `You are continuing an existing Orchestrace ${phase} session.`,
-        'Operate as an autonomous engineering agent with reliable, verifiable execution.',
-      ],
-    },
-    {
-      name: PromptSectionName.AutonomyContract,
-      lines: [
-        'Never claim actions completed unless confirmed by tool output.',
-        'If context is missing, gather it with available tools before deciding.',
-        'Prefer deterministic steps and explicit validation over speculation.',
+        'Use the current conversation and tool results to decide next actions.',
       ],
     },
     {
       name: PromptSectionName.PhaseRules,
-      lines: phaseRules,
+      lines: [
+        'Never claim actions completed unless confirmed by tool output.',
+        'If context is missing, gather it with available tools before deciding what to do next.',
+        ...phaseGuidance,
+      ],
     },
     {
       name: PromptSectionName.SessionContext,
@@ -9078,50 +9290,11 @@ function buildChatSystemPrompt(session: WorkSession): string {
 }
 
 function ensureFollowUpSuggestions(text: string, phase: FollowUpSuggestionPhase): string {
+  void phase;
   const trimmed = text.trim();
   if (!trimmed) {
-    return phase === 'chat' ? buildFollowUpSuggestionsBlock(phase) : 'No response generated.';
+    return 'No response generated.';
   }
 
-  if (phase !== 'chat') {
-    return trimmed;
-  }
-
-  if (hasFollowUpSuggestions(trimmed)) {
-    return trimmed;
-  }
-
-  return `${trimmed}\n\n${buildFollowUpSuggestionsBlock(phase)}`;
-}
-
-function hasFollowUpSuggestions(text: string): boolean {
-  const normalized = text.toLowerCase();
-  return normalized.includes('next follow-up suggestions')
-    || normalized.includes('next followup suggestions')
-    || normalized.includes('next steps');
-}
-
-function buildFollowUpSuggestionsBlock(phase: FollowUpSuggestionPhase): string {
-  const suggestions = phase === 'planning'
-    ? [
-      'Review and approve the plan todo list and dependency graph before implementation.',
-      'Execute the first stage tasks and keep todo_update synchronized with real progress.',
-      'Run the planned verification commands after each stage to catch regressions early.',
-    ]
-    : phase === 'implementation'
-      ? [
-        'Run typecheck and tests for the touched packages to verify the change set.',
-        'Review the diff for scope control and update todos for completed and pending work.',
-        'Address the highest-risk follow-up item from validation output or reviewer feedback.',
-      ]
-      : [
-        'Clarify any missing constraints before the next major edit or planning step.',
-        'Switch to planning mode and publish todo_set plus agent_graph_set for the next objective.',
-        'Start implementation on the highest-priority todo item and keep progress synchronized.',
-      ];
-
-  return [
-    'Next Follow-up Suggestions:',
-    ...suggestions.map((item, index) => `${index + 1}. ${item}`),
-  ].join('\n');
+  return trimmed;
 }

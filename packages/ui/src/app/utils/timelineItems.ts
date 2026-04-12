@@ -10,6 +10,38 @@ export function buildTimelineItems(selectedSession: WorkSession | undefined, cha
   for (const [index, event] of rawEvents.entries()) {
     const toolInfo = parseToolCallEvent(event);
 
+    if (event.type === 'session:llm-context') {
+      const provider = typeof event.llmContextProvider === 'string' ? event.llmContextProvider : '';
+      const model = typeof event.llmContextModel === 'string' ? event.llmContextModel : '';
+      const providerModel = [provider, model].filter((value) => value.length > 0).join('/');
+      const phase = typeof event.llmContextPhase === 'string' ? event.llmContextPhase : 'chat';
+
+      const details: string[] = [];
+      if (typeof event.llmContextTextChars === 'number') {
+        details.push(`${event.llmContextTextChars.toLocaleString()} chars`);
+      }
+      if (typeof event.llmContextImageCount === 'number') {
+        details.push(`${event.llmContextImageCount} images`);
+      }
+
+      items.push({
+        key: `llm-context-${event.time}-${index}`,
+        time: event.time,
+        kind: 'event',
+        title: 'LLM Context Snapshot',
+        subtitle: [phase, providerModel].filter((value) => value.length > 0).join(' | '),
+        tone: 'tool',
+        content: details.length > 0 ? details.join(' • ') : event.message,
+        llmContextSnapshotId: event.llmContextSnapshotId,
+        llmContextPhase: phase,
+        llmContextProvider: provider,
+        llmContextModel: model,
+        llmContextTextChars: event.llmContextTextChars,
+        llmContextImageCount: event.llmContextImageCount,
+      });
+      continue;
+    }
+
     if (toolInfo) {
       if (toolInfo.direction === 'input') {
         const item: TimelineItem = {

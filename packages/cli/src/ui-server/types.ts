@@ -87,7 +87,7 @@ export interface UiDagEvent {
 
   time: string;
   runId?: string;
-  type: DagEvent['type'];
+  type: DagEvent['type'] | string;
   taskId?: string;
   failureType?: string;
   attempt?: number;
@@ -113,6 +113,12 @@ export interface UiDagEvent {
   toolOutput?: string;
   toolIsError?: boolean;
   toolDetails?: unknown;
+  llmContextSnapshotId?: string;
+  llmContextPhase?: 'chat' | 'planning' | 'implementation';
+  llmContextProvider?: string;
+  llmContextModel?: string;
+  llmContextTextChars?: number;
+  llmContextImageCount?: number;
   message: string;
 }
 

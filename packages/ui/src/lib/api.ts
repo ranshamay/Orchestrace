@@ -401,6 +401,12 @@ export interface WorkSession {
     toolOutput?: string;
     toolIsError?: boolean;
     toolDetails?: unknown;
+    llmContextSnapshotId?: string;
+    llmContextPhase?: 'chat' | 'planning' | 'implementation';
+    llmContextProvider?: string;
+    llmContextModel?: string;
+    llmContextTextChars?: number;
+    llmContextImageCount?: number;
     message: string;
   }>;
 
@@ -443,6 +449,21 @@ export interface WorkSessionDiffResponse {
   diff: string;
   generatedAt: string;
   truncated: boolean;
+}
+
+export interface SessionLlmContextSnapshotSummary {
+  id: string;
+  time: string;
+  phase: 'chat' | 'planning' | 'implementation';
+  provider: string;
+  model: string;
+  textChars: number;
+  imageCount: number;
+}
+
+export interface SessionLlmContextSnapshotDetail extends SessionLlmContextSnapshotSummary {
+  systemPrompt: string;
+  promptText: string;
 }
 
 export interface AgentTodo {
@@ -604,6 +625,20 @@ export async function fetchSessions(): Promise<WorkSessionsResponse> {
 
 export async function fetchWorkAgent(id: string): Promise<WorkAgentResponse> {
   return readJson(await authedFetch(`${API_BASE}/work/agent?id=${encodeURIComponent(id)}`));
+}
+
+export async function fetchSessionLlmContextSnapshots(
+  id: string,
+): Promise<{ snapshots: SessionLlmContextSnapshotSummary[] }> {
+  return readJson(await authedFetch(`${API_BASE}/work/chat/context?id=${encodeURIComponent(id)}`));
+}
+
+export async function fetchSessionLlmContextSnapshot(
+  id: string,
+  snapshotId: string,
+): Promise<{ snapshot: SessionLlmContextSnapshotDetail }> {
+  const params = new URLSearchParams({ id, snapshotId });
+  return readJson(await authedFetch(`${API_BASE}/work/chat/context?${params.toString()}`));
 }
 
 export async function fetchWorkTools(
