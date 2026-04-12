@@ -548,6 +548,14 @@ function parseToolCall(
   return { toolName, input: '', output: rest, isError: message.includes('[error]') };
 }
 
+export function parseRealtimeFindingsForTest(
+  text: string,
+  allowedCategories: FindingCategory[],
+  triggerPhase: string,
+): RealtimeFinding[] {
+  return parseRealtimeFindings(text, allowedCategories, triggerPhase);
+}
+
 function parseRealtimeFindings(
   text: string,
   allowedCategories: FindingCategory[],
@@ -560,25 +568,23 @@ function parseRealtimeFindings(
   }
 
   try {
-    const parsed = JSON.parse(jsonStr);
-    if (!parsed || !Array.isArray(parsed.findings)) return [];
+    const parsed: unknown = JSON.parse(jsonStr);
+    if (!isRecord(parsed) || !Array.isArray(parsed.findings)) return [];
 
     const validSeverities: FindingSeverity[] = ['low', 'medium', 'high', 'critical'];
     let idCounter = 0;
 
     return parsed.findings
-      .filter((f: Record<string, unknown>) => isValidRealtimeFindingCandidate(f))
-      .filter((f: Record<string, unknown>) =>
-        allowedCategories.includes(f.category as FindingCategory),
-      )
-      .map((f: Record<string, unknown>): RealtimeFinding => {
+      .filter((candidate): candidate is Record<string, unknown> => isRecord(candidate))
+      .filter((f) => isValidRealtimeFindingCandidate(f))
+      .filter((f) => allowedCategories.includes(f.category as FindingCategory))
+      .map((f): RealtimeFinding => {
         const evidence = normalizeFindingEvidence(
           Array.isArray(f.evidence)
             ? f.evidence
                 .filter((entry): entry is { text: string } => {
-                  if (!entry || typeof entry !== 'object') return false;
-                  const textValue = (entry as Record<string, unknown>).text;
-                  return typeof textValue === 'string';
+                  if (!isRecord(entry)) return false;
+                  return typeof entry.text === 'string';
                 })
                 .map((entry) => ({ text: entry.text }))
             : undefined,
@@ -599,7 +605,7 @@ function parseRealtimeFindings(
           evidence,
           suggestedFix: evidence[0]?.text,
           relevantFiles: Array.isArray(f.relevantFiles)
-            ? f.relevantFiles.filter((p: unknown) => typeof p === 'string')
+            ? f.relevantFiles.filter((p: unknown): p is string => typeof p === 'string')
             : undefined,
           phase: triggerPhase,
           detectedAt: new Date().toISOString(),
@@ -610,6 +616,11 @@ function parseRealtimeFindings(
     return [];
   }
 }
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
 
 function isValidRealtimeFindingCandidate(f: Record<string, unknown>): boolean {
   const hasCore = typeof f.title === 'string' && typeof f.description === 'string';

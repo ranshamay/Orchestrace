@@ -366,33 +366,39 @@ export class LogWatcher {
 // Response Parser
 // ---------------------------------------------------------------------------
 
+export function parseLogFindingsForTest(text: string): LogFinding[] {
+  return parseLogFindings(text);
+}
+
 function parseLogFindings(text: string): LogFinding[] {
   try {
     // Strip markdown fences if present
     const cleaned = text.replace(/^```(?:json)?\s*\n?/m, '').replace(/\n?```\s*$/m, '');
-    const parsed = JSON.parse(cleaned);
-    const raw = Array.isArray(parsed) ? parsed : parsed?.findings;
+    const parsed: unknown = JSON.parse(cleaned);
+    const raw = Array.isArray(parsed)
+      ? parsed
+      : (isRecord(parsed) && Array.isArray(parsed.findings) ? parsed.findings : undefined);
     if (!Array.isArray(raw)) return [];
 
     return raw
-      .filter(
-        (f: Record<string, unknown>) =>
-          f && typeof f.title === 'string' && typeof f.description === 'string',
-      )
-      .map((f: Record<string, unknown>) => ({
+      .filter((candidate): candidate is Record<string, unknown> => isRecord(candidate))
+      .filter((f) => typeof f.title === 'string' && typeof f.description === 'string')
+      .map((f) => ({
         id: `logf-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-        category: validateLogCategory(f.category as string),
-        severity: validateSeverity(f.severity as string),
+        category: validateLogCategory(typeof f.category === 'string' ? f.category : ''),
+        severity: validateSeverity(typeof f.severity === 'string' ? f.severity : ''),
         title: String(f.title),
         description: String(f.description),
-        suggestedFix: typeof f.suggestedFix === 'string' ? f.suggestedFix : (typeof f.issueSummary === 'string' ? f.issueSummary : undefined),
+        suggestedFix: typeof f.suggestedFix === 'string'
+          ? f.suggestedFix
+          : (typeof f.issueSummary === 'string' ? f.issueSummary : undefined),
         evidence: Array.isArray(f.evidence)
           ? f.evidence
-              .filter((x: unknown): x is { text: string } => !!x && typeof x === 'object' && typeof (x as Record<string, unknown>).text === 'string')
-              .map((x: { text: string }) => ({ text: x.text }))
+              .filter((x): x is { text: string } => isRecord(x) && typeof x.text === 'string')
+              .map((x) => ({ text: x.text }))
           : undefined,
         relevantFiles: Array.isArray(f.relevantFiles)
-          ? f.relevantFiles.filter((x: unknown) => typeof x === 'string')
+          ? f.relevantFiles.filter((x: unknown): x is string => typeof x === 'string')
           : undefined,
         logSnippet: String(f.logSnippet ?? ''),
         detectedAt: new Date().toISOString(),
@@ -401,6 +407,11 @@ function parseLogFindings(text: string): LogFinding[] {
     return [];
   }
 }
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
 
 function validateLogCategory(cat: string): LogFindingCategory {
   const valid: LogFindingCategory[] = ['error-pattern', 'performance', 'configuration', 'reliability', 'security'];
