@@ -6,6 +6,7 @@ import { TodoChecklistCard } from './TodoChecklistCard';
 import { CodeChangesCard } from './CodeChangesCard';
 import { ObserverPanel } from '../observer/ObserverPanel';
 import { LogWatcherPanel } from '../observer/LogWatcherPanel';
+import { SessionSummaryCard } from '../work/SessionSummaryCard';
 
 type Props = {
   selectedSession?: WorkSession;
@@ -86,6 +87,17 @@ export function GraphTabView({
             <ObserverPanel observerState={observerState} />
           </div>
         )}
+
+        {selectedSession && (
+          <div className="mb-4">
+            <SessionSummaryCard
+              selectedFailureType={selectedFailureType}
+              selectedLlmStatus={selectedLlmStatus}
+              selectedSession={selectedSession}
+            />
+          </div>
+        )}
+
         <div className="mb-4">
           <LogWatcherPanel />
         </div>

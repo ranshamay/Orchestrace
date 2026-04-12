@@ -1402,7 +1402,7 @@ function TesterSection({
                 markDirty();
               }}
             />
-            <span>Require run_command / run_command_batch in tester phase</span>
+            <span>Require run_command / run_command_batch / playwright_run in tester phase</span>
           </label>
 
           <label className="mt-2 flex items-center gap-2 text-xs text-slate-700 dark:text-slate-200">
