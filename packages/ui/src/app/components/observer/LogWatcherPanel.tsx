@@ -136,11 +136,12 @@ export function LogWatcherPanel({ logWatcherState: sseProp }: Props) {
         </div>
       )}
 
-      {expanded && sortedFindings.length === 0 && state.status === 'watching' && (
+            {expanded && sortedFindings.length === 0 && state.status === 'watching' && (
         <div className="border-t border-teal-100 px-3 py-2 text-[11px] italic text-slate-400 dark:border-teal-800 dark:text-slate-500">
-          No findings yet — watching backend logs for issues.
+          No findings yet — watching backend logs for recurring, actionable issues (invalid model payloads are skipped).
         </div>
       )}
+
     </div>
   );
 }
@@ -180,7 +181,8 @@ function LogFindingItem({ finding, isExpanded, onToggle }: { finding: LogFinding
             </div>
           )}
           <div className="rounded bg-slate-50 px-2 py-1.5 dark:bg-slate-800">
-            <div className="mb-0.5 text-[9px] font-bold uppercase tracking-wide text-slate-400">Suggested Fix</div>
+                        <div className="mb-0.5 text-[9px] font-bold uppercase tracking-wide text-slate-400">Actionable Fix</div>
+
             <p className="text-[11px] text-slate-700 dark:text-slate-200">
               {finding.evidence && finding.evidence.length > 0
                 ? finding.evidence.map((entry) => entry.text).filter(Boolean).join('\n')
