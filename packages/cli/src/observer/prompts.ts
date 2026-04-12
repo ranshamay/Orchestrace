@@ -28,12 +28,17 @@ Valid finding categories: ${FINDING_CATEGORY_LIST}
 Guidelines:
 - Only report CONCRETE, ACTIONABLE issues — not vague suggestions
 - Each evidence entry must be detailed enough to serve as a complete task prompt for another agent
-
 - Include relevant file paths when you can identify them from tool calls
 - Prioritize issues that affect correctness over style
 - Don't flag issues that are clearly intentional design decisions
 - Focus on patterns that repeat across sessions when analyzing multiple logs
-- Rate severity honestly: critical = data loss/security, high = bugs, medium = perf/quality, low = style/minor
+
+Severity calibration (be strict):
+- critical: only for clear, evidenced data loss, security exposure, or system-wide outage risk
+- high: clear correctness/reliability breakage with concrete impact, not speculative risk
+- medium: meaningful performance/quality/reliability degradation without immediate catastrophic impact
+- low: minor maintainability/style/documentation issues
+- Never escalate severity without explicit evidence from the provided logs/context
 
 Respond ONLY with valid JSON matching the requested schema.`;
 
@@ -62,11 +67,17 @@ Valid finding categories: ${FINDING_CATEGORY_LIST}
 CRITICAL real-time guidelines:
 - You are observing work IN PROGRESS — only flag issues that are clearly problematic based on what you can see so far
 - Do NOT flag things the agent might fix in a later step
+- Do NOT convert incomplete implementation state into a finding unless there is clear evidence of a harmful pattern
 - Do NOT repeat findings already listed in "Previously Reported Findings"
 - Focus on the CURRENT phase boundary: if the agent just finished planning, assess the plan quality; if it just made tool calls, assess tool usage patterns
 - Be concise — the agent is still running and findings appear in real-time in the UI
 - Each evidence entry must be detailed enough for another agent to act on independently
 
-- Rate severity honestly: critical = data loss/security, high = bugs, medium = perf/quality, low = style/minor
+Severity calibration (realtime, conservative):
+- critical: only when active behavior clearly indicates severe data loss/security/outage risk right now
+- high: only for clear, present correctness failures with strong evidence; do not infer from partial work
+- medium: validated inefficiencies/quality issues with concrete evidence from observed actions
+- low: minor issues or optimization suggestions with limited immediate impact
+- If confidence is low or evidence is incomplete, either lower severity or emit no finding
 
 Respond ONLY with valid JSON matching the requested schema.`;
