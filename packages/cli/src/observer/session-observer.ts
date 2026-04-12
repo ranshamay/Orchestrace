@@ -612,7 +612,7 @@ function parseRealtimeFindings(
           detectedAt: new Date().toISOString(),
         };
       })
-      .filter((finding): finding is RealtimeFinding => finding !== null);
+      .filter((finding: RealtimeFinding | null): finding is RealtimeFinding => finding !== null);
   } catch {
     console.error('[orchestrace][observer] Failed to parse real-time analysis response');
     return [];

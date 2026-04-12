@@ -156,7 +156,7 @@ function parseAnalysisResponse(text: string, allowedCategories: FindingCategory[
             : undefined,
         };
       })
-      .filter((finding): finding is ObserverFindingInput => finding !== null);
+      .filter((finding: ObserverFindingInput | null): finding is ObserverFindingInput => finding !== null);
 
     const findings: AnalysisResult['findings'] = mappedFindings.filter((finding) =>
       allowedCategories.includes(finding.category),
