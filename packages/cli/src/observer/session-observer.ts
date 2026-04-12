@@ -14,6 +14,7 @@ import type {
   ObserverConfig,
   FindingCategory,
   FindingSeverity,
+  RealtimeValidationGate,
 } from './types.js';
 import { ALL_FINDING_CATEGORIES, normalizeFindingEvidence } from './types.js';
 import { REALTIME_OBSERVER_SYSTEM_PROMPT } from './prompts.js';
@@ -35,6 +36,7 @@ export interface RealtimeFinding {
   /** Compatibility shim for older consumers during rollout. */
   suggestedFix?: string;
   relevantFiles?: string[];
+  validationGate?: RealtimeValidationGate;
   phase: string;
   detectedAt: string;
 }
@@ -94,6 +96,8 @@ const STREAM_TEXT_LIMIT = 8_000;
 const TOOL_PREVIEW_LIMIT = 3_000;
 const DAG_MESSAGE_LIMIT = 600;
 const CHAT_MESSAGE_LIMIT = 2_000;
+const IMPLEMENTATION_LOOP_MIN_CALLS = 12;
+const IMPLEMENTATION_LOOP_MIN_RATIO = 0.9;
 
 // ---------------------------------------------------------------------------
 // SessionObserver
@@ -378,7 +382,11 @@ export class SessionObserver {
 
       });
 
-      const findings = parseRealtimeFindings(result.text, allowedCategories, triggerPhase);
+            const findings = parseRealtimeFindings(result.text, allowedCategories, triggerPhase);
+      const gatedFinding = detectImplementationDiscoveryLoop(this.ctx, triggerPhase);
+      if (gatedFinding) {
+        findings.unshift(gatedFinding);
+      }
 
       for (const finding of findings) {
         // Deduplicate against existing findings by title
@@ -563,13 +571,12 @@ function parseRealtimeFindings(
     const parsed = JSON.parse(jsonStr);
     if (!parsed || !Array.isArray(parsed.findings)) return [];
 
-    const validSeverities: FindingSeverity[] = ['low', 'medium', 'high', 'critical'];
+        const validSeverities: FindingSeverity[] = ['low', 'medium', 'high', 'critical'];
     let idCounter = 0;
 
     return parsed.findings
-      .filter((f: Record<string, unknown>) => isValidRealtimeFindingCandidate(f))
       .filter((f: Record<string, unknown>) =>
-        allowedCategories.includes(f.category as FindingCategory),
+        isValidRealtimeFindingCandidate(f, allowedCategories, validSeverities),
       )
       .map((f: Record<string, unknown>): RealtimeFinding => {
         const evidence = normalizeFindingEvidence(
@@ -588,19 +595,16 @@ function parseRealtimeFindings(
         return {
           id: `rt-${Date.now()}-${idCounter++}`,
           schemaVersion: '2',
-          category: allowedCategories.includes(f.category as FindingCategory)
-            ? (f.category as FindingCategory)
-            : 'code-quality',
-          severity: validSeverities.includes(f.severity as FindingSeverity)
-            ? (f.severity as FindingSeverity)
-            : 'medium',
-          title: String(f.title),
-          description: String(f.description),
+          category: f.category as FindingCategory,
+          severity: f.severity as FindingSeverity,
+          title: String(f.title).trim(),
+          description: String(f.description).trim(),
           evidence,
           suggestedFix: evidence[0]?.text,
           relevantFiles: Array.isArray(f.relevantFiles)
             ? f.relevantFiles.filter((p: unknown) => typeof p === 'string')
             : undefined,
+          validationGate: parseRealtimeValidationGate(f.validationGate),
           phase: triggerPhase,
           detectedAt: new Date().toISOString(),
         };
@@ -611,13 +615,29 @@ function parseRealtimeFindings(
   }
 }
 
-function isValidRealtimeFindingCandidate(f: Record<string, unknown>): boolean {
-  const hasCore = typeof f.title === 'string' && typeof f.description === 'string';
+function isValidRealtimeFindingCandidate(
+  f: Record<string, unknown>,
+  allowedCategories: FindingCategory[],
+  validSeverities: FindingSeverity[],
+): boolean {
+  const hasCore =
+    typeof f.title === 'string'
+    && f.title.trim().length > 0
+    && typeof f.description === 'string'
+    && f.description.trim().length > 0;
   if (!hasCore) {
     return false;
   }
 
-  const hasLegacy = typeof f.suggestedFix === 'string';
+  if (!allowedCategories.includes(f.category as FindingCategory)) {
+    return false;
+  }
+
+  if (!validSeverities.includes(f.severity as FindingSeverity)) {
+    return false;
+  }
+
+  const hasLegacy = typeof f.suggestedFix === 'string' && f.suggestedFix.trim().length > 0;
   const hasEvidence =
     Array.isArray(f.evidence)
     && f.evidence.some((entry) => {
@@ -628,4 +648,86 @@ function isValidRealtimeFindingCandidate(f: Record<string, unknown>): boolean {
 
   return hasLegacy || hasEvidence;
 }
+
+function parseRealtimeValidationGate(value: unknown): RealtimeValidationGate | undefined {
+  if (!value || typeof value !== 'object') {
+    return undefined;
+  }
+
+  const record = value as Record<string, unknown>;
+  const status = record.status;
+  const reason = record.reason;
+
+  if ((status !== 'pass' && status !== 'fail') || typeof reason !== 'string' || reason.trim().length === 0) {
+    return undefined;
+  }
+
+  return {
+    status,
+    reason: reason.trim(),
+  };
+}
+
+function detectImplementationDiscoveryLoop(
+  ctx: AccumulatedContext,
+  triggerPhase: string,
+): RealtimeFinding | null {
+  if (triggerPhase !== 'implementation') {
+    return null;
+  }
+
+  const implementationCalls = ctx.toolCalls.filter((tc) => tc.phase === 'implementation');
+  if (implementationCalls.length < IMPLEMENTATION_LOOP_MIN_CALLS) {
+    return null;
+  }
+
+  const exploratoryCalls = implementationCalls.filter((tc) => {
+    const name = tc.toolName.toLowerCase();
+    return (
+      name.includes('read_file')
+      || name.includes('read_files')
+      || name.includes('list_directory')
+      || name.includes('search_files')
+    );
+  });
+
+  const writeCalls = implementationCalls.filter((tc) => {
+    const name = tc.toolName.toLowerCase();
+    return name.includes('write_file') || name.includes('write_files') || name.includes('edit_file') || name.includes('edit_files');
+  });
+
+  if (writeCalls.length > 0) {
+    return null;
+  }
+
+  const ratio = exploratoryCalls.length / implementationCalls.length;
+  if (ratio < IMPLEMENTATION_LOOP_MIN_RATIO) {
+    return null;
+  }
+
+  return {
+    id: `rt-gate-${Date.now()}`,
+    schemaVersion: '2',
+    category: 'agent-efficiency',
+    severity: 'critical',
+    title: 'Implementation phase stuck in exploratory loop with no code edits',
+    description:
+      `Detected ${implementationCalls.length} implementation tool calls with ${exploratoryCalls.length} exploratory calls and zero write/edit calls. This indicates execution paralysis after planning and requires immediate code changes.`,
+    evidence: [
+      {
+        text: 'Stop discovery calls immediately; edit the targeted files now and run focused validation (typecheck/tests) before additional exploration.',
+      },
+    ],
+    suggestedFix:
+      'Stop discovery calls immediately; edit the targeted files now and run focused validation (typecheck/tests) before additional exploration.',
+    validationGate: {
+      status: 'fail',
+      reason: 'implementation-discovery-loop-no-writes',
+    },
+    relevantFiles: ['packages/cli/src/observer/prompts.ts', 'packages/cli/src/observer/analyzer.ts', 'packages/cli/src/observer/log-watcher.ts'],
+    phase: triggerPhase,
+    detectedAt: new Date().toISOString(),
+  };
+}
+
 

@@ -36,6 +36,12 @@ export interface FindingEvidence {
   text: string;
 }
 
+export interface RealtimeValidationGate {
+  status: 'pass' | 'fail';
+  reason: string;
+}
+
+
 /** Canonical verifier payload used to ground spawned fix prompts. */
 export interface VerifiedEvidence {
   file: string;

@@ -1579,7 +1579,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                     findingTitle: finding.title,
                     category: finding.category,
                     severity: finding.severity,
-                    relevantFiles: finding.relevantFiles ?? [],
+                                        relevantFiles: finding.relevantFiles ?? [],
+                    validationGate: finding.validationGate ?? null,
                   },
                 });
               });

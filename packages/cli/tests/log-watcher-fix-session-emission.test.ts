@@ -152,7 +152,51 @@ describe('log watcher fix-session emission', () => {
     }
   });
 
+    it('accepts session observer findings carrying validation-gate metadata', async () => {
+    const orchestraceDir = await mkdtemp(join(tmpdir(), 'orchestrace-observer-'));
+
+    try {
+      await seedWorkspaceFiles(orchestraceDir, ['packages/cli/src/observer/session-observer.ts']);
+
+      const startSession = vi.fn(async () => ({ id: `fix-${String(startSession.mock.calls.length + 1)}` }));
+      const daemon = new ObserverDaemon({
+        orchestraceDir,
+        eventStore: createEventStoreStub(),
+        llm: createVerifierLlmStub(),
+        startSession,
+        resolveApiKey: async () => undefined,
+      });
+
+      await daemon.updateConfig({ enabled: true, maxConcurrentFixSessions: 0 });
+
+      const result = await daemon.ingestSessionObserverFindings('session-loop', [
+        {
+          schemaVersion: '2',
+          category: 'agent-efficiency',
+          severity: 'critical',
+          title: 'Implementation phase stuck in exploratory loop with no code edits',
+          description: 'Deterministic gate detected repeated read/search/list calls without writes.',
+          evidence: [
+            { text: 'Stop discovery calls and write code changes immediately.' },
+          ],
+          relevantFiles: ['packages/cli/src/observer/session-observer.ts'],
+          validationGate: {
+            status: 'fail',
+            reason: 'implementation-discovery-loop-no-writes',
+          },
+        },
+      ]);
+
+      expect(result).toEqual({ registered: 1, spawned: 1 });
+      expect(startSession).toHaveBeenCalledTimes(1);
+      expect(startSession.mock.calls[0]?.[0].prompt).toContain('Implementation phase stuck in exploratory loop');
+    } finally {
+      await rm(orchestraceDir, { recursive: true, force: true });
+    }
+  });
+
   it('builds grounded fix prompt from verified evidence', async () => {
+
     const orchestraceDir = await mkdtemp(join(tmpdir(), 'orchestrace-observer-'));
 
     try {

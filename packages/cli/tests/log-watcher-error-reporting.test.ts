@@ -53,7 +53,62 @@ describe('log watcher runtime error reporting', () => {
     }
   });
 
+    it('drops malformed findings with invalid category/severity', async () => {
+    let onLineHandler: ((line: string) => void) | null = null;
+    const logger = {
+      onLine(handler: (line: string) => void) {
+        onLineHandler = handler;
+        return () => {
+          onLineHandler = null;
+        };
+      },
+    };
+
+    const emitted: string[] = [];
+    const watcher = new LogWatcher({
+      llm: {
+        complete: vi.fn(async () => ({
+          text: JSON.stringify({
+            findings: [
+              {
+                category: 'not-a-real-category',
+                severity: 'urgent',
+                title: 'Malformed finding should be ignored',
+                description: 'Parser must reject this invalid payload.',
+                suggestedFix: 'N/A',
+                logSnippet: 'bad payload',
+              },
+            ],
+          }),
+        })),
+      } as LogWatcherOptions['llm'],
+      config: DEFAULT_OBSERVER_CONFIG,
+      logger: logger as LogWatcherOptions['logger'],
+      resolveApiKey: async () => undefined,
+      batchSize: 1,
+      timeWindowMs: 60_000,
+      onFindings: (findings) => {
+        emitted.push(...findings.map((finding) => finding.title));
+      },
+    });
+
+    try {
+      watcher.start(logger as LogWatcherOptions['logger']);
+      onLineHandler?.('trigger malformed');
+
+      await vi.waitFor(() => {
+        expect((watcher.getState().analyzedBatches ?? 0) >= 1).toBe(true);
+      });
+
+      expect(emitted).toEqual([]);
+      expect(watcher.getFindings()).toHaveLength(0);
+    } finally {
+      watcher.stop();
+    }
+  });
+
   it('emits structured emit-findings errors when onFindings callback fails', async () => {
+
     let onLineHandler: ((line: string) => void) | null = null;
     const logger = {
       onLine(handler: (line: string) => void) {

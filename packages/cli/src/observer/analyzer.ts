@@ -110,12 +110,14 @@ function parseAnalysisResponse(text: string, allowedCategories: FindingCategory[
       return { findings: [] };
     }
 
-    // Validate and sanitize each finding
+        // Validate and sanitize each finding
     const validCategories: FindingCategory[] = [...ALL_FINDING_CATEGORIES];
     const validSeverities: FindingSeverity[] = ['low', 'medium', 'high', 'critical'];
 
     const mappedFindings: AnalysisResult['findings'] = parsed.findings
-      .filter((f: Record<string, unknown>) => isValidFindingCandidate(f))
+      .filter((f: Record<string, unknown>) =>
+        isValidFindingCandidate(f, validCategories, validSeverities),
+      )
       .map((f: Record<string, unknown>): ObserverFindingInput => {
         const evidence = normalizeFindingEvidence(
           Array.isArray(f.evidence)
@@ -132,14 +134,10 @@ function parseAnalysisResponse(text: string, allowedCategories: FindingCategory[
 
         return {
           schemaVersion: '2',
-          category: validCategories.includes(f.category as FindingCategory)
-            ? (f.category as FindingCategory)
-            : ('code-quality' as FindingCategory),
-          severity: validSeverities.includes(f.severity as FindingSeverity)
-            ? (f.severity as FindingSeverity)
-            : ('medium' as FindingSeverity),
-          title: String(f.title),
-          description: String(f.description),
+          category: f.category as FindingCategory,
+          severity: f.severity as FindingSeverity,
+          title: String(f.title).trim(),
+          description: String(f.description).trim(),
           evidence,
           relevantFiles: Array.isArray(f.relevantFiles)
             ? f.relevantFiles.filter((p: unknown) => typeof p === 'string')
@@ -158,13 +156,29 @@ function parseAnalysisResponse(text: string, allowedCategories: FindingCategory[
   }
 }
 
-function isValidFindingCandidate(f: Record<string, unknown>): boolean {
-  const hasCore = typeof f.title === 'string' && typeof f.description === 'string';
+function isValidFindingCandidate(
+  f: Record<string, unknown>,
+  validCategories: FindingCategory[],
+  validSeverities: FindingSeverity[],
+): boolean {
+  const hasCore =
+    typeof f.title === 'string'
+    && f.title.trim().length > 0
+    && typeof f.description === 'string'
+    && f.description.trim().length > 0;
   if (!hasCore) {
     return false;
   }
 
-  const hasLegacy = typeof f.suggestedFix === 'string';
+  if (!validCategories.includes(f.category as FindingCategory)) {
+    return false;
+  }
+
+  if (!validSeverities.includes(f.severity as FindingSeverity)) {
+    return false;
+  }
+
+  const hasLegacy = typeof f.suggestedFix === 'string' && f.suggestedFix.trim().length > 0;
   const hasEvidence =
     Array.isArray(f.evidence)
     && f.evidence.some((entry) => {

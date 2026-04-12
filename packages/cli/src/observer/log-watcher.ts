@@ -55,6 +55,10 @@ export interface LogWatcherState {
   linesProcessed: number;
 }
 
+const LOG_LOOP_MIN_TOOL_CALLS = 12;
+const LOG_LOOP_MIN_RATIO = 0.9;
+
+
 export type LogWatcherRuntimeError = {
   source: 'log-watcher';
   operation: 'analyze-batch' | 'emit-findings';
@@ -273,7 +277,12 @@ export class LogWatcher {
 
       });
 
-      const findings = parseLogFindings(result.text);
+            const findings = parseLogFindings(result.text);
+      const loopFinding = detectImplementationDiscoveryLoopFromLogs(batch);
+      if (loopFinding) {
+        findings.unshift(loopFinding);
+      }
+
       const newlyDetected: LogFinding[] = [];
 
       for (const finding of findings) {
@@ -282,6 +291,7 @@ export class LogWatcher {
         this.state.findings.push(finding);
         newlyDetected.push(finding);
       }
+
 
             if (newlyDetected.length > 0 && this.onFindings) {
         void Promise.resolve(this.onFindings(newlyDetected)).catch((err) => {
@@ -375,26 +385,32 @@ function parseLogFindings(text: string): LogFinding[] {
     if (!Array.isArray(raw)) return [];
 
     return raw
-      .filter(
-        (f: Record<string, unknown>) =>
-          f && typeof f.title === 'string' && typeof f.description === 'string',
-      )
+      .filter((f: Record<string, unknown>) => isValidLogFindingCandidate(f))
       .map((f: Record<string, unknown>) => ({
         id: `logf-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-        category: validateLogCategory(f.category as string),
-        severity: validateSeverity(f.severity as string),
-        title: String(f.title),
-        description: String(f.description),
-        suggestedFix: typeof f.suggestedFix === 'string' ? f.suggestedFix : (typeof f.issueSummary === 'string' ? f.issueSummary : undefined),
+        category: f.category as LogFindingCategory,
+        severity: f.severity as FindingSeverity,
+        title: String(f.title).trim(),
+        description: String(f.description).trim(),
+        suggestedFix:
+          typeof f.suggestedFix === 'string'
+            ? f.suggestedFix.trim()
+            : (typeof f.issueSummary === 'string' ? f.issueSummary.trim() : undefined),
         evidence: Array.isArray(f.evidence)
           ? f.evidence
-              .filter((x: unknown): x is { text: string } => !!x && typeof x === 'object' && typeof (x as Record<string, unknown>).text === 'string')
-              .map((x: { text: string }) => ({ text: x.text }))
+              .filter(
+                (x: unknown): x is { text: string } =>
+                  !!x
+                  && typeof x === 'object'
+                  && typeof (x as Record<string, unknown>).text === 'string'
+                  && (x as Record<string, unknown>).text!.toString().trim().length > 0,
+              )
+              .map((x: { text: string }) => ({ text: x.text.trim() }))
           : undefined,
         relevantFiles: Array.isArray(f.relevantFiles)
           ? f.relevantFiles.filter((x: unknown) => typeof x === 'string')
           : undefined,
-        logSnippet: String(f.logSnippet ?? ''),
+        logSnippet: String(f.logSnippet).trim(),
         detectedAt: new Date().toISOString(),
       }));
   } catch {
@@ -402,14 +418,105 @@ function parseLogFindings(text: string): LogFinding[] {
   }
 }
 
-function validateLogCategory(cat: string): LogFindingCategory {
-  const valid: LogFindingCategory[] = ['error-pattern', 'performance', 'configuration', 'reliability', 'security'];
-  return valid.includes(cat as LogFindingCategory) ? (cat as LogFindingCategory) : 'error-pattern';
+function isValidLogFindingCandidate(f: Record<string, unknown>): boolean {
+  const validCategories: LogFindingCategory[] = [
+    'error-pattern',
+    'performance',
+    'configuration',
+    'reliability',
+    'security',
+  ];
+  const validSeverities: FindingSeverity[] = ['low', 'medium', 'high', 'critical'];
+
+  const hasCore =
+    typeof f.title === 'string'
+    && f.title.trim().length > 0
+    && typeof f.description === 'string'
+    && f.description.trim().length > 0
+    && typeof f.logSnippet === 'string'
+    && f.logSnippet.trim().length > 0;
+
+  if (!hasCore) return false;
+
+  if (!validCategories.includes(f.category as LogFindingCategory)) {
+    return false;
+  }
+
+  if (!validSeverities.includes(f.severity as FindingSeverity)) {
+    return false;
+  }
+
+  const hasLegacy =
+    (typeof f.suggestedFix === 'string' && f.suggestedFix.trim().length > 0)
+    || (typeof f.issueSummary === 'string' && f.issueSummary.trim().length > 0);
+
+  const hasEvidence =
+    Array.isArray(f.evidence)
+    && f.evidence.some((entry) => {
+      if (!entry || typeof entry !== 'object') return false;
+      const textValue = (entry as Record<string, unknown>).text;
+      return typeof textValue === 'string' && textValue.trim().length > 0;
+    });
+
+  return hasLegacy || hasEvidence;
 }
 
-function validateSeverity(sev: string): FindingSeverity {
-  const valid: FindingSeverity[] = ['low', 'medium', 'high', 'critical'];
-  return valid.includes(sev as FindingSeverity) ? (sev as FindingSeverity) : 'medium';
+function detectImplementationDiscoveryLoopFromLogs(batch: string[]): LogFinding | null {
+  const toolLines = batch.filter((line) => line.includes('Tool ') && line.includes(' input '));
+  if (toolLines.length < LOG_LOOP_MIN_TOOL_CALLS) {
+    return null;
+  }
+
+  const exploratory = toolLines.filter((line) => {
+    const lower = line.toLowerCase();
+    return (
+      lower.includes('tool read_file')
+      || lower.includes('tool read_files')
+      || lower.includes('tool list_directory')
+      || lower.includes('tool search_files')
+    );
+  });
+
+  const writes = toolLines.filter((line) => {
+    const lower = line.toLowerCase();
+    return (
+      lower.includes('tool write_file')
+      || lower.includes('tool write_files')
+      || lower.includes('tool edit_file')
+      || lower.includes('tool edit_files')
+    );
+  });
+
+  if (writes.length > 0) {
+    return null;
+  }
+
+  const ratio = exploratory.length / toolLines.length;
+  if (ratio < LOG_LOOP_MIN_RATIO) {
+    return null;
+  }
+
+  return {
+    id: `logf-gate-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    category: 'reliability',
+    severity: 'critical',
+    title: 'Implementation discovery loop with no code writes detected in logs',
+    description:
+      `Detected ${toolLines.length} tool-call inputs in the batch with ${exploratory.length} exploratory calls and zero write/edit calls. This indicates an execution loop that should be interrupted with immediate code changes.`,
+    schemaVersion: '2',
+    evidence: [
+      {
+        text: 'Interrupt exploratory loop immediately and enforce direct write/edit operations on targeted files before further discovery calls.',
+      },
+    ],
+    relevantFiles: [
+      'packages/cli/src/observer/prompts.ts',
+      'packages/cli/src/observer/analyzer.ts',
+      'packages/cli/src/observer/log-watcher.ts',
+    ],
+    logSnippet: toolLines.slice(0, 3).join('\n'),
+    detectedAt: new Date().toISOString(),
+  };
 }
 
 function toErrorMessage(err: unknown): string {
@@ -419,6 +526,7 @@ function toErrorMessage(err: unknown): string {
 
   return String(err);
 }
+
 
 function pickModelSetting(value: unknown, fallback: string): string {
 

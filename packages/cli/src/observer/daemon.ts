@@ -48,7 +48,10 @@ type LogWatcherFindingInput = {
 };
 
 
-type RealtimeFindingInput = ObserverFindingInput & { schemaVersion?: '1' | '2' };
+type RealtimeFindingInput = ObserverFindingInput & {
+  schemaVersion?: '1' | '2';
+  validationGate?: { status: 'pass' | 'fail'; reason: string };
+};
 
 const LOG_WATCHER_SOURCE_SESSION_ID = 'log-watcher';
 
