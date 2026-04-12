@@ -34,13 +34,14 @@ export function SessionsRail({
     <aside className="flex h-full w-56 shrink-0 flex-col border-r border-slate-200/60 bg-white/50 dark:border-slate-800/60 dark:bg-slate-900/50">
       <div className="flex items-center justify-between px-3 py-2">
         <span className="text-[10px] font-bold uppercase tracking-widest text-slate-400 dark:text-slate-500">Sessions</span>
-        <button
+                <button
           aria-label="New session"
           className="inline-flex h-6 w-6 items-center justify-center rounded bg-blue-600 text-white hover:bg-blue-500"
           onClick={onNewSession}
-          title="New session"
+          title="New session (Ctrl/Cmd+N)"
           type="button"
         >
+
           <Plus className="h-3.5 w-3.5" />
         </button>
       </div>

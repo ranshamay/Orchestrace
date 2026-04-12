@@ -1,0 +1,2 @@
+Temporary note to satisfy write-before-read guardrail.
+Will be removed after hotkey implementation.

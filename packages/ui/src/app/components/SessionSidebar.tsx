@@ -61,11 +61,13 @@ export function SessionSidebar(props: SessionSidebarProps) {
 
         <div className="mb-2 flex items-center justify-between border-t border-slate-100 pt-3 dark:border-slate-800">
           <div className="text-xs font-bold uppercase tracking-widest text-slate-400 dark:text-slate-500">Sessions</div>
-          <button
+                    <button
             className="inline-flex items-center gap-1 rounded bg-blue-600 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-white hover:bg-blue-500"
             onClick={onNewSession}
+            title="New (Ctrl/Cmd+N)"
             type="button"
           >
+
             <Plus className="h-3 w-3" />
             New
           </button>

@@ -36,7 +36,18 @@ import { readTabFromUrl, updateTabInUrl } from './app/utils/viewRoute';
 
 const LOGIN_PATH = '/login';
 
+function isTypingTarget(target: EventTarget | null): boolean {
+  const element = target as HTMLElement | null;
+  if (!element) {
+    return false;
+  }
+
+  const tag = element.tagName;
+  return element.isContentEditable || tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
+}
+
 function normalizeRoutePath(pathname: string): string {
+
   if (!pathname) {
     return '/';
   }
@@ -174,13 +185,14 @@ export default function App() {
   useSessionStream({ enabled: canUseAuthedApis, selectedSessionId, setSessions, setChatMessages, setTodos, setNodeTokenStreams, setObserverState });
   useRunUrlSync(selectedSessionId, setSessionSelection);
 
-  useEffect(() => {
+            useEffect(() => {
     if (typeof window !== 'undefined' && normalizeRoutePath(window.location.pathname) === LOGIN_PATH) {
       return;
     }
 
     updateTabInUrl(activeTab, 'replace');
   }, [activeTab]);
+
 
   useEffect(() => {
     if (typeof window === 'undefined') {
@@ -591,7 +603,8 @@ export default function App() {
     setDefaultAgentRoleModel('investigator', nextModel);
   }, [setDefaultAgentRoleModel]);
 
-  const handleStartNewSessionDraft = useCallback(() => {
+        const handleStartNewSessionDraft = useCallback(() => {
+
     setActiveTab('graph');
     setSessionSelection('');
     updateActiveLlmControls({
@@ -616,9 +629,47 @@ export default function App() {
     updateActiveLlmControls,
   ]);
 
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    const onHotkey = (event: KeyboardEvent) => {
+      if (event.defaultPrevented) {
+        return;
+      }
+
+      if (!(event.metaKey || event.ctrlKey) || event.altKey || event.shiftKey) {
+        return;
+      }
+
+      if (event.key.toLowerCase() !== 'n') {
+        return;
+      }
+
+      if (isTypingTarget(event.target)) {
+        return;
+      }
+
+      if (document.querySelector('[role="dialog"][aria-modal="true"]')) {
+        return;
+      }
+
+      event.preventDefault();
+      handleStartNewSessionDraft();
+    };
+
+    window.addEventListener('keydown', onHotkey);
+    return () => {
+      window.removeEventListener('keydown', onHotkey);
+    };
+      }, [handleStartNewSessionDraft]);
+
+
   const modalTargetsPlanningPhase = composerMode === 'planning';
   const modalWorkProvider = modalTargetsPlanningPhase ? workPlanningProvider : workProvider;
   const modalWorkModel = modalTargetsPlanningPhase ? workPlanningModel : workModel;
+
   const modalSetWorkModel = modalTargetsPlanningPhase ? setWorkPlanningModel : setWorkModel;
   const modalPreferredModelForProvider = modalTargetsPlanningPhase
     ? (modalWorkProvider === defaultLlmControls.planningProvider ? defaultLlmControls.planningModel : '')
