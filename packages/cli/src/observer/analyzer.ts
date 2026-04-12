@@ -105,8 +105,9 @@ function parseAnalysisResponse(text: string, allowedCategories: FindingCategory[
   }
 
   try {
-    const parsed = JSON.parse(jsonStr);
-    if (!parsed || !Array.isArray(parsed.findings)) {
+    const parsed: unknown = JSON.parse(jsonStr);
+    if (!parsed || typeof parsed !== 'object' || !Array.isArray((parsed as { findings?: unknown }).findings)) {
+      console.warn('[orchestrace][observer] Rejected analysis payload: missing findings[] array');
       return { findings: [] };
     }
 
@@ -114,8 +115,17 @@ function parseAnalysisResponse(text: string, allowedCategories: FindingCategory[
     const validCategories: FindingCategory[] = [...ALL_FINDING_CATEGORIES];
     const validSeverities: FindingSeverity[] = ['low', 'medium', 'high', 'critical'];
 
-    const mappedFindings: AnalysisResult['findings'] = parsed.findings
-      .filter((f: Record<string, unknown>) => isValidFindingCandidate(f))
+    const rawFindings = (parsed as { findings: unknown[] }).findings;
+    let rejectedCount = 0;
+
+    const mappedFindings: AnalysisResult['findings'] = rawFindings
+      .filter((f): f is Record<string, unknown> => {
+        const accepted = !!f && typeof f === 'object' && isValidFindingCandidate(f as Record<string, unknown>);
+        if (!accepted) {
+          rejectedCount++;
+        }
+        return accepted;
+      })
       .map((f: Record<string, unknown>): ObserverFindingInput => {
         const evidence = normalizeFindingEvidence(
           Array.isArray(f.evidence)
@@ -138,14 +148,20 @@ function parseAnalysisResponse(text: string, allowedCategories: FindingCategory[
           severity: validSeverities.includes(f.severity as FindingSeverity)
             ? (f.severity as FindingSeverity)
             : ('medium' as FindingSeverity),
-          title: String(f.title),
-          description: String(f.description),
+          title: String(f.title).trim(),
+          description: String(f.description).trim(),
           evidence,
           relevantFiles: Array.isArray(f.relevantFiles)
             ? f.relevantFiles.filter((p: unknown) => typeof p === 'string')
             : undefined,
         };
       });
+
+    if (rejectedCount > 0) {
+      console.warn(
+        `[orchestrace][observer] Rejected ${rejectedCount}/${rawFindings.length} malformed analysis finding(s)`,
+      );
+    }
 
     const findings: AnalysisResult['findings'] = mappedFindings.filter((finding) =>
       allowedCategories.includes(finding.category),
@@ -158,11 +174,17 @@ function parseAnalysisResponse(text: string, allowedCategories: FindingCategory[
   }
 }
 
+
 function isValidFindingCandidate(f: Record<string, unknown>): boolean {
-  const hasCore = typeof f.title === 'string' && typeof f.description === 'string';
+  const hasCore =
+    typeof f.title === 'string'
+    && f.title.trim().length > 0
+    && typeof f.description === 'string'
+    && f.description.trim().length > 0;
   if (!hasCore) {
     return false;
   }
+
 
   const hasLegacy = typeof f.suggestedFix === 'string';
   const hasEvidence =
