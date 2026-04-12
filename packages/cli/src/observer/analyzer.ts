@@ -82,7 +82,9 @@ function buildAnalysisPrompt(summaries: SessionSummary[], allowedCategories: Fin
       '  ]\n' +
       '}\n' +
       '```\n' +
-      'Compatibility: legacy outputs with `suggestedFix` are also accepted during rollout.\n' +
+            'Compatibility: legacy outputs with `suggestedFix` are also accepted during rollout.\n' +
+      'Evidence quality requirements: each `evidence[].text` must be implementation-ready and directly executable by a coding agent.\n' +
+      'For findings about redundant implementation-phase file re-reads, explicitly instruct: reuse planning-phase file context when available; if context is missing, do one consolidated `read_files` batch for all needed files; then immediately perform write/edit actions with no read-think loop.\n' +
       'Return ONLY the JSON object, no other text.',
   );
 
