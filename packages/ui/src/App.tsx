@@ -4,8 +4,10 @@ import {
   type AppAuthStatusResponse,
   fetchAppAuthConfig,
   fetchAppAuthStatus,
+  fetchSessions,
   logoutAppAuth,
   setStoredAuthToken,
+  startWork,
   type AgentModels,
   type AgentTodo,
   type ChatMessage,
@@ -28,12 +30,15 @@ import { useSessionActions } from './app/hooks/useSessionActions';
 import { useThemePreference } from './app/hooks/useThemePreference';
 import { useSessionSelectionController } from './app/hooks/useSessionSelectionController';
 import { useLlmControlsModalState } from './app/hooks/useLlmControlsModalState';
+import { toErrorMessage } from './app/hooks/useSessionActions.helpers';
 import { selectCurrentSession, selectSessionViewState } from './app/selectors/sessionViewSelectors';
 import { buildLlmModalProps } from './app/shell/props/buildLlmModalProps';
 import { AppShell } from './app/shell/AppShell';
 import { LoginGate } from './app/components/auth/LoginGate';
 import type { SettingsSaveToastState } from './app/components/overlays/SettingsSaveToast';
 import { readTabFromUrl, updateTabInUrl } from './app/utils/viewRoute';
+import { sortSessionsByActivityAndRecency } from './app/utils/sessionSort';
+import { QuickPromptModal } from './app/components/overlays/QuickPromptModal';
 
 const LOGIN_PATH = '/login';
 
@@ -109,7 +114,10 @@ export default function App() {
   const [composerImages, setComposerImages] = useState<ComposerImageAttachment[]>([]);
   const [showToolsPanel, setShowToolsPanel] = useState(false);
   const [todoInput, setTodoInput] = useState('');
-  const [copyTraceState, setCopyTraceState] = useState<{ sessionId: string; state: 'idle' | 'copied' | 'failed' }>({ sessionId: '', state: 'idle' });
+    const [copyTraceState, setCopyTraceState] = useState<{ sessionId: string; state: 'idle' | 'copied' | 'failed' }>({ sessionId: '', state: 'idle' });
+  const [quickPromptOpen, setQuickPromptOpen] = useState(false);
+  const [quickPromptText, setQuickPromptText] = useState('');
+  const [quickPromptSubmitting, setQuickPromptSubmitting] = useState(false);
   const [settingsSaveToastState, setSettingsSaveToastState] = useState<SettingsSaveToastState>('idle');
   const [settingsSaveToastMessage, setSettingsSaveToastMessage] = useState('');
   const [nodeTokenStreams, setNodeTokenStreams] = useState<Record<string, NodeTokenStream>>({});
@@ -593,7 +601,7 @@ export default function App() {
     setDefaultAgentRoleModel('investigator', nextModel);
   }, [setDefaultAgentRoleModel]);
 
-  const handleStartNewSessionDraft = useCallback(() => {
+    const handleStartNewSessionDraft = useCallback(() => {
     setActiveTab('graph');
     setSessionSelection('');
     updateActiveLlmControls({
@@ -617,6 +625,110 @@ export default function App() {
     setSessionSelection,
     updateActiveLlmControls,
   ]);
+
+  const handleSubmitQuickPrompt = useCallback(async () => {
+    const prompt = quickPromptText.trim();
+    if (!prompt || quickPromptSubmitting) {
+      return;
+    }
+
+    if (!workWorkspaceId || !workProvider || !workModel) {
+      setErrorMessage('Select workspace, provider, and model before starting a prompt.');
+      return;
+    }
+
+    setQuickPromptSubmitting(true);
+    setErrorMessage('');
+
+    try {
+      const result = await startWork({
+        workspaceId: workWorkspaceId,
+        prompt,
+        provider: workProvider,
+        model: workModel,
+        agentModels: {
+          ...defaultLlmControls.agentModels,
+          planner: {
+            ...(defaultLlmControls.agentModels.planner ?? {}),
+            provider: workPlanningProvider,
+            model: workPlanningModel,
+          },
+          implementer: {
+            ...(defaultLlmControls.agentModels.implementer ?? {}),
+            provider: workProvider,
+            model: workModel,
+          },
+        },
+        planningProvider: workPlanningProvider,
+        planningModel: workPlanningModel,
+        implementationProvider: workProvider,
+        implementationModel: workModel,
+        deliveryStrategy,
+        planningNoToolGuardMode,
+        autoApprove,
+        adaptiveConcurrency,
+        batchConcurrency,
+        batchMinConcurrency,
+      });
+
+      const sessionsState = await fetchSessions();
+      setSessions(sortSessionsByActivityAndRecency(sessionsState.sessions));
+      setSelectedSessionId(result.id);
+      setActiveTab('graph');
+      setQuickPromptOpen(false);
+      setQuickPromptText('');
+    } catch (error) {
+      setErrorMessage(toErrorMessage(error));
+    } finally {
+      setQuickPromptSubmitting(false);
+    }
+  }, [
+    adaptiveConcurrency,
+    autoApprove,
+    batchConcurrency,
+    batchMinConcurrency,
+    defaultLlmControls.agentModels,
+    deliveryStrategy,
+    planningNoToolGuardMode,
+    quickPromptSubmitting,
+    quickPromptText,
+    setActiveTab,
+    setErrorMessage,
+    setSelectedSessionId,
+    setSessions,
+    workPlanningModel,
+    workPlanningProvider,
+    workModel,
+    workProvider,
+    workWorkspaceId,
+  ]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    const onGlobalHotkey = (event: KeyboardEvent) => {
+      if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== 'k') {
+        return;
+      }
+
+      const target = event.target as HTMLElement | null;
+      const tagName = target?.tagName?.toLowerCase();
+      const isTypingTarget = target?.isContentEditable || tagName === 'input' || tagName === 'textarea' || tagName === 'select';
+      if (isTypingTarget) {
+        return;
+      }
+
+      event.preventDefault();
+      setQuickPromptOpen(true);
+    };
+
+    window.addEventListener('keydown', onGlobalHotkey);
+    return () => {
+      window.removeEventListener('keydown', onGlobalHotkey);
+    };
+  }, []);
 
   const modalTargetsPlanningPhase = composerMode === 'planning';
   const modalWorkProvider = modalTargetsPlanningPhase ? workPlanningProvider : workProvider;
@@ -954,27 +1066,44 @@ export default function App() {
     );
   }
 
-  return (
-
-    <AppShell
-      sessionSidebarProps={sessionSidebarProps}
-      mainContentProps={mainContentProps}
-      llmModalProps={llmModalProps}
-      authUser={authUser ?? null}
-      onLogout={() => {
-        void logoutAppAuth();
-        clearStoredAuthToken();
-        setAuthenticated(false);
-        setAuthUser(null);
-        setAuthError('');
-      }}
-      errorMessage={errorMessage}
-      warningMessage={warningMessage}
-      warningActionLabel={warningActionLabel}
-      onWarningConfirm={confirmMissingModelSwitch}
-      onWarningDismiss={dismissMissingModelWarning}
-      settingsSaveToastState={settingsSaveToastState}
-      settingsSaveToastMessage={settingsSaveToastMessage}
-    />
+    return (
+    <>
+      <AppShell
+        sessionSidebarProps={sessionSidebarProps}
+        mainContentProps={mainContentProps}
+        llmModalProps={llmModalProps}
+        authUser={authUser ?? null}
+        onLogout={() => {
+          void logoutAppAuth();
+          clearStoredAuthToken();
+          setAuthenticated(false);
+          setAuthUser(null);
+          setAuthError('');
+        }}
+        errorMessage={errorMessage}
+        warningMessage={warningMessage}
+        warningActionLabel={warningActionLabel}
+        onWarningConfirm={confirmMissingModelSwitch}
+        onWarningDismiss={dismissMissingModelWarning}
+        settingsSaveToastState={settingsSaveToastState}
+        settingsSaveToastMessage={settingsSaveToastMessage}
+      />
+      <QuickPromptModal
+        isOpen={quickPromptOpen}
+        value={quickPromptText}
+        isSubmitting={quickPromptSubmitting}
+        onChange={setQuickPromptText}
+        onClose={() => {
+          if (quickPromptSubmitting) {
+            return;
+          }
+          setQuickPromptOpen(false);
+          setQuickPromptText('');
+        }}
+        onSubmit={() => {
+          void handleSubmitQuickPrompt();
+        }}
+      />
+    </>
   );
 }
