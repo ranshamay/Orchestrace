@@ -59,25 +59,31 @@ function useConnectedDefaultProviderModels(params: {
   const [loading, setLoading] = useState(false);
   const [resolvedFor, setResolvedFor] = useState('');
 
-  useEffect(() => {
+      useEffect(() => {
     if (!provider) {
-      setLoading(false);
-      setResolvedFor('');
-      setModels([]);
+      queueMicrotask(() => {
+        setLoading(false);
+        setResolvedFor('');
+        setModels([]);
+      });
       return;
     }
 
     if (!connectedDefaultProviders.some((entry) => entry.id === provider)) {
-      setLoading(false);
-      setResolvedFor('');
-      setModels([]);
+      queueMicrotask(() => {
+        setLoading(false);
+        setResolvedFor('');
+        setModels([]);
+      });
       return;
     }
 
     let cancelled = false;
-    setLoading(true);
-    setResolvedFor('');
-    void fetchModels(provider)
+    queueMicrotask(() => {
+      setLoading(true);
+      setResolvedFor('');
+    });
+        void fetchModels(provider)
       .then((response) => {
         if (cancelled) {
           return;

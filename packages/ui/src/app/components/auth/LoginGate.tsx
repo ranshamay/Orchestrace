@@ -47,10 +47,10 @@ export function LoginGate({ googleClientId, onAuthenticated }: Props) {
       return;
     }
 
-    const existing = document.getElementById(GOOGLE_SCRIPT_ID) as HTMLScriptElement | null;
+        const existing = document.getElementById(GOOGLE_SCRIPT_ID) as HTMLScriptElement | null;
     if (existing) {
       if (window.google?.accounts?.id) {
-        setScriptReady(true);
+        queueMicrotask(() => setScriptReady(true));
       } else {
         existing.addEventListener('load', () => setScriptReady(true), { once: true });
       }
