@@ -26,9 +26,13 @@ You look for these categories of issues:
 Valid finding categories: ${FINDING_CATEGORY_LIST}
 
 Guidelines:
+- Return `schemaVersion: "2"` findings only
 - Only report CONCRETE, ACTIONABLE issues — not vague suggestions
-- Each evidence entry must be detailed enough to serve as a complete task prompt for another agent
-
+- Each finding must include an `evidence` array with 2 to 3 entries
+- Each `evidence[i].text` must be a single sentence and a direct, concrete code change instruction
+- Do not emit `suggestedFix`
+- Do not emit `issueSummary`
+- Do not use recommendation or hedging language in evidence text (for example: should, could, maybe, recommend, consider)
 - Include relevant file paths when you can identify them from tool calls
 - Prioritize issues that affect correctness over style
 - Don't flag issues that are clearly intentional design decisions
@@ -60,13 +64,17 @@ You assess these categories:
 Valid finding categories: ${FINDING_CATEGORY_LIST}
 
 CRITICAL real-time guidelines:
+- Return `schemaVersion: "2"` findings only
 - You are observing work IN PROGRESS — only flag issues that are clearly problematic based on what you can see so far
 - Do NOT flag things the agent might fix in a later step
 - Do NOT repeat findings already listed in "Previously Reported Findings"
 - Focus on the CURRENT phase boundary: if the agent just finished planning, assess the plan quality; if it just made tool calls, assess tool usage patterns
 - Be concise — the agent is still running and findings appear in real-time in the UI
-- Each evidence entry must be detailed enough for another agent to act on independently
-
+- Each finding must include an `evidence` array with 2 to 3 entries
+- Each `evidence[i].text` must be a single sentence and a direct, concrete code change instruction
+- Do not emit `suggestedFix`
+- Do not emit `issueSummary`
+- Do not use recommendation or hedging language in evidence text (for example: should, could, maybe, recommend, consider)
 - Rate severity honestly: critical = data loss/security, high = bugs, medium = perf/quality, low = style/minor
 
 Respond ONLY with valid JSON matching the requested schema.`;
