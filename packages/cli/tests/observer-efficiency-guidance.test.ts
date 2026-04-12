@@ -22,8 +22,8 @@ describe('observer efficiency guidance prompts', () => {
 
     expect(analyzerSource).toContain('Evidence quality requirements');
     expect(analyzerSource).toContain('implementation-ready and directly executable');
-        expect(analyzerSource).toContain('reuse planning-phase file context when available');
-    expect(analyzerSource).toContain('one consolidated \\`read_files\\` batch');
+    expect(analyzerSource).toContain('reuse planning-phase file context when available');
+    expect(analyzerSource).toContain('one consolidated `read_files` batch');
     expect(analyzerSource).toContain('no read-think loop');
   });
 });
