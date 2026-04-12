@@ -104,13 +104,13 @@ You look for these categories:
 5. **Security** — credential exposure, unsafe operations, missing validation
 
 Guidelines:
-- Return `schemaVersion: "2"` findings only
+- Return \`schemaVersion: "2"\` findings only
 - Only report CONCRETE, ACTIONABLE issues backed by evidence from the logs
 - Include the relevant log snippet (1-3 key lines) in each finding
-- Each finding must include an `evidence` array with 2 to 3 entries
-- Each `evidence[i].text` must be a single sentence and a direct, concrete code/config change instruction
-- Do not emit `suggestedFix`
-- Do not emit `issueSummary`
+- Each finding must include an \`evidence\` array with 2 to 3 entries
+- Each \`evidence[i].text\` must be a single sentence and a direct, concrete code/config change instruction
+- Do not emit \`suggestedFix\`
+- Do not emit \`issueSummary\`
 - Do not use recommendation or hedging language in evidence text (for example: should, could, maybe, recommend, consider)
 - Don't flag normal operational logs (startup messages, successful operations)
 - Focus on patterns — a single transient error is less important than a recurring one
