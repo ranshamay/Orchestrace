@@ -69,7 +69,7 @@ export function buildCompletionFailureRetryHint(params: {
       return [
         'Previous attempt failed during tool execution.',
         'Inspect prior tool-call errors, fix arguments/paths, and retry only needed targeted tools.',
-        'Do not switch to broad shell reconnaissance (for example run_command/run_command_batch with rg) when existing context already covers the required files.',
+        'Prefer targeted read_file/read_files on known paths; if grep-like discovery is still needed, use scoped run_command/run_command_batch with grep/find instead of search_files loops.',
         `Failure detail: ${params.errorMessage}`,
       ].join('\n');
     case 'empty_response':
