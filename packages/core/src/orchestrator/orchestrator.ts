@@ -83,6 +83,11 @@ export interface OrchestratorConfig extends RunnerConfig {
     model?: ModelConfig;
     systemPrompt?: string;
     requireRunTests?: boolean;
+    enforceUiTestsForUiChanges?: boolean;
+    requireUiScreenshotsForUiChanges?: boolean;
+    minUiScreenshotCount?: number;
+    uiChangePatterns?: string[];
+    uiTestCommandPatterns?: string[];
   };
   /** Optional default model for tester phase when a task does not override model. */
   defaultTesterModel?: ModelConfig;
@@ -760,6 +765,27 @@ export async function orchestrate(
     const taskTesterConfig = node.tester;
     const resolvedTesterEnabled = taskTesterConfig?.enabled ?? testerConfig?.enabled ?? false;
     const resolvedTesterRequireRunTests = taskTesterConfig?.requireRunTests ?? testerConfig?.requireRunTests ?? true;
+    const resolvedTesterEnforceUiTestsForUiChanges =
+      taskTesterConfig?.enforceUiTestsForUiChanges
+      ?? testerConfig?.enforceUiTestsForUiChanges
+      ?? true;
+    const resolvedTesterRequireUiScreenshotsForUiChanges =
+      taskTesterConfig?.requireUiScreenshotsForUiChanges
+      ?? testerConfig?.requireUiScreenshotsForUiChanges
+      ?? true;
+    const resolvedTesterMinUiScreenshotCount =
+      sanitizeMinUiScreenshotCount(
+        taskTesterConfig?.minUiScreenshotCount
+        ?? testerConfig?.minUiScreenshotCount,
+      );
+    const resolvedTesterUiChangePatterns =
+      taskTesterConfig?.uiChangePatterns
+      ?? testerConfig?.uiChangePatterns
+      ?? [];
+    const resolvedTesterUiTestCommandPatterns =
+      taskTesterConfig?.uiTestCommandPatterns
+      ?? testerConfig?.uiTestCommandPatterns
+      ?? [];
     const resolvedTesterModel = taskTesterConfig?.model ?? testerConfig?.model ?? defaultTesterModel ?? implementationModel;
     const resolvedTesterSystemPrompt = testerConfig?.systemPrompt;
 
@@ -788,10 +814,17 @@ export async function orchestrate(
           return { approved: true, output };
         }
 
+        const uiChangesDetected = detectUiChanges(output.filesChanged, resolvedTesterUiChangePatterns);
+        const uiTestsRequired = uiChangesDetected && resolvedTesterEnforceUiTestsForUiChanges;
+        const screenshotsRequired = uiTestsRequired && resolvedTesterRequireUiScreenshotsForUiChanges;
+
         emit({
           type: 'task:testing',
           taskId: node.id,
           attempt,
+          uiChangesDetected,
+          uiTestsRequired,
+          screenshotsRequired,
         });
 
         const testerAgent = await spawnRoleAgent({
@@ -817,6 +850,12 @@ export async function orchestrate(
           signal,
           emit,
           requireRunTests: resolvedTesterRequireRunTests,
+          requireUiTests: uiTestsRequired,
+          requireUiScreenshots: screenshotsRequired,
+          minUiScreenshotCount: resolvedTesterMinUiScreenshotCount,
+          uiChangesDetected,
+          uiTestCommandPatterns: resolvedTesterUiTestCommandPatterns,
+          workspacePath: cwd,
         });
 
         mergeUsage(usage, testerResult.usage);
@@ -839,6 +878,15 @@ export async function orchestrate(
           testsPassed: testerVerdict.testsPassed,
           testsFailed: testerVerdict.testsFailed,
           rejectionReason: testerVerdict.rejectionReason,
+          testPlan: testerVerdict.testPlan,
+          coverageAssessment: testerVerdict.coverageAssessment,
+          qualityAssessment: testerVerdict.qualityAssessment,
+          testedAreas: testerVerdict.testedAreas,
+          executedTestCommands: testerVerdict.executedTestCommands,
+          uiChangesDetected: testerVerdict.uiChangesDetected,
+          uiTestsRequired: testerVerdict.uiTestsRequired,
+          uiTestsRun: testerVerdict.uiTestsRun,
+          screenshotPaths: testerVerdict.screenshotPaths,
         });
 
         if (testerVerdict.approved) {
@@ -970,9 +1018,81 @@ function resolveTaskRequiresWrites(task: TaskNode): boolean {
   return true;
 }
 
+const DEFAULT_UI_CHANGE_PATTERNS = [
+  'packages/ui/**',
+  '**/*.tsx',
+  '**/*.jsx',
+  '**/*.css',
+  '**/*.scss',
+  '**/*.html',
+];
+
+function detectUiChanges(filesChanged: string[] | undefined, configuredPatterns: string[]): boolean {
+  if (!Array.isArray(filesChanged) || filesChanged.length === 0) {
+    return false;
+  }
+
+  const normalizedFiles = filesChanged
+    .map((path) => normalizePathForMatching(path))
+    .filter((path) => path.length > 0);
+
+  if (normalizedFiles.length === 0) {
+    return false;
+  }
+
+  const patterns = configuredPatterns.length > 0 ? configuredPatterns : DEFAULT_UI_CHANGE_PATTERNS;
+  const compiledPatterns = patterns
+    .map((pattern) => compileGlobPattern(pattern))
+    .filter((matcher): matcher is RegExp => matcher !== null);
+
+  if (compiledPatterns.length === 0) {
+    return normalizedFiles.some((path) => path.startsWith('packages/ui/'));
+  }
+
+  return normalizedFiles.some((path) => compiledPatterns.some((matcher) => matcher.test(path)));
+}
+
+function normalizePathForMatching(value: string): string {
+  const normalized = value.replace(/\\/g, '/').replace(/^\.\//, '').trim();
+  return normalized;
+}
+
+function compileGlobPattern(pattern: string): RegExp | null {
+  const normalized = normalizePathForMatching(pattern);
+  if (normalized.length === 0) {
+    return null;
+  }
+
+  const escaped = normalized
+    .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+    .replace(/\*\*/g, '__DOUBLE_STAR__')
+    .replace(/\*/g, '[^/]*')
+    .replace(/__DOUBLE_STAR__/g, '.*')
+    .replace(/\?/g, '.');
+
+  return new RegExp(`^${escaped}$`, 'i');
+}
+
+function sanitizeMinUiScreenshotCount(value: number | undefined): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return 2;
+  }
+
+  return Math.max(1, Math.floor(value));
+}
+
 function formatTesterGateFailureMessage(verdict: {
+  testPlan: string[];
+  testedAreas: string[];
+  executedTestCommands: string[];
   testsPassed: number;
   testsFailed: number;
+  coverageAssessment?: string;
+  qualityAssessment?: string;
+  uiChangesDetected: boolean;
+  uiTestsRequired: boolean;
+  uiTestsRun: boolean;
+  screenshotPaths: string[];
   rejectionReason?: string;
   suggestedFixes?: string[];
   testOutput?: string;
@@ -983,6 +1103,43 @@ function formatTesterGateFailureMessage(verdict: {
 
   if (verdict.rejectionReason) {
     lines.push(`Reason: ${verdict.rejectionReason}`);
+  }
+
+  if (verdict.coverageAssessment) {
+    lines.push(`Coverage: ${verdict.coverageAssessment}`);
+  }
+
+  if (verdict.qualityAssessment) {
+    lines.push(`Quality: ${verdict.qualityAssessment}`);
+  }
+
+  if (verdict.testPlan.length > 0) {
+    lines.push('Test plan:');
+    for (const item of verdict.testPlan) {
+      lines.push(`- ${item}`);
+    }
+  }
+
+  if (verdict.testedAreas.length > 0) {
+    lines.push(`Tested areas: ${verdict.testedAreas.join(', ')}`);
+  }
+
+  if (verdict.executedTestCommands.length > 0) {
+    lines.push('Executed test commands:');
+    for (const command of verdict.executedTestCommands) {
+      lines.push(`- ${command}`);
+    }
+  }
+
+  lines.push(
+    `UI evidence: changesDetected=${verdict.uiChangesDetected} required=${verdict.uiTestsRequired} ran=${verdict.uiTestsRun} screenshots=${verdict.screenshotPaths.length}`,
+  );
+
+  if (verdict.screenshotPaths.length > 0) {
+    lines.push('Screenshot paths:');
+    for (const screenshotPath of verdict.screenshotPaths) {
+      lines.push(`- ${screenshotPath}`);
+    }
   }
 
   if (verdict.suggestedFixes && verdict.suggestedFixes.length > 0) {

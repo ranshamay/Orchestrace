@@ -1,6 +1,7 @@
 import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import { execFile, spawn } from 'node:child_process';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { createServer as createNetServer } from 'node:net';
 import { existsSync, watch, type FSWatcher } from 'node:fs';
 import { homedir } from 'node:os';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
@@ -73,6 +74,7 @@ import type {
   SessionDeliveryStrategy,
   SessionWorkspaceAssignmentProvenance,
   SessionWorktreePathSessionIdRelation,
+  SessionTestingPorts,
 } from './ui-server/types.js';
 import { WorkspaceManager } from './workspace-manager.js';
 import {
@@ -114,6 +116,9 @@ const GITHUB_DEVICE_AUTH_CLIENT_ID_DEFAULT = '178c6fc778ccc68e1d6a';
 const DEFAULT_UI_ADAPTIVE_CONCURRENCY = false;
 const DEFAULT_UI_BATCH_CONCURRENCY = 8;
 const DEFAULT_UI_BATCH_MIN_CONCURRENCY = 1;
+const DEFAULT_SESSION_TEST_PORT_BASE = 46000;
+const SESSION_TEST_PORT_PAIR_STRIDE = 20;
+const SESSION_TEST_PORT_SEARCH_LIMIT = 1000;
 const SUBAGENT_WORKER_PROMPT_PREVIEW_MAX_CHARS = 220;
 const SUBAGENT_WORKER_OUTPUT_PREVIEW_MAX_CHARS = 420;
 const SUBAGENT_RETRY_MAX_ATTEMPTS = 2;
@@ -230,6 +235,7 @@ function createInheritedSubAgentToolset(
     adaptiveConcurrency?: boolean;
     batchConcurrency?: number;
     batchMinConcurrency?: number;
+    commandEnv?: Record<string, string>;
     resolveGithubToken: (options?: { allowRefresh?: boolean; minimumTtlSeconds?: number }) => Promise<string | undefined>;
     sharedContextStore?: import('@orchestrace/context').SharedContextStore;
     agentId?: string;
@@ -248,6 +254,7 @@ function createInheritedSubAgentToolset(
     adaptiveConcurrency: options?.adaptiveConcurrency,
     batchConcurrency: options?.batchConcurrency,
     batchMinConcurrency: options?.batchMinConcurrency,
+    commandEnv: options.commandEnv,
     resolveGithubToken: options.resolveGithubToken,
     sharedContextStore: options.sharedContextStore,
     fileReadCache: options.fileReadCache,
@@ -328,6 +335,67 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
   const sessionStatusStreamClients = new Set<ServerResponse>();
   const logStreamClients = new Set<ServerResponse>();
     const uiStatePath = join(workspaceManager.getRootDir(), '.orchestrace', 'ui-state.json');
+
+  function collectReservedSessionTestingPorts(excludeSessionId?: string): Set<number> {
+    const used = new Set<number>();
+    for (const [sessionId, session] of workSessions) {
+      if (excludeSessionId && sessionId === excludeSessionId) {
+        continue;
+      }
+      if (session.status !== 'running') {
+        continue;
+      }
+      if (!session.testingPorts) {
+        continue;
+      }
+      used.add(session.testingPorts.basePort);
+      used.add(session.testingPorts.apiPort);
+      used.add(session.testingPorts.uiPort);
+    }
+    return used;
+  }
+
+  async function allocateSessionTestingPorts(
+    sessionId: string,
+    preferred?: SessionTestingPorts,
+  ): Promise<SessionTestingPorts> {
+    const used = collectReservedSessionTestingPorts(sessionId);
+    const isPreferredAvailable = async (candidate: SessionTestingPorts): Promise<boolean> => {
+      if (used.has(candidate.basePort) || used.has(candidate.apiPort) || used.has(candidate.uiPort)) {
+        return false;
+      }
+
+      const [apiOpen, uiOpen] = await Promise.all([
+        isLocalTcpPortAvailable(candidate.apiPort),
+        isLocalTcpPortAvailable(candidate.uiPort),
+      ]);
+      return apiOpen && uiOpen;
+    };
+
+    if (preferred && await isPreferredAvailable(preferred)) {
+      return preferred;
+    }
+
+    const baseStart = resolveSessionTestPortBase();
+    for (let step = 0; step < SESSION_TEST_PORT_SEARCH_LIMIT; step += 1) {
+      const basePort = baseStart + (step * SESSION_TEST_PORT_PAIR_STRIDE);
+      const candidate: SessionTestingPorts = {
+        basePort,
+        apiPort: basePort + 1,
+        uiPort: basePort + 2,
+      };
+
+      if (candidate.uiPort > 65535) {
+        break;
+      }
+
+      if (await isPreferredAvailable(candidate)) {
+        return candidate;
+      }
+    }
+
+    throw new Error('Unable to allocate isolated testing ports for this session.');
+  }
 
   function broadcastLogStreamEvent(event: string, payload: unknown): void {
     for (const client of [...logStreamClients]) {
@@ -546,6 +614,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
             ?? resolvePlanningNoToolGuardModeDefault(),
           quickStartMode: c.quickStartMode,
           quickStartMaxPreDelegationToolCalls: c.quickStartMaxPreDelegationToolCalls,
+          testingPorts: normalizeSessionTestingPorts(c.testingPorts),
           adaptiveConcurrency: c.adaptiveConcurrency,
           batchConcurrency: c.batchConcurrency,
           batchMinConcurrency: c.batchMinConcurrency,
@@ -1253,6 +1322,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       planningNoToolGuardMode: session.planningNoToolGuardMode,
       quickStartMode: session.quickStartMode,
       quickStartMaxPreDelegationToolCalls: session.quickStartMaxPreDelegationToolCalls,
+      testingPorts: session.testingPorts,
       adaptiveConcurrency: session.adaptiveConcurrency,
       batchConcurrency: session.batchConcurrency,
       batchMinConcurrency: session.batchMinConcurrency,
@@ -1693,6 +1763,16 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       };
     }
 
+    let sessionTestingPorts: SessionTestingPorts;
+    try {
+      sessionTestingPorts = await allocateSessionTestingPorts(session.id, session.testingPorts);
+    } catch (error) {
+      return {
+        error: `Failed to allocate session testing ports: ${toErrorMessage(error)}`,
+        statusCode: 500,
+      };
+    }
+
     const promptParts = cloneChatContentParts(params.promptParts ?? []);
     const displayPrompt = asString(params.displayPrompt);
     const executionPrompt = asString(params.executionPrompt);
@@ -1710,6 +1790,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     session.workspacePath = managedWorkspace.workspacePath;
     session.worktreePath = managedWorkspace.worktreePath;
     session.worktreeBranch = managedWorkspace.worktreeBranch;
+    session.testingPorts = sessionTestingPorts;
     session.cleanupWorktree = managedWorkspace.cleanupWorktree;
     session.prompt = normalizedDisplayPrompt;
     session.executionPromptOverride = normalizedExecutionPrompt;
@@ -1870,6 +1951,16 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     const normalizedPrompt = promptValidation.normalizedPrompt;
 
     const id = randomUUID();
+    let sessionTestingPorts: SessionTestingPorts;
+    try {
+      sessionTestingPorts = await allocateSessionTestingPorts(id);
+    } catch (error) {
+      return {
+        error: `Failed to allocate session testing ports: ${toErrorMessage(error)}`,
+        statusCode: 500,
+      };
+    }
+
     const adaptiveConcurrency = request.adaptiveConcurrency ?? uiPreferences.adaptiveConcurrency;
     const batchConcurrency = normalizePositiveSetting(request.batchConcurrency, uiPreferences.batchConcurrency);
     const batchMinConcurrency = Math.min(
@@ -1925,6 +2016,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       planningNoToolGuardMode,
       quickStartMode,
       quickStartMaxPreDelegationToolCalls,
+      testingPorts: sessionTestingPorts,
       adaptiveConcurrency,
       batchConcurrency,
       batchMinConcurrency,
@@ -3473,6 +3565,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
               sharedContextStore,
             });
             sessionContextStates.set(session.id, managedContext.nextState);
+            const sessionCommandEnv = buildSessionCommandEnvFromTestingPorts(session.testingPorts);
 
             const chatAgent = await llm.spawnAgent({
               provider: session.provider,
@@ -3485,6 +3578,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                 adaptiveConcurrency: session.adaptiveConcurrency,
                 batchConcurrency: session.batchConcurrency,
                 batchMinConcurrency: session.batchMinConcurrency,
+                commandEnv: sessionCommandEnv,
                           resolveGithubToken: (resolveOptions) => githubAuthManager.resolveApiKey(GITHUB_PROVIDER_ID, resolveOptions),
 
                 sharedContextStore: sessionSharedContextStores.get(session.id),
@@ -3522,6 +3616,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                     adaptiveConcurrency: session.adaptiveConcurrency,
                     batchConcurrency: session.batchConcurrency,
                     batchMinConcurrency: session.batchMinConcurrency,
+                    commandEnv: sessionCommandEnv,
                               resolveGithubToken: (resolveOptions) => githubAuthManager.resolveApiKey(GITHUB_PROVIDER_ID, resolveOptions),
 
                     sharedContextStore: sessionSharedContextStores.get(session.id),
@@ -3884,6 +3979,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
             sharedContextStore,
           });
           sessionContextStates.set(session.id, managedContext.nextState);
+          const sessionCommandEnv = buildSessionCommandEnvFromTestingPorts(session.testingPorts);
 
           const chatAgent = await llm.spawnAgent({
             provider: session.provider,
@@ -3896,6 +3992,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
               adaptiveConcurrency: session.adaptiveConcurrency,
               batchConcurrency: session.batchConcurrency,
               batchMinConcurrency: session.batchMinConcurrency,
+              commandEnv: sessionCommandEnv,
                         resolveGithubToken: (resolveOptions) => githubAuthManager.resolveApiKey(GITHUB_PROVIDER_ID, resolveOptions),
 
               sharedContextStore: sessionSharedContextStores.get(session.id),
@@ -3933,6 +4030,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                   adaptiveConcurrency: session.adaptiveConcurrency,
                   batchConcurrency: session.batchConcurrency,
                   batchMinConcurrency: session.batchMinConcurrency,
+                  commandEnv: sessionCommandEnv,
                             resolveGithubToken: (resolveOptions) => githubAuthManager.resolveApiKey(GITHUB_PROVIDER_ID, resolveOptions),
 
                   sharedContextStore: sessionSharedContextStores.get(session.id),
@@ -4822,6 +4920,7 @@ function toPersistedSession(session: WorkSession): PersistedWorkSession {
     planningNoToolGuardMode: session.planningNoToolGuardMode,
     quickStartMode: session.quickStartMode,
     quickStartMaxPreDelegationToolCalls: session.quickStartMaxPreDelegationToolCalls,
+    testingPorts: session.testingPorts,
     adaptiveConcurrency: session.adaptiveConcurrency,
     batchConcurrency: session.batchConcurrency,
     batchMinConcurrency: session.batchMinConcurrency,
@@ -4904,6 +5003,7 @@ function hydratePersistedSession(session: PersistedWorkSession): WorkSession {
     ),
     worktreePath: asString(session.worktreePath) || undefined,
     worktreeBranch: asString(session.worktreeBranch) || undefined,
+    testingPorts: normalizeSessionTestingPorts((session as unknown as { testingPorts?: unknown }).testingPorts),
     creationReason: normalizeSessionCreationReason(session.creationReason),
     sourceSessionId: asString(session.sourceSessionId) || undefined,
     agentGraph: normalizeSessionAgentGraphNodes(session.agentGraph),
@@ -5688,6 +5788,66 @@ function normalizePositiveSetting(value: unknown, fallback: number): number {
   return parsePositiveSetting(value) ?? fallback;
 }
 
+function normalizeSessionTestingPorts(value: unknown): SessionTestingPorts | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+
+  const basePort = parsePositiveSetting(value.basePort);
+  const apiPort = parsePositiveSetting(value.apiPort);
+  const uiPort = parsePositiveSetting(value.uiPort);
+  if (!basePort || !apiPort || !uiPort) {
+    return undefined;
+  }
+
+  if (basePort > 65535 || apiPort > 65535 || uiPort > 65535) {
+    return undefined;
+  }
+
+  return {
+    basePort,
+    apiPort,
+    uiPort,
+  };
+}
+
+function buildSessionCommandEnvFromTestingPorts(ports: SessionTestingPorts | undefined): Record<string, string> | undefined {
+  if (!ports) {
+    return undefined;
+  }
+
+  return {
+    ORCHESTRACE_PORT_BASE: String(ports.basePort),
+    ORCHESTRACE_API_PORT: String(ports.apiPort),
+    ORCHESTRACE_UI_PORT: String(ports.uiPort),
+    PORT: String(ports.apiPort),
+    VITE_PORT: String(ports.uiPort),
+    PLAYWRIGHT_BASE_URL: `http://127.0.0.1:${ports.uiPort}`,
+  };
+}
+
+function resolveSessionTestPortBase(): number {
+  return parsePositiveSetting(process.env.ORCHESTRACE_SESSION_TEST_PORT_BASE)
+    ?? DEFAULT_SESSION_TEST_PORT_BASE;
+}
+
+async function isLocalTcpPortAvailable(port: number): Promise<boolean> {
+  if (!Number.isInteger(port) || port <= 0 || port > 65535) {
+    return false;
+  }
+
+  return await new Promise<boolean>((resolvePort) => {
+    const server = createNetServer();
+    server.once('error', () => {
+      resolvePort(false);
+    });
+    server.once('listening', () => {
+      server.close(() => resolvePort(true));
+    });
+    server.listen(port, '127.0.0.1');
+  });
+}
+
 function resolveLongTurnTimeoutMs(): number {
   return resolveConfiguredTimeoutMs(
     ['ORCHESTRACE_LLM_LONG_TURN_TIMEOUT_MS', 'ORCHESTRACE_LLM_TIMEOUT_MS'],
@@ -6336,6 +6496,29 @@ function toUiEvent(runId: string, event: DagEvent): UiDagEvent | undefined {
     attempt: event.type === 'task:failed' ? event.attempt : undefined,
     maxRetries: event.type === 'task:failed' ? event.maxRetries : undefined,
     totalDurationMs: event.type === 'task:failed' ? event.totalDurationMs : undefined,
+    testsPassed: event.type === 'task:tester-verdict' ? event.testsPassed : undefined,
+    testsFailed: event.type === 'task:tester-verdict' ? event.testsFailed : undefined,
+    rejectionReason: event.type === 'task:tester-verdict' ? event.rejectionReason : undefined,
+    testPlan: event.type === 'task:tester-verdict' ? event.testPlan : undefined,
+    coverageAssessment: event.type === 'task:tester-verdict' ? event.coverageAssessment : undefined,
+    qualityAssessment: event.type === 'task:tester-verdict' ? event.qualityAssessment : undefined,
+    testedAreas: event.type === 'task:tester-verdict' ? event.testedAreas : undefined,
+    executedTestCommands: event.type === 'task:tester-verdict' ? event.executedTestCommands : undefined,
+    uiChangesDetected:
+      event.type === 'task:testing'
+      ? event.uiChangesDetected
+      : event.type === 'task:tester-verdict'
+        ? event.uiChangesDetected
+        : undefined,
+    uiTestsRequired:
+      event.type === 'task:testing'
+      ? event.uiTestsRequired
+      : event.type === 'task:tester-verdict'
+        ? event.uiTestsRequired
+        : undefined,
+    uiTestsRun: event.type === 'task:tester-verdict' ? event.uiTestsRun : undefined,
+    screenshotsRequired: event.type === 'task:testing' ? event.screenshotsRequired : undefined,
+    screenshotPaths: event.type === 'task:tester-verdict' ? event.screenshotPaths : undefined,
     toolName: event.type === 'task:tool-call' ? event.toolName : undefined,
     toolStatus: event.type === 'task:tool-call' ? event.status : undefined,
     toolCallId: event.type === 'task:tool-call' ? event.toolCallId : undefined,
@@ -6359,14 +6542,21 @@ function toUiEvent(runId: string, event: DagEvent): UiDagEvent | undefined {
       return { ...base, message: tagged(`${event.taskId}: approved`) };
     case 'task:implementation-attempt':
       return { ...base, message: tagged(`${event.taskId}: implementation attempt ${event.attempt}/${event.maxAttempts}`) };
-    case 'task:testing':
-      return { ...base, message: tagged(`${event.taskId}: tester gate attempt ${event.attempt}`) };
+    case 'task:testing': {
+      const policyNote = event.uiTestsRequired
+        ? ' (UI changes detected; UI tests required)'
+        : '';
+      return { ...base, message: tagged(`${event.taskId}: tester gate attempt ${event.attempt}${policyNote}`) };
+    }
     case 'task:tester-verdict':
       return {
         ...base,
         message: tagged(
           `${event.taskId}: tester ${event.approved ? 'approved' : 'rejected'} `
           + `(passed=${event.testsPassed}, failed=${event.testsFailed})`
+          + (event.uiTestsRequired
+            ? ` uiTests=${event.uiTestsRun ? 'ran' : 'missing'} screenshots=${event.screenshotPaths?.length ?? 0}`
+            : '')
           + (event.rejectionReason ? ` reason=${event.rejectionReason}` : ''),
         ),
       };
@@ -7580,6 +7770,7 @@ function serializeWorkSession(session: WorkSession, todos: AgentTodoItem[] = [])
     planningNoToolGuardMode: session.planningNoToolGuardMode,
     quickStartMode: session.quickStartMode,
     quickStartMaxPreDelegationToolCalls: session.quickStartMaxPreDelegationToolCalls,
+    testingPorts: session.testingPorts,
     adaptiveConcurrency: session.adaptiveConcurrency,
     batchConcurrency: session.batchConcurrency,
     batchMinConcurrency: session.batchMinConcurrency,

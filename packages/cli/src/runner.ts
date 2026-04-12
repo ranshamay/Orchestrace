@@ -232,6 +232,7 @@ async function main(): Promise<void> {
 
     const config: SessionConfig = createdEvent.payload.config;
   const controller = new AbortController();
+  const sessionCommandEnv = buildSessionCommandEnvFromTestingPorts(config.testingPorts);
 
   try {
         const workspaceCheck = await validateWorkspaceRuntime(config.workspacePath);
@@ -551,7 +552,13 @@ async function main(): Promise<void> {
     command: string,
     timeout: number,
   ): Promise<{ ok: boolean; stdout: string; stderr: string; error?: string }> {
-    return runShellCommandWithTimeoutWithDeps(command, config.workspacePath, timeout, defaultRunnerShellExecutionDependencies);
+    return runShellCommandWithTimeoutWithDeps(
+      command,
+      config.workspacePath,
+      timeout,
+      defaultRunnerShellExecutionDependencies,
+      sessionCommandEnv,
+    );
   }
 
 
@@ -1595,6 +1602,7 @@ async function main(): Promise<void> {
         adaptiveConcurrency: config.adaptiveConcurrency,
         batchConcurrency: config.batchConcurrency,
         batchMinConcurrency: config.batchMinConcurrency,
+        commandEnv: sessionCommandEnv,
                 resolveGithubToken: (resolveOptions) => githubAuthManager.resolveApiKey('github', resolveOptions),
 
       });
@@ -1728,7 +1736,7 @@ async function main(): Promise<void> {
           }],
         ]);
       } else {
-        outputs = await runShellCommandRoute(shellCommand, config.workspacePath);
+        outputs = await runShellCommandRoute(shellCommand, config.workspacePath, sessionCommandEnv);
       }
     } else {
       outputs = await orchestrate(graph, {
@@ -1750,6 +1758,11 @@ async function main(): Promise<void> {
         enabled: testerAgentConfig.enabled,
         model: testerAgentModel,
         requireRunTests: testerAgentConfig.requireRunTests,
+        enforceUiTestsForUiChanges: testerAgentConfig.enforceUiTestsForUiChanges,
+        requireUiScreenshotsForUiChanges: testerAgentConfig.requireUiScreenshotsForUiChanges,
+        minUiScreenshotCount: testerAgentConfig.minUiScreenshotCount,
+        uiChangePatterns: testerAgentConfig.uiChangePatterns,
+        uiTestCommandPatterns: testerAgentConfig.uiTestCommandPatterns,
       },
       quickStartMode,
       quickStartMaxPreDelegationToolCalls,
@@ -1774,6 +1787,7 @@ async function main(): Promise<void> {
         adaptiveConcurrency: config.adaptiveConcurrency,
         batchConcurrency: config.batchConcurrency,
         batchMinConcurrency: config.batchMinConcurrency,
+        commandEnv: sessionCommandEnv,
                 resolveGithubToken: (resolveOptions) => githubAuthManager.resolveApiKey('github', resolveOptions),
         permissions: role === 'tester'
           ? {
@@ -1822,6 +1836,7 @@ async function main(): Promise<void> {
             adaptiveConcurrency: config.adaptiveConcurrency,
             batchConcurrency: config.batchConcurrency,
             batchMinConcurrency: config.batchMinConcurrency,
+                commandEnv: sessionCommandEnv,
                     resolveGithubToken: (resolveOptions) => githubAuthManager.resolveApiKey('github', resolveOptions),
 
             sharedContextStore,
@@ -2507,6 +2522,55 @@ function appendTesterEvidenceToPrDescription(
   lines.push(verdict.testOutput || '(no tester output captured)');
   lines.push('```', '', '</details>', '');
 
+  if (verdict.coverageAssessment) {
+    lines.push('- Coverage assessment:');
+    lines.push(`  ${verdict.coverageAssessment}`);
+  }
+
+  if (verdict.qualityAssessment) {
+    lines.push('- Quality assessment:');
+    lines.push(`  ${verdict.qualityAssessment}`);
+  }
+
+  if (verdict.testPlan.length > 0) {
+    lines.push('- Test plan executed:');
+    for (const planItem of verdict.testPlan) {
+      lines.push(`  - ${planItem}`);
+    }
+  }
+
+  if (verdict.testedAreas.length > 0) {
+    lines.push('- Tested areas:');
+    lines.push(`  ${verdict.testedAreas.join(', ')}`);
+  }
+
+  if (verdict.executedTestCommands.length > 0) {
+    lines.push('- Executed test commands:');
+    for (const command of verdict.executedTestCommands) {
+      lines.push(`  - ${command}`);
+    }
+  }
+
+  lines.push('- UI validation policy:');
+  lines.push(`  uiChangesDetected=${verdict.uiChangesDetected}`);
+  lines.push(`  uiTestsRequired=${verdict.uiTestsRequired}`);
+  lines.push(`  uiTestsRun=${verdict.uiTestsRun}`);
+
+  if (verdict.screenshotPaths.length > 0) {
+    lines.push('- UI screenshots:');
+    for (const screenshotPath of verdict.screenshotPaths) {
+      lines.push(`  - ${screenshotPath}`);
+    }
+
+    lines.push('', '<details>', '<summary>UI Snapshot Evidence</summary>', '');
+    verdict.screenshotPaths.forEach((screenshotPath, index) => {
+      const normalizedPath = screenshotPath.replace(/\\/g, '/');
+      lines.push(`![UI snapshot ${index + 1}](${normalizedPath})`);
+      lines.push('');
+    });
+    lines.push('</details>', '');
+  }
+
   return lines.join('\n').trim();
 }
 
@@ -2619,6 +2683,19 @@ function toUiEvent(
   attempt?: number;
   maxRetries?: number;
   totalDurationMs?: number;
+  testsPassed?: number;
+  testsFailed?: number;
+  rejectionReason?: string;
+  testPlan?: string[];
+  coverageAssessment?: string;
+  qualityAssessment?: string;
+  testedAreas?: string[];
+  executedTestCommands?: string[];
+  uiChangesDetected?: boolean;
+  uiTestsRequired?: boolean;
+  uiTestsRun?: boolean;
+  screenshotsRequired?: boolean;
+  screenshotPaths?: string[];
   toolName?: string;
   toolStatus?: 'started' | 'result';
   toolCallId?: string;
@@ -2638,6 +2715,29 @@ function toUiEvent(
     attempt: event.type === 'task:failed' ? event.attempt : undefined,
     maxRetries: event.type === 'task:failed' ? event.maxRetries : undefined,
     totalDurationMs: event.type === 'task:failed' ? event.totalDurationMs : undefined,
+    testsPassed: event.type === 'task:tester-verdict' ? event.testsPassed : undefined,
+    testsFailed: event.type === 'task:tester-verdict' ? event.testsFailed : undefined,
+    rejectionReason: event.type === 'task:tester-verdict' ? event.rejectionReason : undefined,
+    testPlan: event.type === 'task:tester-verdict' ? event.testPlan : undefined,
+    coverageAssessment: event.type === 'task:tester-verdict' ? event.coverageAssessment : undefined,
+    qualityAssessment: event.type === 'task:tester-verdict' ? event.qualityAssessment : undefined,
+    testedAreas: event.type === 'task:tester-verdict' ? event.testedAreas : undefined,
+    executedTestCommands: event.type === 'task:tester-verdict' ? event.executedTestCommands : undefined,
+    uiChangesDetected:
+      event.type === 'task:testing'
+      ? event.uiChangesDetected
+      : event.type === 'task:tester-verdict'
+        ? event.uiChangesDetected
+        : undefined,
+    uiTestsRequired:
+      event.type === 'task:testing'
+      ? event.uiTestsRequired
+      : event.type === 'task:tester-verdict'
+        ? event.uiTestsRequired
+        : undefined,
+    uiTestsRun: event.type === 'task:tester-verdict' ? event.uiTestsRun : undefined,
+    screenshotsRequired: event.type === 'task:testing' ? event.screenshotsRequired : undefined,
+    screenshotPaths: event.type === 'task:tester-verdict' ? event.screenshotPaths : undefined,
     toolName: event.type === 'task:tool-call' ? event.toolName : undefined,
     toolStatus: event.type === 'task:tool-call' ? event.status : undefined,
     toolCallId: event.type === 'task:tool-call' ? event.toolCallId : undefined,
@@ -2655,13 +2755,21 @@ function toUiEvent(
     case 'task:approval-requested': return { ...base, message: tag(`${event.taskId}: approval requested`) };
     case 'task:approved': return { ...base, message: tag(`${event.taskId}: approved`) };
     case 'task:implementation-attempt': return { ...base, message: tag(`${event.taskId}: implementation attempt ${event.attempt}/${event.maxAttempts}`) };
-    case 'task:testing': return { ...base, message: tag(`${event.taskId}: tester gate attempt ${event.attempt}`) };
+    case 'task:testing': {
+      const policyNote = event.uiTestsRequired
+        ? ' (UI changes detected; UI tests required)'
+        : '';
+      return { ...base, message: tag(`${event.taskId}: tester gate attempt ${event.attempt}${policyNote}`) };
+    }
     case 'task:tester-verdict':
       return {
         ...base,
         message: tag(
           `${event.taskId}: tester ${event.approved ? 'approved' : 'rejected'} `
           + `(passed=${event.testsPassed}, failed=${event.testsFailed})`
+          + (event.uiTestsRequired
+            ? ` uiTests=${event.uiTestsRun ? 'ran' : 'missing'} screenshots=${event.screenshotPaths?.length ?? 0}`
+            : '')
           + (event.rejectionReason ? ` reason=${event.rejectionReason}` : ''),
         ),
       };
@@ -2715,6 +2823,7 @@ export async function runShellCommandWithTimeoutWithDeps(
   cwd: string,
   timeout: number,
   deps: RunnerShellExecutionDependencies,
+  commandEnv?: Record<string, string>,
 ): Promise<{ ok: boolean; stdout: string; stderr: string; error?: string }> {
   const validation = validateShellInput(command);
   if (!validation.ok || !validation.parsed) {
@@ -2732,6 +2841,7 @@ export async function runShellCommandWithTimeoutWithDeps(
       cwd,
       timeout,
       maxBuffer: 5 * 1024 * 1024,
+      env: commandEnv ? { ...process.env, ...commandEnv } : undefined,
     });
     return { ok: true, stdout, stderr };
   } catch (err) {
@@ -2749,6 +2859,7 @@ export async function runShellCommandRouteWithDeps(
   command: string,
   cwd: string,
   deps: RunnerShellExecutionDependencies,
+  commandEnv?: Record<string, string>,
 ): Promise<Map<string, TaskOutput>> {
   const startedAt = Date.now();
   const validation = validateShellInput(command);
@@ -2768,7 +2879,10 @@ export async function runShellCommandRouteWithDeps(
   }
 
   try {
-    const { stdout, stderr } = await deps.execFile(validation.parsed.program, validation.parsed.args, { cwd });
+    const { stdout, stderr } = await deps.execFile(validation.parsed.program, validation.parsed.args, {
+      cwd,
+      env: commandEnv ? { ...process.env, ...commandEnv } : undefined,
+    });
     const text = `${stdout ?? ''}${stderr ?? ''}`.trim();
     return new Map([
       ['task', {
@@ -2795,8 +2909,12 @@ export async function runShellCommandRouteWithDeps(
   }
 }
 
-async function runShellCommandRoute(command: string, cwd: string): Promise<Map<string, TaskOutput>> {
-  return runShellCommandRouteWithDeps(command, cwd, defaultRunnerShellExecutionDependencies);
+async function runShellCommandRoute(
+  command: string,
+  cwd: string,
+  commandEnv?: Record<string, string>,
+): Promise<Map<string, TaskOutput>> {
+  return runShellCommandRouteWithDeps(command, cwd, defaultRunnerShellExecutionDependencies, commandEnv);
 }
 
 
@@ -2860,6 +2978,30 @@ export function assessGitHubStatusCheckRollup(rollup: unknown): {
     passing,
     pending,
     failing,
+  };
+}
+
+function buildSessionCommandEnvFromTestingPorts(
+  ports: SessionConfig['testingPorts'],
+): Record<string, string> | undefined {
+  if (!ports) {
+    return undefined;
+  }
+
+  const basePort = Number.isFinite(ports.basePort) ? Math.floor(ports.basePort) : NaN;
+  const apiPort = Number.isFinite(ports.apiPort) ? Math.floor(ports.apiPort) : NaN;
+  const uiPort = Number.isFinite(ports.uiPort) ? Math.floor(ports.uiPort) : NaN;
+  if (basePort <= 0 || apiPort <= 0 || uiPort <= 0) {
+    return undefined;
+  }
+
+  return {
+    ORCHESTRACE_PORT_BASE: String(basePort),
+    ORCHESTRACE_API_PORT: String(apiPort),
+    ORCHESTRACE_UI_PORT: String(uiPort),
+    PORT: String(apiPort),
+    VITE_PORT: String(uiPort),
+    PLAYWRIGHT_BASE_URL: `http://127.0.0.1:${uiPort}`,
   };
 }
 

@@ -17,12 +17,23 @@ export function SessionSummaryCard({ selectedSession, selectedFailureType, selec
 
   const isTerminal = normalizeSessionStatus(selectedSession.status) === 'failed' || normalizeSessionStatus(selectedSession.status) === 'cancelled';
   const errorDetail = selectedSession.error || selectedLlmStatus.detail;
-  const latestTesterVerdictMessage = [...selectedSession.events]
+  const latestTesterVerdict = [...selectedSession.events]
     .reverse()
-    .find((event) => event.type === 'task:tester-verdict')
-    ?.message;
-  const testerRejected = latestTesterVerdictMessage ? /rejected/i.test(latestTesterVerdictMessage) : false;
-  const testerApproved = latestTesterVerdictMessage ? /approved/i.test(latestTesterVerdictMessage) : false;
+    .find((event) => event.type === 'task:tester-verdict');
+  const latestTesterVerdictMessage = latestTesterVerdict?.message;
+  const testerRejected = latestTesterVerdict
+    ? latestTesterVerdict.testsFailed !== undefined
+      ? latestTesterVerdict.testsFailed > 0
+      : /rejected/i.test(latestTesterVerdictMessage ?? '')
+    : false;
+  const testerApproved = latestTesterVerdict
+    ? latestTesterVerdict.testsFailed !== undefined
+      ? latestTesterVerdict.testsFailed === 0
+      : /approved/i.test(latestTesterVerdictMessage ?? '')
+    : false;
+  const testerPlan = latestTesterVerdict?.testPlan ?? [];
+  const testerCommands = latestTesterVerdict?.executedTestCommands ?? [];
+  const testerScreenshots = latestTesterVerdict?.screenshotPaths ?? [];
 
   return (
     <div className="mt-1.5 space-y-1">
@@ -53,6 +64,42 @@ export function SessionSummaryCard({ selectedSession, selectedFailureType, selec
       {isTerminal && errorDetail && (
         <div className="rounded border border-red-200 bg-red-50 px-2 py-1.5 text-[11px] text-red-700 dark:border-red-800 dark:bg-red-950/40 dark:text-red-300">
           {errorDetail}
+        </div>
+      )}
+
+      {latestTesterVerdict && (
+        <div className="rounded border border-slate-200 bg-white px-2 py-1.5 text-[11px] text-slate-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200">
+          <div className="mb-1 text-[10px] font-bold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+            Tested Summary
+          </div>
+          <div className="space-y-0.5">
+            <div>
+              Tests: passed={latestTesterVerdict.testsPassed ?? 0} failed={latestTesterVerdict.testsFailed ?? 0}
+            </div>
+            {latestTesterVerdict.coverageAssessment && (
+              <div>Coverage: {latestTesterVerdict.coverageAssessment}</div>
+            )}
+            {latestTesterVerdict.qualityAssessment && (
+              <div>Quality: {latestTesterVerdict.qualityAssessment}</div>
+            )}
+            {testerPlan.length > 0 && (
+              <div>Plan: {testerPlan.slice(0, 4).join(' | ')}</div>
+            )}
+            {testerCommands.length > 0 && (
+              <div>Commands: {testerCommands.slice(0, 3).join(' | ')}</div>
+            )}
+            {(latestTesterVerdict.uiTestsRequired || latestTesterVerdict.uiChangesDetected) && (
+              <div>
+                UI: required={latestTesterVerdict.uiTestsRequired ? 'yes' : 'no'} run={latestTesterVerdict.uiTestsRun ? 'yes' : 'no'} screenshots={testerScreenshots.length}
+              </div>
+            )}
+            {testerScreenshots.length > 0 && (
+              <div>Screenshots: {testerScreenshots.slice(0, 3).join(' | ')}</div>
+            )}
+            {latestTesterVerdict.rejectionReason && (
+              <div>Reason: {latestTesterVerdict.rejectionReason}</div>
+            )}
+          </div>
         </div>
       )}
     </div>

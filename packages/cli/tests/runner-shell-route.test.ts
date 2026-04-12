@@ -32,7 +32,7 @@ describe('runner shell execution guard', () => {
     const task = outputs.get('task');
     expect(task?.status).toBe('completed');
     expect(task?.response).toContain('status');
-    expect(execFile).toHaveBeenCalledWith('git', ['status'], { cwd: '/tmp/workspace' });
+    expect(execFile).toHaveBeenCalledWith('git', ['status'], { cwd: '/tmp/workspace', env: undefined });
     expect(logError).not.toHaveBeenCalled();
   });
 
@@ -71,7 +71,30 @@ describe('runner shell execution guard', () => {
       cwd: '/tmp/workspace',
       timeout: 1500,
       maxBuffer: 5 * 1024 * 1024,
+      env: undefined,
     });
     expect(logError).not.toHaveBeenCalled();
+  });
+
+  it('runShellCommandWithTimeoutWithDeps passes session command env when provided', async () => {
+    const execFile = vi.fn(async () => ({ stdout: 'ok\n', stderr: '' }));
+
+    await runShellCommandWithTimeoutWithDeps(
+      'pnpm test',
+      '/tmp/workspace',
+      1500,
+      {
+        execFile: execFile as never,
+        logError: vi.fn(),
+      },
+      {
+        ORCHESTRACE_API_PORT: '46001',
+        ORCHESTRACE_UI_PORT: '46002',
+      },
+    );
+
+    const callOptions = execFile.mock.calls[0]?.[2] as { env?: Record<string, string> } | undefined;
+    expect(callOptions?.env?.ORCHESTRACE_API_PORT).toBe('46001');
+    expect(callOptions?.env?.ORCHESTRACE_UI_PORT).toBe('46002');
   });
 });

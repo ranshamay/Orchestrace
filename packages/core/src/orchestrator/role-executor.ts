@@ -1,3 +1,5 @@
+import { access } from 'node:fs/promises';
+import { isAbsolute, relative, resolve } from 'node:path';
 import type {
   DagEvent,
   ModelConfig,
@@ -29,6 +31,14 @@ import {
   shouldRetryAfterCompletionFailure,
 } from './completion-retry-policy.js';
 import type { TaskEffort } from './task-complexity.js';
+
+const DEFAULT_UI_TEST_COMMAND_PATTERNS = [
+  'playwright',
+  'cypress',
+  'test:ui',
+  '--ui',
+  '@orchestrace/ui test',
+];
 
 export interface SpawnRoleAgentParams {
   llm: LlmAdapter;
@@ -480,6 +490,12 @@ export async function executeTesterRole(params: {
   signal?: AbortSignal;
   emit: (event: DagEvent) => void;
   requireRunTests: boolean;
+  requireUiTests: boolean;
+  requireUiScreenshots: boolean;
+  minUiScreenshotCount: number;
+  uiChangesDetected: boolean;
+  uiTestCommandPatterns: string[];
+  workspacePath: string;
 }): Promise<ExecuteTesterRoleResult> {
   const {
     task,
@@ -490,6 +506,12 @@ export async function executeTesterRole(params: {
     signal,
     emit,
     requireRunTests,
+    requireUiTests,
+    requireUiScreenshots,
+    minUiScreenshotCount,
+    uiChangesDetected,
+    uiTestCommandPatterns,
+    workspacePath,
   } = params;
 
   const testerPrompt = buildTesterPrompt({
@@ -499,11 +521,17 @@ export async function executeTesterRole(params: {
     changedFiles: implementationOutput.filesChanged,
     validationResults: implementationOutput.validationResults,
     attempt,
+    uiChangesDetected,
+    uiTestsRequired: requireUiTests,
+    screenshotEvidenceRequired: requireUiScreenshots,
+    minScreenshotCount: minUiScreenshotCount,
+    uiTestCommandPatterns,
     previousFailureReason: undefined,
   });
 
   const toolCalls: ReplayToolCallRecord[] = [];
   const testCommandOutputs: string[] = [];
+  const executedTestCommands: string[] = [];
   let ranTestCommand = false;
 
   const result = await executeRole({
@@ -518,6 +546,10 @@ export async function executeTesterRole(params: {
       toolCalls.push(replayRecord);
 
       const isTestCommandTool = event.toolName === 'run_command' || event.toolName === 'run_command_batch';
+      if (isTestCommandTool && event.type === 'started') {
+        executedTestCommands.push(...extractTestCommandsFromToolCall(event.toolName, event.arguments));
+      }
+
       if (isTestCommandTool && event.type === 'result') {
         ranTestCommand = true;
         if (typeof event.result === 'string' && event.result.trim().length > 0) {
@@ -529,13 +561,33 @@ export async function executeTesterRole(params: {
 
   const parsedVerdict = parseTesterVerdict(result.text);
   const condensedOutput = collapseTesterOutput(testCommandOutputs);
+  const mergedExecutedCommands = dedupeStrings(executedTestCommands);
+  const effectiveUiPatterns = uiTestCommandPatterns.length > 0
+    ? uiTestCommandPatterns
+    : DEFAULT_UI_TEST_COMMAND_PATTERNS;
+  const uiTestCommandRan = hasUiTestCommandEvidence(mergedExecutedCommands, effectiveUiPatterns);
+
+  const parsedScreenshotEvidence = await resolveScreenshotEvidence(
+    parsedVerdict?.screenshotPaths ?? [],
+    workspacePath,
+  );
+  const screenshotPaths = parsedScreenshotEvidence.existingPaths;
 
   let verdict: TesterVerdict;
   if (requireRunTests && !ranTestCommand) {
     verdict = {
       approved: false,
+      testPlan: [],
+      testedAreas: [],
+      executedTestCommands: mergedExecutedCommands,
       testsPassed: 0,
       testsFailed: 1,
+      coverageAssessment: 'Unavailable because no test command was executed.',
+      qualityAssessment: 'Rejected: missing mandatory tester execution.',
+      uiChangesDetected,
+      uiTestsRequired: requireUiTests,
+      uiTestsRun: uiTestCommandRan,
+      screenshotPaths,
       rejectionReason: 'Tester agent did not execute a test command (run_command or run_command_batch).',
       suggestedFixes: [
         'Run targeted tests with run_command before emitting a tester verdict.',
@@ -545,18 +597,107 @@ export async function executeTesterRole(params: {
   } else if (!parsedVerdict) {
     verdict = {
       approved: false,
+      testPlan: [],
+      testedAreas: [],
+      executedTestCommands: mergedExecutedCommands,
       testsPassed: 0,
       testsFailed: 1,
+      coverageAssessment: 'Unavailable because tester verdict JSON was invalid.',
+      qualityAssessment: 'Rejected: tester verdict format invalid.',
+      uiChangesDetected,
+      uiTestsRequired: requireUiTests,
+      uiTestsRun: uiTestCommandRan,
+      screenshotPaths,
       rejectionReason: 'Tester response did not include a valid JSON verdict.',
       suggestedFixes: [
         'End tester response with a valid JSON verdict object.',
       ],
       testOutput: condensedOutput,
     };
+  } else if (parsedVerdict.testPlan.length === 0) {
+    verdict = {
+      ...parsedVerdict,
+      executedTestCommands: mergeStringArrays(parsedVerdict.executedTestCommands, mergedExecutedCommands),
+      uiChangesDetected,
+      uiTestsRequired: requireUiTests,
+      uiTestsRun: parsedVerdict.uiTestsRun || uiTestCommandRan,
+      screenshotPaths,
+      approved: false,
+      testsFailed: Math.max(1, parsedVerdict.testsFailed),
+      rejectionReason: 'Tester verdict is missing a concrete test plan.',
+      suggestedFixes: [
+        'Provide a concrete testPlan array before running tests.',
+        'Tie test plan items to changed behavior and regression risks.',
+      ],
+      testOutput: condensedOutput,
+    };
+  } else if (!parsedVerdict.coverageAssessment || !parsedVerdict.qualityAssessment) {
+    verdict = {
+      ...parsedVerdict,
+      executedTestCommands: mergeStringArrays(parsedVerdict.executedTestCommands, mergedExecutedCommands),
+      uiChangesDetected,
+      uiTestsRequired: requireUiTests,
+      uiTestsRun: parsedVerdict.uiTestsRun || uiTestCommandRan,
+      screenshotPaths,
+      approved: false,
+      testsFailed: Math.max(1, parsedVerdict.testsFailed),
+      rejectionReason:
+        'Tester verdict must include both coverageAssessment and qualityAssessment for this changeset.',
+      suggestedFixes: [
+        'Add coverageAssessment describing changed behavior coverage.',
+        'Add qualityAssessment describing regression risk and code quality impact.',
+      ],
+      testOutput: condensedOutput,
+    };
+  } else if (requireUiTests && !uiTestCommandRan) {
+    verdict = {
+      ...parsedVerdict,
+      executedTestCommands: mergeStringArrays(parsedVerdict.executedTestCommands, mergedExecutedCommands),
+      uiChangesDetected,
+      uiTestsRequired: requireUiTests,
+      uiTestsRun: false,
+      screenshotPaths,
+      approved: false,
+      testsFailed: Math.max(1, parsedVerdict.testsFailed),
+      rejectionReason:
+        'UI changes were detected but no UI test command execution evidence was found.',
+      suggestedFixes: [
+        'Run UI tests using run_command or run_command_batch (for example, playwright or UI test suite commands).',
+        'Include the executed UI test command(s) in executedTestCommands.',
+      ],
+      testOutput: condensedOutput,
+    };
+  } else if (requireUiScreenshots && screenshotPaths.length < minUiScreenshotCount) {
+    verdict = {
+      ...parsedVerdict,
+      executedTestCommands: mergeStringArrays(parsedVerdict.executedTestCommands, mergedExecutedCommands),
+      uiChangesDetected,
+      uiTestsRequired: requireUiTests,
+      uiTestsRun: parsedVerdict.uiTestsRun || uiTestCommandRan,
+      screenshotPaths,
+      approved: false,
+      testsFailed: Math.max(1, parsedVerdict.testsFailed),
+      rejectionReason:
+        `UI changes require at least ${minUiScreenshotCount} screenshot evidence file(s); found ${screenshotPaths.length}.`,
+      suggestedFixes: [
+        `Capture at least ${minUiScreenshotCount} UI screenshots and include their repository-relative paths in screenshotPaths.`,
+        ...parsedScreenshotEvidence.missingPaths.slice(0, 5).map((path) => `Ensure screenshot file exists and is an image: ${path}`),
+      ],
+      testOutput: condensedOutput,
+    };
   } else {
     verdict = {
       ...parsedVerdict,
-      approved: parsedVerdict.approved && parsedVerdict.testsFailed === 0,
+      executedTestCommands: mergeStringArrays(parsedVerdict.executedTestCommands, mergedExecutedCommands),
+      uiChangesDetected,
+      uiTestsRequired: requireUiTests,
+      uiTestsRun: parsedVerdict.uiTestsRun || uiTestCommandRan,
+      screenshotPaths,
+      approved:
+        parsedVerdict.approved
+        && parsedVerdict.testsFailed === 0
+        && (!requireUiTests || uiTestCommandRan)
+        && (!requireUiScreenshots || screenshotPaths.length >= minUiScreenshotCount),
       testOutput: condensedOutput,
     };
   }
@@ -619,15 +760,33 @@ function parseTesterVerdict(
       }
 
       const approved = parsed.approved === true;
+      const testPlan = asStringArray(parsed.testPlan);
+      const testedAreas = asStringArray(parsed.testedAreas);
+      const executedTestCommands = asStringArray(parsed.executedTestCommands);
       const testsPassed = toNonNegativeInt(parsed.testsPassed);
       const testsFailed = toNonNegativeInt(parsed.testsFailed);
+      const coverageAssessment = asOptionalString(parsed.coverageAssessment);
+      const qualityAssessment = asOptionalString(parsed.qualityAssessment);
+      const uiChangesDetected = asBoolean(parsed.uiChangesDetected, false);
+      const uiTestsRequired = asBoolean(parsed.uiTestsRequired, false);
+      const uiTestsRun = asBoolean(parsed.uiTestsRun, false);
+      const screenshotPaths = asStringArray(parsed.screenshotPaths);
       const rejectionReason = asOptionalString(parsed.rejectionReason);
       const suggestedFixes = asStringArray(parsed.suggestedFixes);
 
       return {
         approved,
+        testPlan,
+        testedAreas,
+        executedTestCommands,
         testsPassed,
         testsFailed,
+        coverageAssessment,
+        qualityAssessment,
+        uiChangesDetected,
+        uiTestsRequired,
+        uiTestsRun,
+        screenshotPaths,
         rejectionReason,
         suggestedFixes,
       };
@@ -721,4 +880,130 @@ function asStringArray(value: unknown): string[] {
     .filter((entry): entry is string => typeof entry === 'string')
     .map((entry) => entry.trim())
     .filter((entry) => entry.length > 0);
+}
+
+function asBoolean(value: unknown, fallback: boolean): boolean {
+  if (typeof value === 'boolean') {
+    return value;
+  }
+  return fallback;
+}
+
+function mergeStringArrays(...values: string[][]): string[] {
+  const merged: string[] = [];
+  for (const list of values) {
+    merged.push(...list);
+  }
+  return dedupeStrings(merged);
+}
+
+function extractTestCommandsFromToolCall(toolName: string, argumentsJson: string | undefined): string[] {
+  if (!argumentsJson || (toolName !== 'run_command' && toolName !== 'run_command_batch')) {
+    return [];
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(argumentsJson);
+  } catch {
+    return [];
+  }
+
+  if (!parsed || typeof parsed !== 'object') {
+    return [];
+  }
+
+  const record = parsed as Record<string, unknown>;
+  if (toolName === 'run_command') {
+    const command = asOptionalString(record.command);
+    return command ? [command] : [];
+  }
+
+  const commands = record.commands;
+  if (!Array.isArray(commands)) {
+    return [];
+  }
+
+  const extracted: string[] = [];
+  for (const entry of commands) {
+    if (typeof entry === 'string') {
+      const trimmed = entry.trim();
+      if (trimmed.length > 0) {
+        extracted.push(trimmed);
+      }
+      continue;
+    }
+
+    if (entry && typeof entry === 'object') {
+      const command = asOptionalString((entry as Record<string, unknown>).command);
+      if (command) {
+        extracted.push(command);
+      }
+    }
+  }
+
+  return dedupeStrings(extracted);
+}
+
+function hasUiTestCommandEvidence(commands: string[], patterns: string[]): boolean {
+  if (commands.length === 0) {
+    return false;
+  }
+
+  const normalizedPatterns = patterns
+    .map((pattern) => pattern.trim().toLowerCase())
+    .filter((pattern) => pattern.length > 0);
+
+  if (normalizedPatterns.length === 0) {
+    return false;
+  }
+
+  return commands.some((command) => {
+    const lower = command.toLowerCase();
+    return normalizedPatterns.some((pattern) => lower.includes(pattern));
+  });
+}
+
+async function resolveScreenshotEvidence(
+  screenshotPaths: string[],
+  workspacePath: string,
+): Promise<{ existingPaths: string[]; missingPaths: string[] }> {
+  const existingPaths: string[] = [];
+  const missingPaths: string[] = [];
+
+  for (const rawPath of dedupeStrings(screenshotPaths)) {
+    const trimmed = rawPath.trim();
+    if (!trimmed) {
+      continue;
+    }
+
+    const absolutePath = isAbsolute(trimmed) ? trimmed : resolve(workspacePath, trimmed);
+    const repoRelativePath = relative(workspacePath, absolutePath).replace(/\\/g, '/');
+
+    if (repoRelativePath.startsWith('..') || repoRelativePath.length === 0) {
+      missingPaths.push(trimmed);
+      continue;
+    }
+
+    if (!isScreenshotImagePath(repoRelativePath)) {
+      missingPaths.push(repoRelativePath);
+      continue;
+    }
+
+    try {
+      await access(absolutePath);
+      existingPaths.push(repoRelativePath);
+    } catch {
+      missingPaths.push(repoRelativePath);
+    }
+  }
+
+  return {
+    existingPaths: dedupeStrings(existingPaths),
+    missingPaths: dedupeStrings(missingPaths),
+  };
+}
+
+function isScreenshotImagePath(path: string): boolean {
+  return /\.(png|jpe?g|webp|gif)$/i.test(path);
 }

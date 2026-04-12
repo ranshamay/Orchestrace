@@ -93,6 +93,19 @@ export interface UiDagEvent {
   attempt?: number;
   maxRetries?: number;
   totalDurationMs?: number;
+  testsPassed?: number;
+  testsFailed?: number;
+  rejectionReason?: string;
+  testPlan?: string[];
+  coverageAssessment?: string;
+  qualityAssessment?: string;
+  testedAreas?: string[];
+  executedTestCommands?: string[];
+  uiChangesDetected?: boolean;
+  uiTestsRequired?: boolean;
+  uiTestsRun?: boolean;
+  screenshotsRequired?: boolean;
+  screenshotPaths?: string[];
   toolName?: string;
   toolStatus?: 'started' | 'result';
   toolCallId?: string;
@@ -201,6 +214,12 @@ export interface SessionRecoveryInfo {
   time: string;
 }
 
+export interface SessionTestingPorts {
+  basePort: number;
+  apiPort: number;
+  uiPort: number;
+}
+
 export interface WorkSession {
   id: string;
   workspaceId: string;
@@ -223,6 +242,7 @@ export interface WorkSession {
   executionContext?: ExecutionContext;
   selectedWorktreePath?: string;
   useWorktree?: boolean;
+  testingPorts?: SessionTestingPorts;
   adaptiveConcurrency: boolean;
   batchConcurrency: number;
   batchMinConcurrency: number;
@@ -274,6 +294,7 @@ export interface PersistedWorkSession {
   executionContext?: ExecutionContext;
   selectedWorktreePath?: string;
   useWorktree?: boolean;
+  testingPorts?: SessionTestingPorts;
   adaptiveConcurrency?: boolean;
   batchConcurrency?: number;
   batchMinConcurrency?: number;

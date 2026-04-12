@@ -72,6 +72,26 @@ export interface UiDagEvent {
   attempt?: number;
   maxRetries?: number;
   totalDurationMs?: number;
+  testsPassed?: number;
+  testsFailed?: number;
+  rejectionReason?: string;
+  testPlan?: string[];
+  coverageAssessment?: string;
+  qualityAssessment?: string;
+  testedAreas?: string[];
+  executedTestCommands?: string[];
+  uiChangesDetected?: boolean;
+  uiTestsRequired?: boolean;
+  uiTestsRun?: boolean;
+  screenshotsRequired?: boolean;
+  screenshotPaths?: string[];
+  toolName?: string;
+  toolStatus?: 'started' | 'result';
+  toolCallId?: string;
+  toolInput?: string;
+  toolOutput?: string;
+  toolIsError?: boolean;
+  toolDetails?: unknown;
   message: string;
 }
 
@@ -103,6 +123,12 @@ export interface SessionOutput {
   text?: string;
   planPath?: string;
   failureType?: string;
+}
+
+export interface SessionTestingPorts {
+  basePort: number;
+  apiPort: number;
+  uiPort: number;
 }
 
 export interface SharedContextFact {
@@ -147,6 +173,8 @@ export interface SessionConfig {
   selectedWorktreePath?: string;
   /** Legacy compatibility switch for worktree mode. */
   useWorktree?: boolean;
+  /** Per-session live testing ports (used to avoid UI/API collisions across worktrees). */
+  testingPorts?: SessionTestingPorts;
   adaptiveConcurrency: boolean;
   batchConcurrency: number;
   batchMinConcurrency: number;

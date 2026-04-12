@@ -52,6 +52,16 @@ export interface TesterConfig {
   model?: ModelConfig;
   /** Require at least one test command execution. Defaults to true. */
   requireRunTests?: boolean;
+  /** Enforce UI test execution when changed files include UI paths. Defaults to true. */
+  enforceUiTestsForUiChanges?: boolean;
+  /** Require screenshot evidence when UI tests are required. Defaults to true. */
+  requireUiScreenshotsForUiChanges?: boolean;
+  /** Minimum screenshots required for UI changes when screenshot evidence is enabled. Defaults to 2. */
+  minUiScreenshotCount?: number;
+  /** Glob-style patterns used to classify changed files as UI changes. */
+  uiChangePatterns?: string[];
+  /** Case-insensitive substrings used to detect UI test command execution. */
+  uiTestCommandPatterns?: string[];
 }
 
 /** A single node in the task graph. */
@@ -130,8 +140,26 @@ export interface TaskReplayRecord {
 
 export interface TesterVerdict {
   approved: boolean;
+  /** Concrete test plan executed for this change. */
+  testPlan: string[];
+  /** Areas actually validated by this tester pass (e.g. unit/api/ui). */
+  testedAreas: string[];
+  /** Concrete commands executed by tester as part of validation. */
+  executedTestCommands: string[];
   testsPassed: number;
   testsFailed: number;
+  /** Tester summary of coverage impact for this change set. */
+  coverageAssessment?: string;
+  /** Tester summary of quality/regression risk for this change set. */
+  qualityAssessment?: string;
+  /** Whether implementer output included UI changes. */
+  uiChangesDetected: boolean;
+  /** Whether UI tests were required by policy for this verdict. */
+  uiTestsRequired: boolean;
+  /** Whether UI tests were executed for this verdict. */
+  uiTestsRun: boolean;
+  /** Screenshot evidence paths collected for UI validation. */
+  screenshotPaths: string[];
   /** Collapsed command output evidence from tester-run validations. */
   testOutput: string;
   rejectionReason?: string;
@@ -222,7 +250,14 @@ export type DagEvent =
   | { type: 'task:approval-requested'; taskId: string; path: string }
   | { type: 'task:approved'; taskId: string }
   | { type: 'task:implementation-attempt'; taskId: string; attempt: number; maxAttempts: number }
-  | { type: 'task:testing'; taskId: string; attempt: number }
+  | {
+      type: 'task:testing';
+      taskId: string;
+      attempt: number;
+      uiChangesDetected?: boolean;
+      uiTestsRequired?: boolean;
+      screenshotsRequired?: boolean;
+    }
   | {
       type: 'task:tester-verdict';
       taskId: string;
@@ -231,6 +266,15 @@ export type DagEvent =
       testsPassed: number;
       testsFailed: number;
       rejectionReason?: string;
+      testPlan?: string[];
+      coverageAssessment?: string;
+      qualityAssessment?: string;
+      testedAreas?: string[];
+      executedTestCommands?: string[];
+      uiChangesDetected?: boolean;
+      uiTestsRequired?: boolean;
+      uiTestsRun?: boolean;
+      screenshotPaths?: string[];
     }
   | { type: 'task:verification-failed'; taskId: string; attempt: number; error: string }
   | { type: 'task:ready'; taskId: string }

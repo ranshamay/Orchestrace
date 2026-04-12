@@ -230,6 +230,11 @@ export interface WorkSession {
   adaptiveConcurrency?: boolean;
   batchConcurrency?: number;
   batchMinConcurrency?: number;
+  testingPorts?: {
+    basePort: number;
+    apiPort: number;
+    uiPort: number;
+  };
   worktreePath?: string;
   worktreeBranch?: string;
   creationReason?: SessionCreationReason;
@@ -258,6 +263,19 @@ export interface WorkSession {
     attempt?: number;
     maxRetries?: number;
     totalDurationMs?: number;
+    testsPassed?: number;
+    testsFailed?: number;
+    rejectionReason?: string;
+    testPlan?: string[];
+    coverageAssessment?: string;
+    qualityAssessment?: string;
+    testedAreas?: string[];
+    executedTestCommands?: string[];
+    uiChangesDetected?: boolean;
+    uiTestsRequired?: boolean;
+    uiTestsRun?: boolean;
+    screenshotsRequired?: boolean;
+    screenshotPaths?: string[];
     toolName?: string;
     toolStatus?: 'started' | 'result';
     toolCallId?: string;
@@ -674,10 +692,15 @@ export interface TesterConfig {
   model: string;
   reasoning?: TesterReasoningLevel;
   requireRunTests: boolean;
+  enforceUiTestsForUiChanges: boolean;
+  requireUiScreenshotsForUiChanges: boolean;
+  minUiScreenshotCount: number;
   testCategories: TesterCategory[];
   maxTestRetries: number;
   timeoutMs: number;
   testFilePatterns: string[];
+  uiChangePatterns: string[];
+  uiTestCommandPatterns: string[];
   approvalThreshold: number;
 }
 
