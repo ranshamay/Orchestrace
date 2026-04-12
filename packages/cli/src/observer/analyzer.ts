@@ -111,12 +111,12 @@ function parseAnalysisResponse(text: string, allowedCategories: FindingCategory[
     }
 
     const mappedFindings: AnalysisResult['findings'] = parsed.findings
-      .filter((f): f is Record<string, unknown> => !!f && typeof f === 'object')
+      .filter((f: unknown): f is Record<string, unknown> => !!f && typeof f === 'object')
       .filter((f: Record<string, unknown>) => isValidFindingCandidate(f))
-      .map((f: Record<string, unknown>): ObserverFindingInput => {
-        const title = toNonEmptyString(f.title);
-        const description = toNonEmptyString(f.description);
-        const suggestedFix = toNonEmptyString(f.suggestedFix);
+            .map((f: Record<string, unknown>): ObserverFindingInput => {
+        const title = toNonEmptyString(f.title) as string;
+        const description = toNonEmptyString(f.description) as string;
+        const suggestedFix = toNonEmptyString(f.suggestedFix) ?? undefined;
         const evidence = normalizeFindingEvidence(extractEvidenceEntries(f.evidence), suggestedFix);
 
         return {

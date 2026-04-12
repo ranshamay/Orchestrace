@@ -566,7 +566,7 @@ function parseRealtimeFindings(
     let idCounter = 0;
 
     return parsed.findings
-      .filter((f): f is Record<string, unknown> => !!f && typeof f === 'object')
+      .filter((f: unknown): f is Record<string, unknown> => !!f && typeof f === 'object')
       .filter((f: Record<string, unknown>) => isValidRealtimeFindingCandidate(f))
       .filter((f: Record<string, unknown>) =>
         allowedCategories.includes(f.category as FindingCategory),
@@ -574,7 +574,7 @@ function parseRealtimeFindings(
       .map((f: Record<string, unknown>): RealtimeFinding => {
         const title = toNonEmptyString(f.title) as string;
         const description = toNonEmptyString(f.description) as string;
-        const suggestedFix = toNonEmptyString(f.suggestedFix);
+                        const suggestedFix = toNonEmptyString(f.suggestedFix) ?? undefined;
         const evidence = normalizeFindingEvidence(extractEvidenceEntries(f.evidence), suggestedFix);
 
         return {
