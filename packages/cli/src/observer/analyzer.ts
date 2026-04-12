@@ -7,7 +7,7 @@
 import type { LlmAdapter } from '@orchestrace/provider';
 import {
   ALL_FINDING_CATEGORIES,
-  normalizeFindingEvidence,
+  extractStrictEvidence,
   type AnalysisResult,
   type FindingCategory,
   type FindingSeverity,
@@ -74,15 +74,23 @@ function buildAnalysisPrompt(summaries: SessionSummary[], allowedCategories: Fin
       '      "category": "code-quality" | "performance" | "agent-efficiency" | "architecture" | "test-coverage",\n' +
       '      "severity": "low" | "medium" | "high" | "critical",\n' +
       '      "title": "Short one-line title",\n' +
-      '      "description": "Detailed description of the issue found",\n' +
-      '      "evidence": [{ "text": "Concrete implementation instruction / evidence detail" }],\n' +
+            '      "description": "Detailed description of the issue found",\n' +
+      '      "evidence": [\n' +
+      '        { "text": "Single-sentence concrete code change instruction" },\n' +
+      '        { "text": "Single-sentence concrete code change instruction" }\n' +
+      '      ],\n' +
       '      "relevantFiles": ["path/to/file.ts"]  // optional\n' +
-
       '    }\n' +
       '  ]\n' +
       '}\n' +
       '```\n' +
-      'Compatibility: legacy outputs with `suggestedFix` are also accepted during rollout.\n' +
+      'Strict contract requirements:\n' +
+      '- Return `schemaVersion: "2"` findings only\n' +
+      '- Each finding must include `evidence` with 2 to 3 entries\n' +
+      '- Each evidence text must be exactly one sentence and a direct code change instruction\n' +
+      '- Do not emit `suggestedFix`\n' +
+      '- Do not emit `issueSummary`\n' +
+      '- Do not use recommendation/hedging language in evidence text (should, could, maybe, recommend, consider, suggest, might)\n' +
       'Return ONLY the JSON object, no other text.',
   );
 
@@ -114,23 +122,15 @@ function parseAnalysisResponse(text: string, allowedCategories: FindingCategory[
     const validCategories: FindingCategory[] = [...ALL_FINDING_CATEGORIES];
     const validSeverities: FindingSeverity[] = ['low', 'medium', 'high', 'critical'];
 
-    const mappedFindings: AnalysisResult['findings'] = parsed.findings
+        const mappedFindings: AnalysisResult['findings'] = parsed.findings
       .filter((f: Record<string, unknown>) => isValidFindingCandidate(f))
-      .map((f: Record<string, unknown>): ObserverFindingInput => {
-        const evidence = normalizeFindingEvidence(
-          Array.isArray(f.evidence)
-            ? f.evidence
-                .filter((entry): entry is { text: string } => {
-                  if (!entry || typeof entry !== 'object') return false;
-                  const textValue = (entry as Record<string, unknown>).text;
-                  return typeof textValue === 'string';
-                })
-                .map((entry) => ({ text: entry.text }))
-            : undefined,
-          typeof f.suggestedFix === 'string' ? String(f.suggestedFix) : undefined,
-        );
+      .flatMap((f: Record<string, unknown>): ObserverFindingInput[] => {
+        const evidence = extractStrictEvidence(f.evidence);
+        if (!evidence) {
+          return [];
+        }
 
-        return {
+        return [{
           schemaVersion: '2',
           category: validCategories.includes(f.category as FindingCategory)
             ? (f.category as FindingCategory)
@@ -144,7 +144,7 @@ function parseAnalysisResponse(text: string, allowedCategories: FindingCategory[
           relevantFiles: Array.isArray(f.relevantFiles)
             ? f.relevantFiles.filter((p: unknown) => typeof p === 'string')
             : undefined,
-        };
+        }];
       });
 
     const findings: AnalysisResult['findings'] = mappedFindings.filter((finding) =>
@@ -164,14 +164,13 @@ function isValidFindingCandidate(f: Record<string, unknown>): boolean {
     return false;
   }
 
-  const hasLegacy = typeof f.suggestedFix === 'string';
-  const hasEvidence =
-    Array.isArray(f.evidence)
-    && f.evidence.some((entry) => {
-      if (!entry || typeof entry !== 'object') return false;
-      const textValue = (entry as Record<string, unknown>).text;
-      return typeof textValue === 'string' && textValue.trim().length > 0;
-    });
+  if (f.schemaVersion !== '2') {
+    return false;
+  }
 
-  return hasLegacy || hasEvidence;
+  if ('suggestedFix' in f || 'issueSummary' in f) {
+    return false;
+  }
+
+  return extractStrictEvidence(f.evidence) !== null;
 }

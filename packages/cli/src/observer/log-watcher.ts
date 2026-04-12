@@ -8,7 +8,7 @@
 
 import type { LlmAdapter } from '@orchestrace/provider';
 import type { ObserverConfig, FindingCategory, FindingSeverity } from './types.js';
-import { ALL_FINDING_CATEGORIES } from './types.js';
+import { ALL_FINDING_CATEGORIES, extractStrictEvidence } from './types.js';
 import type { BackendLogger } from './backend-logger.js';
 
 // ---------------------------------------------------------------------------
@@ -104,10 +104,14 @@ You look for these categories:
 5. **Security** — credential exposure, unsafe operations, missing validation
 
 Guidelines:
+- Return `schemaVersion: "2"` findings only
 - Only report CONCRETE, ACTIONABLE issues backed by evidence from the logs
 - Include the relevant log snippet (1-3 key lines) in each finding
-- Each evidence entry must be a specific code change or configuration adjustment
-
+- Each finding must include an `evidence` array with 2 to 3 entries
+- Each `evidence[i].text` must be a single sentence and a direct, concrete code/config change instruction
+- Do not emit `suggestedFix`
+- Do not emit `issueSummary`
+- Do not use recommendation or hedging language in evidence text (for example: should, could, maybe, recommend, consider)
 - Don't flag normal operational logs (startup messages, successful operations)
 - Focus on patterns — a single transient error is less important than a recurring one
 - Rate severity honestly: critical = data loss/security, high = breaking errors, medium = perf/reliability, low = minor improvements
@@ -118,19 +122,21 @@ Respond ONLY with valid JSON matching this schema:
 {
   "findings": [
     {
+      "schemaVersion": "2",
       "category": "error-pattern|performance|configuration|reliability|security",
       "severity": "low|medium|high|critical",
       "title": "Short one-line title",
       "description": "Detailed description of the issue with context from the logs",
-      "evidence": [{ "text": "Concrete fix — specific code change, config adjustment, or action to take" }],
+      "evidence": [
+        { "text": "Single-sentence concrete code/config change instruction" },
+        { "text": "Single-sentence concrete code/config change instruction" }
+      ],
       "relevantFiles": ["path/to/file.ts"],
       "logSnippet": "The 1-3 key log lines that evidence this issue"
-
     }
   ]
 }
-\`\`\`
-Compatibility: legacy outputs with \`suggestedFix\` string are also accepted during rollout.`;
+\`\`\``;
 
 // ---------------------------------------------------------------------------
 // LogWatcher
@@ -374,38 +380,55 @@ function parseLogFindings(text: string): LogFinding[] {
     const raw = Array.isArray(parsed) ? parsed : parsed?.findings;
     if (!Array.isArray(raw)) return [];
 
-    return raw
-      .filter(
-        (f: Record<string, unknown>) =>
-          f && typeof f.title === 'string' && typeof f.description === 'string',
-      )
-      .map((f: Record<string, unknown>) => ({
-        id: `logf-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-        category: validateLogCategory(f.category as string),
-        severity: validateSeverity(f.severity as string),
-        title: String(f.title),
-        description: String(f.description),
-        suggestedFix: typeof f.suggestedFix === 'string' ? f.suggestedFix : (typeof f.issueSummary === 'string' ? f.issueSummary : undefined),
-        evidence: Array.isArray(f.evidence)
-          ? f.evidence
-              .filter((x: unknown): x is { text: string } => !!x && typeof x === 'object' && typeof (x as Record<string, unknown>).text === 'string')
-              .map((x: { text: string }) => ({ text: x.text }))
-          : undefined,
-        relevantFiles: Array.isArray(f.relevantFiles)
-          ? f.relevantFiles.filter((x: unknown) => typeof x === 'string')
-          : undefined,
-        logSnippet: String(f.logSnippet ?? ''),
-        detectedAt: new Date().toISOString(),
-      }));
+            return raw
+      .filter((f: Record<string, unknown>) => isValidLogFindingCandidate(f))
+      .flatMap((f: Record<string, unknown>): LogFinding[] => {
+        const evidence = extractStrictEvidence(f.evidence);
+        if (!evidence) {
+          return [];
+        }
+
+        return [{
+          id: `logf-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          category: validateLogCategory(f.category as string),
+          severity: validateSeverity(f.severity as string),
+          title: String(f.title),
+          description: String(f.description),
+          evidence,
+          relevantFiles: Array.isArray(f.relevantFiles)
+            ? f.relevantFiles.filter((x: unknown) => typeof x === 'string')
+            : undefined,
+          logSnippet: String(f.logSnippet ?? ''),
+          detectedAt: new Date().toISOString(),
+        }];
+      });
   } catch {
     return [];
   }
+}
+
+function isValidLogFindingCandidate(f: Record<string, unknown>): boolean {
+  const hasCore = typeof f.title === 'string' && typeof f.description === 'string';
+  if (!hasCore) {
+    return false;
+  }
+
+  if (f.schemaVersion !== '2') {
+    return false;
+  }
+
+  if ('suggestedFix' in f || 'issueSummary' in f) {
+    return false;
+  }
+
+  return extractStrictEvidence(f.evidence) !== null;
 }
 
 function validateLogCategory(cat: string): LogFindingCategory {
   const valid: LogFindingCategory[] = ['error-pattern', 'performance', 'configuration', 'reliability', 'security'];
   return valid.includes(cat as LogFindingCategory) ? (cat as LogFindingCategory) : 'error-pattern';
 }
+
 
 function validateSeverity(sev: string): FindingSeverity {
   const valid: FindingSeverity[] = ['low', 'medium', 'high', 'critical'];

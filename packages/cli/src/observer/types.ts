@@ -132,6 +132,51 @@ export interface FindingRecord extends NormalizedObserverFinding {
 
 const LEGACY_FALLBACK_EVIDENCE_TEXT = 'No suggested fix provided in legacy finding payload.';
 
+const HEDGING_OR_RECOMMENDATION_REGEX = /\b(should|could|maybe|recommend|consider|suggest|might|possibly|perhaps)\b/i;
+
+export function isSingleSentenceText(text: string): boolean {
+  const trimmed = text.trim();
+  if (trimmed.length === 0) return false;
+
+  const sentenceCount = (trimmed.match(/[.!?](?:\s|$)/g) ?? []).length;
+  return sentenceCount <= 1;
+}
+
+export function hasBannedRecommendationLanguage(text: string): boolean {
+  return HEDGING_OR_RECOMMENDATION_REGEX.test(text);
+}
+
+export function isEvidenceCountValid(evidence: FindingEvidence[]): boolean {
+  return evidence.length >= 2 && evidence.length <= 3;
+}
+
+export function extractStrictEvidence(
+  rawEvidence: unknown,
+): FindingEvidence[] | null {
+  if (!Array.isArray(rawEvidence)) {
+    return null;
+  }
+
+  const evidence = rawEvidence
+    .filter((entry): entry is { text: string } => {
+      if (!entry || typeof entry !== 'object') return false;
+      const textValue = (entry as Record<string, unknown>).text;
+      return typeof textValue === 'string';
+    })
+    .map((entry) => ({ text: entry.text.trim() }))
+    .filter((entry) => entry.text.length > 0);
+
+  if (!isEvidenceCountValid(evidence)) {
+    return null;
+  }
+
+  const allValid = evidence.every(
+    (entry) => isSingleSentenceText(entry.text) && !hasBannedRecommendationLanguage(entry.text),
+  );
+
+  return allValid ? evidence : null;
+}
+
 export function normalizeFindingEvidence(
   evidence: FindingEvidence[] | undefined,
   suggestedFix: string | undefined,

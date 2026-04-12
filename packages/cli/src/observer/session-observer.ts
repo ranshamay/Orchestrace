@@ -15,7 +15,7 @@ import type {
   FindingCategory,
   FindingSeverity,
 } from './types.js';
-import { ALL_FINDING_CATEGORIES, normalizeFindingEvidence } from './types.js';
+import { ALL_FINDING_CATEGORIES, extractStrictEvidence } from './types.js';
 import { REALTIME_OBSERVER_SYSTEM_PROMPT } from './prompts.js';
 
 // ---------------------------------------------------------------------------
@@ -502,10 +502,11 @@ export class SessionObserver {
 
     lines.push(`Allowed categories: ${allowedCategories.join(', ')}`);
     lines.push('');
-        lines.push(
-      'Respond with a JSON object: { "findings": [{ "schemaVersion": "2", "category": "...", "severity": "...", "title": "...", "description": "...", "evidence": [{ "text": "..." }], "relevantFiles": [...] }] }',
+            lines.push(
+      'Respond with a JSON object: { "findings": [{ "schemaVersion": "2", "category": "...", "severity": "...", "title": "...", "description": "...", "evidence": [{ "text": "Single-sentence concrete code change" }, { "text": "Single-sentence concrete code change" }], "relevantFiles": [...] }] }',
     );
-    lines.push('Compatibility: legacy `suggestedFix` output is accepted during rollout, but prefer schemaVersion=2 + evidence[].');
+    lines.push('Strict contract requirements: schemaVersion="2" only; evidence must have 2 to 3 entries; each evidence text must be one sentence and a direct code change instruction.');
+    lines.push('Do not emit `suggestedFix` or `issueSummary`; do not use recommendation/hedging language such as should/could/maybe/recommend/consider/suggest/might.');
     lines.push('Return ONLY the JSON, no other text. If no issues found, return { "findings": [] }.');
 
     return lines.join('\n');
@@ -566,26 +567,18 @@ function parseRealtimeFindings(
     const validSeverities: FindingSeverity[] = ['low', 'medium', 'high', 'critical'];
     let idCounter = 0;
 
-    return parsed.findings
+        return parsed.findings
       .filter((f: Record<string, unknown>) => isValidRealtimeFindingCandidate(f))
       .filter((f: Record<string, unknown>) =>
         allowedCategories.includes(f.category as FindingCategory),
       )
-      .map((f: Record<string, unknown>): RealtimeFinding => {
-        const evidence = normalizeFindingEvidence(
-          Array.isArray(f.evidence)
-            ? f.evidence
-                .filter((entry): entry is { text: string } => {
-                  if (!entry || typeof entry !== 'object') return false;
-                  const textValue = (entry as Record<string, unknown>).text;
-                  return typeof textValue === 'string';
-                })
-                .map((entry) => ({ text: entry.text }))
-            : undefined,
-          typeof f.suggestedFix === 'string' ? String(f.suggestedFix) : undefined,
-        );
+      .flatMap((f: Record<string, unknown>): RealtimeFinding[] => {
+        const evidence = extractStrictEvidence(f.evidence);
+        if (!evidence) {
+          return [];
+        }
 
-        return {
+        return [{
           id: `rt-${Date.now()}-${idCounter++}`,
           schemaVersion: '2',
           category: allowedCategories.includes(f.category as FindingCategory)
@@ -603,7 +596,7 @@ function parseRealtimeFindings(
             : undefined,
           phase: triggerPhase,
           detectedAt: new Date().toISOString(),
-        };
+        }];
       });
   } catch {
     console.error('[orchestrace][observer] Failed to parse real-time analysis response');
@@ -617,15 +610,14 @@ function isValidRealtimeFindingCandidate(f: Record<string, unknown>): boolean {
     return false;
   }
 
-  const hasLegacy = typeof f.suggestedFix === 'string';
-  const hasEvidence =
-    Array.isArray(f.evidence)
-    && f.evidence.some((entry) => {
-      if (!entry || typeof entry !== 'object') return false;
-      const textValue = (entry as Record<string, unknown>).text;
-      return typeof textValue === 'string' && textValue.trim().length > 0;
-    });
+  if (f.schemaVersion !== '2') {
+    return false;
+  }
 
-  return hasLegacy || hasEvidence;
+  if ('suggestedFix' in f || 'issueSummary' in f) {
+    return false;
+  }
+
+  return extractStrictEvidence(f.evidence) !== null;
 }
 
