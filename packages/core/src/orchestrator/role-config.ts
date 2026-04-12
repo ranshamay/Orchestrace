@@ -1,8 +1,8 @@
-import type { ReplayFailureType, TaskNode, TaskOutput } from '../dag/types.js';
+import type { ReplayFailureType, TaskNode, TaskOutput, ValidationResult } from '../dag/types.js';
 import { PromptSectionName, renderPromptSections, type PromptSection } from '../prompt/sections.js';
 import type { TaskEffort } from './task-complexity.js';
 
-export type AgentRole = 'planner' | 'implementer';
+export type AgentRole = 'planner' | 'implementer' | 'tester';
 
 export const PLANNING_FIRST_TOOL_RETRY_DIRECTIVE =
   'You must now call a tool. Start by running: pwd (or an equivalent workspace-inspection tool), then continue the task.';
@@ -31,6 +31,10 @@ export function buildRoleTaskPrompt(params: {
       params.attempt,
       params.effort,
     );
+  }
+
+  if (params.role === 'tester') {
+    throw new Error('buildRoleTaskPrompt does not support tester role. Use buildTesterPrompt.');
   }
 
   return buildImplementationPrompt({
@@ -139,6 +143,98 @@ export function buildPlanningPrompt(
     sections.push({
       name: PromptSectionName.RetryContext,
       lines: retryDirective,
+    });
+  }
+
+  return renderPromptSections(sections);
+}
+
+export function buildTesterPrompt(params: {
+  node: TaskNode;
+  approvedPlan?: string;
+  implementationResponse?: string;
+  changedFiles?: string[];
+  validationResults?: ValidationResult[];
+  attempt: number;
+  previousFailureReason?: string;
+}): string {
+  const {
+    node,
+    approvedPlan,
+    implementationResponse,
+    changedFiles,
+    validationResults,
+    attempt,
+    previousFailureReason,
+  } = params;
+
+  const validationSummary = (validationResults ?? []).length > 0
+    ? (validationResults ?? [])
+      .map((result) => `${result.passed ? 'PASS' : 'FAIL'} ${result.command}`)
+      .join('\n')
+    : 'No prior validation results were recorded.';
+
+  const retryContext = attempt > 1 && previousFailureReason
+    ? [
+      '',
+      'Previous tester rejection details:',
+      truncateForRetry(previousFailureReason),
+    ].join('\n')
+    : '';
+
+  const sections: PromptSection[] = [
+    {
+      name: PromptSectionName.Goal,
+      lines: [
+        'You are the testing gate for this implementation.',
+        'Read the approved plan and implementation output, create/update tests as needed, and run verification commands.',
+        'You must execute at least one test command using run_command or run_command_batch before producing a verdict.',
+      ],
+    },
+    {
+      name: PromptSectionName.TaskContext,
+      lines: [
+        `Attempt: ${attempt}`,
+        `Task ID: ${node.id}`,
+        `Task Name: ${node.name}`,
+        '',
+        'Original task prompt:',
+        node.prompt,
+      ],
+    },
+    {
+      name: PromptSectionName.ApprovedPlan,
+      lines: [approvedPlan ?? 'No explicit approved plan found. Infer intent conservatively from task prompt and implementation output.'],
+    },
+    {
+      name: PromptSectionName.DependencyContext,
+      lines: [
+        'Implementation response summary:',
+        truncateForRetry(implementationResponse ?? '(no implementation response)'),
+        '',
+        `Changed files (${changedFiles?.length ?? 0}):`,
+        (changedFiles && changedFiles.length > 0)
+          ? changedFiles.slice(0, 120).map((path) => `- ${path}`).join('\n')
+          : '- (unknown)',
+        '',
+        'Prior validation command results:',
+        validationSummary,
+      ],
+    },
+    {
+      name: PromptSectionName.OutputContract,
+      lines: [
+        'After running tests, end with a JSON object (no markdown fences) using this exact shape:',
+        '{"approved":boolean,"testsPassed":number,"testsFailed":number,"rejectionReason":string,"suggestedFixes":string[]}',
+        'When approved=true, set rejectionReason to an empty string and suggestedFixes to an empty array.',
+      ],
+    },
+  ];
+
+  if (retryContext) {
+    sections.push({
+      name: PromptSectionName.RetryContext,
+      lines: [retryContext],
     });
   }
 
@@ -301,7 +397,8 @@ export function buildRoleSystemPrompt(params: {
           'Planning responses must end with 1-3 concrete next follow-up suggestions.',
           'Return a plan that another agent could execute deterministically.',
         ]
-      : [
+      : role === 'implementer'
+        ? [
           'Execute the approved plan and deliver validated code changes.',
           'Read relevant files before editing and keep edits minimal in scope.',
           'Use todo and agent graph state as the execution backbone, updating progress continuously.',
@@ -319,13 +416,22 @@ export function buildRoleSystemPrompt(params: {
           'Do not perform additional read/search/list tool calls between that acknowledgment and the required write_file call.',
           'When blocked, report the blocker clearly and propose the best next step.',
 
+        ]
+        : [
+          'Act as the mandatory testing gate between implementation and delivery.',
+          'Read the approved plan, inspect implementation output, and generate or update tests where needed.',
+          'You must execute at least one run_command or run_command_batch invocation that runs tests.',
+          'Reject the implementation if tests fail, if coverage is obviously insufficient for the changed behavior, or if no test command is executed.',
+          'When rejecting, provide specific, actionable fix instructions for the implementer.',
+          'Keep changes focused to test artifacts; do not rewrite product logic in tester role.',
+          'Tester responses must end with a valid JSON verdict object matching the required schema.',
         ];
 
   return renderPromptSections([
     {
       name: PromptSectionName.Identity,
       lines: [
-        `You are an autonomous Orchestrace ${role === 'planner' ? 'planning' : 'implementation'} agent for software tasks.`,
+        `You are an autonomous Orchestrace ${role === 'planner' ? 'planning' : role === 'implementer' ? 'implementation' : 'testing'} agent for software tasks.`,
         'Operate safely, truthfully, and with high execution reliability.',
         'Think out loud: before every action, explain your reasoning, what you observed, what you plan to do next, and why.',
         'Narrate your thought process continuously so the user can follow your chain of thought in real time.',

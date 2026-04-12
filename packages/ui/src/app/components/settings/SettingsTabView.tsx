@@ -20,9 +20,16 @@ import {
   disableObserver,
   updateObserverConfig,
   triggerObserverAnalysis,
+  clearObserverPendingQueue,
+  fetchTesterStatus,
+  enableTester,
+  disableTester,
+  updateTesterConfig,
   type ObserverStatusResponse,
   type ObserverFinding,
   type ObserverFailedSessionMonitor,
+  type TesterStatusResponse,
+  type TesterCategory,
 } from '../../../lib/api';
 import type { SettingsSaveToastState } from '../overlays/SettingsSaveToast';
 import { ModelAutocomplete } from '../ModelAutocomplete';
@@ -40,6 +47,14 @@ const ASSESSMENT_CATEGORY_OPTIONS: Array<{ value: AssessmentCategory; label: str
   { value: 'agent-efficiency', label: 'Agent Efficiency' },
   { value: 'architecture', label: 'Architecture' },
   { value: 'test-coverage', label: 'Test Coverage' },
+];
+
+const TESTER_CATEGORY_OPTIONS: Array<{ value: TesterCategory; label: string }> = [
+  { value: 'unit', label: 'Unit' },
+  { value: 'integration', label: 'Integration' },
+  { value: 'api', label: 'API' },
+  { value: 'ui', label: 'UI' },
+  { value: 'deployment', label: 'Deployment' },
 ];
 
 function useConnectedDefaultProviderModels(params: {
@@ -743,6 +758,12 @@ export function SettingsTabView({
         onSettingsSaveStatus={onSettingsSaveStatus}
       />
 
+      <TesterSection
+        providers={providers}
+        providerStatuses={displayProviderStatuses}
+        onSettingsSaveStatus={onSettingsSaveStatus}
+      />
+
       <div className="mt-6 rounded-lg border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-700 dark:bg-slate-900">
         <div className="mb-3 flex items-center justify-between gap-3">
           <h3 className="text-xs font-bold uppercase tracking-widest text-slate-500 dark:text-slate-400">Providers</h3>
@@ -949,6 +970,390 @@ export function SettingsTabView({
   );
 }
 
+type TesterSectionProps = {
+  providers: ProviderInfo[];
+  providerStatuses: Array<{ provider: string; source: string }>;
+  onSettingsSaveStatus: (state: Exclude<SettingsSaveToastState, 'idle'>, message: string) => void;
+};
+
+function TesterSection({
+  providers,
+  providerStatuses,
+  onSettingsSaveStatus,
+}: TesterSectionProps) {
+  const [status, setStatus] = useState<TesterStatusResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [toggling, setToggling] = useState(false);
+  const [savingConfig, setSavingConfig] = useState(false);
+  const [configDirty, setConfigDirty] = useState(false);
+
+  const [editProvider, setEditProvider] = useState('');
+  const [editModel, setEditModel] = useState('');
+  const [editRequireRunTests, setEditRequireRunTests] = useState(true);
+  const [editCategories, setEditCategories] = useState<TesterCategory[]>(['unit', 'integration']);
+  const [editMaxRetries, setEditMaxRetries] = useState('1');
+  const [editTimeoutSeconds, setEditTimeoutSeconds] = useState('300');
+  const [editApprovalPercent, setEditApprovalPercent] = useState('100');
+  const [providerModels, setProviderModels] = useState<Record<string, string[]>>({});
+
+  const connectedProviders = useMemo(() => {
+    const connectedProviderIds = new Set(
+      providerStatuses.filter((entry) => entry.source !== 'none').map((entry) => entry.provider),
+    );
+    return providers.filter((provider) => connectedProviderIds.has(provider.id));
+  }, [providerStatuses, providers]);
+
+  const refresh = useCallback(async () => {
+    try {
+      const nextStatus = await fetchTesterStatus();
+      setStatus(nextStatus);
+
+      const firstConnectedProviderId = connectedProviders[0]?.id ?? '';
+      const nextProvider = connectedProviders.some((provider) => provider.id === nextStatus.config.provider)
+        ? nextStatus.config.provider
+        : firstConnectedProviderId;
+
+      setEditProvider(nextProvider);
+      setEditModel(nextProvider === nextStatus.config.provider ? nextStatus.config.model : '');
+      setEditRequireRunTests(nextStatus.config.requireRunTests);
+      setEditCategories(nextStatus.config.testCategories);
+      setEditMaxRetries(String(nextStatus.config.maxTestRetries));
+      setEditTimeoutSeconds(String(Math.max(1, Math.round(nextStatus.config.timeoutMs / 1000))));
+      setEditApprovalPercent(String(Math.round(nextStatus.config.approvalThreshold * 100)));
+      setConfigDirty(false);
+    } catch {
+      // API not available yet.
+    } finally {
+      setLoading(false);
+    }
+  }, [connectedProviders]);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  useEffect(() => {
+    if (connectedProviders.length === 0) {
+      setEditProvider('');
+      setEditModel('');
+      setProviderModels({});
+      return;
+    }
+
+    setEditProvider((current) => (
+      connectedProviders.some((provider) => provider.id === current)
+        ? current
+        : connectedProviders[0].id
+    ));
+  }, [connectedProviders]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadModelsForProvider = async (providerId: string): Promise<void> => {
+      try {
+        const response = await fetchModels(providerId);
+        if (cancelled) {
+          return;
+        }
+
+        setProviderModels((current) => ({
+          ...current,
+          [providerId]: response.models,
+        }));
+      } catch {
+        if (cancelled) {
+          return;
+        }
+
+        setProviderModels((current) => (
+          providerId in current
+            ? current
+            : {
+              ...current,
+              [providerId]: [],
+            }
+        ));
+      }
+    };
+
+    void Promise.all(connectedProviders.map((provider) => loadModelsForProvider(provider.id)));
+
+    return () => {
+      cancelled = true;
+    };
+  }, [connectedProviders]);
+
+  useEffect(() => {
+    if (!editProvider) {
+      return;
+    }
+
+    const models = providerModels[editProvider] ?? [];
+    if (models.length === 0) {
+      setEditModel('');
+      return;
+    }
+
+    setEditModel((current) => (
+      current.length > 0 && models.includes(current)
+        ? current
+        : models[0]
+    ));
+  }, [editProvider, providerModels]);
+
+  const markDirty = () => setConfigDirty(true);
+
+  const toggleCategory = (category: TesterCategory, checked: boolean) => {
+    setEditCategories((current) => {
+      if (checked) {
+        if (current.includes(category)) return current;
+        return [...current, category];
+      }
+
+      return current.filter((value) => value !== category);
+    });
+    markDirty();
+  };
+
+  const enabled = status?.config.enabled ?? false;
+  const models = editProvider ? (providerModels[editProvider] ?? []) : [];
+  const canSaveConfig =
+    configDirty
+    && !savingConfig
+    && connectedProviders.length > 0
+    && editProvider.length > 0
+    && editModel.length > 0
+    && editCategories.length > 0;
+
+  const handleToggle = useCallback(async () => {
+    if (!status) return;
+    setToggling(true);
+    onSettingsSaveStatus('saving', 'Saving settings...');
+    try {
+      if (status.config.enabled) {
+        await disableTester();
+      } else {
+        await enableTester();
+      }
+      await refresh();
+      onSettingsSaveStatus('saved', 'Settings saved.');
+    } catch (error) {
+      onSettingsSaveStatus('error', error instanceof Error ? error.message : 'Failed to save settings.');
+    } finally {
+      setToggling(false);
+    }
+  }, [onSettingsSaveStatus, refresh, status]);
+
+  const handleSaveConfig = useCallback(async () => {
+    if (!canSaveConfig) {
+      return;
+    }
+
+    const maxTestRetries = Math.max(1, Math.round(Number(editMaxRetries) || 1));
+    const timeoutMs = Math.max(30, Number(editTimeoutSeconds) || 300) * 1000;
+    const approvalThreshold = Math.min(1, Math.max(0, (Number(editApprovalPercent) || 100) / 100));
+
+    setSavingConfig(true);
+    onSettingsSaveStatus('saving', 'Saving settings...');
+    try {
+      await updateTesterConfig({
+        provider: editProvider,
+        model: editModel,
+        requireRunTests: editRequireRunTests,
+        testCategories: editCategories,
+        maxTestRetries,
+        timeoutMs,
+        approvalThreshold,
+      });
+      await refresh();
+      onSettingsSaveStatus('saved', 'Settings saved.');
+    } catch (error) {
+      onSettingsSaveStatus('error', error instanceof Error ? error.message : 'Failed to save settings.');
+    } finally {
+      setSavingConfig(false);
+    }
+  }, [
+    canSaveConfig,
+    editApprovalPercent,
+    editCategories,
+    editMaxRetries,
+    editModel,
+    editProvider,
+    editRequireRunTests,
+    editTimeoutSeconds,
+    onSettingsSaveStatus,
+    refresh,
+  ]);
+
+  return (
+    <div className="mt-6 rounded-lg border border-emerald-200 bg-white p-5 shadow-sm dark:border-emerald-800 dark:bg-slate-900">
+      <div className="mb-3 flex items-center justify-between">
+        <h3 className="text-xs font-bold uppercase tracking-widest text-emerald-600 dark:text-emerald-400">
+          Tester Agent
+        </h3>
+        {loading ? (
+          <Loader2 className="h-4 w-4 animate-spin text-slate-400" />
+        ) : (
+          <button
+            className={`rounded px-3 py-1 text-xs font-semibold ${enabled ? 'bg-red-100 text-red-700 hover:bg-red-200 dark:bg-red-900/40 dark:text-red-300 dark:hover:bg-red-900/60' : 'bg-emerald-600 text-white hover:bg-emerald-500'}`}
+            disabled={toggling}
+            onClick={() => { void handleToggle(); }}
+            type="button"
+          >
+            {toggling ? 'Updating...' : enabled ? 'Disable' : 'Enable'}
+          </button>
+        )}
+      </div>
+
+      <p className="mb-4 text-xs text-slate-600 dark:text-slate-300">
+        When enabled, the tester agent generates and executes tests for code changes, then gates delivery until validation is approved.
+      </p>
+
+      <div className="rounded border border-slate-200 p-3 dark:border-slate-700">
+        <h4 className="mb-2 text-[11px] font-bold uppercase tracking-wide text-slate-500 dark:text-slate-400">Configuration</h4>
+
+        {connectedProviders.length === 0 && (
+          <div className="mb-3 rounded border border-amber-200 bg-amber-50 px-2 py-1.5 text-[11px] text-amber-800 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-300">
+            No authenticated providers are connected. Connect a provider above to configure tester models.
+          </div>
+        )}
+
+        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+          <label className="flex flex-col gap-1 text-xs text-slate-700 dark:text-slate-200">
+            <span className="text-[10px] uppercase tracking-wide text-slate-500 dark:text-slate-400">Provider</span>
+            <select
+              className="rounded border border-slate-200 px-2 py-1.5 text-xs dark:border-slate-700 dark:bg-slate-900"
+              value={editProvider}
+              onChange={(event) => {
+                setEditProvider(event.target.value);
+                setEditModel('');
+                markDirty();
+              }}
+              disabled={connectedProviders.length === 0}
+            >
+              {connectedProviders.length === 0 && <option value="">No connected providers</option>}
+              {connectedProviders.map((provider) => (
+                <option key={provider.id} value={provider.id}>{provider.id}</option>
+              ))}
+            </select>
+          </label>
+
+          <label className="flex flex-col gap-1 text-xs text-slate-700 dark:text-slate-200">
+            <span className="text-[10px] uppercase tracking-wide text-slate-500 dark:text-slate-400">Model</span>
+            <ModelAutocomplete
+              models={models}
+              value={editModel}
+              onChange={(model) => {
+                setEditModel(model);
+                markDirty();
+              }}
+              placeholder="Search models…"
+              disabled={models.length === 0}
+            />
+          </label>
+
+          <label className="flex flex-col gap-1 text-xs text-slate-700 dark:text-slate-200">
+            <span className="text-[10px] uppercase tracking-wide text-slate-500 dark:text-slate-400">Max Test Retries</span>
+            <input
+              className="rounded border border-slate-200 px-2 py-1.5 text-xs dark:border-slate-700 dark:bg-slate-900"
+              type="number"
+              min={1}
+              value={editMaxRetries}
+              onChange={(event) => {
+                setEditMaxRetries(event.target.value);
+                markDirty();
+              }}
+            />
+          </label>
+
+          <label className="flex flex-col gap-1 text-xs text-slate-700 dark:text-slate-200">
+            <span className="text-[10px] uppercase tracking-wide text-slate-500 dark:text-slate-400">Timeout (seconds)</span>
+            <input
+              className="rounded border border-slate-200 px-2 py-1.5 text-xs dark:border-slate-700 dark:bg-slate-900"
+              type="number"
+              min={30}
+              value={editTimeoutSeconds}
+              onChange={(event) => {
+                setEditTimeoutSeconds(event.target.value);
+                markDirty();
+              }}
+            />
+          </label>
+
+          <label className="flex flex-col gap-1 text-xs text-slate-700 dark:text-slate-200">
+            <span className="text-[10px] uppercase tracking-wide text-slate-500 dark:text-slate-400">Approval Threshold (%)</span>
+            <input
+              className="rounded border border-slate-200 px-2 py-1.5 text-xs dark:border-slate-700 dark:bg-slate-900"
+              type="number"
+              min={0}
+              max={100}
+              value={editApprovalPercent}
+              onChange={(event) => {
+                setEditApprovalPercent(event.target.value);
+                markDirty();
+              }}
+            />
+          </label>
+        </div>
+
+        <div className="mt-3">
+          <label className="flex items-center gap-2 text-xs text-slate-700 dark:text-slate-200">
+            <input
+              type="checkbox"
+              className="h-3.5 w-3.5 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500 dark:border-slate-700"
+              checked={editRequireRunTests}
+              onChange={(event) => {
+                setEditRequireRunTests(event.target.checked);
+                markDirty();
+              }}
+            />
+            <span>Require run_command / run_command_batch in tester phase</span>
+          </label>
+        </div>
+
+        <div className="mt-3">
+          <div className="mb-1 text-[10px] uppercase tracking-wide text-slate-500 dark:text-slate-400">
+            Test Categories
+          </div>
+          <div className="grid grid-cols-1 gap-1 sm:grid-cols-2">
+            {TESTER_CATEGORY_OPTIONS.map((option) => (
+              <label key={option.value} className="flex items-center gap-2 text-xs text-slate-700 dark:text-slate-200">
+                <input
+                  type="checkbox"
+                  className="h-3.5 w-3.5 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500 dark:border-slate-700"
+                  checked={editCategories.includes(option.value)}
+                  onChange={(event) => toggleCategory(option.value, event.target.checked)}
+                />
+                <span>{option.label}</span>
+              </label>
+            ))}
+          </div>
+          {editCategories.length === 0 && (
+            <div className="mt-1 text-[10px] text-amber-700 dark:text-amber-300">
+              Select at least one category.
+            </div>
+          )}
+        </div>
+
+        <div className="mt-3 flex items-center gap-2">
+          <button
+            className="rounded bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-60"
+            disabled={!canSaveConfig}
+            onClick={() => { void handleSaveConfig(); }}
+            type="button"
+          >
+            {savingConfig ? 'Saving...' : 'Save Tester Config'}
+          </button>
+          {configDirty && !savingConfig && !canSaveConfig && (
+            <span className="text-[11px] text-slate-500 dark:text-slate-400">Complete required fields to save changes.</span>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // -- Observer Agent Settings Section ------------------------------------------
 
 type ObserverSectionProps = {
@@ -973,6 +1378,8 @@ function ObserverSection({
   const [toggling, setToggling] = useState(false);
   const [triggering, setTriggering] = useState(false);
   const [triggerResult, setTriggerResult] = useState<{ analyzed: number; findings: number; spawned: number } | null>(null);
+  const [clearingPending, setClearingPending] = useState(false);
+  const [clearedPendingCount, setClearedPendingCount] = useState<number | null>(null);
   const [editProvider, setEditProvider] = useState('');
   const [editModel, setEditModel] = useState('');
   const [editLogWatcherProvider, setEditLogWatcherProvider] = useState('');
@@ -1213,12 +1620,30 @@ function ObserverSection({
   const handleTrigger = async () => {
     setTriggering(true);
     setTriggerResult(null);
+    setClearedPendingCount(null);
     try {
       const result = await triggerObserverAnalysis();
       setTriggerResult(result);
       await refresh();
     } finally {
       setTriggering(false);
+    }
+  };
+
+  const handleClearPending = async () => {
+    if ((status?.state.pendingFindings ?? 0) === 0) {
+      return;
+    }
+
+    setClearingPending(true);
+    setTriggerResult(null);
+    setClearedPendingCount(null);
+    try {
+      const result = await clearObserverPendingQueue();
+      setClearedPendingCount(result.cleared);
+      await refresh();
+    } finally {
+      setClearingPending(false);
     }
   };
 
@@ -1434,16 +1859,30 @@ function ObserverSection({
           <div className="mb-4 flex items-center gap-2">
             <button
               className="inline-flex items-center gap-1 rounded bg-violet-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-violet-500 disabled:cursor-not-allowed disabled:opacity-60"
-              disabled={triggering}
+              disabled={triggering || clearingPending}
               onClick={() => { void handleTrigger(); }}
               type="button"
             >
               {triggering ? <Loader2 className="h-3 w-3 animate-spin" /> : <Zap className="h-3 w-3" />}
               {triggering ? 'Analyzing...' : 'Trigger Analysis Now'}
             </button>
+            <button
+              className="inline-flex items-center gap-1 rounded border border-amber-300 bg-amber-50 px-3 py-1.5 text-xs font-semibold text-amber-800 hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-60 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-200 dark:hover:bg-amber-950/50"
+              disabled={clearingPending || triggering || (status.state.pendingFindings === 0)}
+              onClick={() => { void handleClearPending(); }}
+              type="button"
+            >
+              {clearingPending ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
+              {clearingPending ? 'Clearing...' : 'Clear Pending Queue'}
+            </button>
             {triggerResult && (
               <span className="text-[11px] text-slate-600 dark:text-slate-300">
                 Analyzed {triggerResult.analyzed} session(s), found {triggerResult.findings} issue(s), spawned {triggerResult.spawned} fix(es)
+              </span>
+            )}
+            {clearedPendingCount !== null && (
+              <span className="text-[11px] text-slate-600 dark:text-slate-300">
+                Cleared {clearedPendingCount} pending finding(s)
               </span>
             )}
           </div>

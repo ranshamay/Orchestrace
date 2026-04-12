@@ -80,6 +80,10 @@ import {
 } from './runner-config-resolution.js';
 import { parseAndSanitizeVerifyCommands } from './verify-commands.js';
 import {
+  loadTesterAgentConfig,
+  type TesterAgentConfig,
+} from './tester-config.js';
+import {
   assertWorkspaceRuntimeIsComplete,
   formatMissingSourceDirsWarning,
   validateWorkspaceRuntime,
@@ -115,6 +119,22 @@ const SESSION_DELIVERY_CI_POLL_INTERVAL_MS = resolvePositiveIntEnv(process.env.O
 const CHECKPOINT_STASH_PREFIX = 'orchestrace-checkpoint';
 const CHECKPOINT_METADATA_FILE = 'checkpoint.json';
 const execFileAsync = promisify(execFile);
+const TESTER_TOOL_ALLOWLIST = [
+  'list_directory',
+  'read_file',
+  'read_files',
+  'search_files',
+  'git_diff',
+  'git_status',
+  'write_file',
+  'write_files',
+  'edit_file',
+  'edit_files',
+  'run_command',
+  'run_command_batch',
+  'playwright_run',
+  'url_fetch',
+];
 
 type CheckpointLifecycleState = 'idle' | 'active' | 'completed' | 'failed' | 'cancelled' | 'interrupted';
 
@@ -229,6 +249,8 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
+  const testerAgentConfig = await loadTesterAgentConfig(join(config.workspacePath, '.orchestrace'));
+
   // Write runner metadata (PID)
   await eventStore.setMetadata(sessionId, {
     id: sessionId,
@@ -284,6 +306,7 @@ async function main(): Promise<void> {
   let successfulEditFileResultsSinceCheckpoint = 0;
   const todoDoneCheckpointed = new Set<string>();
   let checkpointInFlight = false;
+  let latestTesterVerdict: TaskOutput['testerVerdict'] | undefined;
 
   // Build single-task graph
   const graph = buildSingleTaskGraph(sessionId, config.prompt, route.category);
@@ -1019,6 +1042,10 @@ async function main(): Promise<void> {
       taskRanges: taskRangesWithFiles,
     });
 
+    if (latestTesterVerdict) {
+      prMeta.prDescription = appendTesterEvidenceToPrDescription(prMeta.prDescription, latestTesterVerdict);
+    }
+
     // Rewrite history: one commit per task
     if (sessionHeadAtStart && taskCommitRanges.length > 0) {
       // Build message map from LLM output
@@ -1686,6 +1713,7 @@ async function main(): Promise<void> {
         let outputs: Map<string, TaskOutput>;
     const planningAgentModel = resolveSessionRoleModel(config, 'planner');
     const implementationAgentModel = resolveSessionRoleModel(config, 'implementer');
+        const testerAgentModel = resolveTesterModelConfig(config, testerAgentConfig, implementationAgentModel);
     if (route.category === 'shell_command') {
       const shellCommand = dispatch.shell.command;
       if (!shellCommand) {
@@ -1715,8 +1743,14 @@ async function main(): Promise<void> {
       defaultModel: implementationAgentModel,
       defaultPlanningModel: planningAgentModel,
       defaultImplementationModel: implementationAgentModel,
+      defaultTesterModel: testerAgentModel,
       planningSystemPrompt: buildSystemPrompt(config, 'planning', taskEffort),
       implementationSystemPrompt: buildSystemPrompt(config, 'implementation', taskEffort),
+      testerConfig: {
+        enabled: testerAgentConfig.enabled,
+        model: testerAgentModel,
+        requireRunTests: testerAgentConfig.requireRunTests,
+      },
       quickStartMode,
       quickStartMaxPreDelegationToolCalls,
       planningNoToolGuardMode,
@@ -1727,7 +1761,7 @@ async function main(): Promise<void> {
       signal: controller.signal,
       resolveApiKey: async (providerId) => authManager.resolveApiKey(providerId),
 
-      createToolset: ({ phase, task, graphId, provider: activeProvider, model: activeModel, reasoning, taskRequiresWrites }) => createAgentToolset({
+      createToolset: ({ role, phase, task, graphId, provider: activeProvider, model: activeModel, reasoning, taskRequiresWrites }) => createAgentToolset({
         cwd: config.workspacePath,
         phase,
         taskRequiresWrites,
@@ -1741,11 +1775,18 @@ async function main(): Promise<void> {
         batchConcurrency: config.batchConcurrency,
         batchMinConcurrency: config.batchMinConcurrency,
                 resolveGithubToken: (resolveOptions) => githubAuthManager.resolveApiKey('github', resolveOptions),
+        permissions: role === 'tester'
+          ? {
+              allowWriteTools: true,
+              allowRunCommand: true,
+              toolAllowlist: TESTER_TOOL_ALLOWLIST,
+            }
+          : undefined,
 
         sharedContextStore,
         fileReadCache,
         agentId: `orchestrator::${task.id}`,
-        runSubAgent: async (request, _signal) => {
+        runSubAgent: role === 'tester' ? undefined : async (request, _signal) => {
           const subProvider = request.provider ?? activeProvider;
           const subModel = request.model ?? activeModel;
           const subTimeoutMs = resolveTimeoutMs('ORCHESTRACE_SUBAGENT_TIMEOUT_MS', 120_000);
@@ -1921,6 +1962,10 @@ async function main(): Promise<void> {
               void maybeCheckpoint('edit-threshold');
             }
           }
+        }
+
+        if (event.type === 'task:completed') {
+          latestTesterVerdict = event.output.testerVerdict;
         }
 
         // Task status
@@ -2425,6 +2470,46 @@ export function formatSessionDeliveryMessage(params: {
     : `Committed session changes were validated, pushed to origin/${params.branchName}, existing PR #${params.prNumber} was reused, and GitHub CI checks passed: ${params.prUrl}`;
 }
 
+function appendTesterEvidenceToPrDescription(
+  description: string,
+  verdict: NonNullable<TaskOutput['testerVerdict']>,
+): string {
+  const header = '## Test Validation';
+  if (description.includes(header)) {
+    return description;
+  }
+
+  const lines: string[] = [
+    description.trim(),
+    '',
+    header,
+    '',
+    verdict.approved
+      ? 'Tester agent approved this changeset after executing tests.'
+      : 'Tester agent rejected this changeset during test validation.',
+    '',
+    `- Tests passed: ${verdict.testsPassed}`,
+    `- Tests failed: ${verdict.testsFailed}`,
+  ];
+
+  if (verdict.rejectionReason) {
+    lines.push(`- Rejection reason: ${verdict.rejectionReason}`);
+  }
+
+  if (verdict.suggestedFixes && verdict.suggestedFixes.length > 0) {
+    lines.push('- Suggested fixes:');
+    for (const fix of verdict.suggestedFixes) {
+      lines.push(`  - ${fix}`);
+    }
+  }
+
+  lines.push('', '<details>', '<summary>Tester command output</summary>', '', '```text');
+  lines.push(verdict.testOutput || '(no tester output captured)');
+  lines.push('```', '', '</details>', '');
+
+  return lines.join('\n').trim();
+}
+
 function logDagEventTrace(sessionId: string, event: DagEvent): void {
   const taskId = 'taskId' in event ? event.taskId : undefined;
   const phase = 'phase' in event ? event.phase : undefined;
@@ -2487,6 +2572,12 @@ function deriveLlmStatus(event: DagEvent, t: string): SessionLlmStatus | undefin
       return makeLlmStatus('implementing', 'Plan approved. Starting implementation.', undefined, event.taskId, 'implementation');
     case 'task:implementation-attempt':
       return makeLlmStatus('implementing', `Implementation attempt ${event.attempt}/${event.maxAttempts}.`, undefined, event.taskId, 'implementation');
+    case 'task:testing':
+      return makeLlmStatus('validating', `Tester gate attempt ${event.attempt}: generating and running tests.`, undefined, event.taskId, 'implementation');
+    case 'task:tester-verdict':
+      return event.approved
+        ? makeLlmStatus('validating', `Tester approved (passed=${event.testsPassed}, failed=${event.testsFailed}).`, undefined, event.taskId, 'implementation')
+        : makeLlmStatus('retrying', `Tester rejected (passed=${event.testsPassed}, failed=${event.testsFailed}).`, 'validation', event.taskId, 'implementation');
     case 'task:tool-call':
       return event.status === 'started'
         ? makeLlmStatus('using-tools', `Running tool ${event.toolName}.`, undefined, event.taskId, event.phase)
@@ -2564,6 +2655,16 @@ function toUiEvent(
     case 'task:approval-requested': return { ...base, message: tag(`${event.taskId}: approval requested`) };
     case 'task:approved': return { ...base, message: tag(`${event.taskId}: approved`) };
     case 'task:implementation-attempt': return { ...base, message: tag(`${event.taskId}: implementation attempt ${event.attempt}/${event.maxAttempts}`) };
+    case 'task:testing': return { ...base, message: tag(`${event.taskId}: tester gate attempt ${event.attempt}`) };
+    case 'task:tester-verdict':
+      return {
+        ...base,
+        message: tag(
+          `${event.taskId}: tester ${event.approved ? 'approved' : 'rejected'} `
+          + `(passed=${event.testsPassed}, failed=${event.testsFailed})`
+          + (event.rejectionReason ? ` reason=${event.rejectionReason}` : ''),
+        ),
+      };
     case 'task:tool-call': {
       if (event.status === 'started') {
         return { ...base, message: tag(`${event.taskId}: tool ${event.toolName} input ${previewToolPayload(event.input)}`) };
@@ -2778,6 +2879,29 @@ function resolveSessionRoleModel(config: SessionConfig, role: 'planner' | 'imple
     provider,
     model,
     ...(roleConfig?.reasoning ? { reasoning: roleConfig.reasoning } : {}),
+  };
+}
+
+function resolveTesterModelConfig(
+  config: SessionConfig,
+  testerConfig: TesterAgentConfig,
+  fallback: {
+    provider: string;
+    model: string;
+    reasoning?: 'minimal' | 'low' | 'medium' | 'high';
+  },
+): {
+  provider: string;
+  model: string;
+  reasoning?: 'minimal' | 'low' | 'medium' | 'high';
+} {
+  const provider = testerConfig.provider.trim() || fallback.provider || config.provider;
+  const model = testerConfig.model.trim() || fallback.model || config.model;
+
+  return {
+    provider,
+    model,
+    ...(testerConfig.reasoning ? { reasoning: testerConfig.reasoning } : {}),
   };
 }
 

@@ -4,6 +4,7 @@ import type {
   ReplayAttemptRecord,
   ReplayFailureType,
   ReplayToolCallRecord,
+  TesterVerdict,
   TaskOutput,
   TaskReplayRecord,
   TaskNode,
@@ -15,7 +16,13 @@ import type {
   LlmToolCallEvent,
   LlmToolset,
 } from '@orchestrace/provider';
-import { buildRoleSystemPrompt, buildRoleTaskPrompt, roleToPhase, type AgentRole } from './role-config.js';
+import {
+  buildRoleSystemPrompt,
+  buildRoleTaskPrompt,
+  buildTesterPrompt,
+  roleToPhase,
+  type AgentRole,
+} from './role-config.js';
 import {
   buildCompletionFailureRetryHint,
   resolveReplayFailureType,
@@ -33,6 +40,7 @@ export interface SpawnRoleAgentParams {
   systemPrompt?: string;
   signal?: AbortSignal;
   createToolset?: (params: {
+    role: AgentRole;
     phase: 'planning' | 'implementation';
     task: TaskNode;
     graphId: string;
@@ -85,6 +93,7 @@ export async function spawnRoleAgent(params: SpawnRoleAgentParams): Promise<LlmA
       }),
     signal,
     toolset: createToolset?.({
+      role,
       phase,
       task,
       graphId,
@@ -183,6 +192,15 @@ export async function executeImplementerRole(params: {
     model: string;
     usage?: { input: number; output: number; cost: number };
   }) => Promise<void>;
+  postValidationGate?: (params: {
+    task: TaskNode;
+    attempt: number;
+    output: TaskOutput;
+    signal?: AbortSignal;
+  }) => Promise<
+    | { approved: true; output?: TaskOutput }
+    | { approved: false; error: string }
+  >;
 }): Promise<TaskOutput> {
   const {
     task,
@@ -203,6 +221,7 @@ export async function executeImplementerRole(params: {
     replay,
     maxAttempts,
     appendTokenDump,
+    postValidationGate,
   } = params;
 
   let lastResponse = '';
@@ -371,7 +390,46 @@ export async function executeImplementerRole(params: {
     };
 
     if (allPassed) {
-      return output;
+      if (!postValidationGate) {
+        return output;
+      }
+
+      try {
+        const gateResult = await postValidationGate({
+          task,
+          attempt,
+          output,
+          signal,
+        });
+
+        if (gateResult.approved) {
+          return gateResult.output ?? output;
+        }
+
+        lastFailureType = 'validation';
+        completedImplementationAttempt.failureType = 'validation';
+        lastValidationError = gateResult.error || 'Post-validation gate rejected implementation.';
+
+        emit({
+          type: 'task:verification-failed',
+          taskId: task.id,
+          attempt,
+          error: lastValidationError,
+        });
+        continue;
+      } catch (error) {
+        lastFailureType = 'validation';
+        completedImplementationAttempt.failureType = 'validation';
+        lastValidationError = `Post-validation gate failed: ${error instanceof Error ? error.message : String(error)}`;
+
+        emit({
+          type: 'task:verification-failed',
+          taskId: task.id,
+          attempt,
+          error: lastValidationError,
+        });
+        continue;
+      }
     }
 
     lastFailureType = 'validation';
@@ -403,6 +461,111 @@ export async function executeImplementerRole(params: {
     retries: maxAttempts - 1,
     usage,
     replay,
+  };
+}
+
+export interface ExecuteTesterRoleResult {
+  verdict: TesterVerdict;
+  usage?: { input: number; output: number; cost: number };
+  responseText: string;
+  toolCalls: ReplayToolCallRecord[];
+}
+
+export async function executeTesterRole(params: {
+  task: TaskNode;
+  approvedPlan?: string;
+  implementationOutput: TaskOutput;
+  testerAgent: LlmAgent;
+  attempt: number;
+  signal?: AbortSignal;
+  emit: (event: DagEvent) => void;
+  requireRunTests: boolean;
+}): Promise<ExecuteTesterRoleResult> {
+  const {
+    task,
+    approvedPlan,
+    implementationOutput,
+    testerAgent,
+    attempt,
+    signal,
+    emit,
+    requireRunTests,
+  } = params;
+
+  const testerPrompt = buildTesterPrompt({
+    node: task,
+    approvedPlan,
+    implementationResponse: implementationOutput.response,
+    changedFiles: implementationOutput.filesChanged,
+    validationResults: implementationOutput.validationResults,
+    attempt,
+    previousFailureReason: undefined,
+  });
+
+  const toolCalls: ReplayToolCallRecord[] = [];
+  const testCommandOutputs: string[] = [];
+  let ranTestCommand = false;
+
+  const result = await executeRole({
+    role: 'tester',
+    agent: testerAgent,
+    taskId: task.id,
+    prompt: testerPrompt,
+    attempt,
+    signal,
+    emit,
+    onToolCall: (event, replayRecord) => {
+      toolCalls.push(replayRecord);
+
+      const isTestCommandTool = event.toolName === 'run_command' || event.toolName === 'run_command_batch';
+      if (isTestCommandTool && event.type === 'result') {
+        ranTestCommand = true;
+        if (typeof event.result === 'string' && event.result.trim().length > 0) {
+          testCommandOutputs.push(event.result.trim());
+        }
+      }
+    },
+  });
+
+  const parsedVerdict = parseTesterVerdict(result.text);
+  const condensedOutput = collapseTesterOutput(testCommandOutputs);
+
+  let verdict: TesterVerdict;
+  if (requireRunTests && !ranTestCommand) {
+    verdict = {
+      approved: false,
+      testsPassed: 0,
+      testsFailed: 1,
+      rejectionReason: 'Tester agent did not execute a test command (run_command or run_command_batch).',
+      suggestedFixes: [
+        'Run targeted tests with run_command before emitting a tester verdict.',
+      ],
+      testOutput: condensedOutput,
+    };
+  } else if (!parsedVerdict) {
+    verdict = {
+      approved: false,
+      testsPassed: 0,
+      testsFailed: 1,
+      rejectionReason: 'Tester response did not include a valid JSON verdict.',
+      suggestedFixes: [
+        'End tester response with a valid JSON verdict object.',
+      ],
+      testOutput: condensedOutput,
+    };
+  } else {
+    verdict = {
+      ...parsedVerdict,
+      approved: parsedVerdict.approved && parsedVerdict.testsFailed === 0,
+      testOutput: condensedOutput,
+    };
+  }
+
+  return {
+    verdict,
+    usage: result.usage,
+    responseText: result.text,
+    toolCalls,
   };
 }
 
@@ -442,4 +605,120 @@ function createTextPreview(text: string, maxChars = 600): string {
   }
 
   return compact.length > maxChars ? `${compact.slice(0, maxChars - 3)}...` : compact;
+}
+
+function parseTesterVerdict(
+  responseText: string,
+): Omit<TesterVerdict, 'testOutput'> | null {
+  const candidatePayloads = collectJsonCandidates(responseText);
+  for (const candidate of candidatePayloads) {
+    try {
+      const parsed = JSON.parse(candidate) as Record<string, unknown>;
+      if (!parsed || typeof parsed !== 'object') {
+        continue;
+      }
+
+      const approved = parsed.approved === true;
+      const testsPassed = toNonNegativeInt(parsed.testsPassed);
+      const testsFailed = toNonNegativeInt(parsed.testsFailed);
+      const rejectionReason = asOptionalString(parsed.rejectionReason);
+      const suggestedFixes = asStringArray(parsed.suggestedFixes);
+
+      return {
+        approved,
+        testsPassed,
+        testsFailed,
+        rejectionReason,
+        suggestedFixes,
+      };
+    } catch {
+      continue;
+    }
+  }
+
+  return null;
+}
+
+function collectJsonCandidates(responseText: string): string[] {
+  const candidates: string[] = [];
+  const trimmed = responseText.trim();
+  if (trimmed.length > 0) {
+    candidates.push(trimmed);
+  }
+
+  const fencedMatches = [...responseText.matchAll(/```json\s*([\s\S]*?)```/gi)];
+  for (const match of fencedMatches) {
+    const candidate = match[1]?.trim();
+    if (candidate) {
+      candidates.push(candidate);
+    }
+  }
+
+  const firstBrace = responseText.indexOf('{');
+  const lastBrace = responseText.lastIndexOf('}');
+  if (firstBrace !== -1 && lastBrace > firstBrace) {
+    candidates.push(responseText.slice(firstBrace, lastBrace + 1).trim());
+  }
+
+  return dedupeStrings(candidates);
+}
+
+function dedupeStrings(values: string[]): string[] {
+  const seen = new Set<string>();
+  const deduped: string[] = [];
+  for (const value of values) {
+    if (seen.has(value)) {
+      continue;
+    }
+    seen.add(value);
+    deduped.push(value);
+  }
+  return deduped;
+}
+
+function collapseTesterOutput(outputs: string[]): string {
+  if (outputs.length === 0) {
+    return '(no test command output captured)';
+  }
+
+  const merged = outputs.join('\n\n---\n\n').trim();
+  const maxChars = 16_000;
+  if (merged.length <= maxChars) {
+    return merged;
+  }
+
+  return `${merged.slice(0, maxChars)}\n... [truncated ${merged.length - maxChars} chars]`;
+}
+
+function toNonNegativeInt(value: unknown): number {
+  if (typeof value === 'number' && Number.isFinite(value) && value >= 0) {
+    return Math.floor(value);
+  }
+  if (typeof value === 'string') {
+    const parsed = Number.parseInt(value, 10);
+    if (Number.isFinite(parsed) && parsed >= 0) {
+      return parsed;
+    }
+  }
+  return 0;
+}
+
+function asOptionalString(value: unknown): string | undefined {
+  if (typeof value !== 'string') {
+    return undefined;
+  }
+
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function asStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .filter((entry): entry is string => typeof entry === 'string')
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
 }

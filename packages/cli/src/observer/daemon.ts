@@ -349,6 +349,26 @@ export class ObserverDaemon {
   }
 
   /**
+   * Clear all currently pending findings from the queue.
+   * Pending findings are marked as rejected with a manual-clear reason.
+   */
+  async clearPendingQueue(): Promise<number> {
+    const reason = 'Cleared manually from observer pending queue.';
+    const cleared = this.registry.clearPending(reason);
+
+    if (cleared > 0) {
+      for (const finding of this.registry.getAll()) {
+        this.outcomeTracker.syncFinding(finding);
+      }
+      await this.registry.save();
+      await this.outcomeTracker.save();
+      console.log(`[orchestrace][observer] Cleared pending queue: ${cleared} finding(s)`);
+    }
+
+    return cleared;
+  }
+
+  /**
    * Notify the daemon that a fix session has reached a terminal state.
    * Closes the loop: marks the associated finding as completed or failed
    * based on whether the session succeeded and opened a PR.

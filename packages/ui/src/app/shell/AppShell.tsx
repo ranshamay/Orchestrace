@@ -10,6 +10,8 @@ export function AppShell({
   sessionSidebarProps,
   mainContentProps,
   llmModalProps,
+  authUser,
+  onLogout,
   errorMessage,
   warningMessage,
   warningActionLabel,
@@ -21,11 +23,13 @@ export function AppShell({
   return (
     <div className="flex h-screen w-screen flex-col overflow-hidden bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-100">
       <TopBar
+        activeTab={sessionSidebarProps.activeTab}
+        onNavigate={sessionSidebarProps.setActiveTab}
         theme={sessionSidebarProps.theme}
         setTheme={sessionSidebarProps.setTheme}
-        onOpenSettings={() => sessionSidebarProps.setActiveTab('settings')}
-        onOpenLogs={() => sessionSidebarProps.setActiveTab('logs')}
         onOpenLlmControls={mainContentProps.onOpenLlmControls}
+        authUser={authUser}
+        onLogout={onLogout}
       />
       <div className="flex min-h-0 flex-1">
         <SessionsRail

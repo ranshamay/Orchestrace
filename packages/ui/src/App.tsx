@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   clearStoredAuthToken,
+  type AppAuthStatusResponse,
   fetchAppAuthConfig,
   fetchAppAuthStatus,
+  logoutAppAuth,
   setStoredAuthToken,
   type AgentModels,
   type AgentTodo,
@@ -26,8 +28,7 @@ import { useSessionActions } from './app/hooks/useSessionActions';
 import { useThemePreference } from './app/hooks/useThemePreference';
 import { useSessionSelectionController } from './app/hooks/useSessionSelectionController';
 import { useLlmControlsModalState } from './app/hooks/useLlmControlsModalState';
-import { selectCurrentSession, selectSessionViewState, selectSidebarSummaries } from './app/selectors/sessionViewSelectors';
-import { buildSessionSidebarProps } from './app/shell/props/buildSessionSidebarProps';
+import { selectCurrentSession, selectSessionViewState } from './app/selectors/sessionViewSelectors';
 import { buildLlmModalProps } from './app/shell/props/buildLlmModalProps';
 import { AppShell } from './app/shell/AppShell';
 import { LoginGate } from './app/components/auth/LoginGate';
@@ -102,6 +103,7 @@ export default function App() {
   const [authEnabled, setAuthEnabled] = useState(false);
   const [googleClientId, setGoogleClientId] = useState('');
   const [authenticated, setAuthenticated] = useState(false);
+  const [authUser, setAuthUser] = useState<AppAuthStatusResponse['user'] | null>(null);
   const [authError, setAuthError] = useState('');
   const [composerText, setComposerText] = useState('');
   const [composerImages, setComposerImages] = useState<ComposerImageAttachment[]>([]);
@@ -657,8 +659,6 @@ export default function App() {
     setComposerText, setComposerImages, setLlmControlsBySessionId,
   });
 
-  const { sessionStatusSummary, failureTypeSummary } = useMemo(() => selectSidebarSummaries(sessions), [sessions]);
-
   useEffect(() => {
     if (!bootstrapComplete) {
       return;
@@ -730,21 +730,28 @@ export default function App() {
     updateActiveLlmControls({ planningNoToolGuardMode: normalized });
   }, [setDefaultLlmControls, setLlmControlsBySessionId, setPlanningNoToolGuardMode, updateActiveLlmControls]);
 
-  const sessionSidebarProps = buildSessionSidebarProps({
+  const sessionSidebarProps = useMemo(() => ({
     activeTab,
     setActiveTab,
     theme,
     setTheme,
     sessions,
     selectedSessionId,
-    setSessionSelection,
-    onStartNewSessionDraft: handleStartNewSessionDraft,
-    setCopyTraceState,
+    onSelectSession: setSessionSelection,
+    onNewSession: handleStartNewSessionDraft,
+    onDeleteSession: async (sessionId: string) => actions.handleDelete(sessionId),
+    onRetrySession: async (sessionId: string) => actions.handleRetrySession(sessionId),
+  }), [
+    activeTab,
     actions,
-    copyTraceState,
-    sessionStatusSummary,
-    failureTypeSummary,
-  });
+    handleStartNewSessionDraft,
+    selectedSessionId,
+    sessions,
+    setActiveTab,
+    setSessionSelection,
+    setTheme,
+    theme,
+  ]);
 
   const mainContentProps = {
     activeTab,
@@ -875,6 +882,7 @@ export default function App() {
 
         if (!config.authEnabled) {
           setAuthenticated(true);
+          setAuthUser(null);
           setAuthError('');
           return;
         }
@@ -886,16 +894,19 @@ export default function App() {
 
         if (status.authenticated) {
           setAuthenticated(true);
+          setAuthUser(status.user ?? null);
           setAuthError('');
           return;
         }
 
         clearStoredAuthToken();
         setAuthenticated(false);
+        setAuthUser(null);
       } catch (error) {
         if (!cancelled) {
           setAuthError(error instanceof Error ? error.message : String(error));
           setAuthenticated(false);
+          setAuthUser(null);
         }
       } finally {
         if (!cancelled) {
@@ -911,6 +922,14 @@ export default function App() {
     };
   }, []);
 
+  const handleAuthenticated = useCallback((result: { token: string; user?: AppAuthStatusResponse['user'] }) => {
+    setStoredAuthToken(result.token);
+    setAuthenticated(true);
+    setAuthUser(result.user ?? null);
+    setAuthError('');
+    replaceRoute(resolveSafePostLoginPath());
+  }, []);
+
   if (!authReady) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-slate-50 text-sm text-slate-700 dark:bg-slate-950 dark:text-slate-200">
@@ -924,12 +943,7 @@ export default function App() {
       <>
         <LoginGate
           googleClientId={googleClientId}
-          onAuthenticated={(token) => {
-            setStoredAuthToken(token);
-            setAuthenticated(true);
-            setAuthError('');
-            replaceRoute(resolveSafePostLoginPath());
-          }}
+          onAuthenticated={handleAuthenticated}
         />
         {authError && (
           <div className="fixed bottom-4 left-1/2 -translate-x-1/2 rounded-md border border-red-300 bg-red-50 px-3 py-2 text-xs text-red-700 shadow dark:border-red-900/70 dark:bg-red-950/30 dark:text-red-200">
@@ -946,6 +960,14 @@ export default function App() {
       sessionSidebarProps={sessionSidebarProps}
       mainContentProps={mainContentProps}
       llmModalProps={llmModalProps}
+      authUser={authUser ?? null}
+      onLogout={() => {
+        void logoutAppAuth();
+        clearStoredAuthToken();
+        setAuthenticated(false);
+        setAuthUser(null);
+        setAuthError('');
+      }}
       errorMessage={errorMessage}
       warningMessage={warningMessage}
       warningActionLabel={warningActionLabel}

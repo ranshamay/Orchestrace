@@ -427,6 +427,17 @@ export function formatTimelineEvent(event: { type: string; message: string; task
       return { title: 'Awaiting approval', subtitle: event.taskId, tone: 'neutral', content: detail || 'Waiting for plan approval.' };
     case 'task:implementation-attempt':
       return { title: 'Implementing', subtitle: event.taskId, tone: 'neutral', content: detail || 'Starting implementation attempt.' };
+    case 'task:testing':
+      return { title: 'Testing', subtitle: event.taskId, tone: 'neutral', content: detail || 'Tester agent is generating and running tests.' };
+    case 'task:tester-verdict': {
+      const rejected = /rejected/i.test(clean);
+      return {
+        title: rejected ? 'Tester Rejected' : 'Tester Approved',
+        subtitle: event.taskId,
+        tone: rejected ? 'error' : 'success',
+        content: detail || (rejected ? 'Tester agent requested implementation rework.' : 'Tester agent approved the implementation.'),
+      };
+    }
     case 'task:validating':
       return { title: 'Validating', subtitle: event.taskId, tone: 'neutral', content: detail || 'Running verification checks.' };
     case 'task:completed':

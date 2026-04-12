@@ -21,7 +21,12 @@ import {
   buildRoleTaskPrompt,
   buildRoleSystemPrompt,
 } from './role-config.js';
-import { executeImplementerRole, executeRole, spawnRoleAgent } from './role-executor.js';
+import {
+  executeImplementerRole,
+  executeRole,
+  executeTesterRole,
+  spawnRoleAgent,
+} from './role-executor.js';
 import {
   resolveReplayFailureType,
   shouldRetryAfterCompletionFailure,
@@ -72,8 +77,18 @@ export interface OrchestratorConfig extends RunnerConfig {
   onPlanApproval?: (request: PlanApprovalRequest) => Promise<boolean>;
   /** Optional provider auth resolver (env, OAuth store, secret manager, etc.). */
   resolveApiKey?: (provider: string) => Promise<string | undefined>;
+  /** Optional tester gate configuration for implementation outputs. */
+  testerConfig?: {
+    enabled: boolean;
+    model?: ModelConfig;
+    systemPrompt?: string;
+    requireRunTests?: boolean;
+  };
+  /** Optional default model for tester phase when a task does not override model. */
+  defaultTesterModel?: ModelConfig;
   /** Optional factory for phase-specific agent tools. */
   createToolset?: (params: {
+    role: 'planner' | 'implementer' | 'tester';
     phase: 'planning' | 'implementation';
     task: TaskNode;
     graphId: string;
@@ -147,6 +162,8 @@ export async function orchestrate(
     onPlanApproval,
     resolveApiKey,
     createToolset,
+    testerConfig,
+    defaultTesterModel,
     maxImplementationAttempts,
     onEvent,
     promptVersion,
@@ -223,6 +240,7 @@ export async function orchestrate(
     );
     const planningTokenDumpPath = join(taskTokenDumpDir, 'planning.jsonl');
     const implementationTokenDumpPath = join(taskTokenDumpDir, 'implementation.jsonl');
+    const testerTokenDumpPath = join(taskTokenDumpDir, 'testing.jsonl');
 
     const trivialTaskGate = resolveTrivialTaskGateConfig({
       enabled: enableTrivialTaskGate,
@@ -739,6 +757,12 @@ export async function orchestrate(
       maxImplementationAttempts ?? taskRetryBudget + 1,
     );
 
+    const taskTesterConfig = node.tester;
+    const resolvedTesterEnabled = taskTesterConfig?.enabled ?? testerConfig?.enabled ?? false;
+    const resolvedTesterRequireRunTests = taskTesterConfig?.requireRunTests ?? testerConfig?.requireRunTests ?? true;
+    const resolvedTesterModel = taskTesterConfig?.model ?? testerConfig?.model ?? defaultTesterModel ?? implementationModel;
+    const resolvedTesterSystemPrompt = testerConfig?.systemPrompt;
+
     return executeImplementerRole({
       task: node,
       graphId: graph.id,
@@ -758,6 +782,80 @@ export async function orchestrate(
       replay,
       maxAttempts,
       appendTokenDump,
+      postValidationGate: async ({ attempt, output, signal }) => {
+        const hasExplicitNoChanges = Array.isArray(output.filesChanged) && output.filesChanged.length === 0;
+        if (!resolvedTesterEnabled || hasExplicitNoChanges) {
+          return { approved: true, output };
+        }
+
+        emit({
+          type: 'task:testing',
+          taskId: node.id,
+          attempt,
+        });
+
+        const testerAgent = await spawnRoleAgent({
+          llm,
+          role: 'tester',
+          task: node,
+          graphId: graph.id,
+          cwd,
+          model: resolvedTesterModel,
+          systemPrompt: resolvedTesterSystemPrompt,
+          signal,
+          createToolset,
+          resolveApiKey,
+          taskRequiresWrites,
+        });
+
+        const testerResult = await executeTesterRole({
+          task: node,
+          approvedPlan: planningResult?.text,
+          implementationOutput: output,
+          testerAgent,
+          attempt,
+          signal,
+          emit,
+          requireRunTests: resolvedTesterRequireRunTests,
+        });
+
+        mergeUsage(usage, testerResult.usage);
+        await appendTokenDump(testerTokenDumpPath, {
+          graphId: graph.id,
+          taskId: node.id,
+          agent: 'testing',
+          attempt,
+          provider: resolvedTesterModel.provider,
+          model: resolvedTesterModel.model,
+          usage: testerResult.usage,
+        });
+
+        const testerVerdict = testerResult.verdict;
+        emit({
+          type: 'task:tester-verdict',
+          taskId: node.id,
+          attempt,
+          approved: testerVerdict.approved,
+          testsPassed: testerVerdict.testsPassed,
+          testsFailed: testerVerdict.testsFailed,
+          rejectionReason: testerVerdict.rejectionReason,
+        });
+
+        if (testerVerdict.approved) {
+          return {
+            approved: true,
+            output: {
+              ...output,
+              testerVerdict,
+            },
+          };
+        }
+
+        return {
+          approved: false,
+          error: formatTesterGateFailureMessage(testerVerdict),
+        };
+      },
     });
   };
 
@@ -772,7 +870,7 @@ async function appendTokenDump(
   entry: {
     graphId: string;
     taskId: string;
-    agent: 'planning' | 'implementation';
+    agent: 'planning' | 'implementation' | 'testing';
     attempt: number;
     provider: string;
     model: string;
@@ -870,6 +968,36 @@ function resolveTaskRequiresWrites(task: TaskNode): boolean {
   }
 
   return true;
+}
+
+function formatTesterGateFailureMessage(verdict: {
+  testsPassed: number;
+  testsFailed: number;
+  rejectionReason?: string;
+  suggestedFixes?: string[];
+  testOutput?: string;
+}): string {
+  const lines = [
+    `Tester gate rejected implementation (passed=${verdict.testsPassed}, failed=${verdict.testsFailed}).`,
+  ];
+
+  if (verdict.rejectionReason) {
+    lines.push(`Reason: ${verdict.rejectionReason}`);
+  }
+
+  if (verdict.suggestedFixes && verdict.suggestedFixes.length > 0) {
+    lines.push('Suggested fixes:');
+    for (const fix of verdict.suggestedFixes) {
+      lines.push(`- ${fix}`);
+    }
+  }
+
+  if (verdict.testOutput) {
+    lines.push('Test output:');
+    lines.push(verdict.testOutput);
+  }
+
+  return lines.join('\n');
 }
 
 function readTaskMetaString(task: TaskNode, key: string): string | undefined {

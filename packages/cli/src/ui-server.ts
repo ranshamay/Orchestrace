@@ -96,6 +96,10 @@ import type { LogWatcherRuntimeError, RealtimeFinding } from './observer/index.j
 import { sanitizeLogLine, sanitizeToolPayload } from './runner/log-sanitizer.js';
 import { parseTaskRouteOverride } from './task-routing.js';
 import { PrMergeScanner } from './pr-merge-scanner.js';
+import {
+  loadTesterAgentConfig,
+  saveTesterAgentConfig,
+} from './tester-config.js';
 
 
 
@@ -103,6 +107,7 @@ const GITHUB_PROVIDER_ID = 'github';
 const GITHUB_API_BASE_URL = 'https://api.github.com';
 const GOOGLE_TOKENINFO_URL = 'https://oauth2.googleapis.com/tokeninfo';
 const APP_AUTH_BEARER_PREFIX = 'Bearer ';
+const APP_AUTH_COOKIE_NAME = 'orchestrace_app_auth';
 const GITHUB_DEVICE_AUTH_SCOPES_DEFAULT = ['repo', 'workflow', 'read:org'];
 // Public OAuth app client id used for GitHub device flow (mirrors CLI-style auth UX).
 const GITHUB_DEVICE_AUTH_CLIENT_ID_DEFAULT = '178c6fc778ccc68e1d6a';
@@ -133,6 +138,11 @@ const STARTUP_RECOVERY_MODE_ENV = 'ORCHESTRACE_RECOVERY_MODE';
 const SESSION_CHECKPOINT_FILE = 'checkpoint.json';
 const CHECKPOINT_STASH_PREFIX = 'orchestrace-checkpoint';
 const execFileAsync = promisify(execFile);
+
+type AppAuthRequestHeaders = {
+  authorization?: string | string[];
+  cookie?: string | string[];
+};
 
 type SessionCheckpointMetadata = {
   sessionId: string;
@@ -295,6 +305,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
   const orchestraceDir = join(workspaceManager.getRootDir(), '.orchestrace');
   const backendLogger = new BackendLogger({ orchestraceDir });
   backendLogger.start();
+  let testerAgentConfig = await loadTesterAgentConfig(orchestraceDir);
 
     const workSessions = new Map<string, WorkSession>();
 
@@ -428,7 +439,12 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       return true;
     }
 
-    if (pathname === '/api/app-auth/config' || pathname === '/api/app-auth/google' || pathname === '/api/app-auth/status') {
+    if (
+      pathname === '/api/app-auth/config'
+      || pathname === '/api/app-auth/google'
+      || pathname === '/api/app-auth/status'
+      || pathname === '/api/app-auth/logout'
+    ) {
       return true;
     }
 
@@ -451,22 +467,16 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     return false;
   }
 
-  function resolveRequestJwt(req: IncomingMessage, url: URL): string | undefined {
-    const authHeader = asString(req.headers.authorization)?.trim();
-    if (authHeader && authHeader.startsWith(APP_AUTH_BEARER_PREFIX)) {
-      return authHeader.slice(APP_AUTH_BEARER_PREFIX.length).trim() || undefined;
-    }
-
-    const token = asString(url.searchParams.get('token'))?.trim();
-    return token || undefined;
+  function resolveRequestJwt(req: IncomingMessage): string | undefined {
+    return resolveAppAuthTokenFromRequestHeaders(req.headers);
   }
 
-  function requireAppAuth(req: IncomingMessage, res: ServerResponse, url: URL): AppAuthJwtPayload | undefined {
+  function requireAppAuth(req: IncomingMessage, res: ServerResponse): AppAuthJwtPayload | undefined {
     if (!appAuthEnabled) {
       return undefined;
     }
 
-    const token = resolveRequestJwt(req, url);
+    const token = resolveRequestJwt(req);
     if (!token) {
       sendJson(res, 401, { error: 'Authentication required' });
       return undefined;
@@ -2150,7 +2160,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       }
 
       if (req.method === 'GET' && pathname === '/api/app-auth/status') {
-        const token = resolveRequestJwt(req, url);
+        const token = resolveRequestJwt(req);
         if (!appAuthEnabled) {
           sendJson(res, 200, { authenticated: true, authEnabled: false });
           return;
@@ -2226,6 +2236,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
             exp: Math.floor(expiresAt / 1000),
           }, appAuthConfig.jwtSecret);
 
+          res.setHeader('Set-Cookie', serializeAppAuthCookie(token, appAuthConfig.tokenTtlSeconds));
+
           sendJson(res, 200, {
             token,
             tokenType: 'Bearer',
@@ -2242,8 +2254,15 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         return;
       }
 
+      if (req.method === 'POST' && pathname === '/api/app-auth/logout') {
+        res.statusCode = 204;
+        res.setHeader('Set-Cookie', clearAppAuthCookie());
+        res.end();
+        return;
+      }
+
       if (!isPublicRoute(pathname)) {
-        const authPayload = requireAppAuth(req, res, url);
+        const authPayload = requireAppAuth(req, res);
         if (appAuthEnabled && !authPayload) {
           return;
         }
@@ -4101,6 +4120,13 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         return;
       }
 
+      if (req.method === 'GET' && pathname === '/api/tester/status') {
+        sendJson(res, 200, {
+          config: testerAgentConfig,
+        });
+        return;
+      }
+
       if (req.method === 'GET' && pathname === '/api/observer/findings') {
         sendJson(res, 200, { findings: observerDaemon.getFindings() });
         return;
@@ -4172,6 +4198,34 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         return;
       }
 
+      if (req.method === 'POST' && pathname === '/api/tester/enable') {
+        testerAgentConfig = await saveTesterAgentConfig(orchestraceDir, {
+          ...testerAgentConfig,
+          enabled: true,
+        });
+        sendJson(res, 200, { enabled: true, config: testerAgentConfig });
+        return;
+      }
+
+      if (req.method === 'POST' && pathname === '/api/tester/disable') {
+        testerAgentConfig = await saveTesterAgentConfig(orchestraceDir, {
+          ...testerAgentConfig,
+          enabled: false,
+        });
+        sendJson(res, 200, { enabled: false, config: testerAgentConfig });
+        return;
+      }
+
+      if (req.method === 'POST' && pathname === '/api/tester/config') {
+        const body = await readJsonBody(req);
+        testerAgentConfig = await saveTesterAgentConfig(orchestraceDir, {
+          ...testerAgentConfig,
+          ...(body && typeof body === 'object' ? body : {}),
+        });
+        sendJson(res, 200, { config: testerAgentConfig });
+        return;
+      }
+
       if (req.method === 'POST' && pathname === '/api/observer/trigger') {
         const result = await observerDaemon.triggerAnalysis();
         sendJson(res, 200, result);
@@ -4181,6 +4235,12 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       if (req.method === 'POST' && pathname === '/api/observer/spawn-all') {
         const spawned = await observerDaemon.spawnAll();
         sendJson(res, 200, { spawned });
+        return;
+      }
+
+      if (req.method === 'POST' && pathname === '/api/observer/clear-pending') {
+        const cleared = await observerDaemon.clearPendingQueue();
+        sendJson(res, 200, { cleared });
         return;
       }
 
@@ -5088,6 +5148,70 @@ function resolveAppAuthConfig(): AppAuthConfig {
     jwtSecret,
     tokenTtlSeconds,
   };
+}
+
+export function resolveAppAuthTokenFromRequestHeaders(headers: AppAuthRequestHeaders): string | undefined {
+  const authHeader = asString(Array.isArray(headers.authorization) ? headers.authorization[0] : headers.authorization)?.trim();
+  if (authHeader && authHeader.startsWith(APP_AUTH_BEARER_PREFIX)) {
+    return authHeader.slice(APP_AUTH_BEARER_PREFIX.length).trim() || undefined;
+  }
+
+  const cookieHeader = Array.isArray(headers.cookie) ? headers.cookie.join('; ') : headers.cookie;
+  return readCookieValue(cookieHeader, APP_AUTH_COOKIE_NAME)?.trim() || undefined;
+}
+
+function readCookieValue(cookieHeader: string | undefined, cookieName: string): string | undefined {
+  if (!cookieHeader) {
+    return undefined;
+  }
+
+  const entries = cookieHeader.split(';');
+  for (const entry of entries) {
+    const separatorIndex = entry.indexOf('=');
+    if (separatorIndex <= 0) {
+      continue;
+    }
+
+    const rawName = entry.slice(0, separatorIndex).trim();
+    if (rawName !== cookieName) {
+      continue;
+    }
+
+    const rawValue = entry.slice(separatorIndex + 1).trim();
+    if (!rawValue) {
+      return undefined;
+    }
+
+    try {
+      return decodeURIComponent(rawValue);
+    } catch {
+      return rawValue;
+    }
+  }
+
+  return undefined;
+}
+
+function serializeAppAuthCookie(token: string, maxAgeSeconds: number): string {
+  const secure = process.env.NODE_ENV === 'production' ? '; Secure' : '';
+  return [
+    `${APP_AUTH_COOKIE_NAME}=${encodeURIComponent(token)}`,
+    'Path=/',
+    `Max-Age=${Math.max(1, Math.floor(maxAgeSeconds))}`,
+    'HttpOnly',
+    'SameSite=Lax',
+  ].join('; ') + secure;
+}
+
+function clearAppAuthCookie(): string {
+  const secure = process.env.NODE_ENV === 'production' ? '; Secure' : '';
+  return [
+    `${APP_AUTH_COOKIE_NAME}=`,
+    'Path=/',
+    'Max-Age=0',
+    'HttpOnly',
+    'SameSite=Lax',
+  ].join('; ') + secure;
 }
 
 function base64UrlEncode(input: string | Buffer): string {
@@ -6235,6 +6359,17 @@ function toUiEvent(runId: string, event: DagEvent): UiDagEvent | undefined {
       return { ...base, message: tagged(`${event.taskId}: approved`) };
     case 'task:implementation-attempt':
       return { ...base, message: tagged(`${event.taskId}: implementation attempt ${event.attempt}/${event.maxAttempts}`) };
+    case 'task:testing':
+      return { ...base, message: tagged(`${event.taskId}: tester gate attempt ${event.attempt}`) };
+    case 'task:tester-verdict':
+      return {
+        ...base,
+        message: tagged(
+          `${event.taskId}: tester ${event.approved ? 'approved' : 'rejected'} `
+          + `(passed=${event.testsPassed}, failed=${event.testsFailed})`
+          + (event.rejectionReason ? ` reason=${event.rejectionReason}` : ''),
+        ),
+      };
     case 'task:tool-call': {
       if (event.status === 'started') {
         return {

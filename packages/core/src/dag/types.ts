@@ -6,6 +6,7 @@ export type TaskStatus =
   | 'awaiting_approval'
   | 'running'
   | 'implementing'
+  | 'testing'
   | 'validating'
   | 'completed'
   | 'failed'
@@ -43,6 +44,16 @@ export interface ValidationConfig {
   retryDelayMs?: number;
 }
 
+/** Tester gate strategy for a task's output. */
+export interface TesterConfig {
+  /** Enable tester gate for this task. */
+  enabled: boolean;
+  /** Override tester model for this task. */
+  model?: ModelConfig;
+  /** Require at least one test command execution. Defaults to true. */
+  requireRunTests?: boolean;
+}
+
 /** A single node in the task graph. */
 export interface TaskNode {
   id: string;
@@ -56,6 +67,8 @@ export interface TaskNode {
   model?: ModelConfig;
   /** Validation/retry configuration. */
   validation?: ValidationConfig;
+  /** Optional tester gate configuration. */
+  tester?: TesterConfig;
   /** Arbitrary metadata. */
   meta?: Record<string, unknown>;
 }
@@ -115,6 +128,16 @@ export interface TaskReplayRecord {
   attempts: ReplayAttemptRecord[];
 }
 
+export interface TesterVerdict {
+  approved: boolean;
+  testsPassed: number;
+  testsFailed: number;
+  /** Collapsed command output evidence from tester-run validations. */
+  testOutput: string;
+  rejectionReason?: string;
+  suggestedFixes?: string[];
+}
+
 /** Result produced by a completed task. */
 export interface TaskOutput {
   taskId: string;
@@ -131,6 +154,8 @@ export interface TaskOutput {
   filesChanged?: string[];
   /** Validation results. */
   validationResults?: ValidationResult[];
+  /** Tester gate verdict when tester phase is enabled. */
+  testerVerdict?: TesterVerdict;
   /** Time taken in ms. */
   durationMs: number;
   /** Token usage from the LLM call. */
@@ -197,6 +222,16 @@ export type DagEvent =
   | { type: 'task:approval-requested'; taskId: string; path: string }
   | { type: 'task:approved'; taskId: string }
   | { type: 'task:implementation-attempt'; taskId: string; attempt: number; maxAttempts: number }
+  | { type: 'task:testing'; taskId: string; attempt: number }
+  | {
+      type: 'task:tester-verdict';
+      taskId: string;
+      attempt: number;
+      approved: boolean;
+      testsPassed: number;
+      testsFailed: number;
+      rejectionReason?: string;
+    }
   | { type: 'task:verification-failed'; taskId: string; attempt: number; error: string }
   | { type: 'task:ready'; taskId: string }
   | { type: 'task:started'; taskId: string }

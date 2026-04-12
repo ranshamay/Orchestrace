@@ -46,20 +46,6 @@ function withAuthHeaders(init?: RequestInit): RequestInit {
   };
 }
 
-function withAuthApiPath(path: string): string {
-  const token = getStoredAuthToken();
-  if (!token) {
-    return path;
-  }
-
-  if (!path.startsWith(API_BASE)) {
-    return path;
-  }
-
-  const separator = path.includes('?') ? '&' : '?';
-  return `${path}${separator}token=${encodeURIComponent(token)}`;
-}
-
 async function authedFetch(path: string, init?: RequestInit): Promise<Response> {
   return fetch(path, withAuthHeaders(init));
 }
@@ -109,8 +95,15 @@ export async function loginWithGoogleIdToken(idToken: string): Promise<AppGoogle
   return readJson(res);
 }
 
+export async function logoutAppAuth(): Promise<void> {
+  await fetch(`${API_BASE}/app-auth/logout`, {
+    method: 'POST',
+    headers: withAuthHeaders().headers,
+  });
+}
+
 export function buildAuthedSseUrl(path: string): string {
-  return withAuthApiPath(path);
+  return path;
 }
 
 export interface ProviderInfo {
@@ -572,7 +565,7 @@ export interface ObserverFinding {
   observedInSessions: string[];
   detectedAt: string;
   fixSessionId: string | null;
-  fixStatus: 'pending' | 'spawned' | 'completed' | 'failed';
+  fixStatus: 'hypothesis' | 'verified' | 'grouped' | 'pending' | 'spawned' | 'completed' | 'failed' | 'rejected';
   additionalSessions: string[];
 }
 
@@ -662,6 +655,59 @@ export async function updateObserverConfig(config: Record<string, unknown>): Pro
 
 export async function triggerObserverAnalysis(): Promise<{ analyzed: number; findings: number; spawned: number }> {
   const res = await authedFetch(`${API_BASE}/observer/trigger`, { method: 'POST' });
+  return readJson(res);
+}
+
+export async function clearObserverPendingQueue(): Promise<{ cleared: number }> {
+  const res = await authedFetch(`${API_BASE}/observer/clear-pending`, { method: 'POST' });
+  return readJson(res);
+}
+
+// -- Tester API --
+
+export type TesterCategory = 'unit' | 'integration' | 'api' | 'ui' | 'deployment';
+export type TesterReasoningLevel = 'minimal' | 'low' | 'medium' | 'high';
+
+export interface TesterConfig {
+  enabled: boolean;
+  provider: string;
+  model: string;
+  reasoning?: TesterReasoningLevel;
+  requireRunTests: boolean;
+  testCategories: TesterCategory[];
+  maxTestRetries: number;
+  timeoutMs: number;
+  testFilePatterns: string[];
+  approvalThreshold: number;
+}
+
+export interface TesterStatusResponse {
+  config: TesterConfig;
+}
+
+export async function fetchTesterStatus(): Promise<TesterStatusResponse> {
+  const res = await authedFetch(`${API_BASE}/tester/status`);
+  return readJson(res);
+}
+
+export async function enableTester(): Promise<{ enabled: boolean; config: TesterConfig }> {
+  const res = await authedFetch(`${API_BASE}/tester/enable`, { method: 'POST' });
+  return readJson(res);
+}
+
+export async function disableTester(): Promise<{ enabled: boolean; config: TesterConfig }> {
+  const res = await authedFetch(`${API_BASE}/tester/disable`, { method: 'POST' });
+  return readJson(res);
+}
+
+export async function updateTesterConfig(
+  config: Partial<TesterConfig>,
+): Promise<{ config: TesterConfig }> {
+  const res = await authedFetch(`${API_BASE}/tester/config`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(config),
+  });
   return readJson(res);
 }
 

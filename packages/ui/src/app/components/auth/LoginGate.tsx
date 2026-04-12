@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { loginWithGoogleIdToken } from '../../../lib/api';
+import { loginWithGoogleIdToken, type AppGoogleAuthResponse } from '../../../lib/api';
 
 declare global {
   interface Window {
@@ -23,7 +23,7 @@ declare global {
 
 type Props = {
   googleClientId: string;
-  onAuthenticated: (token: string) => void;
+  onAuthenticated: (result: AppGoogleAuthResponse) => void;
 };
 
 const GOOGLE_SCRIPT_ID = 'google-identity-client';
@@ -91,7 +91,7 @@ export function LoginGate({ googleClientId, onAuthenticated }: Props) {
         setError('');
         void loginWithGoogleIdToken(credential)
           .then((result) => {
-            onAuthenticated(result.token);
+            onAuthenticated(result);
           })
           .catch((err) => {
             setError(err instanceof Error ? err.message : String(err));
@@ -125,14 +125,9 @@ export function LoginGate({ googleClientId, onAuthenticated }: Props) {
         ) : (
           <div className="mt-5 space-y-3">
             <div ref={buttonHostRef} className="min-h-10" />
-            <button
-              type="button"
-              className="rounded border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-60 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
-              onClick={() => window.google?.accounts?.id?.prompt()}
-              disabled={isLoading}
-            >
-              {isLoading ? 'Signing in...' : 'Try another Google account'}
-            </button>
+            {isLoading ? (
+              <div className="text-xs text-slate-500 dark:text-slate-300">Signing in...</div>
+            ) : null}
           </div>
         )}
 

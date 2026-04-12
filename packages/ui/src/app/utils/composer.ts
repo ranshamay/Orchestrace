@@ -10,9 +10,14 @@ export function sanitizeAttachmentName(input: string): string {
 }
 
 export function attachmentMarkdown(attachments: ComposerImageAttachment[]): string {
-  return attachments
-    .map((attachment, index) => `![${sanitizeAttachmentName(attachment.name || `pasted-image-${index + 1}.png`)}](${attachment.dataUrl})`)
-    .join('\n\n');
+  if (attachments.length === 0) {
+    return '';
+  }
+
+  const names = attachments
+    .map((attachment, index) => sanitizeAttachmentName(attachment.name || `pasted-image-${index + 1}.png`))
+    .join(', ');
+  return `[attached ${attachments.length} image${attachments.length === 1 ? '' : 's'}: ${names}]`;
 }
 
 export function composePrompt(text: string, attachments: ComposerImageAttachment[]): string {

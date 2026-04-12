@@ -16,6 +16,7 @@ import { enforceSafeShellDispatch, formatShellValidationRejection, resolveTaskRo
 import { WorkspaceManager } from './workspace-manager.js';
 import type { WorkspaceEntry } from './workspace-manager.js';
 import { parseAndSanitizeVerifyCommands } from './verify-commands.js';
+import { loadTesterAgentConfig } from './tester-config.js';
 
 const SUB_AGENT_READ_ONLY_TOOL_ALLOWLIST = [
   'list_directory',
@@ -23,6 +24,23 @@ const SUB_AGENT_READ_ONLY_TOOL_ALLOWLIST = [
   'search_files',
   'git_diff',
   'git_status',
+  'url_fetch',
+];
+
+const TESTER_TOOL_ALLOWLIST = [
+  'list_directory',
+  'read_file',
+  'read_files',
+  'search_files',
+  'git_diff',
+  'git_status',
+  'write_file',
+  'write_files',
+  'edit_file',
+  'edit_files',
+  'run_command',
+  'run_command_batch',
+  'playwright_run',
   'url_fetch',
 ];
 
@@ -126,6 +144,7 @@ interface ReplayTaskArtifact {
 
 const execFileAsync = promisify(execFile);
 loadDotEnv({ quiet: true });
+loadDotEnv({ path: resolve(process.cwd(), '..', '..', '.env'), quiet: true });
 
 async function main() {
   const args = process.argv.slice(2);
@@ -447,6 +466,14 @@ async function runGraph(
       case 'task:implementation-attempt':
         console.log(`  [${ts}] ⚙ implement attempt:    ${event.taskId} (${event.attempt}/${event.maxAttempts})`);
         break;
+      case 'task:testing':
+        console.log(`  [${ts}] 🧪 tester gate:         ${event.taskId} (attempt ${event.attempt})`);
+        break;
+      case 'task:tester-verdict':
+        console.log(
+          `  [${ts}] ${event.approved ? '✅' : '❌'} tester verdict:      ${event.taskId} (passed=${event.testsPassed}, failed=${event.testsFailed})`,
+        );
+        break;
       case 'task:validating':
         console.log(`  [${ts}] ⌁ validating:           ${event.taskId}`);
         break;
@@ -477,6 +504,12 @@ async function runGraph(
   const authManager = new ProviderAuthManager();
   const githubAuthManager = createGithubAuthManager();
   const cwd = options.workspace.path;
+    const testerAgentConfig = await loadTesterAgentConfig(resolve(cwd, '.orchestrace'));
+    const testerModel = {
+      provider: testerAgentConfig.provider.trim() || implementationProvider,
+      model: testerAgentConfig.model.trim() || implementationModel,
+      ...(testerAgentConfig.reasoning ? { reasoning: testerAgentConfig.reasoning } : {}),
+    };
 
   const providersToValidate = new Set<string>([
     provider,
@@ -509,11 +542,17 @@ async function runGraph(
     defaultModel: { provider: implementationProvider, model: implementationModel },
     defaultPlanningModel: { provider: planningProvider, model: planningModel },
     defaultImplementationModel: { provider: implementationProvider, model: implementationModel },
+    defaultTesterModel: testerModel,
+    testerConfig: {
+      enabled: testerAgentConfig.enabled,
+      model: testerModel,
+      requireRunTests: testerAgentConfig.requireRunTests,
+    },
     onEvent,
     requirePlanApproval: true,
     onPlanApproval: approvalGate,
     resolveApiKey: (providerId) => authManager.resolveApiKey(providerId),
-    createToolset: ({ phase, task, graphId, provider: activeProvider, model: activeModel, reasoning, taskRequiresWrites }) => createAgentToolset({
+    createToolset: ({ role, phase, task, graphId, provider: activeProvider, model: activeModel, reasoning, taskRequiresWrites }) => createAgentToolset({
       cwd,
       phase,
       taskRequiresWrites,
@@ -523,9 +562,16 @@ async function runGraph(
       provider: activeProvider,
       model: activeModel,
       reasoning,
+      permissions: role === 'tester'
+        ? {
+            allowWriteTools: true,
+            allowRunCommand: true,
+            toolAllowlist: TESTER_TOOL_ALLOWLIST,
+          }
+        : undefined,
             resolveGithubToken: (resolveOptions) => githubAuthManager.resolveApiKey(GITHUB_PROVIDER_ID, resolveOptions),
 
-      runSubAgent: async (request, _signal) => {
+      runSubAgent: role === 'tester' ? undefined : async (request, _signal) => {
         const subProvider = request.provider ?? activeProvider;
         const subModel = request.model ?? activeModel;
         const subAgentToolset = createReadOnlySubAgentToolset(cwd, taskRequiresWrites);

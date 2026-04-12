@@ -149,6 +149,29 @@ export class FindingRegistry {
     return this.findings.filter((f) => f.fixStatus === 'pending');
   }
 
+  /**
+   * Clear all pending findings from the active queue by rejecting them.
+   * Returns the number of findings transitioned out of pending.
+   */
+  clearPending(reason: string): number {
+    let cleared = 0;
+    for (const finding of this.findings) {
+      if (finding.fixStatus !== 'pending') {
+        continue;
+      }
+
+      finding.fixStatus = 'rejected';
+      finding.rejectionReason = reason;
+      cleared += 1;
+    }
+
+    if (cleared > 0) {
+      this.dirty = true;
+    }
+
+    return cleared;
+  }
+
   markVerified(fingerprint: string, verifiedEvidence: VerifiedEvidence[]): void {
     const record = this.findings.find((f) => f.fingerprint === fingerprint);
     if (!record) return;

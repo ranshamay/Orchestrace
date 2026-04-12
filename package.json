@@ -18,7 +18,7 @@
     "format": "prettier --write \"packages/*/src/**/*.ts\"",
     "format:check": "prettier --check \"packages/*/src/**/*.ts\"",
     "clean": "turbo clean && rm -rf node_modules",
-    "start": "zsh -lc \"(lsof -ti:4310 -ti:3000 | xargs kill -9 >/dev/null 2>&1 || true); concurrently -n 'backend,frontend' -c 'blue,green' 'pnpm --filter @orchestrace/cli dev ui --port 4310' 'pnpm --filter @orchestrace/ui dev'\""
+    "start": "zsh -lc \"(lsof -ti:4310 -ti:3000 | xargs kill -9 >/dev/null 2>&1 || true); concurrently -n 'backend,frontend' -c 'blue,green' 'pnpm --filter @orchestrace/cli dev ui --port 4310' 'zsh -lc \\\"until curl -sf http://127.0.0.1:4310/api/health >/dev/null; do sleep 0.2; done; pnpm --filter @orchestrace/ui dev\\\"'\""
   },
   "pnpm": {
     "onlyBuiltDependencies": [
