@@ -16,6 +16,7 @@ import { createTimeoutSignal } from './timeout.js';
 const MAX_TOOL_ROUNDS = resolveMaxToolRounds();
 const SUBAGENT_BATCH_RETRY_MAX_ATTEMPTS = resolveSubagentBatchRetryMaxAttempts();
 const ACKNOWLEDGMENT_READ_AFTER_WRITE_ESCALATION_THRESHOLD = 2;
+const WRITE_GUARD_EXEMPT_TOOLS = new Set(['write_file', 'todo_set']);
 
 const SUFFICIENT_CONTEXT_ACK_PATTERNS: RegExp[] = [
   /\benough\s+(?:source\s+)?context\b/i,
@@ -200,7 +201,7 @@ async function executeToolCalls(
       arguments: formatToolPayload(toolCall.arguments),
     });
 
-    if (writeRequiredNext && toolCall.name !== 'write_file') {
+    if (writeRequiredNext && !WRITE_GUARD_EXEMPT_TOOLS.has(toolCall.name)) {
       readAfterAckViolation = true;
       payload = {
         content: buildAcknowledgmentWriteGuardViolationMessage(toolCall),
@@ -232,6 +233,8 @@ async function executeToolCalls(
     if (writeRequiredNext && toolCall.name === 'write_file') {
       writeRequirementSatisfied = true;
       writeRequiredNext = false;
+    } else if (writeRequiredNext && toolCall.name === 'todo_set') {
+      // todo_set is a planning tool — allow it without satisfying the write requirement
     }
 
     try {
