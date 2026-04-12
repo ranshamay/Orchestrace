@@ -15,8 +15,8 @@ import {
   type ObserverFindingInput,
 } from './types.js';
 import type { SessionSummary } from './summarizer.js';
-import { formatSummaryForLlm } from './summarizer.js';
 import { OBSERVER_SYSTEM_PROMPT } from './prompts.js';
+
 
 const READ_SEARCH_TOOLS = new Set(['read_file', 'read_files', 'search_files']);
 const WRITE_TOOLS = new Set(['write_file', 'write_files', 'edit_file', 'edit_files']);
@@ -89,11 +89,12 @@ function buildAnalysisPrompt(summaries: SessionSummary[], allowedCategories: Fin
   );
 
   for (const summary of summaries) {
-    parts.push(formatSummaryForLlm(summary));
+    parts.push(formatSessionSummaryForAnalyzer(summary));
     parts.push('---\n');
   }
 
   parts.push(
+
     'Respond with a JSON object matching this exact schema:\n'
       + '```json\n'
       + '{\n'
@@ -117,7 +118,38 @@ function buildAnalysisPrompt(summaries: SessionSummary[], allowedCategories: Fin
   parts.push('');
   parts.push(`Only include findings in these categories: ${allowedCategories.join(', ')}`);
 
-  return parts.join('\n');
+    return parts.join('\n');
+}
+
+function formatSessionSummaryForAnalyzer(summary: SessionSummary): string {
+  const lines: string[] = [];
+
+  lines.push(`## Session ${summary.sessionId}`);
+  lines.push(`Prompt: ${summary.config.prompt}`);
+  lines.push(`Provider: ${summary.config.provider} / Model: ${summary.config.model}`);
+  lines.push(`Workspace: ${summary.config.workspacePath}`);
+  lines.push(`Status: ${summary.status}${summary.error ? ` — Error: ${summary.error}` : ''}`);
+  lines.push(`Duration: ${summary.durationMs != null ? `${(summary.durationMs / 1000).toFixed(1)}s` : 'unknown'}`);
+  lines.push(`Total events: ${summary.totalEvents}`);
+  lines.push('');
+
+  if (summary.toolCalls.length > 0) {
+    lines.push('### Tool Calls');
+    for (const tool of summary.toolCalls) {
+      lines.push(`- ${tool.toolName}${tool.isError ? ' [error]' : ''}`);
+    }
+    lines.push('');
+  }
+
+  if (summary.todos.length > 0) {
+    lines.push('### Todos');
+    for (const todo of summary.todos) {
+      lines.push(`- [${todo.done ? 'x' : ' '}] ${todo.text}${todo.status ? ` (${todo.status})` : ''}`);
+    }
+    lines.push('');
+  }
+
+  return lines.join('\n');
 }
 
 /**
@@ -125,6 +157,7 @@ function buildAnalysisPrompt(summaries: SessionSummary[], allowedCategories: Fin
  * Tolerates markdown fences around the JSON.
  */
 function parseAnalysisResponse(text: string, allowedCategories: FindingCategory[]): AnalysisResult {
+
   // Strip markdown code fences
   let jsonStr = text.trim();
   const fenceMatch = jsonStr.match(/```(?:json)?\s*\n?([\s\S]*?)\n?\s*```/);
