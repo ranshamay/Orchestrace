@@ -107,11 +107,14 @@ Guidelines:
 - Only report CONCRETE, ACTIONABLE issues backed by evidence from the logs
 - Include the relevant log snippet (1-3 key lines) in each finding
 - Each evidence entry must be a specific code change or configuration adjustment
+- Do NOT repeat previously reported findings; only report newly evidenced, material issues
+- Keep findings concise and implementation-ready (what to change, where, and why)
 
 - Don't flag normal operational logs (startup messages, successful operations)
 - Focus on patterns — a single transient error is less important than a recurring one
 - Rate severity honestly: critical = data loss/security, high = breaking errors, medium = perf/reliability, low = minor improvements
 - If no significant issues are found in the batch, return an empty findings array
+
 
 Respond ONLY with valid JSON matching this schema:
 \`\`\`json
@@ -326,7 +329,9 @@ export class LogWatcher {
   private buildAnalysisPrompt(batch: string[]): string {
     const lines: string[] = [];
     lines.push(`# Backend Log Batch (${batch.length} lines)\n`);
-    lines.push('Analyze the following backend log lines for issues and improvements:\n');
+        lines.push('Analyze the following backend log lines for issues and improvements:\n');
+    lines.push('Return only concrete actionable findings; do NOT repeat prior findings. If no significant issue exists, return { "findings": [] }.\n');
+
     lines.push('```');
     lines.push(...batch.map((l) => l.trimEnd()));
     lines.push('```\n');

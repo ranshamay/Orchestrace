@@ -55,9 +55,13 @@ export async function analyzeSessionSummaries(
 function buildAnalysisPrompt(summaries: SessionSummary[], allowedCategories: FindingCategory[]): string {
   const parts: string[] = [];
 
-  parts.push(
+    parts.push(
     `Analyze the following ${summaries.length} session log(s) for optimization opportunities.\n`,
   );
+  parts.push(
+    'Prioritize concrete findings that unblock implementation progress. Avoid recommending broad additional scans unless absolutely required.\n',
+  );
+
 
   for (const summary of summaries) {
     parts.push(formatSummaryForLlm(summary));
@@ -82,8 +86,10 @@ function buildAnalysisPrompt(summaries: SessionSummary[], allowedCategories: Fin
       '  ]\n' +
       '}\n' +
       '```\n' +
-      'Compatibility: legacy outputs with `suggestedFix` are also accepted during rollout.\n' +
+            'Compatibility: legacy outputs with `suggestedFix` are also accepted during rollout.\n' +
+      'Each evidence item must be implementation-ready (specific code/test/config change), not generic reconnaissance advice.\n' +
       'Return ONLY the JSON object, no other text.',
+
   );
 
   parts.push('');
