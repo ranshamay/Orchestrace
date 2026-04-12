@@ -110,40 +110,23 @@ function parseAnalysisResponse(text: string, allowedCategories: FindingCategory[
       return { findings: [] };
     }
 
-    // Validate and sanitize each finding
-    const validCategories: FindingCategory[] = [...ALL_FINDING_CATEGORIES];
-    const validSeverities: FindingSeverity[] = ['low', 'medium', 'high', 'critical'];
-
     const mappedFindings: AnalysisResult['findings'] = parsed.findings
+      .filter((f): f is Record<string, unknown> => !!f && typeof f === 'object')
       .filter((f: Record<string, unknown>) => isValidFindingCandidate(f))
       .map((f: Record<string, unknown>): ObserverFindingInput => {
-        const evidence = normalizeFindingEvidence(
-          Array.isArray(f.evidence)
-            ? f.evidence
-                .filter((entry): entry is { text: string } => {
-                  if (!entry || typeof entry !== 'object') return false;
-                  const textValue = (entry as Record<string, unknown>).text;
-                  return typeof textValue === 'string';
-                })
-                .map((entry) => ({ text: entry.text }))
-            : undefined,
-          typeof f.suggestedFix === 'string' ? String(f.suggestedFix) : undefined,
-        );
+        const title = toNonEmptyString(f.title);
+        const description = toNonEmptyString(f.description);
+        const suggestedFix = toNonEmptyString(f.suggestedFix);
+        const evidence = normalizeFindingEvidence(extractEvidenceEntries(f.evidence), suggestedFix);
 
         return {
           schemaVersion: '2',
-          category: validCategories.includes(f.category as FindingCategory)
-            ? (f.category as FindingCategory)
-            : ('code-quality' as FindingCategory),
-          severity: validSeverities.includes(f.severity as FindingSeverity)
-            ? (f.severity as FindingSeverity)
-            : ('medium' as FindingSeverity),
-          title: String(f.title),
-          description: String(f.description),
+          category: f.category as FindingCategory,
+          severity: f.severity as FindingSeverity,
+          title,
+          description,
           evidence,
-          relevantFiles: Array.isArray(f.relevantFiles)
-            ? f.relevantFiles.filter((p: unknown) => typeof p === 'string')
-            : undefined,
+          relevantFiles: extractRelevantFiles(f.relevantFiles),
         };
       });
 
@@ -159,19 +142,50 @@ function parseAnalysisResponse(text: string, allowedCategories: FindingCategory[
 }
 
 function isValidFindingCandidate(f: Record<string, unknown>): boolean {
-  const hasCore = typeof f.title === 'string' && typeof f.description === 'string';
-  if (!hasCore) {
+  const title = toNonEmptyString(f.title);
+  const description = toNonEmptyString(f.description);
+  if (!title || !description) {
     return false;
   }
 
-  const hasLegacy = typeof f.suggestedFix === 'string';
-  const hasEvidence =
-    Array.isArray(f.evidence)
-    && f.evidence.some((entry) => {
-      if (!entry || typeof entry !== 'object') return false;
-      const textValue = (entry as Record<string, unknown>).text;
-      return typeof textValue === 'string' && textValue.trim().length > 0;
-    });
+  if (!ALL_FINDING_CATEGORIES.includes(f.category as FindingCategory)) {
+    return false;
+  }
+
+  const validSeverities: FindingSeverity[] = ['low', 'medium', 'high', 'critical'];
+  if (!validSeverities.includes(f.severity as FindingSeverity)) {
+    return false;
+  }
+
+  const hasLegacy = !!toNonEmptyString(f.suggestedFix);
+  const evidenceEntries = extractEvidenceEntries(f.evidence);
+  const hasEvidence = evidenceEntries.length > 0;
 
   return hasLegacy || hasEvidence;
+}
+
+function toNonEmptyString(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function extractEvidenceEntries(value: unknown): Array<{ text: string }> {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((entry): entry is { text: string } => {
+      if (!entry || typeof entry !== 'object') return false;
+      const textValue = toNonEmptyString((entry as Record<string, unknown>).text);
+      return !!textValue;
+    })
+    .map((entry) => ({ text: entry.text.trim() }));
+}
+
+function extractRelevantFiles(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const files = value
+    .filter((p): p is string => typeof p === 'string')
+    .map((p) => p.trim())
+    .filter((p) => p.length > 0);
+  return files.length > 0 ? files : undefined;
 }
