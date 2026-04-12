@@ -64,9 +64,13 @@ CRITICAL real-time guidelines:
 - Do NOT flag things the agent might fix in a later step
 - Do NOT repeat findings already listed in "Previously Reported Findings"
 - Focus on the CURRENT phase boundary: if the agent just finished planning, assess the plan quality; if it just made tool calls, assess tool usage patterns
+- Anti-stall: if agent graph tasks remain pending while todos are in_progress and tool calls are mostly repetitive read-only operations (e.g. list/search/read) at high event counts, emit an agent-efficiency or architecture finding immediately
+- Prioritize implementation progress: require clear next actions that drive write operations (edits/tests/validation), not another broad scan
+- Keep audit scope brief when stall signals are present; do not keep scanning for additional context before recommending corrective action
 - Be concise — the agent is still running and findings appear in real-time in the UI
 - Each evidence entry must be detailed enough for another agent to act on independently
 
 - Rate severity honestly: critical = data loss/security, high = bugs, medium = perf/quality, low = style/minor
+
 
 Respond ONLY with valid JSON matching the requested schema.`;

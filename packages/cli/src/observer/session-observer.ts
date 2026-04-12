@@ -61,6 +61,7 @@ interface AccumulatedContext {
   prompt: string;
   provider: string;
   model: string;
+
   /** Chain-of-thought / streamed text per phase. */
   streamedText: { planning: string; implementation: string };
   /** Tool calls with input/output. */
@@ -405,17 +406,41 @@ export class SessionObserver {
     }
   }
 
-  private buildAnalysisPrompt(triggerPhase: string): string {
+    private buildAnalysisPrompt(triggerPhase: string): string {
     const lines: string[] = [];
+    const pendingNodeCount = this.ctx.agentGraph.filter((n) => n.status === 'pending').length;
+    const inProgressTodoCount = this.ctx.todos.filter((t) => t.status === 'in_progress').length;
+    const completedTodoCount = this.ctx.todos.filter((t) => t.done || t.status === 'done').length;
+    const readOnlyToolCallCount = this.ctx.toolCalls.filter((tc) =>
+      ['read_file', 'read_files', 'list_directory', 'search_files'].includes(tc.toolName),
+    ).length;
+    const recentToolCalls = this.ctx.toolCalls.slice(-20);
+    const recentReadOnlyToolCallCount = recentToolCalls.filter((tc) =>
+      ['read_file', 'read_files', 'list_directory', 'search_files'].includes(tc.toolName),
+    ).length;
+
+    // Stage 1 Gap Matrix (inline artifact)
+    // | Observed signal                                                                    | Gap / risk                                                     | Expected corrective action                                                             | Trigger threshold |
+    // | pending Agent Graph nodes + in_progress todo + mostly read-only tool loop          | Implementation stalls; event budget consumed without code edits | Emit immediate anti-stall finding with write-first next steps (edit/test/validate)     | >= 200 events     |
+    // | repeated reconnaissance after planning completion                                   | Redundant analysis cycles and duplicated context gathering       | Keep audit brief and direct the agent to start scoped write operations immediately      | >= 2 repeat loops |
 
     lines.push(`# Real-Time Session Assessment (Phase: ${triggerPhase})`);
+
     lines.push('');
     lines.push(`Session ID: ${this.sessionId}`);
     lines.push(`Original Task: ${this.ctx.prompt}`);
     lines.push(`Provider: ${this.ctx.provider} / Model: ${this.ctx.model}`);
-    lines.push(`Phase Boundary: ${triggerPhase}`);
+        lines.push(`Phase Boundary: ${triggerPhase}`);
     lines.push(`Total Events So Far: ${this.ctx.totalEvents}`);
     lines.push('');
+    lines.push('## Stall Signals (Compact)');
+    lines.push(`Pending Agent Graph Nodes: ${pendingNodeCount}/${this.ctx.agentGraph.length}`);
+    lines.push(`In-Progress Todos: ${inProgressTodoCount} | Completed Todos: ${completedTodoCount}/${this.ctx.todos.length}`);
+    lines.push(`Read-Only Tool Calls: ${readOnlyToolCallCount}/${this.ctx.toolCalls.length}`);
+    lines.push(`Recent Read-Only Tool Calls (last ${recentToolCalls.length}): ${recentReadOnlyToolCallCount}`);
+    lines.push('Use these indicators to decide quickly whether an anti-stall finding is required; prefer brief audit plus write-first actions.');
+    lines.push('');
+
 
     // Agent graph
     if (this.ctx.agentGraph.length > 0) {
@@ -505,8 +530,10 @@ export class SessionObserver {
         lines.push(
       'Respond with a JSON object: { "findings": [{ "schemaVersion": "2", "category": "...", "severity": "...", "title": "...", "description": "...", "evidence": [{ "text": "..." }], "relevantFiles": [...] }] }',
     );
-    lines.push('Compatibility: legacy `suggestedFix` output is accepted during rollout, but prefer schemaVersion=2 + evidence[].');
+        lines.push('Compatibility: legacy `suggestedFix` output is accepted during rollout, but prefer schemaVersion=2 + evidence[].');
+    lines.push('Evidence must be implementation-ready and actionable (specific code edits/tests/validation), not additional broad reconnaissance.');
     lines.push('Return ONLY the JSON, no other text. If no issues found, return { "findings": [] }.');
+
 
     return lines.join('\n');
   }
