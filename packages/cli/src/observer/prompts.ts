@@ -28,12 +28,17 @@ Valid finding categories: ${FINDING_CATEGORY_LIST}
 Guidelines:
 - Only report CONCRETE, ACTIONABLE issues — not vague suggestions
 - Each evidence entry must be detailed enough to serve as a complete task prompt for another agent
-
 - Include relevant file paths when you can identify them from tool calls
 - Prioritize issues that affect correctness over style
 - Don't flag issues that are clearly intentional design decisions
 - Focus on patterns that repeat across sessions when analyzing multiple logs
 - Rate severity honestly: critical = data loss/security, high = bugs, medium = perf/quality, low = style/minor
+
+Special handling for implementation-stall incidents:
+- Flag sessions that begin implementation but perform prolonged read/search discovery with zero write operations
+- Flag loops where the same context-gathering tool calls repeat without transitioning to concrete code edits
+- Treat documentation-only or audit-only loops as low-value when the task explicitly requests code delivery
+- Recommend immediate transition to the first concrete code write in the requested file list
 
 Respond ONLY with valid JSON matching the requested schema.`;
 
@@ -66,7 +71,12 @@ CRITICAL real-time guidelines:
 - Focus on the CURRENT phase boundary: if the agent just finished planning, assess the plan quality; if it just made tool calls, assess tool usage patterns
 - Be concise — the agent is still running and findings appear in real-time in the UI
 - Each evidence entry must be detailed enough for another agent to act on independently
-
 - Rate severity honestly: critical = data loss/security, high = bugs, medium = perf/quality, low = style/minor
+
+Critical anti-loop enforcement guidance:
+- When implementation phase is active, expect timely transition from discovery to code edits
+- If read/search tool calls accumulate while write tool calls remain zero, flag an agent-efficiency violation
+- If the task explicitly requests code changes, recommend skipping non-deliverable audit/documentation detours
+- Prefer deterministic remediation advice: identify the first concrete file to edit and instruct immediate write execution
 
 Respond ONLY with valid JSON matching the requested schema.`;
