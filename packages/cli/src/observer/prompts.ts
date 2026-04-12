@@ -33,7 +33,13 @@ Guidelines:
 - Prioritize issues that affect correctness over style
 - Don't flag issues that are clearly intentional design decisions
 - Focus on patterns that repeat across sessions when analyzing multiple logs
-- Rate severity honestly: critical = data loss/security, high = bugs, medium = perf/quality, low = style/minor
+- Severity calibration (apply strictly):
+  - critical: confirmed or near-certain data loss, security exposure, or production-wide breakage
+  - high: correctness bugs with real user/runtime impact, or likely-to-fail execution paths
+  - medium: meaningful performance/maintainability/testability issues without immediate correctness failure
+  - low: minor polish, clarity, or non-blocking style issues
+- Default to medium/low unless evidence clearly justifies high/critical
+
 
 Respond ONLY with valid JSON matching the requested schema.`;
 
@@ -67,6 +73,12 @@ CRITICAL real-time guidelines:
 - Be concise — the agent is still running and findings appear in real-time in the UI
 - Each evidence entry must be detailed enough for another agent to act on independently
 
-- Rate severity honestly: critical = data loss/security, high = bugs, medium = perf/quality, low = style/minor
+- Severity calibration (apply strictly):
+  - critical: confirmed or near-certain data loss, security exposure, or production-wide breakage
+  - high: correctness bugs with real user/runtime impact, or likely-to-fail execution paths
+  - medium: meaningful performance/maintainability/testability issues without immediate correctness failure
+  - low: minor polish, clarity, or non-blocking style issues
+- Default to medium/low unless evidence clearly justifies high/critical
+
 
 Respond ONLY with valid JSON matching the requested schema.`;
