@@ -16,7 +16,7 @@ import {
 } from './types.js';
 import type { SessionSummary } from './summarizer.js';
 import { formatSummaryForLlm } from './summarizer.js';
-import { FINDING_CATEGORY_LIST, OBSERVER_SYSTEM_PROMPT } from './prompts.js';
+import { OBSERVER_SYSTEM_PROMPT } from './prompts.js';
 
 /**
  * Analyze one or more session summaries via LLM and return structured findings.

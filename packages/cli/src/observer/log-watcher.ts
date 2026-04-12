@@ -7,8 +7,7 @@
 // ---------------------------------------------------------------------------
 
 import type { LlmAdapter } from '@orchestrace/provider';
-import type { ObserverConfig, FindingCategory, FindingSeverity } from './types.js';
-import { ALL_FINDING_CATEGORIES } from './types.js';
+import type { ObserverConfig, FindingSeverity } from './types.js';
 import type { BackendLogger } from './backend-logger.js';
 
 // ---------------------------------------------------------------------------

@@ -397,8 +397,7 @@ export class SessionObserver {
     if (this.state.status === 'done') return;
     if (this.ctx.totalEvents < 3) return; // Not enough data
 
-    const previousStatus = this.state.status;
-    this.state.status = 'analyzing';
+        this.state.status = 'analyzing';
     this.emitStatusChange();
 
     try {
