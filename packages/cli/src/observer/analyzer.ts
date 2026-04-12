@@ -86,8 +86,10 @@ function buildAnalysisPrompt(summaries: SessionSummary[], allowedCategories: Fin
       'Return ONLY the JSON object, no other text.',
   );
 
-  parts.push('');
+    parts.push('');
   parts.push(`Only include findings in these categories: ${allowedCategories.join(', ')}`);
+  parts.push('Apply severity calibration strictly: critical requires severe demonstrated impact and 3+ corroborating evidence points; high/medium require 2+ corroborating evidence points; low requires 1+ concrete evidence point.');
+  parts.push('If evidence thresholds are not met, lower severity or omit the finding. Do not escalate based on speculation.');
 
   return parts.join('\n');
 }

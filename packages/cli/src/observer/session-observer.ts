@@ -95,6 +95,11 @@ const TOOL_PREVIEW_LIMIT = 3_000;
 const DAG_MESSAGE_LIMIT = 600;
 const CHAT_MESSAGE_LIMIT = 2_000;
 
+const STALL_EVENT_THRESHOLD = 400;
+const STALL_DISCOVERY_TOOL_THRESHOLD = 40;
+const STALL_DISCOVERY_TO_WRITE_RATIO = 8;
+
+
 // ---------------------------------------------------------------------------
 // SessionObserver
 // ---------------------------------------------------------------------------
@@ -414,8 +419,13 @@ export class SessionObserver {
     lines.push(`Original Task: ${this.ctx.prompt}`);
     lines.push(`Provider: ${this.ctx.provider} / Model: ${this.ctx.model}`);
     lines.push(`Phase Boundary: ${triggerPhase}`);
-    lines.push(`Total Events So Far: ${this.ctx.totalEvents}`);
+        lines.push(`Total Events So Far: ${this.ctx.totalEvents}`);
+    const stallSignal = computeStallSignal(this.ctx.totalEvents, this.ctx.toolCalls);
+    lines.push(
+      `Stall Signals: discoveryCalls=${stallSignal.discoveryCalls}, writeCalls=${stallSignal.writeCalls}, discoveryToWriteRatio=${stallSignal.ratio.toFixed(2)}, stalled=${stallSignal.isStalled ? 'yes' : 'no'}`,
+    );
     lines.push('');
+
 
     // Agent graph
     if (this.ctx.agentGraph.length > 0) {
@@ -500,11 +510,22 @@ export class SessionObserver {
         ? this.config.assessmentCategories
         : ALL_FINDING_CATEGORIES;
 
-    lines.push(`Allowed categories: ${allowedCategories.join(', ')}`);
+        lines.push(`Allowed categories: ${allowedCategories.join(', ')}`);
     lines.push('');
-        lines.push(
+
+    if (stallSignal.isStalled) {
+      lines.push('## Required Anti-Stall Behavior');
+      lines.push('- Session is effectively stalled (high event volume + discovery-heavy tool usage with insufficient writes).');
+      lines.push('- Prioritize an `agent-efficiency` finding that explicitly requires immediate implementation actions.');
+      lines.push('- Evidence must cite concrete counts from Stall Signals and representative tool call patterns.');
+      lines.push('- The recommended action must direct the next step to code edits (write_file/edit_file) and prohibit further discovery churn unless strictly required.');
+      lines.push('');
+    }
+
+    lines.push(
       'Respond with a JSON object: { "findings": [{ "schemaVersion": "2", "category": "...", "severity": "...", "title": "...", "description": "...", "evidence": [{ "text": "..." }], "relevantFiles": [...] }] }',
     );
+
     lines.push('Compatibility: legacy `suggestedFix` output is accepted during rollout, but prefer schemaVersion=2 + evidence[].');
     lines.push('Return ONLY the JSON, no other text. If no issues found, return { "findings": [] }.');
 
@@ -547,6 +568,49 @@ function parseToolCall(
   }
   return { toolName, input: '', output: rest, isError: message.includes('[error]') };
 }
+
+function isWriteToolCall(toolName: string): boolean {
+  return toolName === 'write_file' || toolName === 'write_files' || toolName === 'edit_file' || toolName === 'edit_files';
+}
+
+function isDiscoveryToolCall(toolName: string): boolean {
+  return toolName === 'read_file' || toolName === 'read_files' || toolName === 'search_files' || toolName === 'list_directory';
+}
+
+function computeStallSignal(
+  totalEvents: number,
+  toolCalls: Array<{ toolName: string }>,
+): {
+  isStalled: boolean;
+  discoveryCalls: number;
+  writeCalls: number;
+  ratio: number;
+} {
+  let discoveryCalls = 0;
+  let writeCalls = 0;
+
+  for (const call of toolCalls) {
+    if (isDiscoveryToolCall(call.toolName)) {
+      discoveryCalls += 1;
+    }
+    if (isWriteToolCall(call.toolName)) {
+      writeCalls += 1;
+    }
+  }
+
+  const ratio = writeCalls > 0 ? discoveryCalls / writeCalls : discoveryCalls;
+  const highDiscoveryVolume = discoveryCalls >= STALL_DISCOVERY_TOOL_THRESHOLD;
+  const highDiscoveryRatio = ratio >= STALL_DISCOVERY_TO_WRITE_RATIO;
+  const hasHighEventCount = totalEvents >= STALL_EVENT_THRESHOLD;
+
+  return {
+    isStalled: hasHighEventCount && highDiscoveryVolume && (writeCalls === 0 || highDiscoveryRatio),
+    discoveryCalls,
+    writeCalls,
+    ratio,
+  };
+}
+
 
 function parseRealtimeFindings(
   text: string,

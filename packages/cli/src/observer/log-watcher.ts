@@ -323,13 +323,22 @@ export class LogWatcher {
     }
   }
 
-  private buildAnalysisPrompt(batch: string[]): string {
+    private buildAnalysisPrompt(batch: string[]): string {
     const lines: string[] = [];
+    const stallSignals = computeLogBatchStallSignals(batch);
+
     lines.push(`# Backend Log Batch (${batch.length} lines)\n`);
     lines.push('Analyze the following backend log lines for issues and improvements:\n');
+    lines.push(
+      `Observer Stall Signals: discoveryCalls=${stallSignals.discoveryCalls}, writeCalls=${stallSignals.writeCalls}, possibleStall=${stallSignals.possibleStall ? 'yes' : 'no'}`,
+    );
+    if (stallSignals.possibleStall) {
+      lines.push('When possibleStall=yes, prioritize agent-efficiency/reliability findings that force transition from discovery to concrete code edits.');
+    }
     lines.push('```');
     lines.push(...batch.map((l) => l.trimEnd()));
     lines.push('```\n');
+
 
     if (this.state.findings.length > 0) {
       lines.push('## Previously Reported Findings (do NOT repeat these)\n');
@@ -429,3 +438,49 @@ function pickModelSetting(value: unknown, fallback: string): string {
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : fallback;
 }
+
+function isDiscoveryToolName(name: string): boolean {
+  return name === 'read_file' || name === 'read_files' || name === 'search_files' || name === 'list_directory';
+}
+
+function isWriteToolName(name: string): boolean {
+  return name === 'write_file' || name === 'write_files' || name === 'edit_file' || name === 'edit_files';
+}
+
+function extractToolNameFromLogLine(line: string): string | null {
+  const normalized = line.trim();
+  const toolPattern = normalized.match(/\bTool\s+(\S+)\s+(?:input|output)\b/i);
+  if (toolPattern) {
+    return toolPattern[1];
+  }
+
+  const watcherPattern = normalized.match(/\btask:tool-call\b.*?\b([a-z_]+)\b/i);
+  if (watcherPattern) {
+    return watcherPattern[1];
+  }
+
+  return null;
+}
+
+function computeLogBatchStallSignals(batch: string[]): {
+  discoveryCalls: number;
+  writeCalls: number;
+  possibleStall: boolean;
+} {
+  let discoveryCalls = 0;
+  let writeCalls = 0;
+
+  for (const line of batch) {
+    const toolName = extractToolNameFromLogLine(line);
+    if (!toolName) continue;
+    if (isDiscoveryToolName(toolName)) discoveryCalls += 1;
+    if (isWriteToolName(toolName)) writeCalls += 1;
+  }
+
+  return {
+    discoveryCalls,
+    writeCalls,
+    possibleStall: discoveryCalls >= 20 && writeCalls === 0,
+  };
+}
+
