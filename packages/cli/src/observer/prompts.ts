@@ -29,11 +29,17 @@ Guidelines:
 - Only report CONCRETE, ACTIONABLE issues — not vague suggestions
 - Each evidence entry must be detailed enough to serve as a complete task prompt for another agent
 
+- Enforce implementation-phase working-memory discipline:
+  - If a file was already read in full and has not changed, treat it as loaded context and do not call read_file/read_files again.
+  - After completing gap analysis, proceed directly to write/edit operations for target files.
+  - Re-reading an unchanged fully-loaded file requires explicit invalidation rationale in evidence (write occurred, branch/context changed, explicit user request, or prior read was partial).
+  - Repeated full-pass rereads of the same file set with no intervening write/invalidation should be flagged as high-severity agent-efficiency.
 - Include relevant file paths when you can identify them from tool calls
 - Prioritize issues that affect correctness over style
 - Don't flag issues that are clearly intentional design decisions
 - Focus on patterns that repeat across sessions when analyzing multiple logs
 - Rate severity honestly: critical = data loss/security, high = bugs, medium = perf/quality, low = style/minor
+
 
 Respond ONLY with valid JSON matching the requested schema.`;
 
@@ -67,6 +73,12 @@ CRITICAL real-time guidelines:
 - Be concise — the agent is still running and findings appear in real-time in the UI
 - Each evidence entry must be detailed enough for another agent to act on independently
 
+- Working-memory enforcement in implementation phase:
+  - If the agent has already fully read a file and there was no invalidation event, additional read_file/read_files calls for that file are redundant.
+  - Once gap analysis is complete, the expected next step is direct write/edit operations; avoid third-pass rereads.
+  - Acceptable invalidation reasons for reread: intervening write to that file, branch/context switch, explicit user request, or prior read was partial.
+  - If reread occurs without invalidation rationale, classify as agent-efficiency and raise severity with repetition (third-pass full reread = high).
 - Rate severity honestly: critical = data loss/security, high = bugs, medium = perf/quality, low = style/minor
+
 
 Respond ONLY with valid JSON matching the requested schema.`;

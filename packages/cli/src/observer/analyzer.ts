@@ -49,8 +49,21 @@ export async function analyzeSessionSummaries(
     allowAuthRefreshRetry: true,
   });
 
-  return parseAnalysisResponse(result.text, allowedCategories);
+  const llmResult = parseAnalysisResponse(result.text, allowedCategories);
+  const deterministicFindings = summaries.flatMap((summary) =>
+    detectRedundantFullReadPasses(summary, allowedCategories),
+  );
+
+  const mergedFindings = [...llmResult.findings];
+  for (const finding of deterministicFindings) {
+    if (!mergedFindings.some((existing) => areEquivalentFindings(existing, finding))) {
+      mergedFindings.push(finding);
+    }
+  }
+
+  return { findings: mergedFindings };
 }
+
 
 function buildAnalysisPrompt(summaries: SessionSummary[], allowedCategories: FindingCategory[]): string {
   const parts: string[] = [];
@@ -174,4 +187,179 @@ function isValidFindingCandidate(f: Record<string, unknown>): boolean {
     });
 
   return hasLegacy || hasEvidence;
+}
+
+function areEquivalentFindings(a: ObserverFindingInput, b: ObserverFindingInput): boolean {
+  return a.category === b.category && a.severity === b.severity && a.title === b.title;
+}
+
+function detectRedundantFullReadPasses(
+  summary: SessionSummary,
+  allowedCategories: FindingCategory[],
+): ObserverFindingInput[] {
+  if (!allowedCategories.includes('agent-efficiency')) {
+    return [];
+  }
+
+    const findings: ObserverFindingInput[] = [];
+  const readPassHistory = new Map<string, { passCount: number; lastReadIndex: number; readPaths: string[] }>();
+  const lastWriteIndexByPath = new Map<string, number>();
+
+  for (let i = 0; i < summary.toolCalls.length; i++) {
+    const call = summary.toolCalls[i];
+    const writtenPaths = extractWritePaths(call);
+    for (const path of writtenPaths) {
+      lastWriteIndexByPath.set(path, i);
+    }
+
+    const readPaths = extractFullReadPaths(call);
+
+    if (readPaths.length === 0) {
+      continue;
+    }
+
+    const readSignature = readPaths.slice().sort().join('|');
+    const prior = readPassHistory.get(readSignature);
+
+    if (!prior) {
+      readPassHistory.set(readSignature, {
+        passCount: 1,
+        lastReadIndex: i,
+        readPaths,
+      });
+      continue;
+    }
+
+        const hasInvalidation = prior.readPaths.some((path) => {
+      const lastWriteIndex = lastWriteIndexByPath.get(path);
+      return typeof lastWriteIndex === 'number' && lastWriteIndex > prior.lastReadIndex;
+    });
+    if (hasInvalidation) {
+      readPassHistory.set(readSignature, {
+        passCount: 1,
+        lastReadIndex: i,
+        readPaths,
+      });
+      continue;
+    }
+
+
+    const nextPassCount = prior.passCount + 1;
+    readPassHistory.set(readSignature, {
+      passCount: nextPassCount,
+      lastReadIndex: i,
+      readPaths,
+    });
+
+    if (nextPassCount < 3) {
+      continue;
+    }
+
+    const title = 'Implementation repeatedly re-read unchanged file set instead of editing';
+    if (findings.some((f) => f.title === title)) {
+      continue;
+    }
+
+    findings.push({
+      schemaVersion: '2',
+      category: 'agent-efficiency',
+      severity: 'high',
+      title,
+      description:
+        `Session ${summary.sessionId} performed at least ${nextPassCount} full read pass(es) of the same file set with no intervening writes/invalidation. ` +
+        'After gap analysis, the agent should use working memory and proceed directly to write/edit calls.',
+      evidence: [
+        {
+          text:
+            `Repeated read_files/read_file pass detected for unchanged files: ${readPaths.join(', ')}. ` +
+            'Add implementation-phase enforcement: no redundant rereads unless invalidated by write, context switch, explicit user request, or prior partial read.',
+        },
+      ],
+      relevantFiles: readPaths,
+    });
+  }
+
+  return findings;
+}
+
+function extractFullReadPaths(call: SessionSummary['toolCalls'][number]): string[] {
+  if (call.isError) return [];
+  if (call.toolName !== 'read_file' && call.toolName !== 'read_files') return [];
+  if (!call.inputPreview || call.inputPreview.trim().length === 0) return [];
+
+  const input = safeParseJson(call.inputPreview);
+  if (!input || typeof input !== 'object') return [];
+
+    if (call.toolName === 'read_file') {
+    const parsed = input as { path?: unknown; startLine?: unknown; endLine?: unknown };
+    if (typeof parsed.startLine === 'number' || typeof parsed.endLine === 'number') {
+      return [];
+    }
+    const path = normalizePath(parsed.path);
+    return path ? [path] : [];
+  }
+
+
+  const files = (input as { files?: unknown }).files;
+  if (!Array.isArray(files)) return [];
+
+    const paths = files
+    .map((entry) => {
+      if (!entry || typeof entry !== 'object') return null;
+      const parsedEntry = entry as { path?: unknown; startLine?: unknown; endLine?: unknown };
+      if (typeof parsedEntry.startLine === 'number' || typeof parsedEntry.endLine === 'number') {
+        return null;
+      }
+      return normalizePath(parsedEntry.path);
+    })
+    .filter((path): path is string => !!path);
+
+
+  return dedupeStrings(paths);
+}
+
+function extractWritePaths(call: SessionSummary['toolCalls'][number]): string[] {
+  if (call.isError) return [];
+
+  if (call.toolName === 'write_file' || call.toolName === 'edit_file') {
+    const input = safeParseJson(call.inputPreview);
+    if (!input || typeof input !== 'object') return [];
+    const path = normalizePath((input as { path?: unknown }).path);
+    return path ? [path] : [];
+  }
+
+  if (call.toolName === 'write_files' || call.toolName === 'edit_files') {
+    const input = safeParseJson(call.inputPreview);
+    if (!input || typeof input !== 'object') return [];
+    const files = (input as { files?: unknown }).files;
+    if (!Array.isArray(files)) return [];
+    return dedupeStrings(
+      files
+        .map((entry) => {
+          if (!entry || typeof entry !== 'object') return null;
+          return normalizePath((entry as { path?: unknown }).path);
+        })
+        .filter((path): path is string => !!path),
+    );
+  }
+
+  return [];
+}
+
+function safeParseJson(value: string): unknown {
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+}
+
+function normalizePath(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function dedupeStrings(values: string[]): string[] {
+  return [...new Set(values)];
 }

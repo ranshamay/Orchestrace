@@ -379,28 +379,65 @@ function parseLogFindings(text: string): LogFinding[] {
         (f: Record<string, unknown>) =>
           f && typeof f.title === 'string' && typeof f.description === 'string',
       )
-      .map((f: Record<string, unknown>) => ({
-        id: `logf-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-        category: validateLogCategory(f.category as string),
-        severity: validateSeverity(f.severity as string),
-        title: String(f.title),
-        description: String(f.description),
-        suggestedFix: typeof f.suggestedFix === 'string' ? f.suggestedFix : (typeof f.issueSummary === 'string' ? f.issueSummary : undefined),
-        evidence: Array.isArray(f.evidence)
-          ? f.evidence
-              .filter((x: unknown): x is { text: string } => !!x && typeof x === 'object' && typeof (x as Record<string, unknown>).text === 'string')
-              .map((x: { text: string }) => ({ text: x.text }))
-          : undefined,
-        relevantFiles: Array.isArray(f.relevantFiles)
-          ? f.relevantFiles.filter((x: unknown) => typeof x === 'string')
-          : undefined,
-        logSnippet: String(f.logSnippet ?? ''),
-        detectedAt: new Date().toISOString(),
-      }));
+      .map((f: Record<string, unknown>) => {
+        const finding: LogFinding = {
+          id: `logf-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          category: validateLogCategory(f.category as string),
+          severity: validateSeverity(f.severity as string),
+          title: String(f.title),
+          description: String(f.description),
+          suggestedFix: typeof f.suggestedFix === 'string' ? f.suggestedFix : (typeof f.issueSummary === 'string' ? f.issueSummary : undefined),
+          evidence: Array.isArray(f.evidence)
+            ? f.evidence
+                .filter((x: unknown): x is { text: string } => !!x && typeof x === 'object' && typeof (x as Record<string, unknown>).text === 'string')
+                .map((x: { text: string }) => ({ text: x.text }))
+            : undefined,
+          relevantFiles: Array.isArray(f.relevantFiles)
+            ? f.relevantFiles.filter((x: unknown) => typeof x === 'string')
+            : undefined,
+          logSnippet: String(f.logSnippet ?? ''),
+          detectedAt: new Date().toISOString(),
+        };
+
+        return enrichRedundantRereadSignal(finding);
+      });
   } catch {
     return [];
   }
 }
+
+function enrichRedundantRereadSignal(finding: LogFinding): LogFinding {
+  const title = finding.title.toLowerCase();
+  const description = finding.description.toLowerCase();
+  const suggestedFix = (finding.suggestedFix ?? '').toLowerCase();
+  const combined = `${title}\n${description}\n${suggestedFix}`;
+
+  const mentionsReread =
+    combined.includes('reread')
+    || combined.includes('re-read')
+    || combined.includes('read_files')
+    || combined.includes('read_file');
+
+  if (!mentionsReread) {
+    return finding;
+  }
+
+  const evidence = [...(finding.evidence ?? [])];
+  const marker =
+    'Classification: agent-efficiency/high — repeated full-file rereads without invalidation; proceed directly to write/edit after gap analysis.';
+  if (!evidence.some((entry) => entry.text === marker)) {
+    evidence.push({ text: marker });
+  }
+
+  return {
+    ...finding,
+    category: finding.category === 'performance' ? 'performance' : 'reliability',
+    severity: finding.severity === 'critical' ? 'critical' : 'high',
+    evidence,
+    description: `${finding.description}\n\nObserver signal: redundant reread pattern detected (agent-efficiency/high).`,
+  };
+}
+
 
 function validateLogCategory(cat: string): LogFindingCategory {
   const valid: LogFindingCategory[] = ['error-pattern', 'performance', 'configuration', 'reliability', 'security'];

@@ -45,7 +45,12 @@ export interface SessionObserverState {
   findings: RealtimeFinding[];
   analyzedSteps: number;
   lastAnalyzedAt: string | null;
+  readMemory: {
+    files: Record<string, { fullReadCount: number; lastReadAt: string; invalidatedAt?: string }>;
+    redundantRereads: number;
+  };
 }
+
 
 /** Callback to emit observer events into the session's event/SSE stream. */
 export type ObserverEventEmitter = (event: {
@@ -57,10 +62,25 @@ export type ObserverEventEmitter = (event: {
 // Accumulated context from event stream
 // ---------------------------------------------------------------------------
 
+interface ReadMemoryFileState {
+  fullReadCount: number;
+  lastReadAt: string;
+  invalidatedAt?: string;
+  invalidationReason?: 'write';
+}
+
+interface ReadPassRecord {
+  signature: string;
+  paths: string[];
+  timestamp: string;
+  phase: string;
+}
+
 interface AccumulatedContext {
   prompt: string;
   provider: string;
   model: string;
+
   /** Chain-of-thought / streamed text per phase. */
   streamedText: { planning: string; implementation: string };
   /** Tool calls with input/output. */
@@ -83,11 +103,16 @@ interface AccumulatedContext {
   todos: Array<{ text: string; done: boolean; status?: string }>;
   /** Chat messages. */
   chatMessages: Array<{ role: string; content: string; time: string }>;
-  /** Errors encountered. */
+    /** Errors encountered. */
   errors: string[];
+  /** Per-file read memory + invalidation markers. */
+  readMemory: Map<string, ReadMemoryFileState>;
+  /** Full-read pass history by signature. */
+  readPassHistory: Map<string, ReadPassRecord[]>;
   /** Total event count. */
   totalEvents: number;
 }
+
 
 // Limits for context accumulation
 const STREAM_TEXT_LIMIT = 8_000;
@@ -110,9 +135,11 @@ export class SessionObserver {
   private state: SessionObserverState;
   private unwatch: (() => void) | null = null;
   private analysisPending = false;
-  private abortController = new AbortController();
+    private abortController = new AbortController();
   private currentPhase: string = 'unknown';
   private analysisCounter = 0;
+  private emittedLocalFindingKeys = new Set<string>();
+
 
   constructor(options: {
     sessionId: string;
@@ -138,8 +165,10 @@ export class SessionObserver {
       dagEvents: [],
       agentGraph: [],
       todos: [],
-      chatMessages: [],
+            chatMessages: [],
       errors: [],
+      readMemory: new Map(),
+      readPassHistory: new Map(),
       totalEvents: 0,
     };
     this.state = {
@@ -147,7 +176,12 @@ export class SessionObserver {
       findings: [],
       analyzedSteps: 0,
       lastAnalyzedAt: null,
+      readMemory: {
+        files: {},
+        redundantRereads: 0,
+      },
     };
+
   }
 
   /** Start watching the session's event stream. */
@@ -233,7 +267,7 @@ export class SessionObserver {
           message: truncate(dag.message, DAG_MESSAGE_LIMIT),
         });
 
-        // Extract tool calls
+                // Extract tool calls
         if (dag.type === 'task:tool-call') {
           const parsed = parseToolCall(dag.message);
           if (parsed) {
@@ -246,8 +280,19 @@ export class SessionObserver {
               taskId: dag.taskId,
               phase: this.currentPhase,
             });
+
+            const localFinding = this.updateReadMemoryFromToolCall(
+              parsed.toolName,
+              parsed.input,
+              parsed.isError,
+              event.time,
+            );
+            if (localFinding) {
+              this.publishLocalFinding(localFinding);
+            }
           }
         }
+
 
         // Trigger analysis after tool call errors
         if (dag.type === 'task:tool-call' && dag.message.includes('[error]')) {
@@ -438,7 +483,7 @@ export class SessionObserver {
       lines.push('');
     }
 
-    // Tool calls
+        // Tool calls
     if (this.ctx.toolCalls.length > 0) {
       lines.push('## Tool Calls');
       for (const tc of this.ctx.toolCalls) {
@@ -449,6 +494,19 @@ export class SessionObserver {
         lines.push('');
       }
     }
+
+    const readMemoryEntries = Object.entries(this.state.readMemory.files);
+    if (readMemoryEntries.length > 0) {
+      lines.push('## Read Memory (full file reads)');
+      for (const [path, state] of readMemoryEntries) {
+        lines.push(
+          `- ${path}: fullReadCount=${state.fullReadCount}, lastReadAt=${state.lastReadAt}${state.invalidatedAt ? `, invalidatedAt=${state.invalidatedAt}` : ''}`,
+        );
+      }
+      lines.push(`- redundantRereadsDetected=${this.state.readMemory.redundantRereads}`);
+      lines.push('');
+    }
+
 
     // Chat messages (user + assistant turns)
     if (this.ctx.chatMessages.length > 0) {
@@ -517,12 +575,113 @@ export class SessionObserver {
       payload: {
         status: this.state.status,
         findings: this.state.findings.length,
-        analyzedSteps: this.state.analyzedSteps,
+                analyzedSteps: this.state.analyzedSteps,
         lastAnalyzedAt: this.state.lastAnalyzedAt,
+        readMemory: this.state.readMemory,
       },
     });
   }
+
+  private updateReadMemoryFromToolCall(
+    toolName: string,
+    input: string,
+    isError: boolean,
+    timestamp: string,
+  ): RealtimeFinding | null {
+    if (isError) return null;
+
+    const writtenPaths = extractWritePathsFromToolInput(toolName, input);
+    for (const path of writtenPaths) {
+      const existing = this.ctx.readMemory.get(path) ?? {
+        fullReadCount: 0,
+        lastReadAt: timestamp,
+      };
+      existing.invalidatedAt = timestamp;
+      existing.invalidationReason = 'write';
+      existing.fullReadCount = 0;
+      this.ctx.readMemory.set(path, existing);
+      this.state.readMemory.files[path] = {
+        fullReadCount: existing.fullReadCount,
+        lastReadAt: existing.lastReadAt,
+        invalidatedAt: existing.invalidatedAt,
+      };
+    }
+
+    const readPaths = extractFullReadPathsFromToolInput(toolName, input);
+    if (readPaths.length === 0) {
+      return null;
+    }
+
+    for (const path of readPaths) {
+      const existing = this.ctx.readMemory.get(path) ?? {
+        fullReadCount: 0,
+        lastReadAt: timestamp,
+      };
+      existing.fullReadCount += 1;
+      existing.lastReadAt = timestamp;
+      this.ctx.readMemory.set(path, existing);
+      this.state.readMemory.files[path] = {
+        fullReadCount: existing.fullReadCount,
+        lastReadAt: existing.lastReadAt,
+        invalidatedAt: existing.invalidatedAt,
+      };
+    }
+
+    const signature = readPaths.slice().sort().join('|');
+    const history = this.ctx.readPassHistory.get(signature) ?? [];
+    history.push({
+      signature,
+      paths: readPaths,
+      timestamp,
+      phase: this.currentPhase,
+    });
+    this.ctx.readPassHistory.set(signature, history);
+
+    if (history.length < 3) {
+      return null;
+    }
+
+    const passCount = history.length;
+    this.state.readMemory.redundantRereads += 1;
+    return {
+      id: `rt-local-reread-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      schemaVersion: '2',
+      category: 'agent-efficiency',
+      severity: 'high',
+      title: 'Implementation repeatedly re-read unchanged file set instead of editing',
+      description:
+        `Observed ${passCount} full read pass(es) for the same file set without invalidation in implementation context. ` +
+        'After gap analysis, proceed directly to write/edit operations using working memory.',
+      evidence: [
+        {
+          text:
+            `Redundant reread sequence detected for files: ${readPaths.join(', ')}. ` +
+            'Require explicit invalidation rationale before rereading (write/context switch/user request/partial prior read).',
+        },
+      ],
+      suggestedFix:
+        `Stop re-reading unchanged files (${readPaths.join(', ')}) and proceed directly to write/edit operations after gap analysis.`,
+      relevantFiles: readPaths,
+      phase: this.currentPhase,
+      detectedAt: timestamp,
+    };
+  }
+
+  private publishLocalFinding(finding: RealtimeFinding): void {
+    const key = `${finding.category}|${finding.severity}|${finding.title}|${(finding.relevantFiles ?? []).slice().sort().join('|')}`;
+    if (this.emittedLocalFindingKeys.has(key)) {
+      return;
+    }
+
+    this.emittedLocalFindingKeys.add(key);
+    this.state.findings.push(finding);
+    this.emit({
+      type: 'session:observer-finding',
+      payload: { finding },
+    });
+  }
 }
+
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -536,19 +695,97 @@ function truncate(s: string, maxLen: number): string {
 function parseToolCall(
   message: string,
 ): { toolName: string; input: string; output: string; isError: boolean } | null {
+
   const toolMatch = message.match(/^Tool\s+(\S+)\s+(input|output)\s+/);
   if (!toolMatch) return null;
   const toolName = toolMatch[1];
   const phase = toolMatch[2];
   const rest = message.slice(toolMatch[0].length);
 
-  if (phase === 'input') {
+    if (phase === 'input') {
     return { toolName, input: rest, output: '', isError: false };
   }
   return { toolName, input: '', output: rest, isError: message.includes('[error]') };
 }
 
+function extractFullReadPathsFromToolInput(toolName: string, input: string): string[] {
+  if (toolName !== 'read_file' && toolName !== 'read_files') return [];
+  const parsed = safeParseJson(input);
+  if (!parsed || typeof parsed !== 'object') return [];
+
+  if (toolName === 'read_file') {
+    const readInput = parsed as { path?: unknown; startLine?: unknown; endLine?: unknown };
+    if (typeof readInput.startLine === 'number' || typeof readInput.endLine === 'number') {
+      return [];
+    }
+
+    const path = normalizePath(readInput.path);
+    return path ? [path] : [];
+  }
+
+  const files = (parsed as { files?: unknown }).files;
+  if (!Array.isArray(files)) return [];
+
+  return dedupeStrings(
+    files
+      .map((entry) => {
+        if (!entry || typeof entry !== 'object') return null;
+        const fileEntry = entry as { path?: unknown; startLine?: unknown; endLine?: unknown };
+        if (typeof fileEntry.startLine === 'number' || typeof fileEntry.endLine === 'number') {
+          return null;
+        }
+        return normalizePath(fileEntry.path);
+      })
+      .filter((path): path is string => !!path),
+  );
+}
+
+function extractWritePathsFromToolInput(toolName: string, input: string): string[] {
+  const parsed = safeParseJson(input);
+  if (!parsed || typeof parsed !== 'object') return [];
+
+  if (toolName === 'write_file' || toolName === 'edit_file') {
+    const path = normalizePath((parsed as { path?: unknown }).path);
+    return path ? [path] : [];
+  }
+
+  if (toolName === 'write_files' || toolName === 'edit_files') {
+    const files = (parsed as { files?: unknown }).files;
+    if (!Array.isArray(files)) return [];
+
+    return dedupeStrings(
+      files
+        .map((entry) => {
+          if (!entry || typeof entry !== 'object') return null;
+          return normalizePath((entry as { path?: unknown }).path);
+        })
+        .filter((path): path is string => !!path),
+    );
+  }
+
+  return [];
+}
+
+function safeParseJson(value: string): unknown {
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+}
+
+function normalizePath(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function dedupeStrings(values: string[]): string[] {
+  return [...new Set(values)];
+}
+
 function parseRealtimeFindings(
+
   text: string,
   allowedCategories: FindingCategory[],
   triggerPhase: string,
