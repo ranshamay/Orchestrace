@@ -105,17 +105,24 @@ export default function App() {
   const [authenticated, setAuthenticated] = useState(false);
   const [authUser, setAuthUser] = useState<AppAuthStatusResponse['user'] | null>(null);
   const [authError, setAuthError] = useState('');
-  const [composerText, setComposerText] = useState('');
+    const [composerText, setComposerText] = useState('');
   const [composerImages, setComposerImages] = useState<ComposerImageAttachment[]>([]);
   const [showToolsPanel, setShowToolsPanel] = useState(false);
+    const [isNewPromptModalOpen, setIsNewPromptModalOpen] = useState(false);
+  const [newPromptInput, setNewPromptInput] = useState('');
+
   const [todoInput, setTodoInput] = useState('');
+
   const [copyTraceState, setCopyTraceState] = useState<{ sessionId: string; state: 'idle' | 'copied' | 'failed' }>({ sessionId: '', state: 'idle' });
   const [settingsSaveToastState, setSettingsSaveToastState] = useState<SettingsSaveToastState>('idle');
   const [settingsSaveToastMessage, setSettingsSaveToastMessage] = useState('');
   const [nodeTokenStreams, setNodeTokenStreams] = useState<Record<string, NodeTokenStream>>({});
   const [observerState, setObserverState] = useState<SessionObserverState | null>(null);
-  const settingsSaveToastTimerRef = useRef<number | undefined>(undefined);
+    const settingsSaveToastTimerRef = useRef<number | undefined>(undefined);
+  const newPromptInputRef = useRef<HTMLTextAreaElement | null>(null);
+  const pendingNewPromptSubmissionRef = useRef<string | null>(null);
   const hydratedActiveTabPreferenceRef = useRef(false);
+
   const preferencesSyncInitializedRef = useRef(false);
   const preferenceSaveRequestIdRef = useRef(0);
   const preferenceSaveQueueRef = useRef<Promise<void>>(Promise.resolve());
@@ -593,7 +600,7 @@ export default function App() {
     setDefaultAgentRoleModel('investigator', nextModel);
   }, [setDefaultAgentRoleModel]);
 
-  const handleStartNewSessionDraft = useCallback(() => {
+    const handleStartNewSessionDraft = useCallback(() => {
     setActiveTab('graph');
     setSessionSelection('');
     updateActiveLlmControls({
@@ -618,7 +625,27 @@ export default function App() {
     updateActiveLlmControls,
   ]);
 
+    const closeNewPromptModal = useCallback(() => {
+    setIsNewPromptModalOpen(false);
+    setNewPromptInput('');
+  }, []);
+
+  const submitNewPromptModal = useCallback(() => {
+    const draft = newPromptInput.trim();
+    if (!draft) {
+      return;
+    }
+
+    pendingNewPromptSubmissionRef.current = draft;
+    handleStartNewSessionDraft();
+    setComposerText(draft);
+    setIsNewPromptModalOpen(false);
+    setNewPromptInput('');
+  }, [handleStartNewSessionDraft, newPromptInput, setComposerText]);
+
   const modalTargetsPlanningPhase = composerMode === 'planning';
+
+
   const modalWorkProvider = modalTargetsPlanningPhase ? workPlanningProvider : workProvider;
   const modalWorkModel = modalTargetsPlanningPhase ? workPlanningModel : workModel;
   const modalSetWorkModel = modalTargetsPlanningPhase ? setWorkPlanningModel : setWorkModel;
@@ -643,7 +670,7 @@ export default function App() {
   const timelineFollow = useTimelineFollow(latestTimelineKey, selectedSessionId);
   const toolsPanel = useToolsPanel(showToolsPanel, selectedSessionId, composerMode, selectedSession?.mode);
 
-  const actions = useSessionActions({
+    const actions = useSessionActions({
     selectedSessionId, selectedSession, sessions, chatMessages, todos, composerText, composerImages,
     workWorkspaceId,
     workPlanningProvider,
@@ -660,9 +687,77 @@ export default function App() {
   });
 
   useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      const target = event.target;
+      if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement) {
+        return;
+      }
+      if ((target as HTMLElement | null)?.isContentEditable) {
+        return;
+      }
+      if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== 'k') {
+        return;
+      }
+
+      event.preventDefault();
+      setIsNewPromptModalOpen(true);
+    };
+
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, []);
+
+    useEffect(() => {
+    if (!isNewPromptModalOpen) {
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      newPromptInputRef.current?.focus();
+      newPromptInputRef.current?.select();
+    }, 0);
+
+    return () => window.clearTimeout(timeoutId);
+  }, [isNewPromptModalOpen]);
+
+  useEffect(() => {
+    if (!isNewPromptModalOpen || typeof window === 'undefined') {
+      return;
+    }
+
+    const onEsc = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        closeNewPromptModal();
+      }
+    };
+
+    window.addEventListener('keydown', onEsc);
+    return () => window.removeEventListener('keydown', onEsc);
+  }, [closeNewPromptModal, isNewPromptModalOpen]);
+
+  useEffect(() => {
+    if (!pendingNewPromptSubmissionRef.current) {
+      return;
+    }
+
+    if (composerText.trim().length === 0) {
+      return;
+    }
+
+    pendingNewPromptSubmissionRef.current = null;
+    void actions.handleSendChat();
+  }, [actions, composerText]);
+
+  useEffect(() => {
     if (!bootstrapComplete) {
       return;
     }
+
 
     if (!preferencesSyncInitializedRef.current) {
       preferencesSyncInitializedRef.current = true;
@@ -954,27 +1049,83 @@ export default function App() {
     );
   }
 
-  return (
+    return (
+    <>
+      <AppShell
+        sessionSidebarProps={sessionSidebarProps}
+        mainContentProps={mainContentProps}
+        llmModalProps={llmModalProps}
+        authUser={authUser ?? null}
+        onLogout={() => {
+          void logoutAppAuth();
+          clearStoredAuthToken();
+          setAuthenticated(false);
+          setAuthUser(null);
+          setAuthError('');
+        }}
+        errorMessage={errorMessage}
+        warningMessage={warningMessage}
+        warningActionLabel={warningActionLabel}
+        onWarningConfirm={confirmMissingModelSwitch}
+        onWarningDismiss={dismissMissingModelWarning}
+        settingsSaveToastState={settingsSaveToastState}
+        settingsSaveToastMessage={settingsSaveToastMessage}
+      />
+      {isNewPromptModalOpen && (
+        <div
+          aria-modal="true"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4"
+          role="dialog"
+          onClick={(event) => {
+            if (event.target === event.currentTarget) {
+              closeNewPromptModal();
+            }
+          }}
+        >
+          <div className="w-full max-w-xl rounded-xl border border-slate-200 bg-white p-4 shadow-xl dark:border-slate-700 dark:bg-slate-900">
+            <div className="mb-2 text-sm font-semibold text-slate-900 dark:text-slate-100">Start new prompt</div>
+            <p className="mb-3 text-xs text-slate-500 dark:text-slate-400">
+              Use <span className="font-mono">⌘/Ctrl + K</span> from anywhere to open this.
+            </p>
+            <textarea
+              ref={newPromptInputRef}
+              className="h-28 w-full resize-none rounded border border-slate-200 px-2 py-1.5 text-sm dark:border-slate-700 dark:bg-slate-950"
+              onChange={(event) => setNewPromptInput(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Escape') {
+                  event.preventDefault();
+                  closeNewPromptModal();
+                  return;
+                }
 
-    <AppShell
-      sessionSidebarProps={sessionSidebarProps}
-      mainContentProps={mainContentProps}
-      llmModalProps={llmModalProps}
-      authUser={authUser ?? null}
-      onLogout={() => {
-        void logoutAppAuth();
-        clearStoredAuthToken();
-        setAuthenticated(false);
-        setAuthUser(null);
-        setAuthError('');
-      }}
-      errorMessage={errorMessage}
-      warningMessage={warningMessage}
-      warningActionLabel={warningActionLabel}
-      onWarningConfirm={confirmMissingModelSwitch}
-      onWarningDismiss={dismissMissingModelWarning}
-      settingsSaveToastState={settingsSaveToastState}
-      settingsSaveToastMessage={settingsSaveToastMessage}
-    />
+                if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+                  event.preventDefault();
+                  submitNewPromptModal();
+                }
+              }}
+              placeholder="Describe task and start autonomous execution..."
+              value={newPromptInput}
+            />
+            <div className="mt-3 flex items-center justify-end gap-2">
+              <button
+                className="rounded border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-100 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
+                onClick={closeNewPromptModal}
+                type="button"
+              >
+                Cancel
+              </button>
+              <button
+                className="rounded bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-500 disabled:opacity-50"
+                disabled={newPromptInput.trim().length === 0}
+                onClick={submitNewPromptModal}
+                type="button"
+              >
+                Start
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
   );
 }
