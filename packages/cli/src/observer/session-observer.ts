@@ -438,8 +438,81 @@ export class SessionObserver {
       lines.push('');
     }
 
-    // Tool calls
+        // Tool calls
     if (this.ctx.toolCalls.length > 0) {
+      const implementationToolCalls = this.ctx.toolCalls.filter((tc) => tc.phase === 'implementation');
+      if (implementationToolCalls.length > 0) {
+        const discoveryToolNames = new Set([
+          'list_directory',
+          'read_file',
+          'read_files',
+          'search_files',
+        ]);
+        const writeToolNames = new Set(['write_file', 'write_files', 'edit_file', 'edit_files']);
+
+        const discoveryCount = implementationToolCalls.filter((tc) => discoveryToolNames.has(tc.toolName)).length;
+        const writeCount = implementationToolCalls.filter((tc) => writeToolNames.has(tc.toolName)).length;
+
+        const repeatedReadTargets = new Map<string, number>();
+        const repeatedSearchTargets = new Map<string, number>();
+        const repeatedListTargets = new Map<string, number>();
+
+        for (const tc of implementationToolCalls) {
+          const normalizedInput = tc.input ?? '';
+          if (!normalizedInput) continue;
+
+          if (tc.toolName === 'read_file') {
+            const match = normalizedInput.match(/"path"\s*:\s*"([^"]+)"/);
+            if (match) {
+              repeatedReadTargets.set(match[1], (repeatedReadTargets.get(match[1]) ?? 0) + 1);
+            }
+          }
+
+          if (tc.toolName === 'search_files') {
+            const queryMatch = normalizedInput.match(/"query"\s*:\s*"([^"]+)"/);
+            if (queryMatch) {
+              repeatedSearchTargets.set(queryMatch[1], (repeatedSearchTargets.get(queryMatch[1]) ?? 0) + 1);
+            }
+          }
+
+          if (tc.toolName === 'list_directory') {
+            const pathMatch = normalizedInput.match(/"path"\s*:\s*"([^"]+)"/);
+            const key = pathMatch?.[1] ?? '<workspace-root>';
+            repeatedListTargets.set(key, (repeatedListTargets.get(key) ?? 0) + 1);
+          }
+        }
+
+        const topRepeats = (source: Map<string, number>) =>
+          [...source.entries()]
+            .filter(([, count]) => count > 1)
+            .sort((a, b) => b[1] - a[1])
+            .slice(0, 5)
+            .map(([value, count]) => `${value} (${count}x)`);
+
+        lines.push('## Implementation Tool Efficiency Summary');
+        lines.push(`- Implementation tool calls: ${implementationToolCalls.length}`);
+        lines.push(`- Discovery calls (list/read/search): ${discoveryCount}`);
+        lines.push(`- Write/edit calls: ${writeCount}`);
+        if (discoveryCount > 0 && writeCount === 0) {
+          lines.push('- Signal: implementation has discovery activity without write/edit progress');
+        }
+
+        const repeatedReads = topRepeats(repeatedReadTargets);
+        const repeatedSearches = topRepeats(repeatedSearchTargets);
+        const repeatedLists = topRepeats(repeatedListTargets);
+
+        if (repeatedReads.length > 0) {
+          lines.push(`- Repeated read_file targets: ${repeatedReads.join(', ')}`);
+        }
+        if (repeatedSearches.length > 0) {
+          lines.push(`- Repeated search_files queries: ${repeatedSearches.join(', ')}`);
+        }
+        if (repeatedLists.length > 0) {
+          lines.push(`- Repeated list_directory paths: ${repeatedLists.join(', ')}`);
+        }
+        lines.push('');
+      }
+
       lines.push('## Tool Calls');
       for (const tc of this.ctx.toolCalls) {
         const errorTag = tc.isError ? ' [ERROR]' : '';
@@ -449,6 +522,7 @@ export class SessionObserver {
         lines.push('');
       }
     }
+
 
     // Chat messages (user + assistant turns)
     if (this.ctx.chatMessages.length > 0) {

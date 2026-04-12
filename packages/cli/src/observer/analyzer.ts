@@ -55,9 +55,17 @@ export async function analyzeSessionSummaries(
 function buildAnalysisPrompt(summaries: SessionSummary[], allowedCategories: FindingCategory[]): string {
   const parts: string[] = [];
 
-  parts.push(
+    parts.push(
     `Analyze the following ${summaries.length} session log(s) for optimization opportunities.\n`,
   );
+  parts.push(
+    'Phase-aware rule: once implementation begins, expect concrete write/edit progress that uses planning context instead of re-running planning discovery loops.',
+  );
+  parts.push(
+    'Flag repeated implementation-phase list/read/search activity without write_file/edit_file progress as an agent-efficiency issue, with actionable remediation.',
+  );
+  parts.push('');
+
 
   for (const summary of summaries) {
     parts.push(formatSummaryForLlm(summary));

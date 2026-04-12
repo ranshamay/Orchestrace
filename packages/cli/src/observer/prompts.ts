@@ -28,12 +28,16 @@ Valid finding categories: ${FINDING_CATEGORY_LIST}
 Guidelines:
 - Only report CONCRETE, ACTIONABLE issues — not vague suggestions
 - Each evidence entry must be detailed enough to serve as a complete task prompt for another agent
+- Phase-aware efficiency rule: after implementation starts, the agent should leverage planning context and move to concrete writes/edits
+- Treat repeated planning-style rediscovery during implementation (repeated list/read/search calls with no write_file/edit_file progress) as an "agent-efficiency" finding
+- Include concrete remediation in evidence (for example: stop rediscovery loop and perform the first scoped code edit)
 
 - Include relevant file paths when you can identify them from tool calls
 - Prioritize issues that affect correctness over style
 - Don't flag issues that are clearly intentional design decisions
 - Focus on patterns that repeat across sessions when analyzing multiple logs
 - Rate severity honestly: critical = data loss/security, high = bugs, medium = perf/quality, low = style/minor
+
 
 Respond ONLY with valid JSON matching the requested schema.`;
 
@@ -64,9 +68,12 @@ CRITICAL real-time guidelines:
 - Do NOT flag things the agent might fix in a later step
 - Do NOT repeat findings already listed in "Previously Reported Findings"
 - Focus on the CURRENT phase boundary: if the agent just finished planning, assess the plan quality; if it just made tool calls, assess tool usage patterns
+- Implementation-phase efficiency rule: once implementation has started, expect timely write/edit progress that uses planning context
+- Flag repeated planning-style rediscovery during implementation (repeated list/read/search calls without write_file/edit_file progress) as "agent-efficiency"
 - Be concise — the agent is still running and findings appear in real-time in the UI
 - Each evidence entry must be detailed enough for another agent to act on independently
 
 - Rate severity honestly: critical = data loss/security, high = bugs, medium = perf/quality, low = style/minor
+
 
 Respond ONLY with valid JSON matching the requested schema.`;

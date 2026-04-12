@@ -98,7 +98,8 @@ The logs contain:
 You look for these categories:
 
 1. **Error Patterns** — recurring errors, unhandled exceptions, failed operations, error cascades
-2. **Performance** — slow operations, high-frequency redundant calls, memory concerns, bottlenecks
+2. **Performance** — slow operations, high-frequency redundant calls, memory concerns, bottlenecks (including implementation-phase rediscovery loops in runner logs)
+
 3. **Configuration** — misconfigurations, missing env vars, auth issues, incorrect settings
 4. **Reliability** — race conditions, timeout patterns, retry storms, connection instability
 5. **Security** — credential exposure, unsafe operations, missing validation
