@@ -17,6 +17,88 @@ function graphNodeLabel(node: { id: string; name?: string; prompt: string }): st
   return compactInline(node.prompt, 42);
 }
 
+/**
+ * When no explicit agent graph exists, derive a lifecycle graph from session events.
+ * Produces sequential nodes: Planning → Implementation → Testing → Verification.
+ */
+function deriveLifecycleGraph(session: WorkSession): { id: string; name: string; prompt: string; dependencies: string[]; status: 'pending' | 'running' | 'completed' | 'failed' }[] {
+  const events = session.events ?? [];
+  const eventTypes = new Set(events.map((e) => e.type));
+  const sessionStatus = normalizeSessionStatus(session.status);
+
+  const phases: { id: string; name: string; prompt: string; deps: string[]; detected: boolean }[] = [
+    { id: 'planning', name: 'Planning', prompt: 'Analyze prompt and generate execution plan', deps: [], detected: eventTypes.has('task:planning') || eventTypes.has('task:plan-persisted') || eventTypes.has('task:approval-requested') },
+    { id: 'implementation', name: 'Implementation', prompt: 'Implement the planned changes', deps: ['planning'], detected: eventTypes.has('task:implementation-attempt') || eventTypes.has('task:approved') },
+    { id: 'testing', name: 'Testing', prompt: 'Run tests to validate implementation', deps: ['implementation'], detected: eventTypes.has('task:testing') || eventTypes.has('task:tester-verdict') },
+    { id: 'verification', name: 'Verification', prompt: 'Verify and finalize changes', deps: ['implementation'], detected: eventTypes.has('task:validating') || eventTypes.has('task:verification-failed') },
+  ];
+
+  // Include phases that were detected or are expected based on session state
+  const activePhases = phases.filter((p) => p.detected || sessionStatus === 'running' || sessionStatus === 'completed');
+  if (activePhases.length === 0) {
+    return [{ id: session.id, name: compactInline(session.prompt, 42), prompt: session.prompt, dependencies: [], status: 'pending' }];
+  }
+
+  // Derive status per phase from events
+  const getPhaseStatus = (phaseId: string): 'pending' | 'running' | 'completed' | 'failed' => {
+    switch (phaseId) {
+      case 'planning': {
+        if (eventTypes.has('task:approved') || eventTypes.has('task:implementation-attempt')) return 'completed';
+        if (eventTypes.has('task:planning') || eventTypes.has('task:plan-persisted') || eventTypes.has('task:approval-requested')) return 'running';
+        if (sessionStatus === 'running') return 'running';
+        return 'pending';
+      }
+      case 'implementation': {
+        if (eventTypes.has('task:testing') || eventTypes.has('task:tester-verdict') || eventTypes.has('task:validating')) return 'completed';
+        const lastImplEvent = [...events].reverse().find((e) => e.type === 'task:implementation-attempt');
+        if (lastImplEvent) return 'running';
+        if (eventTypes.has('task:approved')) return 'running';
+        return 'pending';
+      }
+      case 'testing': {
+        const lastVerdict = [...events].reverse().find((e) => e.type === 'task:tester-verdict');
+        if (lastVerdict) return (lastVerdict as { testsFailed?: number }).testsFailed === 0 ? 'completed' : 'failed';
+        if (eventTypes.has('task:testing')) return 'running';
+        return 'pending';
+      }
+      case 'verification': {
+        if (sessionStatus === 'completed') return 'completed';
+        if (eventTypes.has('task:verification-failed')) return 'failed';
+        if (eventTypes.has('task:validating')) return 'running';
+        return 'pending';
+      }
+      default:
+        return 'pending';
+    }
+  };
+
+  // Fix deps to only reference phases actually in the list
+  const activeIds = new Set(activePhases.map((p) => p.id));
+  // If testing exists, make verification depend on testing instead of implementation
+  if (activeIds.has('testing') && activeIds.has('verification')) {
+    const verPhase = activePhases.find((p) => p.id === 'verification');
+    if (verPhase) verPhase.deps = ['testing'];
+  }
+
+  if (sessionStatus === 'failed') {
+    // Mark uncompleted phases correctly
+    return activePhases.map((p) => {
+      const status = getPhaseStatus(p.id);
+      return {
+        id: p.id, name: p.name, prompt: p.prompt,
+        dependencies: p.deps.filter((d) => activeIds.has(d)),
+        status: status === 'running' ? 'failed' : status,
+      };
+    });
+  }
+
+  return activePhases.map((p) => ({
+    id: p.id, name: p.name, prompt: p.prompt,
+    dependencies: p.deps.filter((d) => activeIds.has(d)),
+    status: sessionStatus === 'completed' ? 'completed' : getPhaseStatus(p.id),
+  }));
+}
+
 export function buildGraphLayout(session?: WorkSession): { nodes: GraphNodeView[]; width: number; height: number } {
   if (!session) {
     return { nodes: [], width: 900, height: 520 };
@@ -24,7 +106,7 @@ export function buildGraphLayout(session?: WorkSession): { nodes: GraphNodeView[
 
   const baseNodes = session.agentGraph && session.agentGraph.length > 0
     ? session.agentGraph
-    : [{ id: session.id, prompt: session.prompt, dependencies: [] }];
+    : deriveLifecycleGraph(session);
 
   const statusById = new Map(baseNodes.map((node) => [node.id, node.status ?? normalizeTaskStatus(session.taskStatus[node.id])]));
   const sessionNormalized = normalizeSessionStatus(session.status);

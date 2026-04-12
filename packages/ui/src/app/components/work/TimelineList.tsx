@@ -49,6 +49,12 @@ export function TimelineList({ timelineItems, isDark, selectedSessionId }: Props
   const blocks = groupTimelineItems(timelineItems);
   const [snapshotSummaries, setSnapshotSummaries] = useState<SessionLlmContextSnapshotSummary[]>([]);
 
+  // Count context events so the fetch re-fires when new snapshots arrive during a live session.
+  const contextEventCount = useMemo(
+    () => timelineItems.filter((item) => item.llmContextSnapshotId).length,
+    [timelineItems],
+  );
+
   useEffect(() => {
     let cancelled = false;
 
@@ -74,7 +80,7 @@ export function TimelineList({ timelineItems, isDark, selectedSessionId }: Props
     return () => {
       cancelled = true;
     };
-  }, [selectedSessionId]);
+  }, [selectedSessionId, contextEventCount]);
 
   const snapshotIdsInTimeline = useMemo(() => {
     const ids = new Set<string>();

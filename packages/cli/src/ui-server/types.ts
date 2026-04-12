@@ -57,7 +57,7 @@ export interface SessionLlmStatus {
   detail?: string;
   failureType?: string;
   taskId?: string;
-  phase?: 'planning' | 'implementation';
+  phase?: 'planning' | 'implementation' | 'testing';
   updatedAt: string;
 }
 
@@ -114,7 +114,7 @@ export interface UiDagEvent {
   toolIsError?: boolean;
   toolDetails?: unknown;
   llmContextSnapshotId?: string;
-  llmContextPhase?: 'chat' | 'planning' | 'implementation';
+  llmContextPhase?: 'chat' | 'planning' | 'implementation' | 'testing';
   llmContextProvider?: string;
   llmContextModel?: string;
   llmContextTextChars?: number;

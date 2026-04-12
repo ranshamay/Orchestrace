@@ -82,6 +82,9 @@ function normalizeLlmPhase(raw?: string): LlmSessionPhase | undefined {
   if (value === 'implementation' || value === 'implementing') {
     return 'implementation';
   }
+  if (value === 'testing' || value === 'tester') {
+    return 'testing';
+  }
   return undefined;
 }
 
@@ -92,9 +95,10 @@ export function fallbackLlmPhase(state: LlmSessionState): LlmSessionPhase | unde
       return 'planning';
     case 'implementing':
     case 'using-tools':
-    case 'validating':
     case 'retrying':
       return 'implementation';
+    case 'validating':
+      return 'testing';
     default:
       return undefined;
   }
@@ -104,7 +108,9 @@ export function llmPhaseLabel(phase?: LlmSessionPhase): string {
   if (!phase) {
     return 'Unknown';
   }
-  return phase === 'planning' ? 'Planning' : 'Implementation';
+  if (phase === 'planning') return 'Planning';
+  if (phase === 'testing') return 'Testing';
+  return 'Implementation';
 }
 
 export function llmPhaseBadgeClass(phase?: LlmSessionPhase, selected = false): string {
@@ -116,6 +122,9 @@ export function llmPhaseBadgeClass(phase?: LlmSessionPhase, selected = false): s
   }
   if (phase === 'implementation') {
     return 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300';
+  }
+  if (phase === 'testing') {
+    return 'bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-300';
   }
   return 'bg-slate-200 text-slate-600 dark:bg-slate-800 dark:text-slate-300';
 }

@@ -38,7 +38,7 @@ export type TimelineItem = {
   toolStatus?: 'pending' | 'success' | 'error';
   endTime?: string;
   llmContextSnapshotId?: string;
-  llmContextPhase?: 'chat' | 'planning' | 'implementation';
+  llmContextPhase?: 'chat' | 'planning' | 'implementation' | 'testing';
   llmContextProvider?: string;
   llmContextModel?: string;
   llmContextTextChars?: number;
@@ -68,8 +68,8 @@ export type SessionLlmControls = {
 };
 
 export type SessionStatus = 'running' | 'completed' | 'failed' | 'cancelled' | 'merged' | 'pending' | 'unknown';
-export type LlmSessionPhase = 'planning' | 'implementation';
-export type ComposerMode = 'run' | 'chat' | 'planning' | 'implementation';
+export type LlmSessionPhase = 'planning' | 'implementation' | 'testing';
+export type ComposerMode = 'run' | 'chat' | 'planning' | 'implementation' | 'testing';
 
 export type LlmSessionState =
   | 'queued'

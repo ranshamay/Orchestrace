@@ -28,8 +28,8 @@ export function useToolsPanel(showToolsPanel: boolean, selectedSessionId: string
       try {
         const requestedMode: 'chat' | 'planning' | 'implementation' | undefined =
           selectedSessionMode && selectedSessionMode !== 'run'
-            ? selectedSessionMode
-            : (composerMode !== 'run' ? composerMode : undefined);
+            ? (selectedSessionMode === 'testing' ? 'implementation' : selectedSessionMode)
+            : (composerMode !== 'run' ? (composerMode === 'testing' ? 'implementation' : composerMode) : undefined);
         const toolsState = await fetchWorkTools(selectedSessionId, requestedMode);
         if (cancelled) {
           return;

@@ -135,6 +135,11 @@ export function applyEvent(state: MaterializedSession, event: SessionEvent): voi
       }
       break;
 
+    case 'session:llm-context':
+      // LLM context snapshots are queried via dedicated APIs and do not
+      // influence the core materialized session envelope.
+      break;
+
     case 'session:todos-set':
       state.todos = event.payload.items;
       break;

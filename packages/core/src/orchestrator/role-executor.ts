@@ -1,5 +1,6 @@
 import { access } from 'node:fs/promises';
 import { isAbsolute, relative, resolve } from 'node:path';
+import { randomUUID } from 'node:crypto';
 import type {
   DagEvent,
   ModelConfig,
@@ -123,6 +124,9 @@ export async function executeRole(params: {
   agent: LlmAgent;
   taskId: string;
   prompt: string;
+  provider: string;
+  model: string;
+  systemPrompt: string;
   attempt: number;
   signal?: AbortSignal;
   emit: (event: DagEvent) => void;
@@ -134,6 +138,9 @@ export async function executeRole(params: {
     agent,
     taskId,
     prompt,
+    provider,
+    model,
+    systemPrompt,
     attempt,
     signal,
     emit,
@@ -142,6 +149,18 @@ export async function executeRole(params: {
   } = params;
 
   const phase = roleToPhase(role);
+
+  emit({
+    type: 'task:llm-context',
+    taskId,
+    phase,
+    attempt,
+    snapshotId: randomUUID(),
+    provider,
+    model,
+    systemPrompt,
+    prompt,
+  });
 
   return agent.complete(prompt, signal, {
     onTextDelta: (delta) => {
@@ -182,6 +201,7 @@ export async function executeImplementerRole(params: {
   planPath?: string;
   effort: TaskEffort;
   implementationModel: ModelConfig;
+  implementationSystemPrompt: string;
   implAgent: LlmAgent;
   signal?: AbortSignal;
   cwd: string;
@@ -219,6 +239,7 @@ export async function executeImplementerRole(params: {
     planPath,
     effort,
     implementationModel,
+    implementationSystemPrompt,
     implAgent,
     signal,
     cwd,
@@ -267,6 +288,9 @@ export async function executeImplementerRole(params: {
         agent: implAgent,
         taskId: task.id,
         prompt: implementationPrompt,
+        provider: implementationModel.provider,
+        model: implementationModel.model,
+        systemPrompt: implementationSystemPrompt,
         attempt,
         signal,
         emit,
@@ -485,6 +509,8 @@ export async function executeTesterRole(params: {
   approvedPlan?: string;
   implementationOutput: TaskOutput;
   testerAgent: LlmAgent;
+  testerModel: ModelConfig;
+  testerSystemPrompt: string;
   attempt: number;
   signal?: AbortSignal;
   emit: (event: DagEvent) => void;
@@ -501,6 +527,8 @@ export async function executeTesterRole(params: {
     approvedPlan,
     implementationOutput,
     testerAgent,
+    testerModel,
+    testerSystemPrompt,
     attempt,
     signal,
     emit,
@@ -540,6 +568,9 @@ export async function executeTesterRole(params: {
     agent: testerAgent,
     taskId: task.id,
     prompt: testerPrompt,
+    provider: testerModel.provider,
+    model: testerModel.model,
+    systemPrompt: testerSystemPrompt,
     attempt,
     signal,
     emit,

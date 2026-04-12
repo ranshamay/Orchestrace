@@ -1831,6 +1831,7 @@ async function main(): Promise<void> {
           const subSignal = AbortSignal.any([controller.signal, AbortSignal.timeout(subTimeoutMs)]);
           const toolCallId = `subagent-worker-${randomUUID()}`;
           const subPhase: 'planning' | 'implementation' = phase === 'planning' ? 'planning' : 'implementation';
+          const subSystemPrompt = resolveSubAgentSystemPrompt(request);
 
           // Emit sub-agent started event
           emitSubAgentEvent(task.id, subPhase, toolCallId, 'started', {
@@ -1872,7 +1873,7 @@ async function main(): Promise<void> {
               model: subModel,
               reasoning: request.reasoning ?? reasoning,
               timeoutMs: subTimeoutMs,
-              systemPrompt: resolveSubAgentSystemPrompt(request),
+              systemPrompt: subSystemPrompt,
               signal: subSignal,
               toolset: subToolset,
                             apiKey: await authManager.resolveApiKey(subProvider),
@@ -1882,7 +1883,44 @@ async function main(): Promise<void> {
 
             });
 
-            const result = await completeWithRetry(subAgent, request.prompt, subSignal);
+            const result = await completeWithRetry(subAgent, request.prompt, subSignal, {
+              onAttemptStart: (subAttempt) => {
+                const snapshotId = randomUUID();
+                const promptText = request.prompt;
+                const eventTime = iso();
+                const llmContextEvent: Extract<DagEvent, { type: 'task:llm-context' }> = {
+                  type: 'task:llm-context',
+                  taskId: task.id,
+                  phase: subPhase,
+                  attempt: subAttempt,
+                  snapshotId,
+                  provider: subProvider,
+                  model: subModel,
+                  systemPrompt: subSystemPrompt,
+                  prompt: promptText,
+                };
+
+                void emit({
+                  time: eventTime,
+                  type: 'session:llm-context',
+                  payload: {
+                    snapshotId,
+                    phase: subPhase,
+                    provider: subProvider,
+                    model: subModel,
+                    textChars: promptText.length,
+                    imageCount: 0,
+                    systemPrompt: subSystemPrompt,
+                    promptText,
+                  },
+                });
+
+                const uiEvent = toUiEvent(sessionId, llmContextEvent, eventTime);
+                if (uiEvent) {
+                  void emit({ time: eventTime, type: 'session:dag-event', payload: { event: uiEvent } });
+                }
+              },
+            });
             const structured = buildStructuredResult(result);
 
             emitSubAgentEvent(task.id, subPhase, toolCallId, 'completed', {
@@ -1974,6 +2012,24 @@ async function main(): Promise<void> {
           return;
         }
 
+        if (event.type === 'task:llm-context') {
+          const promptText = typeof event.prompt === 'string' ? event.prompt : '';
+          void emit({
+            time: t,
+            type: 'session:llm-context',
+            payload: {
+              snapshotId: event.snapshotId,
+              phase: event.phase,
+              provider: event.provider,
+              model: event.model,
+              textChars: promptText.length,
+              imageCount: 0,
+              systemPrompt: event.systemPrompt,
+              promptText,
+            },
+          });
+        }
+
         // Dag events
         const uiEvent = toUiEvent(sessionId, event, t);
         if (uiEvent) {
@@ -2006,7 +2062,7 @@ async function main(): Promise<void> {
         }
 
         // Task status
-        if ('taskId' in event && event.type !== 'task:tool-call') {
+        if ('taskId' in event && event.type !== 'task:tool-call' && event.type !== 'task:llm-context') {
           void emit({ time: t, type: 'session:task-status-change', payload: { taskId: event.taskId, taskStatus: event.type } });
         }
             },
@@ -2640,7 +2696,7 @@ function makeLlmStatus(
   detail?: string,
   failureType?: string,
   taskId?: string,
-  phase?: 'planning' | 'implementation',
+  phase?: 'planning' | 'implementation' | 'testing',
 ): SessionLlmStatus {
   const labels: Record<string, string> = {
     queued: 'Queued', analyzing: 'Analyzing', thinking: 'Thinking', planning: 'Planning',
@@ -2668,11 +2724,11 @@ function deriveLlmStatus(event: DagEvent, t: string): SessionLlmStatus | undefin
     case 'task:implementation-attempt':
       return makeLlmStatus('implementing', `Implementation attempt ${event.attempt}/${event.maxAttempts}.`, undefined, event.taskId, 'implementation');
     case 'task:testing':
-      return makeLlmStatus('validating', `Tester gate attempt ${event.attempt}: generating and running tests.`, undefined, event.taskId, 'implementation');
+      return makeLlmStatus('validating', `Tester gate attempt ${event.attempt}: generating and running tests.`, undefined, event.taskId, 'testing');
     case 'task:tester-verdict':
       return event.approved
-        ? makeLlmStatus('validating', `Tester approved (passed=${event.testsPassed}, failed=${event.testsFailed}).`, undefined, event.taskId, 'implementation')
-        : makeLlmStatus('retrying', `Tester rejected (passed=${event.testsPassed}, failed=${event.testsFailed}).`, 'validation', event.taskId, 'implementation');
+        ? makeLlmStatus('validating', `Tester approved (passed=${event.testsPassed}, failed=${event.testsFailed}).`, undefined, event.taskId, 'testing')
+        : makeLlmStatus('retrying', `Tester rejected (passed=${event.testsPassed}, failed=${event.testsFailed}).`, 'validation', event.taskId, 'testing');
     case 'task:tool-call':
       return event.status === 'started'
         ? makeLlmStatus('using-tools', `Running tool ${event.toolName}.`, undefined, event.taskId, event.phase)
@@ -2734,6 +2790,12 @@ function toUiEvent(
   toolOutput?: string;
   toolIsError?: boolean;
   toolDetails?: unknown;
+  llmContextSnapshotId?: string;
+  llmContextPhase?: 'chat' | 'planning' | 'implementation';
+  llmContextProvider?: string;
+  llmContextModel?: string;
+  llmContextTextChars?: number;
+  llmContextImageCount?: number;
   message: string;
 } | undefined {
 
@@ -2776,6 +2838,12 @@ function toUiEvent(
     toolOutput: event.type === 'task:tool-call' ? event.output : undefined,
     toolIsError: event.type === 'task:tool-call' ? event.isError : undefined,
     toolDetails: event.type === 'task:tool-call' ? event.details : undefined,
+    llmContextSnapshotId: event.type === 'task:llm-context' ? event.snapshotId : undefined,
+    llmContextPhase: event.type === 'task:llm-context' ? event.phase : undefined,
+    llmContextProvider: event.type === 'task:llm-context' ? event.provider : undefined,
+    llmContextModel: event.type === 'task:llm-context' ? event.model : undefined,
+    llmContextTextChars: event.type === 'task:llm-context' ? event.prompt.length : undefined,
+    llmContextImageCount: event.type === 'task:llm-context' ? 0 : undefined,
   };
 
   const tag = (msg: string) => `[run:${runId}] ${msg}`;
@@ -2811,6 +2879,14 @@ function toUiEvent(
       const err = event.isError ? ' [error]' : '';
       return { ...base, message: tag(`${event.taskId}: tool ${event.toolName} output${err} ${previewToolPayload(event.output)}`) };
     }
+    case 'task:llm-context':
+      return {
+        ...base,
+        type: 'session:llm-context',
+        message: tag(
+          `${event.taskId}: llm context snapshot ${event.snapshotId} (${event.prompt.length} chars, provider=${event.provider}, model=${event.model}, phase=${event.phase})`,
+        ),
+      };
     case 'task:verification-failed': return { ...base, message: tag(`${event.taskId}: verification failed`) };
     case 'task:ready': return { ...base, message: tag(`${event.taskId}: ready`) };
     case 'task:started': return { ...base, message: tag(`${event.taskId}: started`) };
@@ -3180,11 +3256,15 @@ async function completeWithRetry(
   agent: { complete: (prompt: string, signal?: AbortSignal) => Promise<{ text: string; usage?: { input: number; output: number; cost: number } }> },
   prompt: string,
   signal?: AbortSignal,
+  options?: {
+    onAttemptStart?: (attempt: number) => void | Promise<void>;
+  },
 ): Promise<{ text: string; usage?: { input: number; output: number; cost: number } }> {
   let lastError: unknown;
   for (let attempt = 1; attempt <= SUBAGENT_RETRY_MAX_ATTEMPTS; attempt++) {
     const startedAt = Date.now();
     try {
+      await options?.onAttemptStart?.(attempt);
       return await agent.complete(prompt, signal);
     } catch (err) {
       lastError = err;

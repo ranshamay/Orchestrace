@@ -25,8 +25,8 @@ export function selectSessionViewState(selectedSession?: WorkSession) {
   };
 }
 
-function fallbackComposerModeFromLlmStatus(status: { state: string; phase?: 'planning' | 'implementation' }): ComposerMode {
-  if (status.phase === 'planning' || status.phase === 'implementation') {
+function fallbackComposerModeFromLlmStatus(status: { state: string; phase?: 'planning' | 'implementation' | 'testing' }): ComposerMode {
+  if (status.phase === 'planning' || status.phase === 'implementation' || status.phase === 'testing') {
     return status.phase;
   }
 

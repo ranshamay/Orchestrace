@@ -47,7 +47,7 @@ export interface SessionLlmStatus {
   detail?: string;
   failureType?: string;
   taskId?: string;
-  phase?: 'planning' | 'implementation';
+  phase?: 'planning' | 'implementation' | 'testing';
   updatedAt: string;
 }
 
@@ -93,7 +93,7 @@ export interface UiDagEvent {
   toolIsError?: boolean;
   toolDetails?: unknown;
   llmContextSnapshotId?: string;
-  llmContextPhase?: 'chat' | 'planning' | 'implementation';
+  llmContextPhase?: 'chat' | 'planning' | 'implementation' | 'testing';
   llmContextProvider?: string;
   llmContextModel?: string;
   llmContextTextChars?: number;
@@ -221,6 +221,7 @@ export type SessionEventType =
   // Chat
   | 'session:chat-thread-created'
   | 'session:chat-message'
+  | 'session:llm-context'
   // Todos
   | 'session:todos-set'
   | 'session:todo-item-added'
@@ -295,6 +296,17 @@ export interface SessionChatMessagePayload {
   message: SessionChatMessage;
 }
 
+export interface SessionLlmContextPayload {
+  snapshotId: string;
+  phase: 'chat' | 'planning' | 'implementation' | 'testing';
+  provider: string;
+  model: string;
+  textChars: number;
+  imageCount: number;
+  systemPrompt: string;
+  promptText: string;
+}
+
 export interface SessionTodosSetPayload {
   items: AgentTodoItem[];
 }
@@ -359,7 +371,7 @@ export interface SessionRecoveryDetectedPayload {
 
 export interface SessionStreamDeltaPayload {
   taskId: string;
-  phase: 'planning' | 'implementation';
+  phase: 'planning' | 'implementation' | 'testing';
   delta: string;
 }
 
@@ -415,6 +427,7 @@ export type SessionEvent =
   | { seq: number; time: string; type: 'session:agent-graph-node-status'; payload: SessionAgentGraphNodeStatusPayload }
   | { seq: number; time: string; type: 'session:chat-thread-created'; payload: SessionChatThreadCreatedPayload }
   | { seq: number; time: string; type: 'session:chat-message'; payload: SessionChatMessagePayload }
+  | { seq: number; time: string; type: 'session:llm-context'; payload: SessionLlmContextPayload }
   | { seq: number; time: string; type: 'session:todos-set'; payload: SessionTodosSetPayload }
   | { seq: number; time: string; type: 'session:todo-item-added'; payload: SessionTodoItemAddedPayload }
   | { seq: number; time: string; type: 'session:todo-item-toggled'; payload: SessionTodoItemToggledPayload }

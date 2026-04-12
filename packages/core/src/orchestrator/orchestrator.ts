@@ -265,6 +265,30 @@ export async function orchestrate(
       | undefined;
     let persistedPlanPath: string | undefined;
     const resolvedPlanningNoToolGuardMode = normalizePlanningNoToolGuardMode(planningNoToolGuardMode);
+    const resolvedPlanningSystemPrompt =
+      planningSystemPrompt
+      ?? systemPrompt
+      ?? buildRoleSystemPrompt({
+        role: 'planner',
+        task: node,
+        graphId: graph.id,
+        cwd,
+        provider: planningModel.provider,
+        model: planningModel.model,
+        reasoning: planningModel.reasoning,
+      });
+    const resolvedImplementationSystemPrompt =
+      implementationSystemPrompt
+      ?? systemPrompt
+      ?? buildRoleSystemPrompt({
+        role: 'implementer',
+        task: node,
+        graphId: graph.id,
+        cwd,
+        provider: implementationModel.provider,
+        model: implementationModel.model,
+        reasoning: implementationModel.reasoning,
+      });
 
     if (!shouldSkipPlanning) {
       const planningAgent = await spawnRoleAgent({
@@ -274,18 +298,7 @@ export async function orchestrate(
         graphId: graph.id,
         cwd,
         model: planningModel,
-        systemPrompt:
-          planningSystemPrompt
-          ?? systemPrompt
-          ?? buildRoleSystemPrompt({
-            role: 'planner',
-            task: node,
-            graphId: graph.id,
-            cwd,
-            provider: planningModel.provider,
-            model: planningModel.model,
-            reasoning: planningModel.reasoning,
-          }),
+        systemPrompt: resolvedPlanningSystemPrompt,
         signal: context.signal,
         createToolset,
         resolveApiKey,
@@ -396,6 +409,9 @@ export async function orchestrate(
             agent: planningAgent,
             taskId: node.id,
             prompt: planningPrompt,
+            provider: planningModel.provider,
+            model: planningModel.model,
+            systemPrompt: resolvedPlanningSystemPrompt,
             attempt: planningAttempt,
             signal: planningAttemptController.signal,
             emit,
@@ -738,18 +754,7 @@ export async function orchestrate(
       graphId: graph.id,
       cwd,
       model: implementationModel,
-      systemPrompt:
-        implementationSystemPrompt
-        ?? systemPrompt
-        ?? buildRoleSystemPrompt({
-          role: 'implementer',
-          task: node,
-          graphId: graph.id,
-          cwd,
-          provider: implementationModel.provider,
-          model: implementationModel.model,
-          reasoning: implementationModel.reasoning,
-        }),
+      systemPrompt: resolvedImplementationSystemPrompt,
       signal: context.signal,
       createToolset,
       resolveApiKey,
@@ -788,6 +793,17 @@ export async function orchestrate(
       ?? [];
     const resolvedTesterModel = taskTesterConfig?.model ?? testerConfig?.model ?? defaultTesterModel ?? implementationModel;
     const resolvedTesterSystemPrompt = testerConfig?.systemPrompt;
+    const resolvedTesterExecutionSystemPrompt =
+      resolvedTesterSystemPrompt
+      ?? buildRoleSystemPrompt({
+        role: 'tester',
+        task: node,
+        graphId: graph.id,
+        cwd,
+        provider: resolvedTesterModel.provider,
+        model: resolvedTesterModel.model,
+        reasoning: resolvedTesterModel.reasoning,
+      });
 
     return executeImplementerRole({
       task: node,
@@ -797,6 +813,7 @@ export async function orchestrate(
       planPath: persistedPlanPath,
       effort,
       implementationModel,
+      implementationSystemPrompt: resolvedImplementationSystemPrompt,
       implAgent,
       signal: context.signal,
       cwd,
@@ -834,7 +851,7 @@ export async function orchestrate(
           graphId: graph.id,
           cwd,
           model: resolvedTesterModel,
-          systemPrompt: resolvedTesterSystemPrompt,
+          systemPrompt: resolvedTesterExecutionSystemPrompt,
           signal,
           createToolset,
           resolveApiKey,
@@ -846,6 +863,8 @@ export async function orchestrate(
           approvedPlan: planningResult?.text,
           implementationOutput: output,
           testerAgent,
+          testerModel: resolvedTesterModel,
+          testerSystemPrompt: resolvedTesterExecutionSystemPrompt,
           attempt,
           signal,
           emit,

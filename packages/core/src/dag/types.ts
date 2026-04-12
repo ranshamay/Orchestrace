@@ -224,6 +224,17 @@ export interface TaskState {
 /** Events emitted by the DAG runner. */
 export type DagEvent =
   | { type: 'task:planning'; taskId: string }
+  | {
+      type: 'task:llm-context';
+      taskId: string;
+      phase: 'planning' | 'implementation';
+      attempt: number;
+      snapshotId: string;
+      provider: string;
+      model: string;
+      systemPrompt: string;
+      prompt: string;
+    }
   | { type: 'task:stream-delta'; taskId: string; phase: 'planning' | 'implementation'; attempt: number; delta: string }
   | {
       type: 'task:replay-attempt';

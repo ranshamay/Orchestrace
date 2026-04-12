@@ -1,5 +1,5 @@
-import { readFile } from 'node:fs/promises';
-import { isAbsolute, normalize, resolve, sep } from 'node:path';
+import { readFile, readdir } from 'node:fs/promises';
+import { basename as pathBasename, isAbsolute, join, normalize, resolve, sep } from 'node:path';
 import type { LlmAdapter } from '@orchestrace/provider';
 import type { FindingRecord, ObserverConfig, VerifiedEvidence } from './types.js';
 
@@ -29,6 +29,7 @@ Return ONLY valid JSON in this format:
 
 const FILE_CHAR_LIMIT = 12_000;
 const FILE_COUNT_LIMIT = 5;
+const IGNORED_DIRS = new Set(['node_modules', '.git', 'dist', '.orchestrace', '.turbo']);
 
 export interface VerificationResult {
   verified: boolean;
@@ -107,10 +108,12 @@ function collectCandidateFiles(finding: FindingRecord): string[] {
 
 async function readCandidateSnippets(paths: string[], workspaceRoot: string): Promise<Array<{ path: string; content: string }>> {
   const snippets: Array<{ path: string; content: string }> = [];
+  const failedPaths: string[] = [];
 
   for (const rawPath of paths) {
     const safePath = resolveSafePath(workspaceRoot, rawPath);
     if (!safePath) {
+      failedPaths.push(rawPath);
       continue;
     }
 
@@ -121,11 +124,72 @@ async function readCandidateSnippets(paths: string[], workspaceRoot: string): Pr
         content: content.slice(0, FILE_CHAR_LIMIT),
       });
     } catch {
-      // Skip unreadable candidates.
+      failedPaths.push(rawPath);
+    }
+  }
+
+  if (failedPaths.length > 0 && snippets.length < FILE_COUNT_LIMIT) {
+    const fileIndex = await listWorkspaceFiles(workspaceRoot);
+
+    for (const rawPath of failedPaths) {
+      if (snippets.length >= FILE_COUNT_LIMIT) {
+        break;
+      }
+
+      const name = pathBasename(rawPath);
+      if (!name || !name.includes('.')) {
+        continue;
+      }
+
+      const match = fileIndex.find((f) => f === name || f.endsWith(`/${name}`));
+      if (!match) {
+        continue;
+      }
+
+      const safePath = resolveSafePath(workspaceRoot, match);
+      if (!safePath) {
+        continue;
+      }
+
+      try {
+        const content = await readFile(safePath.absolute, 'utf-8');
+        snippets.push({
+          path: safePath.relative,
+          content: content.slice(0, FILE_CHAR_LIMIT),
+        });
+      } catch {
+        // Skip unreadable candidates.
+      }
     }
   }
 
   return snippets;
+}
+
+async function listWorkspaceFiles(root: string): Promise<string[]> {
+  const files: string[] = [];
+
+  async function walk(dir: string): Promise<void> {
+    let entries;
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (entry.isDirectory()) {
+        if (!IGNORED_DIRS.has(entry.name)) {
+          await walk(join(dir, entry.name));
+        }
+      } else {
+        const rel = normalize(join(dir, entry.name)).slice(root.length + 1);
+        files.push(rel);
+      }
+    }
+  }
+
+  await walk(root);
+  return files;
 }
 
 function resolveSafePath(workspaceRoot: string, rawPath: string): { absolute: string; relative: string } | null {

@@ -259,7 +259,7 @@ export interface Workspace {
 
 export type SessionDeliveryStrategy = 'pr-only' | 'merge-after-ci';
 export type ReasoningLevel = 'minimal' | 'low' | 'medium' | 'high';
-export type AgentRole = 'router' | 'planner' | 'implementer' | 'reviewer' | 'investigator';
+export type AgentRole = 'router' | 'planner' | 'implementer' | 'tester' | 'reviewer' | 'investigator';
 
 export interface AgentModelConfig {
   provider?: string;
@@ -368,7 +368,7 @@ export interface WorkSession {
     detail?: string;
     failureType?: string;
     taskId?: string;
-    phase?: 'planning' | 'implementation';
+    phase?: 'planning' | 'implementation' | 'testing';
     updatedAt: string;
   };
   taskStatus: Record<string, string>;
@@ -402,7 +402,7 @@ export interface WorkSession {
     toolIsError?: boolean;
     toolDetails?: unknown;
     llmContextSnapshotId?: string;
-    llmContextPhase?: 'chat' | 'planning' | 'implementation';
+    llmContextPhase?: 'chat' | 'planning' | 'implementation' | 'testing';
     llmContextProvider?: string;
     llmContextModel?: string;
     llmContextTextChars?: number;

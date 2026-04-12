@@ -21,6 +21,7 @@ export type {
   SessionAgentGraphNodeStatusPayload,
   SessionChatThreadCreatedPayload,
   SessionChatMessagePayload,
+  SessionLlmContextPayload,
   SessionTodosSetPayload,
   SessionTodoItemAddedPayload,
   SessionTodoItemToggledPayload,

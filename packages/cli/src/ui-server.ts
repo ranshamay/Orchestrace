@@ -90,6 +90,7 @@ import type {
   SessionEvent,
   SessionEventInput,
   SessionLlmStatusChangePayload,
+  SessionLlmContextPayload,
   SessionRecoveryDetectedPayload,
 } from '@orchestrace/store';
 import { ObserverDaemon, SessionObserver, BackendLogger, LogWatcher } from './observer/index.js';
@@ -778,6 +779,16 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                   }
                   break;
                 }
+                case 'session:llm-context': {
+                  const snapshot = parseSessionLlmContextSnapshotPayload(
+                    event.payload as SessionLlmContextPayload,
+                    event.time,
+                  );
+                  if (snapshot) {
+                    storeSessionLlmContextSnapshot(sessionLlmContextSnapshots, sessionId, snapshot);
+                  }
+                  break;
+                }
                 default:
                   break;
               }
@@ -827,6 +838,19 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         }
 
         workSessions.set(sessionId, session);
+
+        for (const event of events) {
+          if (event.type !== 'session:llm-context') {
+            continue;
+          }
+
+          const snapshot = parseSessionLlmContextSnapshotPayload(event.payload, event.time);
+          if (!snapshot) {
+            continue;
+          }
+
+          storeSessionLlmContextSnapshot(sessionLlmContextSnapshots, sessionId, snapshot);
+        }
 
         // Restore chat thread
         if (materialized.chatThread) {
@@ -1557,6 +1581,17 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
             thread.messages.push(msg);
             trimThreadMessages(thread);
             thread.updatedAt = event.time;
+          }
+          break;
+        }
+
+        case 'session:llm-context': {
+          const snapshot = parseSessionLlmContextSnapshotPayload(
+            event.payload as SessionLlmContextPayload,
+            event.time,
+          );
+          if (snapshot) {
+            storeSessionLlmContextSnapshot(sessionLlmContextSnapshots, id, snapshot);
           }
           break;
         }
@@ -3508,6 +3543,44 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         return;
       }
 
+      if (req.method === 'GET' && pathname === '/api/work/screenshot') {
+        const sessionId = asString(url.searchParams.get('id'));
+        const filePath = asString(url.searchParams.get('path'));
+        if (!sessionId || !filePath) {
+          sendJson(res, 400, { error: 'Missing id or path' });
+          return;
+        }
+        const session = workSessions.get(sessionId);
+        if (!session) {
+          sendJson(res, 404, { error: 'Unknown work session' });
+          return;
+        }
+        // Security: resolve the path and ensure it's under the session's worktree or workspace
+        const resolvedPath = resolve(filePath);
+        const allowedRoot = resolve(session.worktreePath ?? session.workspacePath);
+        if (!resolvedPath.startsWith(allowedRoot + '/') && resolvedPath !== allowedRoot) {
+          sendJson(res, 403, { error: 'Path is outside session workspace' });
+          return;
+        }
+        try {
+          const imageBuffer = await readFile(resolvedPath);
+          const ext = resolvedPath.split('.').pop()?.toLowerCase() ?? '';
+          const mimeTypes: Record<string, string> = {
+            png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg',
+            gif: 'image/gif', webp: 'image/webp', svg: 'image/svg+xml',
+          };
+          res.writeHead(200, {
+            'Content-Type': mimeTypes[ext] ?? 'application/octet-stream',
+            'Content-Length': imageBuffer.length,
+            'Cache-Control': 'public, max-age=86400',
+          });
+          res.end(imageBuffer);
+        } catch {
+          sendJson(res, 404, { error: 'Screenshot file not found' });
+        }
+        return;
+      }
+
       if (req.method === 'GET' && pathname === '/api/work/chat/stream') {
         const streamId = asString(url.searchParams.get('streamId'));
         if (!streamId) {
@@ -3762,6 +3835,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                   const subAgentPhase: 'planning' | 'implementation' = continuationPhase === 'planning'
                     ? 'planning'
                     : 'implementation';
+                  const subSystemPrompt = resolveSubAgentSystemPrompt(runSubAgentRequest);
                   emitSubAgentWorkerEvent({
                     session,
                     uiStatePersistence,
@@ -3798,7 +3872,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                       model: subModel,
                       reasoning: runSubAgentRequest.reasoning,
                       timeoutMs: resolveSubAgentTimeoutMs(),
-                      systemPrompt: resolveSubAgentSystemPrompt(runSubAgentRequest),
+                      systemPrompt: subSystemPrompt,
                       signal: subAgentSignal,
                       toolset: subAgentToolset,
                                             apiKey: await resolveProviderApiKey(subProvider),
@@ -3812,6 +3886,26 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                       subAgent,
                       runSubAgentRequest.prompt,
                       subAgentSignal,
+                      {
+                        onAttemptStart: () => {
+                          appendLlmContextSnapshot({
+                            session,
+                            phase: subAgentPhase,
+                            provider: subProvider,
+                            model: subModel,
+                            systemPrompt: subSystemPrompt,
+                            prompt: runSubAgentRequest.prompt,
+                            sessionLlmContextSnapshots,
+                            persistEvent: emitSessionEvent,
+                          });
+                          uiStatePersistence.schedule();
+                          broadcastSessionUpdate(
+                            workStreamClients,
+                            session.id,
+                            serializeWorkSession(session, sessionTodos.get(session.id) ?? []),
+                          );
+                        },
+                      },
                     );
                     const structuredResult = buildStructuredSubAgentResult(result);
                     emitSubAgentWorkerEvent({
@@ -4194,6 +4288,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                 const subAgentPhase: 'planning' | 'implementation' = continuationPhase === 'planning'
                   ? 'planning'
                   : 'implementation';
+                const subSystemPrompt = resolveSubAgentSystemPrompt(runSubAgentRequest);
                 emitSubAgentWorkerEvent({
                   session,
                   uiStatePersistence,
@@ -4230,7 +4325,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                     model: subModel,
                     reasoning: runSubAgentRequest.reasoning,
                     timeoutMs: resolveSubAgentTimeoutMs(),
-                    systemPrompt: resolveSubAgentSystemPrompt(runSubAgentRequest),
+                    systemPrompt: subSystemPrompt,
                     signal: subAgentSignal,
                     toolset: subAgentToolset,
                                         apiKey: await resolveProviderApiKey(subProvider),
@@ -4244,6 +4339,26 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                     subAgent,
                     runSubAgentRequest.prompt,
                     subAgentSignal,
+                    {
+                      onAttemptStart: () => {
+                        appendLlmContextSnapshot({
+                          session,
+                          phase: subAgentPhase,
+                          provider: subProvider,
+                          model: subModel,
+                          systemPrompt: subSystemPrompt,
+                          prompt: runSubAgentRequest.prompt,
+                          sessionLlmContextSnapshots,
+                          persistEvent: emitSessionEvent,
+                        });
+                        uiStatePersistence.schedule();
+                        broadcastSessionUpdate(
+                          workStreamClients,
+                          session.id,
+                          serializeWorkSession(session, sessionTodos.get(session.id) ?? []),
+                        );
+                      },
+                    },
                   );
                   const structuredResult = buildStructuredSubAgentResult(result);
                   emitSubAgentWorkerEvent({
@@ -8743,10 +8858,14 @@ async function completeSubAgentWithRetry(
   },
   prompt: string,
   signal?: AbortSignal,
+  options?: {
+    onAttemptStart?: (attempt: number) => void | Promise<void>;
+  },
 ): Promise<{ text: string; usage?: { input: number; output: number; cost: number } }> {
   let lastError: unknown;
   for (let attempt = 1; attempt <= SUBAGENT_RETRY_MAX_ATTEMPTS; attempt += 1) {
     try {
+      await options?.onAttemptStart?.(attempt);
       return await subAgent.complete(prompt, signal);
     } catch (error) {
       lastError = error;
@@ -8835,13 +8954,7 @@ function appendLlmContextSnapshot(params: {
     systemPrompt: params.systemPrompt,
     promptText: inputSummary.promptText,
   };
-
-  const current = params.sessionLlmContextSnapshots.get(params.session.id) ?? [];
-  current.push(snapshot);
-  while (current.length > SESSION_LLM_CONTEXT_SNAPSHOT_LIMIT) {
-    current.shift();
-  }
-  params.sessionLlmContextSnapshots.set(params.session.id, current);
+  storeSessionLlmContextSnapshot(params.sessionLlmContextSnapshots, params.session.id, snapshot);
 
   const uiEvent: UiDagEvent = {
     time,
@@ -8868,7 +8981,71 @@ function appendLlmContextSnapshot(params: {
     payload: { event: uiEvent },
   });
 
+  params.persistEvent(params.session.id, {
+    time,
+    type: 'session:llm-context',
+    payload: {
+      snapshotId: snapshot.id,
+      phase: snapshot.phase,
+      provider: snapshot.provider,
+      model: snapshot.model,
+      textChars: snapshot.textChars,
+      imageCount: snapshot.imageCount,
+      systemPrompt: snapshot.systemPrompt,
+      promptText: snapshot.promptText,
+    },
+  });
+
   return snapshot;
+}
+
+function storeSessionLlmContextSnapshot(
+  store: Map<string, SessionLlmContextSnapshot[]>,
+  sessionId: string,
+  snapshot: SessionLlmContextSnapshot,
+): void {
+  const current = store.get(sessionId) ?? [];
+  if (current.some((entry) => entry.id === snapshot.id)) {
+    return;
+  }
+  current.push(snapshot);
+  while (current.length > SESSION_LLM_CONTEXT_SNAPSHOT_LIMIT) {
+    current.shift();
+  }
+  store.set(sessionId, current);
+}
+
+function parseSessionLlmContextSnapshotPayload(
+  payload: SessionLlmContextPayload,
+  time: string,
+): SessionLlmContextSnapshot | undefined {
+  const snapshotId = asString(payload.snapshotId);
+  if (!snapshotId) {
+    return undefined;
+  }
+
+  const phase = payload.phase === 'implementation'
+    ? 'implementation'
+    : payload.phase === 'chat'
+      ? 'chat'
+      : 'planning';
+  const provider = asString(payload.provider);
+  const model = asString(payload.model);
+  if (!provider || !model) {
+    return undefined;
+  }
+
+  return {
+    id: snapshotId,
+    time,
+    phase,
+    provider,
+    model,
+    textChars: typeof payload.textChars === 'number' ? payload.textChars : asString(payload.promptText).length,
+    imageCount: typeof payload.imageCount === 'number' ? payload.imageCount : 0,
+    systemPrompt: asString(payload.systemPrompt),
+    promptText: asString(payload.promptText),
+  };
 }
 
 function listFallbackLlmContextSnapshots(session: WorkSession): SessionLlmContextSnapshot[] {

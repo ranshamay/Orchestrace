@@ -94,7 +94,27 @@ export function SessionSummaryCard({ selectedSession, selectedFailureType, selec
               </div>
             )}
             {testerScreenshots.length > 0 && (
-              <div>Screenshots: {testerScreenshots.slice(0, 3).join(' | ')}</div>
+              <div>
+                <div className="mb-0.5">Screenshots ({testerScreenshots.length}):</div>
+                <div className="flex flex-wrap gap-1.5">
+                  {testerScreenshots.slice(0, 6).map((screenshotPath, i) => (
+                    <a
+                      key={i}
+                      href={`/api/work/screenshot?id=${encodeURIComponent(selectedSession.id)}&path=${encodeURIComponent(screenshotPath)}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="block"
+                    >
+                      <img
+                        src={`/api/work/screenshot?id=${encodeURIComponent(selectedSession.id)}&path=${encodeURIComponent(screenshotPath)}`}
+                        alt={`Screenshot ${i + 1}`}
+                        className="h-20 max-w-[160px] rounded border border-slate-300 object-cover dark:border-slate-600"
+                        loading="lazy"
+                      />
+                    </a>
+                  ))}
+                </div>
+              </div>
             )}
             {latestTesterVerdict.rejectionReason && (
               <div>Reason: {latestTesterVerdict.rejectionReason}</div>
