@@ -16,7 +16,15 @@ import {
 } from './types.js';
 import type { SessionSummary } from './summarizer.js';
 import { formatSummaryForLlm } from './summarizer.js';
-import { FINDING_CATEGORY_LIST, OBSERVER_SYSTEM_PROMPT } from './prompts.js';
+import { OBSERVER_SYSTEM_PROMPT } from './prompts.js';
+
+const READ_SEARCH_TOOLS = new Set(['read_file', 'read_files', 'search_files']);
+const WRITE_TOOLS = new Set(['write_file', 'write_files', 'edit_file', 'edit_files']);
+
+const DISCOVERY_LOOP_MIN_READ_SEARCH = 12;
+const DISCOVERY_LOOP_MIN_STREAK = 8;
+const DISCOVERY_LOOP_MIN_EVENTS = 80;
+const DISCOVERY_LOOP_MIN_DURATION_MS = 90_000;
 
 /**
  * Analyze one or more session summaries via LLM and return structured findings.
@@ -49,7 +57,28 @@ export async function analyzeSessionSummaries(
     allowAuthRefreshRetry: true,
   });
 
-  return parseAnalysisResponse(result.text, allowedCategories);
+  const parsed = parseAnalysisResponse(result.text, allowedCategories);
+  const gateFindings = buildParserValidationGateFindings(summaries, allowedCategories);
+
+  if (gateFindings.length === 0) {
+    return parsed;
+  }
+
+  const combined = [...parsed.findings];
+  for (const gate of gateFindings) {
+    if (
+      combined.some(
+        (existing) =>
+          existing.category === gate.category
+          && existing.title.trim().toLowerCase() === gate.title.trim().toLowerCase(),
+      )
+    ) {
+      continue;
+    }
+    combined.push(gate);
+  }
+
+  return { findings: combined };
 }
 
 function buildAnalysisPrompt(summaries: SessionSummary[], allowedCategories: FindingCategory[]): string {
@@ -65,25 +94,24 @@ function buildAnalysisPrompt(summaries: SessionSummary[], allowedCategories: Fin
   }
 
   parts.push(
-    'Respond with a JSON object matching this exact schema:\n' +
-      '```json\n' +
-      '{\n' +
-      '  "findings": [\n' +
-      '    {\n' +
-      '      "schemaVersion": "2",\n' +
-      '      "category": "code-quality" | "performance" | "agent-efficiency" | "architecture" | "test-coverage",\n' +
-      '      "severity": "low" | "medium" | "high" | "critical",\n' +
-      '      "title": "Short one-line title",\n' +
-      '      "description": "Detailed description of the issue found",\n' +
-      '      "evidence": [{ "text": "Concrete implementation instruction / evidence detail" }],\n' +
-      '      "relevantFiles": ["path/to/file.ts"]  // optional\n' +
-
-      '    }\n' +
-      '  ]\n' +
-      '}\n' +
-      '```\n' +
-      'Compatibility: legacy outputs with `suggestedFix` are also accepted during rollout.\n' +
-      'Return ONLY the JSON object, no other text.',
+    'Respond with a JSON object matching this exact schema:\n'
+      + '```json\n'
+      + '{\n'
+      + '  "findings": [\n'
+      + '    {\n'
+      + '      "schemaVersion": "2",\n'
+      + '      "category": "code-quality" | "performance" | "agent-efficiency" | "architecture" | "test-coverage",\n'
+      + '      "severity": "low" | "medium" | "high" | "critical",\n'
+      + '      "title": "Short one-line title",\n'
+      + '      "description": "Detailed description of the issue found",\n'
+      + '      "evidence": [{ "text": "Concrete implementation instruction / evidence detail" }],\n'
+      + '      "relevantFiles": ["path/to/file.ts"]  // optional\n'
+      + '    }\n'
+      + '  ]\n'
+      + '}\n'
+      + '```\n'
+      + 'Compatibility: legacy outputs with `suggestedFix` are also accepted during rollout.\n'
+      + 'Return ONLY the JSON object, no other text.',
   );
 
   parts.push('');
@@ -156,6 +184,97 @@ function parseAnalysisResponse(text: string, allowedCategories: FindingCategory[
     console.error('[orchestrace][observer] Failed to parse LLM analysis response');
     return { findings: [] };
   }
+}
+
+export function buildParserValidationGateFindings(
+  summaries: SessionSummary[],
+  allowedCategories: FindingCategory[],
+): ObserverFindingInput[] {
+  if (!allowedCategories.includes('agent-efficiency')) {
+    return [];
+  }
+
+  const findings: ObserverFindingInput[] = [];
+
+  for (const summary of summaries) {
+    const metrics = collectToolMetrics(summary);
+    const startedImplementation = summary.llmStatusHistory.some(
+      (entry) => entry.state === 'implementing' || entry.detail?.includes('implementing'),
+    );
+    const longRunningSession =
+      summary.totalEvents >= DISCOVERY_LOOP_MIN_EVENTS
+      || (summary.durationMs != null && summary.durationMs >= DISCOVERY_LOOP_MIN_DURATION_MS);
+
+    const qualifies =
+      metrics.readSearchCalls >= DISCOVERY_LOOP_MIN_READ_SEARCH
+      && metrics.writeCalls === 0
+      && metrics.longestDiscoveryStreak >= DISCOVERY_LOOP_MIN_STREAK
+      && (startedImplementation || longRunningSession);
+
+    if (!qualifies) {
+      continue;
+    }
+
+    const severity: FindingSeverity =
+      metrics.readSearchCalls >= 30 || summary.totalEvents >= 400 ? 'critical' : 'high';
+
+    findings.push({
+      schemaVersion: '2',
+      category: 'agent-efficiency',
+      severity,
+      title: `Implementation stalled in discovery loop (${summary.sessionId})`,
+      description:
+        `Session ${summary.sessionId} repeatedly invoked read/search tools without any write/edit operation, `
+        + `indicating an implementation stall. read/search=${metrics.readSearchCalls}, writes=${metrics.writeCalls}, `
+        + `longest discovery streak=${metrics.longestDiscoveryStreak}, total events=${summary.totalEvents}.`,
+      evidence: [
+        {
+          text:
+            'Transition immediately to code generation: execute the first concrete write/edit in the requested target file before additional discovery calls.',
+        },
+        {
+          text:
+            'Skip non-deliverable audit/documentation detours when the task explicitly requires code changes, then re-run validation after writing.',
+        },
+      ],
+    });
+  }
+
+  return findings;
+}
+
+function collectToolMetrics(summary: SessionSummary): {
+  readSearchCalls: number;
+  writeCalls: number;
+  longestDiscoveryStreak: number;
+} {
+  let readSearchCalls = 0;
+  let writeCalls = 0;
+  let currentDiscoveryStreak = 0;
+  let longestDiscoveryStreak = 0;
+
+  for (const toolCall of summary.toolCalls) {
+    if (READ_SEARCH_TOOLS.has(toolCall.toolName)) {
+      readSearchCalls++;
+      currentDiscoveryStreak++;
+      if (currentDiscoveryStreak > longestDiscoveryStreak) {
+        longestDiscoveryStreak = currentDiscoveryStreak;
+      }
+      continue;
+    }
+
+    if (WRITE_TOOLS.has(toolCall.toolName)) {
+      writeCalls++;
+    }
+
+    currentDiscoveryStreak = 0;
+  }
+
+  return {
+    readSearchCalls,
+    writeCalls,
+    longestDiscoveryStreak,
+  };
 }
 
 function isValidFindingCandidate(f: Record<string, unknown>): boolean {

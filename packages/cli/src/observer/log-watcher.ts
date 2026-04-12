@@ -17,6 +17,12 @@ import type { BackendLogger } from './backend-logger.js';
 
 export type LogWatcherStatus = 'idle' | 'watching' | 'analyzing' | 'stopped';
 
+export interface LogToolActivitySignal {
+  readSearchCalls: number;
+  writeCalls: number;
+  longestDiscoveryStreak: number;
+}
+
 export interface LogFinding {
   id: string;
   category: LogFindingCategory;
@@ -29,8 +35,9 @@ export interface LogFinding {
   relevantFiles?: string[];
   logSnippet: string;
   detectedAt: string;
+  /** Optional parser-provided signal used by observer loop gates. */
+  toolActivity?: LogToolActivitySignal;
 }
-
 
 export type LogFindingCategory =
   | 'error-pattern'
@@ -79,7 +86,6 @@ export interface LogWatcherOptions {
   /** Time window (ms) — trigger analysis after this interval even if batch isn't full (default 120s). */
   timeWindowMs?: number;
 }
-
 
 // ---------------------------------------------------------------------------
 // System Prompt
@@ -141,10 +147,9 @@ export class LogWatcher {
   private config: ObserverConfig;
   private readonly resolveApiKey: (provider: string) => Promise<string | undefined>;
   private readonly onStateChange?: (state: LogWatcherState) => void;
-    private readonly onFindings?: (findings: LogFinding[]) => void | Promise<void>;
+  private readonly onFindings?: (findings: LogFinding[]) => void | Promise<void>;
   private readonly onError?: (error: LogWatcherRuntimeError) => void | Promise<void>;
   private readonly batchSize: number;
-
   private readonly timeWindowMs: number;
 
   private state: LogWatcherState = {
@@ -165,11 +170,10 @@ export class LogWatcher {
     this.llm = options.llm;
     this.config = { ...options.config };
     this.resolveApiKey = options.resolveApiKey;
-        this.onStateChange = options.onStateChange;
+    this.onStateChange = options.onStateChange;
     this.onFindings = options.onFindings;
     this.onError = options.onError;
     this.batchSize = options.batchSize ?? 200;
-
     this.timeWindowMs = options.timeWindowMs ?? 120_000;
   }
 
@@ -248,7 +252,7 @@ export class LogWatcher {
     this.emitChange();
 
     try {
-            const prompt = this.buildAnalysisPrompt(batch);
+      const prompt = this.buildAnalysisPrompt(batch);
       const provider = pickModelSetting(this.config.logWatcherProvider, this.config.provider);
       const model = pickModelSetting(this.config.logWatcherModel, this.config.model);
       const apiKey = await this.resolveApiKey(provider);
@@ -259,18 +263,15 @@ export class LogWatcher {
         bufferedLinesRemaining: this.buffer.length,
       };
 
-
       const result = await this.llm.complete({
         provider,
         model,
         systemPrompt: LOG_WATCHER_SYSTEM_PROMPT,
         prompt,
         signal: this.abortController.signal,
-                apiKey,
+        apiKey,
         refreshApiKey: () => this.resolveApiKey(provider),
         allowAuthRefreshRetry: true,
-
-
       });
 
       const findings = parseLogFindings(result.text);
@@ -283,7 +284,7 @@ export class LogWatcher {
         newlyDetected.push(finding);
       }
 
-            if (newlyDetected.length > 0 && this.onFindings) {
+      if (newlyDetected.length > 0 && this.onFindings) {
         void Promise.resolve(this.onFindings(newlyDetected)).catch((err) => {
           this.emitError({
             source: 'log-watcher',
@@ -298,10 +299,9 @@ export class LogWatcher {
         });
       }
 
-
       this.state.analyzedBatches++;
       this.state.lastAnalyzedAt = new Date().toISOString();
-        } catch (err) {
+    } catch (err) {
       if ((err as Error).name !== 'AbortError') {
         this.emitError({
           source: 'log-watcher',
@@ -314,7 +314,6 @@ export class LogWatcher {
         });
       }
     } finally {
-
       this.analyzing = false;
       if ((this.state.status as string) !== 'stopped') {
         this.state.status = 'watching';
@@ -342,11 +341,11 @@ export class LogWatcher {
     return lines.join('\n');
   }
 
-    private emitChange(): void {
+  private emitChange(): void {
     this.onStateChange?.(this.state);
   }
 
-    private emitError(error: LogWatcherRuntimeError): void {
+  private emitError(error: LogWatcherRuntimeError): void {
     if (this.onError) {
       void Promise.resolve(this.onError(error)).catch((handlerError) => {
         process.stderr.write(
@@ -358,9 +357,7 @@ export class LogWatcher {
 
     process.stderr.write(`[orchestrace][log-watcher] ${error.operation} error: ${error.message}\n`);
   }
-
 }
-
 
 // ---------------------------------------------------------------------------
 // Response Parser
@@ -385,16 +382,25 @@ function parseLogFindings(text: string): LogFinding[] {
         severity: validateSeverity(f.severity as string),
         title: String(f.title),
         description: String(f.description),
-        suggestedFix: typeof f.suggestedFix === 'string' ? f.suggestedFix : (typeof f.issueSummary === 'string' ? f.issueSummary : undefined),
+        suggestedFix:
+          typeof f.suggestedFix === 'string'
+            ? f.suggestedFix
+            : (typeof f.issueSummary === 'string' ? f.issueSummary : undefined),
         evidence: Array.isArray(f.evidence)
           ? f.evidence
-              .filter((x: unknown): x is { text: string } => !!x && typeof x === 'object' && typeof (x as Record<string, unknown>).text === 'string')
+              .filter(
+                (x: unknown): x is { text: string } =>
+                  !!x
+                  && typeof x === 'object'
+                  && typeof (x as Record<string, unknown>).text === 'string',
+              )
               .map((x: { text: string }) => ({ text: x.text }))
           : undefined,
         relevantFiles: Array.isArray(f.relevantFiles)
           ? f.relevantFiles.filter((x: unknown) => typeof x === 'string')
           : undefined,
         logSnippet: String(f.logSnippet ?? ''),
+        toolActivity: parseToolActivitySignal(f.toolActivity),
         detectedAt: new Date().toISOString(),
       }));
   } catch {
@@ -402,8 +408,48 @@ function parseLogFindings(text: string): LogFinding[] {
   }
 }
 
+function parseToolActivitySignal(value: unknown): LogToolActivitySignal | undefined {
+  if (!value || typeof value !== 'object') {
+    return undefined;
+  }
+
+  const obj = value as Record<string, unknown>;
+  const readSearchCalls = toNonNegativeInteger(obj.readSearchCalls);
+  const writeCalls = toNonNegativeInteger(obj.writeCalls);
+  const longestDiscoveryStreak = toNonNegativeInteger(obj.longestDiscoveryStreak);
+
+  if (readSearchCalls == null || writeCalls == null || longestDiscoveryStreak == null) {
+    return undefined;
+  }
+
+  return {
+    readSearchCalls,
+    writeCalls,
+    longestDiscoveryStreak,
+  };
+}
+
+function toNonNegativeInteger(value: unknown): number | null {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return null;
+  }
+
+  const normalized = Math.floor(value);
+  if (normalized < 0) {
+    return null;
+  }
+
+  return normalized;
+}
+
 function validateLogCategory(cat: string): LogFindingCategory {
-  const valid: LogFindingCategory[] = ['error-pattern', 'performance', 'configuration', 'reliability', 'security'];
+  const valid: LogFindingCategory[] = [
+    'error-pattern',
+    'performance',
+    'configuration',
+    'reliability',
+    'security',
+  ];
   return valid.includes(cat as LogFindingCategory) ? (cat as LogFindingCategory) : 'error-pattern';
 }
 
@@ -421,7 +467,6 @@ function toErrorMessage(err: unknown): string {
 }
 
 function pickModelSetting(value: unknown, fallback: string): string {
-
   if (typeof value !== 'string') {
     return fallback;
   }

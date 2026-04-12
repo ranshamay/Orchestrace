@@ -3,7 +3,7 @@
 // ---------------------------------------------------------------------------
 // Attaches to a running session's event stream, accumulates context (CoT,
 // tool calls, agent graph, errors), and triggers LLM analysis at key phase
-// boundaries.  Findings are emitted as session events so the UI can display
+// boundaries. Findings are emitted as session events so the UI can display
 // them inline alongside the session's own output.
 // ---------------------------------------------------------------------------
 
@@ -38,7 +38,6 @@ export interface RealtimeFinding {
   phase: string;
   detectedAt: string;
 }
-
 
 export interface SessionObserverState {
   status: ObserverSessionStatus;
@@ -94,6 +93,12 @@ const STREAM_TEXT_LIMIT = 8_000;
 const TOOL_PREVIEW_LIMIT = 3_000;
 const DAG_MESSAGE_LIMIT = 600;
 const CHAT_MESSAGE_LIMIT = 2_000;
+
+const READ_SEARCH_TOOLS = new Set(['read_file', 'read_files', 'search_files']);
+const WRITE_TOOLS = new Set(['write_file', 'write_files', 'edit_file', 'edit_files']);
+const DISCOVERY_LOOP_MIN_READ_SEARCH = 10;
+const DISCOVERY_LOOP_MIN_STREAK = 7;
+const DISCOVERY_LOOP_MIN_TOTAL_EVENTS = 60;
 
 // ---------------------------------------------------------------------------
 // SessionObserver
@@ -246,6 +251,10 @@ export class SessionObserver {
               taskId: dag.taskId,
               phase: this.currentPhase,
             });
+
+            if (this.shouldForceDiscoveryLoopAnalysis()) {
+              void this.scheduleAnalysis();
+            }
           }
         }
 
@@ -266,7 +275,9 @@ export class SessionObserver {
       }
 
       case 'session:agent-graph-set': {
-        const graph = (event.payload as { graph: Array<{ id: string; name?: string; status?: string; prompt: string }> }).graph;
+        const graph = (event.payload as {
+          graph: Array<{ id: string; name?: string; status?: string; prompt: string }>;
+        }).graph;
         this.ctx.agentGraph = graph.map((n) => ({
           id: n.id,
           name: n.name,
@@ -285,7 +296,9 @@ export class SessionObserver {
       }
 
       case 'session:todos-set': {
-        const items = (event.payload as { items: Array<{ text: string; done: boolean; status?: string }> }).items;
+        const items = (event.payload as {
+          items: Array<{ text: string; done: boolean; status?: string }>;
+        }).items;
         this.ctx.todos = items;
         break;
       }
@@ -335,6 +348,21 @@ export class SessionObserver {
     return false;
   }
 
+  private shouldForceDiscoveryLoopAnalysis(): boolean {
+    const metrics = collectToolMetrics(this.ctx.toolCalls);
+    const implementationActive =
+      this.currentPhase === 'implementation'
+      || this.ctx.llmStatusHistory.some((entry) => entry.state === 'implementing');
+
+    return (
+      implementationActive
+      && this.ctx.totalEvents >= DISCOVERY_LOOP_MIN_TOTAL_EVENTS
+      && metrics.writeCalls === 0
+      && metrics.readSearchCalls >= DISCOVERY_LOOP_MIN_READ_SEARCH
+      && metrics.longestDiscoveryStreak >= DISCOVERY_LOOP_MIN_STREAK
+    );
+  }
+
   private async scheduleAnalysis(): Promise<void> {
     if (this.analysisPending) return;
     this.analysisPending = true;
@@ -371,16 +399,34 @@ export class SessionObserver {
         systemPrompt: REALTIME_OBSERVER_SYSTEM_PROMPT,
         prompt,
         signal: this.abortController.signal,
-                apiKey,
+        apiKey,
         refreshApiKey: () => this.resolveApiKey(provider),
         allowAuthRefreshRetry: true,
-
-
       });
 
       const findings = parseRealtimeFindings(result.text, allowedCategories, triggerPhase);
+      const gatedFindings = buildRealtimeDiscoveryLoopGateFindings(
+        this.sessionId,
+        this.ctx,
+        allowedCategories,
+        triggerPhase,
+      );
 
-      for (const finding of findings) {
+      const merged = [...findings];
+      for (const gateFinding of gatedFindings) {
+        if (
+          merged.some(
+            (existing) =>
+              existing.category === gateFinding.category
+              && existing.title.trim().toLowerCase() === gateFinding.title.trim().toLowerCase(),
+          )
+        ) {
+          continue;
+        }
+        merged.push(gateFinding);
+      }
+
+      for (const finding of merged) {
         // Deduplicate against existing findings by title
         if (this.state.findings.some((f) => f.title === finding.title)) continue;
         this.state.findings.push(finding);
@@ -399,7 +445,7 @@ export class SessionObserver {
       }
     } finally {
       if ((this.state.status as string) !== 'done') {
-        this.state.status = 'watching';
+        this.state.status = previousStatus === 'watching' ? 'watching' : 'watching';
       }
       this.emitStatusChange();
     }
@@ -443,7 +489,9 @@ export class SessionObserver {
       lines.push('## Tool Calls');
       for (const tc of this.ctx.toolCalls) {
         const errorTag = tc.isError ? ' [ERROR]' : '';
-        lines.push(`### ${tc.toolName}${errorTag} (${tc.phase ?? 'unknown'} phase, task: ${tc.taskId ?? 'n/a'})`);
+        lines.push(
+          `### ${tc.toolName}${errorTag} (${tc.phase ?? 'unknown'} phase, task: ${tc.taskId ?? 'n/a'})`,
+        );
         if (tc.input) lines.push(`Input: ${tc.input}`);
         if (tc.output) lines.push(`Output: ${tc.output}`);
         lines.push('');
@@ -463,7 +511,9 @@ export class SessionObserver {
     if (this.ctx.llmStatusHistory.length > 0) {
       lines.push('## LLM Status Timeline');
       for (const h of this.ctx.llmStatusHistory) {
-        lines.push(`- ${h.time}: ${h.state}${h.phase ? ` (${h.phase})` : ''}${h.detail ? ` — ${h.detail}` : ''}`);
+        lines.push(
+          `- ${h.time}: ${h.state}${h.phase ? ` (${h.phase})` : ''}${h.detail ? ` — ${h.detail}` : ''}`,
+        );
       }
       lines.push('');
     }
@@ -502,10 +552,12 @@ export class SessionObserver {
 
     lines.push(`Allowed categories: ${allowedCategories.join(', ')}`);
     lines.push('');
-        lines.push(
+    lines.push(
       'Respond with a JSON object: { "findings": [{ "schemaVersion": "2", "category": "...", "severity": "...", "title": "...", "description": "...", "evidence": [{ "text": "..." }], "relevantFiles": [...] }] }',
     );
-    lines.push('Compatibility: legacy `suggestedFix` output is accepted during rollout, but prefer schemaVersion=2 + evidence[].');
+    lines.push(
+      'Compatibility: legacy `suggestedFix` output is accepted during rollout, but prefer schemaVersion=2 + evidence[].',
+    );
     lines.push('Return ONLY the JSON, no other text. If no issues found, return { "findings": [] }.');
 
     return lines.join('\n');
@@ -536,7 +588,7 @@ function truncate(s: string, maxLen: number): string {
 function parseToolCall(
   message: string,
 ): { toolName: string; input: string; output: string; isError: boolean } | null {
-  const toolMatch = message.match(/^Tool\s+(\S+)\s+(input|output)\s+/);
+  const toolMatch = message.match(/^Tool\s+([\w.-]+)\s+(input|output)\s+/);
   if (!toolMatch) return null;
   const toolName = toolMatch[1];
   const phase = toolMatch[2];
@@ -611,6 +663,98 @@ function parseRealtimeFindings(
   }
 }
 
+function buildRealtimeDiscoveryLoopGateFindings(
+  sessionId: string,
+  ctx: AccumulatedContext,
+  allowedCategories: FindingCategory[],
+  triggerPhase: string,
+): RealtimeFinding[] {
+  if (!allowedCategories.includes('agent-efficiency')) {
+    return [];
+  }
+
+  const metrics = collectToolMetrics(ctx.toolCalls);
+  const implementationActive =
+    triggerPhase === 'implementation'
+    || ctx.llmStatusHistory.some((entry) => entry.state === 'implementing');
+
+  const qualifies =
+    implementationActive
+    && ctx.totalEvents >= DISCOVERY_LOOP_MIN_TOTAL_EVENTS
+    && metrics.writeCalls === 0
+    && metrics.readSearchCalls >= DISCOVERY_LOOP_MIN_READ_SEARCH
+    && metrics.longestDiscoveryStreak >= DISCOVERY_LOOP_MIN_STREAK;
+
+  if (!qualifies) {
+    return [];
+  }
+
+  const severity: FindingSeverity =
+    metrics.readSearchCalls >= 24 || ctx.totalEvents >= 250 ? 'critical' : 'high';
+
+  const evidence = normalizeFindingEvidence(
+    [
+      {
+        text: 'Immediate remediation: perform the first concrete write/edit tool call in the requested target file before additional read/search calls.',
+      },
+      {
+        text: 'Skip non-deliverable audit-only tasks when the task explicitly requests code edits; return to verification after code generation.',
+      },
+    ],
+    undefined,
+  );
+
+  return [
+    {
+      id: `rt-gate-${Date.now()}`,
+      schemaVersion: '2',
+      category: 'agent-efficiency',
+      severity,
+      title: `Discovery loop detected with zero writes (${sessionId})`,
+      description:
+        `Implementation-phase behavior indicates a read/search loop with no code writes. `
+        + `read/search=${metrics.readSearchCalls}, writes=${metrics.writeCalls}, `
+        + `longest streak=${metrics.longestDiscoveryStreak}, total events=${ctx.totalEvents}.`,
+      evidence,
+      suggestedFix: evidence[0]?.text,
+      phase: triggerPhase,
+      detectedAt: new Date().toISOString(),
+    },
+  ];
+}
+
+function collectToolMetrics(
+  toolCalls: Array<{ toolName: string }>,
+): { readSearchCalls: number; writeCalls: number; longestDiscoveryStreak: number } {
+  let readSearchCalls = 0;
+  let writeCalls = 0;
+  let currentDiscoveryStreak = 0;
+  let longestDiscoveryStreak = 0;
+
+  for (const toolCall of toolCalls) {
+    if (READ_SEARCH_TOOLS.has(toolCall.toolName)) {
+      readSearchCalls++;
+      currentDiscoveryStreak++;
+      if (currentDiscoveryStreak > longestDiscoveryStreak) {
+        longestDiscoveryStreak = currentDiscoveryStreak;
+      }
+      continue;
+    }
+
+    if (WRITE_TOOLS.has(toolCall.toolName)) {
+      writeCalls++;
+    }
+
+    currentDiscoveryStreak = 0;
+  }
+
+  return {
+    readSearchCalls,
+    writeCalls,
+    longestDiscoveryStreak,
+  };
+}
+
 function isValidRealtimeFindingCandidate(f: Record<string, unknown>): boolean {
   const hasCore = typeof f.title === 'string' && typeof f.description === 'string';
   if (!hasCore) {
@@ -628,4 +772,3 @@ function isValidRealtimeFindingCandidate(f: Record<string, unknown>): boolean {
 
   return hasLegacy || hasEvidence;
 }
-
