@@ -29,9 +29,10 @@ export function useSessionStream({ enabled = true, selectedSessionId, setSession
       return;
     }
 
-    if (!selectedSessionId) {
+            if (!selectedSessionId) {
       connectedIdRef.current = '';
       setNodeTokenStreams({});
+      setObserverState(null);
       return;
     }
 
