@@ -158,8 +158,10 @@ export class LogWatcher {
   private buffer: string[] = [];
   private unsubscribe: (() => void) | null = null;
   private flushTimer: ReturnType<typeof setTimeout> | null = null;
-  private abortController = new AbortController();
+    private abortController = new AbortController();
   private analyzing = false;
+  private consecutiveInvalidResponses = 0;
+
 
   constructor(options: LogWatcherOptions) {
     this.llm = options.llm;
@@ -273,10 +275,40 @@ export class LogWatcher {
 
       });
 
-      const findings = parseLogFindings(result.text);
+            const parsed = parseLogFindings(result.text);
+      if (parsed.invalidCount > 0) {
+        this.emitError({
+          source: 'log-watcher',
+          operation: 'analyze-batch',
+          message: `Rejected ${parsed.invalidCount} malformed log finding(s) from LLM response`,
+          timestamp: new Date().toISOString(),
+          context,
+        });
+      }
+
+      if (parsed.hadParseFailure || parsed.invalidCount > 0) {
+        this.consecutiveInvalidResponses++;
+      } else {
+        this.consecutiveInvalidResponses = 0;
+      }
+
+      if (this.consecutiveInvalidResponses >= 3) {
+        this.emitError({
+          source: 'log-watcher',
+          operation: 'analyze-batch',
+          message: 'Received repeated invalid log-analysis responses; skipping invalid payloads and continuing with deterministic empty fallback',
+          timestamp: new Date().toISOString(),
+          context: {
+            ...context,
+            consecutiveInvalidResponses: this.consecutiveInvalidResponses,
+          },
+        });
+      }
+
       const newlyDetected: LogFinding[] = [];
 
-      for (const finding of findings) {
+      for (const finding of parsed.findings) {
+
         // Deduplicate by title
         if (this.state.findings.some((f) => f.title === finding.title)) continue;
         this.state.findings.push(finding);
@@ -366,43 +398,96 @@ export class LogWatcher {
 // Response Parser
 // ---------------------------------------------------------------------------
 
-function parseLogFindings(text: string): LogFinding[] {
+function parseLogFindings(text: string): {
+  findings: LogFinding[];
+  invalidCount: number;
+  hadParseFailure: boolean;
+} {
   try {
     // Strip markdown fences if present
     const cleaned = text.replace(/^```(?:json)?\s*\n?/m, '').replace(/\n?```\s*$/m, '');
-    const parsed = JSON.parse(cleaned);
-    const raw = Array.isArray(parsed) ? parsed : parsed?.findings;
-    if (!Array.isArray(raw)) return [];
+    const parsed: unknown = JSON.parse(cleaned);
+    const raw = Array.isArray(parsed)
+      ? parsed
+      : (parsed as { findings?: unknown })?.findings;
 
-    return raw
-      .filter(
-        (f: Record<string, unknown>) =>
-          f && typeof f.title === 'string' && typeof f.description === 'string',
-      )
+    if (!Array.isArray(raw)) {
+      return { findings: [], invalidCount: 1, hadParseFailure: false };
+    }
+
+    let invalidCount = 0;
+    const findings = raw
+      .filter((entry): entry is Record<string, unknown> => {
+        const isValid = isValidLogFindingCandidate(entry);
+        if (!isValid) {
+          invalidCount++;
+        }
+        return isValid;
+      })
       .map((f: Record<string, unknown>) => ({
         id: `logf-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
         category: validateLogCategory(f.category as string),
         severity: validateSeverity(f.severity as string),
-        title: String(f.title),
-        description: String(f.description),
-        suggestedFix: typeof f.suggestedFix === 'string' ? f.suggestedFix : (typeof f.issueSummary === 'string' ? f.issueSummary : undefined),
+        title: String(f.title).trim(),
+        description: String(f.description).trim(),
+        suggestedFix:
+          typeof f.suggestedFix === 'string'
+            ? f.suggestedFix
+            : (typeof f.issueSummary === 'string' ? f.issueSummary : undefined),
         evidence: Array.isArray(f.evidence)
           ? f.evidence
-              .filter((x: unknown): x is { text: string } => !!x && typeof x === 'object' && typeof (x as Record<string, unknown>).text === 'string')
+              .filter(
+                (x: unknown): x is { text: string } =>
+                  !!x
+                  && typeof x === 'object'
+                  && typeof (x as Record<string, unknown>).text === 'string',
+              )
               .map((x: { text: string }) => ({ text: x.text }))
           : undefined,
         relevantFiles: Array.isArray(f.relevantFiles)
           ? f.relevantFiles.filter((x: unknown) => typeof x === 'string')
           : undefined,
-        logSnippet: String(f.logSnippet ?? ''),
+        logSnippet: String(f.logSnippet ?? '').trim(),
         detectedAt: new Date().toISOString(),
       }));
+
+    return { findings, invalidCount, hadParseFailure: false };
   } catch {
-    return [];
+    return { findings: [], invalidCount: 1, hadParseFailure: true };
   }
 }
 
+
+function isValidLogFindingCandidate(entry: unknown): entry is Record<string, unknown> {
+  if (!entry || typeof entry !== 'object') {
+    return false;
+  }
+
+  const finding = entry as Record<string, unknown>;
+  const hasCore =
+    typeof finding.title === 'string'
+    && finding.title.trim().length > 0
+    && typeof finding.description === 'string'
+    && finding.description.trim().length > 0;
+
+  if (!hasCore) {
+    return false;
+  }
+
+  const hasLegacy = typeof finding.suggestedFix === 'string';
+  const hasEvidence =
+    Array.isArray(finding.evidence)
+    && finding.evidence.some((e) => {
+      if (!e || typeof e !== 'object') return false;
+      const textValue = (e as Record<string, unknown>).text;
+      return typeof textValue === 'string' && textValue.trim().length > 0;
+    });
+
+  return hasLegacy || hasEvidence;
+}
+
 function validateLogCategory(cat: string): LogFindingCategory {
+
   const valid: LogFindingCategory[] = ['error-pattern', 'performance', 'configuration', 'reliability', 'security'];
   return valid.includes(cat as LogFindingCategory) ? (cat as LogFindingCategory) : 'error-pattern';
 }
