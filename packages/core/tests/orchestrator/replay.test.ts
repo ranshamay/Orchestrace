@@ -1245,7 +1245,7 @@ describe('orchestrate replay capture', () => {
     }
   });
 
-  it('includes search_files regex escaping reminder in implementation prompt', async () => {
+    it('prioritizes targeted file reads and grep/find fallback in implementation prompt', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'orchestrace-replay-impl-prompt-'));
     const capturedImplementationPrompts: string[] = [];
 
@@ -1267,8 +1267,9 @@ describe('orchestrate replay capture', () => {
       expect(output?.status).toBe('completed');
       expect(capturedImplementationPrompts.length).toBeGreaterThan(0);
                   const implementationPrompt = capturedImplementationPrompts[0] ?? '';
-      expect(implementationPrompt).toContain('search_files uses regex; characters like ( and ) need escaping as \\( and \\).');
-      expect(implementationPrompt).toContain('Do not use run_command or run_command_batch as substitutes for targeted file reads/search when sufficient context is already gathered; proceed directly to edits.');
+            expect(implementationPrompt).toContain('Prefer targeted read_file/read_files calls for known paths from planning.');
+      expect(implementationPrompt).toContain('If grep-like discovery is still needed, use run_command with grep/find rather than relying on search_files.');
+      expect(implementationPrompt).toContain('Do not use run_command or run_command_batch as substitutes for targeted file reads when sufficient context is already gathered; proceed directly to edits.');
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }
