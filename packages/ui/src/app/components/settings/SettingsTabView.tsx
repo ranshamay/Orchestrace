@@ -21,6 +21,7 @@ import {
   updateObserverConfig,
   triggerObserverAnalysis,
   clearObserverPendingQueue,
+  fetchApiHealth,
   fetchTesterStatus,
   enableTester,
   disableTester,
@@ -983,6 +984,7 @@ function TesterSection({
 }: TesterSectionProps) {
   const [status, setStatus] = useState<TesterStatusResponse | null>(null);
   const [loading, setLoading] = useState(true);
+  const [testerApiSupported, setTesterApiSupported] = useState<boolean | null>(null);
   const [toggling, setToggling] = useState(false);
   const [savingConfig, setSavingConfig] = useState(false);
   const [configDirty, setConfigDirty] = useState(false);
@@ -1008,7 +1010,49 @@ function TesterSection({
     return providers.filter((provider) => connectedProviderIds.has(provider.id));
   }, [providerStatuses, providers]);
 
+  useEffect(() => {
+    let cancelled = false;
+
+    const probeTesterApiSupport = async () => {
+      try {
+        const health = await fetchApiHealth();
+        if (cancelled) {
+          return;
+        }
+
+        const supported = health.capabilities?.testerApi === true;
+        setTesterApiSupported(supported);
+        if (!supported) {
+          setLoading(false);
+        }
+      } catch {
+        if (cancelled) {
+          return;
+        }
+
+        setTesterApiSupported(false);
+        setLoading(false);
+      }
+    };
+
+    void probeTesterApiSupport();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const refresh = useCallback(async () => {
+    if (testerApiSupported === false) {
+      setStatus(null);
+      setLoading(false);
+      return;
+    }
+
+    if (testerApiSupported === null) {
+      return;
+    }
+
     try {
       const nextStatus = await fetchTesterStatus();
       setStatus(nextStatus);
@@ -1036,11 +1080,15 @@ function TesterSection({
     } finally {
       setLoading(false);
     }
-  }, [connectedProviders]);
+  }, [connectedProviders, testerApiSupported]);
 
   useEffect(() => {
+    if (testerApiSupported === null) {
+      return;
+    }
+
     void refresh();
-  }, [refresh]);
+  }, [refresh, testerApiSupported]);
 
   useEffect(() => {
     if (connectedProviders.length === 0) {
@@ -1127,8 +1175,12 @@ function TesterSection({
   };
 
   const enabled = status?.config.enabled ?? false;
+  const testerApiUnsupported = testerApiSupported === false;
+  const testerApiAvailable = testerApiSupported !== false && status !== null;
   const models = editProvider ? (providerModels[editProvider] ?? []) : [];
   const canSaveConfig =
+    testerApiAvailable
+    &&
     configDirty
     && !savingConfig
     && connectedProviders.length > 0
@@ -1156,7 +1208,7 @@ function TesterSection({
   }, [onSettingsSaveStatus, refresh, status]);
 
   const handleSaveConfig = useCallback(async () => {
-    if (!canSaveConfig) {
+    if (!canSaveConfig || !testerApiAvailable) {
       return;
     }
 
@@ -1213,6 +1265,7 @@ function TesterSection({
     editUiTestCommandPatternsText,
     onSettingsSaveStatus,
     refresh,
+    testerApiAvailable,
   ]);
 
   return (
@@ -1226,11 +1279,11 @@ function TesterSection({
         ) : (
           <button
             className={`rounded px-3 py-1 text-xs font-semibold ${enabled ? 'bg-red-100 text-red-700 hover:bg-red-200 dark:bg-red-900/40 dark:text-red-300 dark:hover:bg-red-900/60' : 'bg-emerald-600 text-white hover:bg-emerald-500'}`}
-            disabled={toggling}
+            disabled={toggling || !testerApiAvailable}
             onClick={() => { void handleToggle(); }}
             type="button"
           >
-            {toggling ? 'Updating...' : enabled ? 'Disable' : 'Enable'}
+            {toggling ? 'Updating...' : !testerApiAvailable ? 'Unavailable' : enabled ? 'Disable' : 'Enable'}
           </button>
         )}
       </div>
@@ -1245,6 +1298,18 @@ function TesterSection({
         {connectedProviders.length === 0 && (
           <div className="mb-3 rounded border border-amber-200 bg-amber-50 px-2 py-1.5 text-[11px] text-amber-800 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-300">
             No authenticated providers are connected. Connect a provider above to configure tester models.
+          </div>
+        )}
+
+        {!loading && testerApiUnsupported && (
+          <div className="mb-3 rounded border border-amber-200 bg-amber-50 px-2 py-1.5 text-[11px] text-amber-800 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-300">
+            Tester API is not supported by this backend version.
+          </div>
+        )}
+
+        {!loading && !testerApiUnsupported && !testerApiAvailable && (
+          <div className="mb-3 rounded border border-amber-200 bg-amber-50 px-2 py-1.5 text-[11px] text-amber-800 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-300">
+            Tester API is unavailable from this backend, so config changes cannot be saved yet.
           </div>
         )}
 

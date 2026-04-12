@@ -13,7 +13,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { execFile, type ExecFileException } from 'node:child_process';
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { access, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import {
@@ -250,7 +250,29 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  const testerAgentConfig = await loadTesterAgentConfig(join(config.workspacePath, '.orchestrace'));
+  const sessionTesterConfigPath = join(config.workspacePath, '.orchestrace', 'tester', 'config.json');
+  const rootTesterConfigPath = join(workspaceRoot, '.orchestrace', 'tester', 'config.json');
+
+  let testerConfigDir = join(config.workspacePath, '.orchestrace');
+  let testerConfigSource: 'session-workspace' | 'workspace-root-fallback' = 'session-workspace';
+
+  const [sessionTesterConfigExists, rootTesterConfigExists] = await Promise.all([
+    fileExists(sessionTesterConfigPath),
+    fileExists(rootTesterConfigPath),
+  ]);
+
+  if (!sessionTesterConfigExists && rootTesterConfigExists) {
+    testerConfigDir = join(workspaceRoot, '.orchestrace');
+    testerConfigSource = 'workspace-root-fallback';
+    console.info(
+      `[runner:${sessionId}] tester-config fallback: using ${rootTesterConfigPath} because ${sessionTesterConfigPath} is missing.`,
+    );
+  }
+
+  const testerAgentConfig = await loadTesterAgentConfig(testerConfigDir);
+  console.info(
+    `[runner:${sessionId}] tester-config source=${testerConfigSource} enabled=${testerAgentConfig.enabled}`,
+  );
 
   // Write runner metadata (PID)
   await eventStore.setMetadata(sessionId, {
@@ -2326,6 +2348,15 @@ async function main(): Promise<void> {
       }
     }
     return changed;
+  }
+}
+
+async function fileExists(path: string): Promise<boolean> {
+  try {
+    await access(path);
+    return true;
+  } catch {
+    return false;
   }
 }
 

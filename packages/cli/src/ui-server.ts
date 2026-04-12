@@ -289,6 +289,7 @@ export async function validateSessionProvidersReadiness(
 export async function startUiServer(options: UiServerOptions = {}): Promise<void> {
 
   const port = options.port ?? 4310;
+  const apiRequestDebugEnabled = process.env.ORCHESTRACE_UI_API_DEBUG === '1';
   const hmrEnabled = options.hmr ?? process.env.ORCHESTRACE_UI_HMR !== 'false';
   const workspaceManager = new WorkspaceManager(process.cwd());
   if (options.workspace) {
@@ -2208,6 +2209,29 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
   }
 
   const server = createServer(async (req, res) => {
+    const requestMethod = req.method ?? 'GET';
+    const requestPath = req.url ?? '/';
+    const shouldTraceRequest = apiRequestDebugEnabled && requestPath.startsWith('/api/');
+    const requestStartedAt = Date.now();
+
+    if (shouldTraceRequest) {
+      console.log(`[orchestrace][ui-api] -> ${requestMethod} ${requestPath}`);
+      let finished = false;
+      res.on('finish', () => {
+        finished = true;
+        console.log(
+          `[orchestrace][ui-api] <- ${requestMethod} ${requestPath} ${res.statusCode} (${Date.now() - requestStartedAt}ms)`,
+        );
+      });
+      res.on('close', () => {
+        if (!finished) {
+          console.warn(
+            `[orchestrace][ui-api] xx ${requestMethod} ${requestPath} connection-closed (${Date.now() - requestStartedAt}ms)`,
+          );
+        }
+      });
+    }
+
     try {
       const url = new URL(req.url ?? '/', 'http://localhost');
       const { pathname } = url;
@@ -2448,6 +2472,9 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           status: isDraining() ? 'draining' : 'ok',
           sessions: { total: workSessions.size, running: runningSessions },
           uptime: process.uptime(),
+          capabilities: {
+            testerApi: true,
+          },
         });
         return;
       }
@@ -2570,7 +2597,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           return;
         }
 
-                const readiness = await authManager.validateProviderReadiness(provider, { allowRefresh: false });
+                const readiness = await authManager.validateProviderReadiness(provider, { allowRefresh: true });
         if (!readiness.ok) {
           sendJson(res, 403, { error: readiness.message, code: readiness.code, remediation: readiness.remediation });
           return;
@@ -4218,7 +4245,10 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         return;
       }
 
-      if (req.method === 'GET' && pathname === '/api/tester/status') {
+      if (
+        req.method === 'GET'
+        && (pathname === '/api/tester/status' || pathname === '/api/tester/status/')
+      ) {
         sendJson(res, 200, {
           config: testerAgentConfig,
         });
@@ -4296,7 +4326,10 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         return;
       }
 
-      if (req.method === 'POST' && pathname === '/api/tester/enable') {
+      if (
+        req.method === 'POST'
+        && (pathname === '/api/tester/enable' || pathname === '/api/tester/enable/')
+      ) {
         testerAgentConfig = await saveTesterAgentConfig(orchestraceDir, {
           ...testerAgentConfig,
           enabled: true,
@@ -4305,7 +4338,10 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         return;
       }
 
-      if (req.method === 'POST' && pathname === '/api/tester/disable') {
+      if (
+        req.method === 'POST'
+        && (pathname === '/api/tester/disable' || pathname === '/api/tester/disable/')
+      ) {
         testerAgentConfig = await saveTesterAgentConfig(orchestraceDir, {
           ...testerAgentConfig,
           enabled: false,
@@ -4314,7 +4350,10 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         return;
       }
 
-      if (req.method === 'POST' && pathname === '/api/tester/config') {
+      if (
+        (req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH')
+        && (pathname === '/api/tester/config' || pathname === '/api/tester/config/')
+      ) {
         const body = await readJsonBody(req);
         testerAgentConfig = await saveTesterAgentConfig(orchestraceDir, {
           ...testerAgentConfig,
