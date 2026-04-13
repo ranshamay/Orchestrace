@@ -82,8 +82,8 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  const changedFiles = options.changedFilesPath
-    ? await loadChangedFiles(await resolveInputPath(options.changedFilesPath))
+    const changedFiles = options.changedFilesPath
+    ? await loadChangedFilesSafe(options.changedFilesPath)
     : [];
   const selectedCases = selectEvalCases(defaultEvalCases, options.caseIds, changedFiles);
   if (selectedCases.length === 0) {
@@ -532,6 +532,21 @@ function selectEvalCases(allCases: EvalCase[], caseIds: string[], changedFiles: 
   return filtered;
 }
 
+async function loadChangedFilesSafe(path: string): Promise<string[]> {
+  const resolvedPath = await resolveInputPath(path);
+
+  try {
+    return await loadChangedFiles(resolvedPath);
+  } catch (error) {
+    if (isEnoentError(error)) {
+      console.warn(`Changed-files list not found at ${resolvedPath}; continuing without changed-file filtering.`);
+      return [];
+    }
+
+    throw error;
+  }
+}
+
 async function loadChangedFiles(path: string): Promise<string[]> {
   const raw = await readFile(path, 'utf-8');
   const trimmed = raw.trim();
@@ -618,6 +633,13 @@ async function fileExists(path: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+function isEnoentError(error: unknown): boolean {
+  return typeof error === 'object'
+    && error !== null
+    && 'code' in error
+    && (error as { code?: unknown }).code === 'ENOENT';
 }
 
 async function resolveInputPath(path: string): Promise<string> {

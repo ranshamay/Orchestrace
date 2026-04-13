@@ -103,7 +103,7 @@ describe('tester gate UI policy', () => {
       suggestedFixes: [],
     };
 
-    const result = await executeTesterRole({
+        const result = await executeTesterRole({
       task: makeTask(),
       approvedPlan: 'Update UI flow',
       implementationOutput: makeImplementationOutput(),
@@ -111,7 +111,10 @@ describe('tester gate UI policy', () => {
         verdict,
         commands: [{ command: 'pnpm --filter @orchestrace/cli test' }],
       }),
+      testerModel: { provider: 'github-copilot', model: 'gpt-5.3-codex' },
+      testerSystemPrompt: 'You are tester.',
       attempt: 1,
+
       emit: () => undefined,
       requireRunTests: true,
       requireUiTests: true,
@@ -158,11 +161,14 @@ describe('tester gate UI policy', () => {
       task: makeTask(),
       approvedPlan: 'Update UI flow',
       implementationOutput: makeImplementationOutput(),
-      testerAgent: makeTesterAgent({
+            testerAgent: makeTesterAgent({
         verdict,
         commands: [{ command: 'pnpm exec playwright test' }],
       }),
+      testerModel: { provider: 'github-copilot', model: 'gpt-5.3-codex' },
+      testerSystemPrompt: 'You are tester.',
       attempt: 1,
+
       emit: () => undefined,
       requireRunTests: true,
       requireUiTests: true,
@@ -204,11 +210,14 @@ describe('tester gate UI policy', () => {
       task: makeTask(),
       approvedPlan: 'Update UI flow',
       implementationOutput: makeImplementationOutput(),
-      testerAgent: makeTesterAgent({
+            testerAgent: makeTesterAgent({
         verdict,
         commands: [{ toolName: 'playwright_run', command: 'test', args: ['--grep', '@smoke'] }],
       }),
+      testerModel: { provider: 'github-copilot', model: 'gpt-5.3-codex' },
+      testerSystemPrompt: 'You are tester.',
       attempt: 1,
+
       emit: () => undefined,
       requireRunTests: true,
       requireUiTests: false,
@@ -252,11 +261,14 @@ describe('tester gate UI policy', () => {
       task: makeTask(),
       approvedPlan: 'Update UI flow',
       implementationOutput: makeImplementationOutput(),
-      testerAgent: makeTesterAgent({
+            testerAgent: makeTesterAgent({
         verdict,
         commands: [{ command: 'pnpm exec playwright test' }],
       }),
+      testerModel: { provider: 'github-copilot', model: 'gpt-5.3-codex' },
+      testerSystemPrompt: 'You are tester.',
       attempt: 1,
+
       emit: () => undefined,
       requireRunTests: true,
       requireUiTests: true,
@@ -298,7 +310,7 @@ describe('tester gate UI policy', () => {
       task: makeTask(),
       approvedPlan: 'Update UI flow',
       implementationOutput: makeImplementationOutput(),
-      testerAgent: makeTesterAgent({
+            testerAgent: makeTesterAgent({
         verdict,
         commands: [
           {
@@ -309,7 +321,10 @@ describe('tester gate UI policy', () => {
           },
         ],
       }),
+      testerModel: { provider: 'github-copilot', model: 'gpt-5.3-codex' },
+      testerSystemPrompt: 'You are tester.',
       attempt: 1,
+
       emit: () => undefined,
       requireRunTests: true,
       requireUiTests: true,
