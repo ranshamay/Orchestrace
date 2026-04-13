@@ -88,13 +88,15 @@ export async function executeWithOptionalTools(params: {
     }
 
     context.messages.push(response);
-    const { results: toolResults, retryPrompts, hadErrors } = await executeToolCalls(
+        const { results: toolResults, retryPrompts, hadErrors } = await executeToolCalls(
       toolset,
+      context,
       context.tools ?? [],
       toolCalls,
       signal,
       completionOptions,
     );
+
 
     context.messages.push(...toolResults);
     for (const retryPrompt of retryPrompts) {
@@ -142,6 +144,7 @@ function resolveSubagentBatchRetryMaxAttempts(): number {
 
 async function executeToolCalls(
   toolset: LlmToolset,
+  context: import('@mariozechner/pi-ai').Context,
   tools: Tool[],
   toolCalls: ToolCall[],
   signal?: AbortSignal,
@@ -154,13 +157,12 @@ async function executeToolCalls(
   const results: ToolResultMessage[] = [];
   const retryPrompts: string[] = [];
   let hadErrors = false;
-
+  let awaitingWriteAfterSufficientContextAck = hasSufficientContextAck(context);
 
   for (const toolCall of toolCalls) {
     let payload: { content: string; isError: boolean; details?: unknown };
-    let validatedArgs: Record<string, unknown> | undefined;
 
-        completionOptions?.onToolCall?.({
+    completionOptions?.onToolCall?.({
       type: 'started',
       toolCallId: toolCall.id,
       toolName: toolCall.name,
@@ -169,33 +171,55 @@ async function executeToolCalls(
     });
 
     try {
+      if (awaitingWriteAfterSufficientContextAck && toolCall.name !== 'write_file') {
+        payload = {
+          content:
+            `Tool call blocked by system guardrail: after sufficient-context acknowledgment, the next tool call must be write_file (received ${toolCall.name}).\n`
+            + 'Proceed by writing concrete changes before issuing additional read/search/list operations.',
+          isError: true,
+        };
 
-      coerceStringifiedArrayArgs(toolCall);
-      validatedArgs = validateToolCall(tools, toolCall) as Record<string, unknown>;
-            const toolResult = await executeToolWithEditFilesDedup({
-        toolset,
-        toolCall,
-        arguments: validatedArgs,
-        signal,
-      });
+        completionOptions?.onToolCall?.({
+          type: 'result',
+          toolCallId: toolCall.id,
+          toolName: toolCall.name,
+          arguments: formatToolPayload(toolCall.arguments),
+          rawArguments: formatToolPayload(toolCall.arguments, Infinity),
+          result: formatToolPayload(payload.content),
+          isError: true,
+          details: payload.details,
+        });
+      } else {
+        coerceStringifiedArrayArgs(toolCall);
+        const validatedArgs = validateToolCall(tools, toolCall) as Record<string, unknown>;
+        const toolResult = await executeToolWithEditFilesDedup({
+          toolset,
+          toolCall,
+          arguments: validatedArgs,
+          signal,
+        });
 
+        payload = {
+          content: toolResult.content,
+          isError: toolResult.isError ?? false,
+          details: toolResult.details,
+        };
 
-      payload = {
-        content: toolResult.content,
-        isError: toolResult.isError ?? false,
-        details: toolResult.details,
-      };
+        completionOptions?.onToolCall?.({
+          type: 'result',
+          toolCallId: toolCall.id,
+          toolName: toolCall.name,
+          arguments: formatToolPayload(toolCall.arguments),
+          rawArguments: formatToolPayload(toolCall.arguments, Infinity),
+          result: formatToolPayload(toolResult.content),
+          isError: toolResult.isError ?? false,
+          details: toolResult.details,
+        });
 
-      completionOptions?.onToolCall?.({
-        type: 'result',
-        toolCallId: toolCall.id,
-        toolName: toolCall.name,
-        arguments: formatToolPayload(toolCall.arguments),
-        rawArguments: formatToolPayload(toolCall.arguments, Infinity),
-        result: formatToolPayload(toolResult.content),
-        isError: toolResult.isError ?? false,
-        details: toolResult.details,
-      });
+        if (toolCall.name === 'write_file') {
+          awaitingWriteAfterSufficientContextAck = false;
+        }
+      }
     } catch (error) {
       payload = {
         content:
@@ -237,16 +261,38 @@ async function executeToolCalls(
     }
   }
 
-    return {
+  return {
     results,
     retryPrompts,
     hadErrors,
   };
 }
 
+function hasSufficientContextAck(context: import('@mariozechner/pi-ai').Context): boolean {
+  for (let index = context.messages.length - 1; index >= 0; index -= 1) {
+    const message = context.messages[index];
+    if (message.role !== 'assistant') {
+      continue;
+    }
 
+    const parts = Array.isArray(message.content) ? message.content : [];
+    for (const part of parts) {
+      if (part?.type !== 'text') {
+        continue;
+      }
+
+      const text = String(part.text ?? '').toLowerCase();
+      if (text.includes('enough source context')) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
 
 type ToolExecutionPayload = {
+
   content: string;
   isError?: boolean;
   details?: unknown;

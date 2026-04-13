@@ -428,7 +428,7 @@ async function main(): Promise<void> {
     return new Promise<{ approved: boolean; note?: string }>((resolve, reject) => {
       let settled = false;
       let timeoutHandle: NodeJS.Timeout | undefined;
-      let unwatch: (() => void) | undefined;
+                        let unwatch: (() => void) | undefined = undefined;
 
       const finalize = (callback: () => void) => {
         if (settled) {
