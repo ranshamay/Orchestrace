@@ -59,13 +59,7 @@ Each guide includes:
 
 ### Testing
 
-- [Testing standards (cross-cutting)](./testing-standards.md)
 - [Vitest, Playwright, @playwright/test](./vitest-playwright.md)
-
-### Coding Standards
-
-- [Coding standards (cross-cutting)](./coding-standards.md)
-
 
 ### Code Quality
 
@@ -120,11 +114,8 @@ Suggested filename pattern: `technology-group.md` in kebab-case.
 | lucide-react | [ui-utilities.md](./ui-utilities.md) |
 | react-markdown / remark-gfm | [ui-utilities.md](./ui-utilities.md) |
 | class-variance-authority / clsx / tailwind-merge | [ui-utilities.md](./ui-utilities.md) |
-| coding standards (cross-cutting) | [coding-standards.md](./coding-standards.md) |
-| testing standards (cross-cutting) | [testing-standards.md](./testing-standards.md) |
 | vitest | [vitest-playwright.md](./vitest-playwright.md) |
 | playwright / @playwright/test | [vitest-playwright.md](./vitest-playwright.md) |
-
 | eslint / @eslint/js / typescript-eslint | [eslint-prettier.md](./eslint-prettier.md) |
 | eslint-plugin-react-hooks / eslint-plugin-react-refresh | [eslint-prettier.md](./eslint-prettier.md) |
 | prettier | [eslint-prettier.md](./eslint-prettier.md) |
