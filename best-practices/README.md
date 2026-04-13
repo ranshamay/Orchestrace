@@ -25,6 +25,11 @@ Each guide includes:
 2. Read the relevant guide(s) in this folder before generating changes.
 3. Apply the **DO** patterns and avoid **DON’T** examples.
 4. Re-check configuration snippets against real repo files before editing.
+5. Enforce strict gates:
+   - No source file over **200 LOC** (unless documented approved exception)
+   - Add/update tests for behavior changes
+   - Do not proceed with known failing validations in touched scope
+
 
 ### For human developers
 
@@ -89,7 +94,14 @@ Each guide includes:
 
 ---
 
+## Strict standards baseline (repo-wide)
+
+- **Coding:** modular design, clear boundaries, and **no more than 200 LOC per source file**.
+- **Testing:** behavior-focused coverage, deterministic tests, mandatory regression tests for bug fixes.
+- **Quality gates:** lint + typecheck + tests required before merge.
+
 ## Contributing
+
 
 When adding or updating a guide:
 

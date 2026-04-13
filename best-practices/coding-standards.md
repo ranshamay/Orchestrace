@@ -70,11 +70,13 @@ try {
 - Export stable public APIs from package boundaries.
 
 ### 6) Use modular file design (hard limit: no more than 200 LOC per file)
-- **Rule:** **no more than 200 lines of code (LOC) per file**.
+- **Rule:** **no more than 200 lines of code (LOC) per source file**.
+- Count LOC as non-empty, non-comment source lines.
 - If a file approaches ~160–180 LOC, proactively split it.
 
 - Split by responsibility: UI, state, domain logic, I/O adapters, and types.
 - Keep a small public API (`index.ts`) and avoid deep imports into internals.
+- Prefer **high cohesion + low coupling**: things that change together stay together; unrelated concerns are separated.
 
 Recommended layout:
 ```text
@@ -85,6 +87,14 @@ feature-x/
   feature-x.ui.tsx
   feature-x.api.ts
 ```
+
+Industry-backed modular suggestions to apply:
+- **Package by feature/domain** first, not by technical layer only.
+- **Stable dependencies rule**: domain logic must not depend on UI/framework internals.
+- **Dependency direction inward**: UI/infrastructure depend on domain, not vice versa.
+- **One module = one reason to change** (SRP at module level).
+- **No deep imports** across module internals (`feature-a/internal/*` is private).
+- **Prefer composition over inheritance** for reusable behavior.
 
 Exceptions (must be documented in-file):
 - Generated code
@@ -108,6 +118,7 @@ export async function fetchUser(id: string) {
 // DON'T: one "god file" handling UI + fetch + validation + mapping + storage
 // user.ts (350+ LOC)
 ```
+
 
 
 ### 7) Write code for diffs and reviews
@@ -175,6 +186,26 @@ pnpm --filter <package-name> typecheck
 - Keep tsconfig strictness aligned across packages unless deviation is justified.
 - Add/enable a file-length check in linting or CI to enforce the **200 LOC** limit for source files.
 - Require a short justification comment for any file-length exception.
+- Block merges if new/modified source files exceed 200 LOC without approved exception.
+
+Example ESLint rule:
+```js
+// eslint.config.js (flat config example)
+export default [
+  {
+    files: ['**/*.{ts,tsx,js,jsx}'],
+    rules: {
+      'max-lines': ['error', { max: 200, skipBlankLines: true, skipComments: true }],
+    },
+  },
+];
+```
+
+Example CI gate:
+```bash
+pnpm lint && pnpm typecheck && pnpm test
+```
+
 
 
 ---

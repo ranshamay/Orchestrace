@@ -15,6 +15,13 @@ Primary goals:
 
 ## DO
 
+### 0) Treat testing as a release gate (strict mode)
+- No merge on failing tests in affected packages.
+- For bug fixes, add a regression test in the same PR.
+- For critical flows, require at least one integration/e2e assertion path.
+- Flaky test tolerance is **zero**: triage immediately, quarantine only with owner + due date.
+
+
 ### 1) Follow a testing pyramid strategy
 - Many unit tests for pure logic.
 - Targeted integration tests for boundaries/contracts.
@@ -90,7 +97,14 @@ it('works', async () => {
 ### Execution standards
 - Local dev: run focused tests for changed area first.
 - Before merge: run affected package tests + critical cross-package checks.
-- CI: lint + typecheck + tests should be required gates.
+- CI: lint + typecheck + tests are mandatory required gates.
+- PRs should include test evidence summary (what levels were run and why).
+
+Minimum expectations by change type:
+- **Pure logic change**: unit tests updated/added.
+- **Boundary/integration change** (API, DB, file, env): integration test updated/added.
+- **User-flow/UI change**: at least one high-value e2e or component-level behavior test.
+
 
 ### Suggested command discipline
 ```bash
@@ -129,3 +143,6 @@ pnpm --filter <package-name> test -- <path-or-pattern>
 - [ ] Are test names descriptive and behavior-focused?
 - [ ] Are flaky patterns (sleeps, brittle selectors, hidden state) avoided?
 - [ ] Is bugfix work paired with a regression test?
+- [ ] Did the author run lint + typecheck + test for affected scope?
+- [ ] If UI/flow changed, is there at least one behavior-level test proving outcome?
+- [ ] If a test is quarantined, is there an owner + due date + ticket reference?
