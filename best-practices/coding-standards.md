@@ -69,17 +69,60 @@ try {
 - Avoid giant utility files with unrelated helpers.
 - Export stable public APIs from package boundaries.
 
-### 6) Write code for diffs and reviews
+### 6) Use modular file design (hard limit: no more than 200 LOC per file)
+- **Rule:** **no more than 200 lines of code (LOC) per file**.
+- If a file approaches ~160–180 LOC, proactively split it.
+
+- Split by responsibility: UI, state, domain logic, I/O adapters, and types.
+- Keep a small public API (`index.ts`) and avoid deep imports into internals.
+
+Recommended layout:
+```text
+feature-x/
+  index.ts           # public exports only
+  feature-x.types.ts
+  feature-x.logic.ts
+  feature-x.ui.tsx
+  feature-x.api.ts
+```
+
+Exceptions (must be documented in-file):
+- Generated code
+- Schema/migration snapshots
+- Intentional composition roots (kept readable and reviewed)
+
+```ts
+// DO: split responsibilities
+// user.logic.ts
+export function normalizeUserName(name: string): string {
+  return name.trim().replace(/\s+/g, ' ');
+}
+
+// user.api.ts
+export async function fetchUser(id: string) {
+  // network boundary only
+}
+```
+
+```ts
+// DON'T: one "god file" handling UI + fetch + validation + mapping + storage
+// user.ts (350+ LOC)
+```
+
+
+### 7) Write code for diffs and reviews
 - Prefer smaller PR-sized changes over massive rewrites.
 - Include comments only when intent is non-obvious.
 - Keep comments aligned with code reality (delete stale comments quickly).
 
-### 7) Use async patterns safely
+### 8) Use async patterns safely
+
 - Use `await` for sequencing when order matters.
 - Use `Promise.all` only for truly independent operations.
 - Ensure promise rejections are surfaced and handled.
 
-### 8) Respect linting and formatting as guardrails
+### 9) Respect linting and formatting as guardrails
+
 - Treat ESLint + Prettier warnings/errors as quality gates, not suggestions.
 - Auto-fix where safe; discuss rule changes before disabling rules.
 
@@ -94,6 +137,9 @@ try {
 - Don’t write clever one-liners that reduce readability.
 - Don’t hardcode environment-specific paths, URLs, or credentials.
 - Don’t mutate inputs unless mutation is explicit and intentional.
+- Don’t allow any file to exceed **200 LOC** without approved/documented exception.
+
+
 
 ```ts
 // Avoid: unclear behavior, mutates input, weak typing
@@ -127,6 +173,9 @@ pnpm --filter <package-name> typecheck
 - Keep CI failing on lint/typecheck/test failures.
 - Prefer pre-commit or pre-push checks for fast feedback loops.
 - Keep tsconfig strictness aligned across packages unless deviation is justified.
+- Add/enable a file-length check in linting or CI to enforce the **200 LOC** limit for source files.
+- Require a short justification comment for any file-length exception.
+
 
 ---
 
