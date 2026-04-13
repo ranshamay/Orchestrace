@@ -519,9 +519,10 @@ export async function executeTesterRole(params: {
   approvedPlan?: string;
   implementationOutput: TaskOutput;
   testerAgent: LlmAgent;
-  testerModel: ModelConfig;
-  testerSystemPrompt: string;
+  testerModel?: ModelConfig;
+  testerSystemPrompt?: string;
   attempt: number;
+
   signal?: AbortSignal;
   emit: (event: DagEvent) => void;
   requireRunTests: boolean;
@@ -537,9 +538,10 @@ export async function executeTesterRole(params: {
     approvedPlan,
     implementationOutput,
     testerAgent,
-    testerModel,
+        testerModel,
     testerSystemPrompt,
     attempt,
+
     signal,
     emit,
     requireRunTests,
@@ -551,7 +553,14 @@ export async function executeTesterRole(params: {
     workspacePath,
   } = params;
 
+    const resolvedTesterModel = testerModel ?? {
+    provider: 'github-copilot',
+    model: 'gpt-5',
+  };
+  const resolvedTesterSystemPrompt = testerSystemPrompt ?? '';
+
   const testerPrompt = buildTesterPrompt({
+
     node: task,
     approvedPlan,
     implementationResponse: implementationOutput.response,
@@ -578,9 +587,10 @@ export async function executeTesterRole(params: {
     agent: testerAgent,
     taskId: task.id,
     prompt: testerPrompt,
-    provider: testerModel.provider,
-    model: testerModel.model,
-    systemPrompt: testerSystemPrompt,
+        provider: resolvedTesterModel.provider,
+    model: resolvedTesterModel.model,
+    systemPrompt: resolvedTesterSystemPrompt,
+
     attempt,
     signal,
     emit,

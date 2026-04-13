@@ -39,11 +39,14 @@ export async function executeWithOptionalTools(params: {
   } = params;
 
     let round = 0;
-  let previousRoundHadToolError = false;
+    let previousRoundHadToolError = false;
   let toolErrorRecoveryAttempts = 0;
-
+  const guardrailState: ToolExecutionGuardrailState = {
+    requireWriteFileNext: false,
+  };
 
   for (;;) {
+
     round += 1;
     if (MAX_TOOL_ROUNDS !== undefined && round > MAX_TOOL_ROUNDS) {
       throw new Error(`Model exceeded ${MAX_TOOL_ROUNDS} tool rounds without producing a final response.`);
@@ -88,13 +91,16 @@ export async function executeWithOptionalTools(params: {
     }
 
     context.messages.push(response);
-    const { results: toolResults, retryPrompts, hadErrors } = await executeToolCalls(
+        const { results: toolResults, retryPrompts, hadErrors } = await executeToolCalls(
       toolset,
       context.tools ?? [],
       toolCalls,
+      response,
+      guardrailState,
       signal,
       completionOptions,
     );
+
 
     context.messages.push(...toolResults);
     for (const retryPrompt of retryPrompts) {
@@ -144,19 +150,23 @@ async function executeToolCalls(
   toolset: LlmToolset,
   tools: Tool[],
   toolCalls: ToolCall[],
+  assistantResponse: AssistantMessage,
+  guardrailState: ToolExecutionGuardrailState,
   signal?: AbortSignal,
   completionOptions?: LlmCompletionOptions,
 ): Promise<{
+
   results: ToolResultMessage[];
   retryPrompts: string[];
   hadErrors: boolean;
 }> {
-  const results: ToolResultMessage[] = [];
+    const results: ToolResultMessage[] = [];
   const retryPrompts: string[] = [];
   let hadErrors = false;
-
+  const acknowledgedMap = mapToolCallsAfterSufficientContextAck(assistantResponse);
 
   for (const toolCall of toolCalls) {
+
     let payload: { content: string; isError: boolean; details?: unknown };
     let validatedArgs: Record<string, unknown> | undefined;
 
@@ -168,33 +178,47 @@ async function executeToolCalls(
       rawArguments: formatToolPayload(toolCall.arguments, Infinity),
     });
 
-    try {
+        try {
 
       coerceStringifiedArrayArgs(toolCall);
       validatedArgs = validateToolCall(tools, toolCall) as Record<string, unknown>;
-            const toolResult = await executeToolWithEditFilesDedup({
-        toolset,
-        toolCall,
-        arguments: validatedArgs,
-        signal,
-      });
+
+      const mustWriteFile = guardrailState.requireWriteFileNext || acknowledgedMap.get(toolCall.id) === true;
+      if (mustWriteFile && toolCall.name !== 'write_file') {
+        payload = {
+          content: 'Tool execution blocked by system guardrail: after acknowledging sufficient context, next tool call must be write_file.',
+          isError: true,
+        };
+        guardrailState.requireWriteFileNext = true;
+      } else {
+        const toolResult = await executeToolWithEditFilesDedup({
+          toolset,
+          toolCall,
+          arguments: validatedArgs,
+          signal,
+        });
+
+        payload = {
+          content: toolResult.content,
+          isError: toolResult.isError ?? false,
+          details: toolResult.details,
+        };
+
+        if (mustWriteFile && toolCall.name === 'write_file' && !(toolResult.isError ?? false)) {
+          guardrailState.requireWriteFileNext = false;
+        }
+      }
 
 
-      payload = {
-        content: toolResult.content,
-        isError: toolResult.isError ?? false,
-        details: toolResult.details,
-      };
-
-      completionOptions?.onToolCall?.({
+            completionOptions?.onToolCall?.({
         type: 'result',
         toolCallId: toolCall.id,
         toolName: toolCall.name,
         arguments: formatToolPayload(toolCall.arguments),
         rawArguments: formatToolPayload(toolCall.arguments, Infinity),
-        result: formatToolPayload(toolResult.content),
-        isError: toolResult.isError ?? false,
-        details: toolResult.details,
+        result: formatToolPayload(payload.content),
+        isError: payload.isError,
+        details: payload.details,
       });
     } catch (error) {
       payload = {
@@ -262,6 +286,11 @@ const SUBAGENT_RETRY_CONTEXT_MAX_ERROR_CHARS = 240;
 const SUBAGENT_RETRY_CONTEXT_MAX_LINE_CHARS = 360;
 const SUBAGENT_BATCH_IDENTICAL_FAILURE_CAP = 2;
 const SUBAGENT_BATCH_RETRY_BASE_DELAY_MS = 200;
+
+type ToolExecutionGuardrailState = {
+  requireWriteFileNext: boolean;
+};
+
 
 async function executeToolWithEditFilesDedup(params: {
   toolset: LlmToolset;
@@ -820,7 +849,33 @@ async function sleepWithSignal(ms: number, signal?: AbortSignal): Promise<void> 
   });
 }
 
+function mapToolCallsAfterSufficientContextAck(message: AssistantMessage): Map<string, boolean> {
+  const map = new Map<string, boolean>();
+  let acknowledged = false;
+
+  for (const block of message.content) {
+    if (block.type === 'text' && isSufficientContextAcknowledgment(String(block.text ?? ''))) {
+      acknowledged = true;
+      continue;
+    }
+
+    if (block.type === 'toolCall') {
+      map.set(block.id, acknowledged);
+    }
+  }
+
+  return map;
+}
+
+function isSufficientContextAcknowledgment(text: string): boolean {
+  const normalized = text.toLowerCase();
+  return normalized.includes('enough source context')
+    || normalized.includes('enough context')
+    || normalized.includes('sufficient context');
+}
+
 function buildToolCallRetryMessage(toolCall: ToolCall, errorContent: string): string {
+
 
   const deterministicEditFailure = isDeterministicEditValidationFailure(toolCall.name, errorContent);
   const remediationLine = deterministicEditFailure

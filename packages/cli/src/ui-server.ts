@@ -9586,10 +9586,19 @@ function resolveSessionPhaseModel(
 }
 
 export function buildSessionSystemPrompt(session: WorkSession, phase: SessionPromptPhase): string {
+  const planningBudgetPercent = resolvePlanningBudgetPercent();
+  const planningGuardThreshold = resolvePlanningGuardThreshold();
+  const simpleTaskPrompt = isSimpleSessionTaskPrompt(session.prompt);
+
   const phaseGuidance =
     phase === 'planning'
       ? [
           'Plan the work clearly before implementation, but adapt to user intent and new evidence.',
+          ...(simpleTaskPrompt
+            ? ['For simple single-file tasks, skip sub-agent delegation and execute directly.']
+            : []),
+          `Planning is budgeted: keep planning activity under ${planningBudgetPercent}% of total execution effort.`,
+          `If session guard thresholds are exceeded (${planningGuardThreshold} non-write tool calls), immediately switch to implementation and continue with concrete edits.`,
         ]
       : phase === 'implementation'
         ? [
@@ -9600,6 +9609,7 @@ export function buildSessionSystemPrompt(session: WorkSession, phase: SessionPro
           ];
 
   const sections: PromptSection[] = [
+
     {
       name: PromptSectionName.Identity,
       lines: [
