@@ -615,8 +615,9 @@ describe('orchestrate replay capture', () => {
       previousValidationError: '',
     });
 
-    expect(prompt).toContain('Always apply relevant guidance from best-practices/ when implementing');
+        expect(prompt).toContain('Always apply relevant guidance from best-practices/ when implementing');
     expect(prompt).toContain('you must consult matching guide(s) before code edits when relevant');
+    expect(prompt).toContain('Before making edits, read best-practices/README.md');
   });
 
   it('requires mandatory best-practices consultation in implementer system prompt', () => {
@@ -635,8 +636,9 @@ describe('orchestrate replay capture', () => {
       model: 'gpt-5',
     });
 
-    expect(prompt).toContain('Always apply relevant guidance from best-practices/ when implementing');
+        expect(prompt).toContain('Always apply relevant guidance from best-practices/ when implementing');
     expect(prompt).toContain('you must consult matching guide(s) before edits when relevant');
+    expect(prompt).toContain('Before making edits, read best-practices/README.md');
   });
 
   it('aborts repeated identical planning-contract failures as stagnation', async () => {

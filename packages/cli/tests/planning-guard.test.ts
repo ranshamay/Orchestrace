@@ -130,7 +130,8 @@ describe('planning guard behavior', () => {
     const session = createSession();
     const prompt = buildSessionSystemPrompt(session, 'implementation');
 
-    expect(prompt).toContain('Always apply relevant guidance from best-practices/ when implementing');
+        expect(prompt).toContain('Always apply relevant guidance from best-practices/ when implementing');
     expect(prompt).toContain('you must consult matching guide(s) before edits when relevant');
+    expect(prompt).toContain('Before making edits, read best-practices/README.md');
   });
 });
