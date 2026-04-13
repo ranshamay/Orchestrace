@@ -335,8 +335,9 @@ export function buildImplementationPrompt(params: {
     {
       name: PromptSectionName.Autonomy,
       lines: [
-        'If a tool call fails, read the error details, adjust arguments, and retry the tool call.',
+                'If a tool call fails, read the error details, adjust arguments, and retry the tool call.',
         'Read relevant files before editing. Keep edits minimal and focused.',
+        'Always apply relevant guidance from best-practices/ when implementing (read the matching guide(s) before code edits when needed).',
         ...(isLowEffort
           ? []
           : [
@@ -439,8 +440,9 @@ export function buildRoleSystemPrompt(params: {
         ]
       : role === 'implementer'
         ? [
-          'Execute the approved plan and deliver validated code changes.',
+                    'Execute the approved plan and deliver validated code changes.',
           'Read relevant files before editing and keep edits minimal in scope.',
+          'Always apply relevant guidance from best-practices/ when implementing (read matching guide(s) before edits when needed).',
           'Use todo and agent graph state as the execution backbone, updating progress continuously.',
           'Use subagent_spawn or subagent_spawn_batch for parallelizable slices and delegate only relevant context to each sub-agent.',
                     'search_files uses regex; characters like ( and ) need escaping as \\( and \\).',

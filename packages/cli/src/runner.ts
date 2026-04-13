@@ -3369,8 +3369,9 @@ function buildSystemPrompt(config: SessionConfig, phase: 'planning' | 'implement
       'For transient tool or sub-agent failures (timeouts, aborts, rate limits), retry automatically before surfacing a blocker.',
     ]
     : [
-      'Execute approved work with minimal, scoped edits and verify outcomes.',
+            'Execute approved work with minimal, scoped edits and verify outcomes.',
       'Read before editing, and use tool output to adapt after failures.',
+      'Always apply relevant guidance from best-practices/ when implementing (read matching guide(s) before edits when needed).',
       'While thinking, stream concise rationale updates explaining what you are doing and why.',
       'Rationale updates must be user-facing, factual, and short.',
       ...(isLowEffort

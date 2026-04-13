@@ -9859,8 +9859,9 @@ export function buildSessionSystemPrompt(session: WorkSession, phase: SessionPro
         ]
 
       : phase === 'implementation'
-        ? [
+                ? [
             'Implement requested changes with verifiable outcomes and adapt your approach from tool feedback.',
+            'Always apply relevant guidance from best-practices/ when implementing (read matching guide(s) before edits when needed).',
           ]
         : [
             'Infer user intent from conversation context and continue naturally.',
