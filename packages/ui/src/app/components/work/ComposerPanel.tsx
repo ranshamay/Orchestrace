@@ -50,11 +50,7 @@ export function ComposerPanel(props: Props) {
   const awaitingPlanApproval = Boolean(
     selectedSessionId
       && selectedSession
-      && (
-        selectedLlmStatus.state === 'idle'
-        || selectedLlmStatus.state === 'awaiting-approval'
-        || normalizedSessionStatus === 'idle'
-      ),
+      && selectedLlmStatus.state === 'awaiting-approval',
   );
 
   return (
@@ -80,7 +76,7 @@ export function ComposerPanel(props: Props) {
             <button
               aria-label="Run"
               className="inline-flex items-center rounded bg-blue-600 p-2 text-white disabled:opacity-50"
-              disabled={!hasComposerContent || !workWorkspaceId || !workProvider || !workModel || awaitingPlanApproval}
+              disabled={!hasComposerContent || (!selectedSessionId && (!workWorkspaceId || !workProvider || !workModel)) || awaitingPlanApproval}
               onClick={() => {
                 void onSendChat();
               }}

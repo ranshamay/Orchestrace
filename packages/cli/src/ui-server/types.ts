@@ -189,7 +189,7 @@ export interface ChatTokenStream {
 
 export interface SessionCheckpointInfo {
   status: 'committed' | 'skipped' | 'failed';
-  reason: 'edit-threshold' | 'todo-completed' | 'terminal';
+  reason: 'edit-threshold' | 'todo-completed' | 'terminal' | 'chat-follow-up';
   message: string;
   trigger?: {
     threshold?: number;

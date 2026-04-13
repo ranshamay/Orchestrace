@@ -33,7 +33,6 @@ export type SessionActionsParams = {
   setErrorMessage: (message: string) => void;
   setSessions: (sessions: WorkSession[]) => void;
   setSelectedSessionId: (id: string) => void;
-  setChatMessages: (messages: ChatMessage[]) => void;
   setTodos: (items: AgentTodo[]) => void;
   setComposerText: (value: string) => void;
   setComposerImages: (

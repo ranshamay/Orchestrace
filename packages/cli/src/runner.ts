@@ -789,8 +789,7 @@ async function main(): Promise<void> {
     if (checkpointInFlight) return;
     checkpointInFlight = true;
 
-    const messageContext = opts?.todoTitle?.trim() || opts?.todoId?.trim() || reason;
-    const commitMessage = `checkpoint: ${compact(messageContext, 120)}`;
+    const isSemanticBoundary = reason === 'todo-completed' || reason === 'terminal';
 
     try {
       const add = await runGitSafe(['add', '-A']);
@@ -801,7 +800,7 @@ async function main(): Promise<void> {
           payload: {
             status: 'failed',
             reason,
-            message: commitMessage,
+            message: 'git add failed',
             trigger: {
               threshold: AUTO_CHECKPOINT_EVERY_N_EDITS,
               editCountSinceLast: successfulEditFileResultsSinceCheckpoint,
@@ -822,7 +821,7 @@ async function main(): Promise<void> {
           payload: {
             status: 'skipped',
             reason,
-            message: commitMessage,
+            message: 'no staged changes',
             trigger: {
               threshold: AUTO_CHECKPOINT_EVERY_N_EDITS,
               editCountSinceLast: successfulEditFileResultsSinceCheckpoint,
@@ -833,6 +832,26 @@ async function main(): Promise<void> {
         });
         successfulEditFileResultsSinceCheckpoint = 0;
         return;
+      }
+
+      // Generate commit message: semantic for todo-completed/terminal, simple for edit-threshold
+      let commitMessage: string;
+      if (isSemanticBoundary) {
+        // Get diff context for semantic message
+        const diffStatRes = await runGitSafe(['diff', '--cached', '--stat']);
+        const filesRes = await runGitSafe(['diff', '--cached', '--name-only']);
+        const changedFiles = filesRes.ok ? filesRes.stdout.trim().split('\n').filter(Boolean) : [];
+
+        commitMessage = await generateSemanticCommitMessage({
+          todoTitle: opts?.todoTitle,
+          todoId: opts?.todoId,
+          reason,
+          diffStat: diffStatRes.ok ? diffStatRes.stdout.trim() : '',
+          changedFiles,
+        });
+      } else {
+        const messageContext = opts?.todoTitle?.trim() || opts?.todoId?.trim() || reason;
+        commitMessage = `checkpoint: ${compact(messageContext, 120)}`;
       }
 
       const commit = await runGitSafe(['commit', '-m', commitMessage]);
@@ -898,6 +917,14 @@ async function main(): Promise<void> {
         },
       });
       successfulEditFileResultsSinceCheckpoint = 0;
+
+      // Push after semantic commits to keep remote in sync
+      if (isSemanticBoundary) {
+        const pushResult = await incrementalPush();
+        if (!pushResult.ok) {
+          console.warn(`[runner] Incremental push failed after semantic commit: ${pushResult.error}`);
+        }
+      }
     } finally {
       checkpointInFlight = false;
     }
@@ -911,6 +938,81 @@ async function main(): Promise<void> {
     } catch {
       return undefined;
     }
+  }
+
+  // -----------------------------------------------------------------------
+  // Semantic commit helpers
+  // -----------------------------------------------------------------------
+
+  /** Whether the session branch has ever been pushed to origin. */
+  let sessionBranchPushed = false;
+
+  /**
+   * Generates a conventional-commit-style message for a logical unit of work
+   * by calling the LLM with the staged diff context.
+   */
+  async function generateSemanticCommitMessage(context: {
+    todoTitle?: string;
+    todoId?: string;
+    reason: string;
+    diffStat: string;
+    changedFiles: string[];
+  }): Promise<string> {
+    const taskHint = context.todoTitle || context.todoId || context.reason;
+    const fileList = context.changedFiles.slice(0, 20).join(', ');
+    const prompt = [
+      'Generate a single conventional-commit message (max 72 chars) for the following change.',
+      'Respond with ONLY the commit message line, no explanation.',
+      '',
+      `Task: ${taskHint}`,
+      `Original session prompt: ${compact(config.prompt, 200)}`,
+      `Files changed (${context.changedFiles.length}): ${fileList}`,
+      context.diffStat ? `\nDiff stats:\n${context.diffStat}` : '',
+    ].join('\n');
+
+    try {
+      const agent = await llm.spawnAgent({
+        provider: config.provider,
+        model: config.model,
+        systemPrompt: 'You generate conventional-commit messages. Output only the single commit message line. Use prefixes like feat:, fix:, refactor:, docs:, chore:, test: as appropriate.',
+        timeoutMs: 15_000,
+        apiKey: await authManager.resolveApiKey(config.provider),
+        refreshApiKey: () => authManager.resolveApiKey(config.provider),
+        allowAuthRefreshRetry: true,
+      });
+      const result = await agent.complete(prompt);
+      const msg = result.text.trim().split('\n')[0].trim();
+      if (msg && msg.length <= 120) return msg;
+    } catch (err) {
+      console.warn(`[runner] Semantic commit message generation failed: ${errorMsg(err)}. Using fallback.`);
+    }
+
+    // Fallback: use the todo title or reason as-is
+    return compact(taskHint, 72);
+  }
+
+  /**
+   * Push the current branch to origin. On first push, sets upstream.
+   * Subsequent pushes are plain `git push`.
+   */
+  async function incrementalPush(): Promise<{ ok: boolean; error?: string }> {
+    const branchRes = await runGitSafeWithTimeout(
+      ['rev-parse', '--abbrev-ref', 'HEAD'],
+      SESSION_DELIVERY_GIT_TIMEOUT_MS,
+    );
+    if (!branchRes.ok) return { ok: false, error: 'Cannot resolve current branch' };
+    const branch = branchRes.stdout.trim();
+
+    const pushArgs = sessionBranchPushed
+      ? ['push']
+      : ['push', '--set-upstream', 'origin', branch];
+
+    const pushRes = await runGitSafeWithTimeout(pushArgs, SESSION_DELIVERY_GIT_TIMEOUT_MS);
+    if (pushRes.ok) {
+      sessionBranchPushed = true;
+      return { ok: true };
+    }
+    return { ok: false, error: (pushRes.error ?? pushRes.stderr) || 'git push failed' };
   }
 
   async function getWorktreeDirtySummary(): Promise<{
@@ -1129,8 +1231,9 @@ async function main(): Promise<void> {
   }
 
   /**
-   * Rewrites session checkpoint commits into per-task commits, each with an
-   * LLM-generated message, then pushes and creates a PR.
+   * Pushes the session branch and creates a PR.
+   * Semantic commits are already in place from incremental `maybeCheckpoint`
+   * calls – this function just ensures the final push and PR creation.
    */
   async function ensureRemoteDeliveryForCommittedSession(): Promise<void> {
     if (deliveryFinalized) return;
@@ -1162,7 +1265,7 @@ async function main(): Promise<void> {
       }),
     );
 
-    // Use LLM to generate meaningful PR metadata + per-task commit messages
+    // Use LLM to generate meaningful PR metadata
     const prMeta = await generatePrMetadata({
       prompt: config.prompt,
       diffSummary: changes.diffSummary,
@@ -1175,87 +1278,16 @@ async function main(): Promise<void> {
       prMeta.prDescription = appendTesterEvidenceToPrDescription(prMeta.prDescription, latestTesterVerdict);
     }
 
-    // Rewrite history: one commit per task
-    if (sessionHeadAtStart && taskCommitRanges.length > 0) {
-      // Build message map from LLM output
-      const messageMap = new Map<string, string>();
-      for (const tcm of prMeta.taskCommitMessages) {
-        messageMap.set(tcm.todoId, tcm.message);
-      }
+    // Squash remaining checkpoint commits (edit-threshold) into semantic ones.
+    // Only rewrite if ALL commits are still checkpoint-style (no semantic
+    // boundaries were hit during execution, e.g. single-task sessions).
+    const hasSemanticCommits = committedCheckpointShas.some((_, i) => {
+      // We pushed after semantic boundaries, so if we ever pushed we have semantics
+      return sessionBranchPushed;
+    });
 
-      // Reset to session start, then replay per-task ranges
-      const resetRes = await runGitSafeWithTimeout(
-        ['reset', '--soft', sessionHeadAtStart],
-        SESSION_DELIVERY_GIT_TIMEOUT_MS,
-      );
-      if (resetRes.ok) {
-        // Commit once per task range by cherry-picking the diff
-        for (const range of taskCommitRanges) {
-          const message = messageMap.get(range.todoId) ?? compact(range.todoTitle, 72);
-
-          // Apply all changes from this task's range
-          const patchRes = await runGitSafeWithTimeout(
-            ['diff', `${range.fromSha}..${range.toSha}`],
-            SESSION_DELIVERY_GIT_TIMEOUT_MS,
-          );
-          if (patchRes.ok && patchRes.stdout.trim()) {
-            const applyRes = await runGitSafeWithTimeout(
-              ['apply', '--index', '--allow-empty', '-'],
-              SESSION_DELIVERY_GIT_TIMEOUT_MS,
-            );
-            // If apply fails, try checkout-based approach
-            if (!applyRes.ok) {
-              await runGitSafeWithTimeout(
-                ['checkout', range.toSha, '--', '.'],
-                SESSION_DELIVERY_GIT_TIMEOUT_MS,
-              );
-              await runGitSafe(['add', '-A']);
-            }
-          } else {
-            // Fallback: checkout the tree state at toSha
-            await runGitSafeWithTimeout(
-              ['checkout', range.toSha, '--', '.'],
-              SESSION_DELIVERY_GIT_TIMEOUT_MS,
-            );
-            await runGitSafe(['add', '-A']);
-          }
-
-          const hasStaged = await runGitSafe(['diff', '--cached', '--quiet']);
-          if (!hasStaged.ok) {
-            const commitRes = await runGitSafeWithTimeout(
-              ['commit', '-m', message],
-              SESSION_DELIVERY_GIT_TIMEOUT_MS,
-            );
-            if (!commitRes.ok) {
-              // If per-task commit fails, bail to single-commit fallback
-              console.warn(`[runner] Per-task commit failed for ${range.todoId}, falling back to single commit.`);
-              await runGitSafeWithTimeout(['reset', '--soft', sessionHeadAtStart], SESSION_DELIVERY_GIT_TIMEOUT_MS);
-              break;
-            }
-          }
-        }
-
-        // Ensure final tree matches the original session end
-        const finalHead = await getGitHeadSha();
-        const lastRange = taskCommitRanges[taskCommitRanges.length - 1];
-        if (finalHead !== lastRange.toSha) {
-          // There may be trailing changes after the last task (terminal checkpoint)
-          const currentHead = committedCheckpointShas[committedCheckpointShas.length - 1];
-          if (currentHead && currentHead !== finalHead) {
-            await runGitSafeWithTimeout(['checkout', currentHead, '--', '.'], SESSION_DELIVERY_GIT_TIMEOUT_MS);
-            await runGitSafe(['add', '-A']);
-            const trailingStaged = await runGitSafe(['diff', '--cached', '--quiet']);
-            if (!trailingStaged.ok) {
-              await runGitSafeWithTimeout(
-                ['commit', '-m', prMeta.fallbackCommitMessage],
-                SESSION_DELIVERY_GIT_TIMEOUT_MS,
-              );
-            }
-          }
-        }
-      }
-    } else if (sessionHeadAtStart && changes.commitCount >= 1) {
-      // No task ranges: squash all into one commit with LLM message
+    if (!hasSemanticCommits && sessionHeadAtStart && changes.commitCount >= 1) {
+      // No semantic commits were made — squash all checkpoints into one commit
       if (changes.commitCount > 1) {
         const resetRes = await runGitSafeWithTimeout(
           ['reset', '--soft', sessionHeadAtStart],
@@ -1280,23 +1312,14 @@ async function main(): Promise<void> {
 
     const baseBranch = await resolveBaseBranch();
 
-    // Create branch with LLM-generated name
-    const branchRes = await runGitSafeWithTimeout(
-      ['checkout', '-B', prMeta.branchName],
+    // Use the existing worktree branch for the PR instead of creating a new one.
+    // The branch is already `orchestrace/session-<id>` from worktree setup.
+    const currentBranchRes = await runGitSafeWithTimeout(
+      ['rev-parse', '--abbrev-ref', 'HEAD'],
       SESSION_DELIVERY_GIT_TIMEOUT_MS,
     );
-    if (!branchRes.ok) {
-      // Fallback to generated branch name if LLM name conflicts
-      const fallbackBranch = `orchestrace/session-${sessionId.slice(0, 8)}-${Date.now().toString(36)}`;
-      const fallbackRes = await runGitSafeWithTimeout(
-        ['checkout', '-B', fallbackBranch],
-        SESSION_DELIVERY_GIT_TIMEOUT_MS,
-      );
-      if (!fallbackRes.ok) {
-        throw new Error(`Unable to create delivery branch: ${(fallbackRes.error ?? fallbackRes.stderr) || 'git checkout failed'}`);
-      }
-      prMeta.branchName = fallbackBranch;
-    }
+    const deliveryBranch = currentBranchRes.ok ? currentBranchRes.stdout.trim() : `orchestrace/session-${sessionId.slice(0, 8)}`;
+    prMeta.branchName = deliveryBranch;
 
     await runRequiredValidationBeforeDelivery();
 

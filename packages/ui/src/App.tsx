@@ -20,7 +20,6 @@ import { buildTimelineItems } from './app/utils/timelineItems';
 import { useBootstrapData } from './app/hooks/useBootstrapData';
 import { useProviderModels } from './app/hooks/useProviderModels';
 import { useSessionPolling } from './app/hooks/useSessionPolling';
-import { useSessionStream } from './app/hooks/useSessionStream';
 import { useChatStream } from './app/hooks/useChatStream';
 import { useSessionsStatusStream } from './app/hooks/useSessionsStatusStream';
 import { useRunUrlSync } from './app/hooks/useRunUrlSync';
@@ -185,8 +184,7 @@ export default function App() {
 
   useSessionsStatusStream({ enabled: canUseRealtimeApis, selectedSessionId, setSelectedSessionId: setSessionSelection, setSessions });
   useSessionPolling({ enabled: canUseRealtimeApis, selectedSessionId, setSelectedSessionId: setSessionSelection, setSessions, setChatMessages, setTodos });
-  useSessionStream({ enabled: canUseRealtimeApis, selectedSessionId, setSessions, setChatMessages, setTodos, setNodeTokenStreams, setObserverState });
-  const chatStream = useChatStream({ enabled: canUseRealtimeApis, selectedSessionId, setSessions, setTodos, setObserverState });
+  const chatStream = useChatStream({ enabled: canUseRealtimeApis, selectedSessionId, setSessions, setTodos, setObserverState, setNodeTokenStreams });
   useRunUrlSync(selectedSessionId, setSessionSelection);
 
   useEffect(() => {
@@ -767,7 +765,7 @@ export default function App() {
     planningNoToolGuardMode,
     autoApprove,
     adaptiveConcurrency, batchConcurrency, batchMinConcurrency,
-    setErrorMessage, setSessions, setSelectedSessionId, setChatMessages, setTodos,
+    setErrorMessage, setSessions, setSelectedSessionId, setTodos,
     setComposerText, setComposerImages, setLlmControlsBySessionId,
   });
 
