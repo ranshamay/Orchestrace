@@ -2,153 +2,185 @@
 
 ## Overview
 
-This document defines cross-cutting testing standards for the Orchestrace stack:
+This document defines **testing standards** for this repo’s stack:
 
-- **Vitest** for unit/integration tests
-- **Playwright / @playwright/test** for end-to-end user journeys
+- **Vitest** for unit and integration tests
+- **Playwright / @playwright/test** for end-to-end tests
 
-Goal: fast, deterministic feedback with high confidence and low maintenance cost.
+Primary goals:
 
----
-
-## Testing Strategy (Pyramid)
-
-Follow a practical pyramid:
-
-1. **Many unit tests** (fast, deterministic, behavior-focused)
-2. **Some integration tests** (module + real collaborators or lightweight adapters)
-3. **Few E2E tests** (critical user/business journeys only)
-
-High-level UI tests are valuable but slower and more brittle; keep them targeted.
+1. fast feedback
+2. deterministic tests
+3. high confidence with low flake rate
+4. maintainable test suite over time
 
 ---
 
-## Standards
+## Source-backed strategy
 
-## 1) Test selection by scope
+Use a practical **test pyramid**:
+
+- many unit tests
+- some integration tests
+- few E2E tests on critical journeys
+
+This aligns with Martin Fowler and Google testing guidance: broad UI/E2E tests are useful but expensive and brittle if overused.
+
+---
+
+## 1) Choosing the right test layer
+
+### Decision guide
+
+- **Unit (Vitest):** pure logic, transformations, branching, error mapping.
+- **Integration (Vitest):** module collaboration, adapters with local test doubles/in-memory infra.
+- **E2E (Playwright):** cross-boundary business-critical journeys.
 
 ### ✅ DO
 
-- Use **Vitest unit tests** for pure/domain logic and edge cases.
-- Use **Vitest integration tests** for internal module collaboration.
-- Use **Playwright** for business-critical paths crossing frontend/backend boundaries.
+- Test behavior at the lowest layer that gives confidence.
 
 ### ❌ DON'T
 
-- Push all confidence into E2E tests.
-- Test trivial getter/setter internals with heavy integration/E2E harnesses.
+- Use E2E for scenarios already proven at unit/integration layers.
 
 ---
 
-## 2) Determinism first
+## 2) Determinism rules (non-negotiable)
 
 ### ✅ DO
 
-- Control time (`vi.useFakeTimers`, `vi.setSystemTime`) where relevant.
-- Stub randomness (`Math.random`, UUID providers) for reproducibility.
-- Mock/route external network calls in tests.
-- Isolate environment variables per test process.
+- Control time (`vi.useFakeTimers`, `vi.setSystemTime`).
+- Stub randomness/IDs when asserting exact outputs.
+- Mock or route external network calls.
+- Isolate env vars and global state per test.
+
+```ts
+beforeEach(() => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+});
+
+afterEach(() => {
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+});
+```
 
 ### ❌ DON'T
 
-- Depend on wall clock timing, real third-party APIs, or global mutable state.
+- Depend on real wall-clock waits, third-party APIs, or shared mutable globals.
 
 ---
 
-## 3) Behavior over implementation details
+## 3) Assertions: behavior over implementation
 
 ### ✅ DO
 
-- Assert outcomes visible to users/callers.
-- Use meaningful assertions on domain outputs, API responses, and UI behavior.
+- Assert externally visible behavior and outcomes.
+- Use precise assertions (`toEqual`, `toMatchObject`, domain-specific checks).
 
 ### ❌ DON'T
 
-- Assert private helper invocation counts unless behavior requires it.
-- Snapshot huge outputs as a substitute for precise assertions.
+- Over-assert internals (private function call counts) when output is sufficient.
+- Overuse broad assertions like `toBeTruthy()` for critical logic.
 
 ---
 
-## 4) Clean test structure and readability
+## 4) Unit testing standards (Vitest)
 
 ### ✅ DO
 
-- Use Arrange → Act → Assert.
-- Name tests by behavior and expected outcome.
-- Use table-driven tests for edge-case matrices.
+- Keep tests small, focused, and table-driven for edge matrices.
+- Prefer real logic + fake boundaries over deep mocking everything.
 
 ```ts
 it.each([
   ['0', true],
-  ['42', true],
+  ['10', true],
   ['-1', false],
-])('isPositiveInteger(%s) => %s', (input, expected) => {
+  ['abc', false],
+])('isPositiveInteger(%s)', (input, expected) => {
   expect(isPositiveInteger(input)).toBe(expected);
 });
 ```
 
 ### ❌ DON'T
 
-- Write vague test names like `works` or `handles data`.
-- Mix multiple independent behaviors in one large test.
+- Put multiple unrelated behaviors in one test.
+- Snapshot giant payloads as a substitute for meaningful assertions.
 
 ---
 
-## 5) Mocking discipline
+## 5) Integration testing standards
 
 ### ✅ DO
 
-- Mock only unstable/out-of-process dependencies.
-- Prefer integration with in-memory implementations over deep mocks.
-- Reset mocks/spies between tests.
+- Test module boundaries with realistic collaborators.
+- Use in-memory adapters when possible.
+- Cover failure paths (timeouts, invalid payloads, retries).
+
+### ❌ DON'T
+
+- Rebuild full E2E setup for integration tests.
+- Depend on shared test data that can be mutated by other tests.
+
+---
+
+## 6) E2E testing standards (Playwright)
+
+### ✅ DO
+
+- Prefer resilient locators: `getByRole`, `getByLabel`, `getByTestId`.
+- Keep tests short and scenario-focused.
+- Use reusable auth state/fixtures.
+- Capture traces/screenshots/videos on failure in CI.
 
 ```ts
-afterEach(() => {
-  vi.restoreAllMocks();
-  vi.useRealTimers();
-});
+await page.getByRole('button', { name: 'Sign in' }).click();
+await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible();
 ```
 
 ### ❌ DON'T
 
-- Mock every collaborator by default.
-- Keep global mocks active across test files.
+- Use arbitrary `waitForTimeout` sleeps.
+- Build giant “mega tests” that verify too many concerns at once.
 
 ---
 
-## 6) Playwright reliability rules
+## 7) Flake prevention and management
 
 ### ✅ DO
 
-- Prefer resilient locators (`getByRole`, `getByLabel`, `getByTestId`) over brittle CSS/XPath.
-- Test user-visible outcomes, not implementation details.
-- Keep auth setup reusable (fixtures/storage state).
-- Capture traces/screenshots/videos on failure in CI.
+- Treat flaky tests as defects.
+- Quarantine + root-cause + fix quickly.
+- Track flake rate trend in CI.
 
 ### ❌ DON'T
 
-- Rely on arbitrary sleeps/timeouts.
-- Chain overly long “mega-flow” tests covering many unrelated scenarios.
+- Hide instability with excessive retries.
+- Normalize random failures as acceptable.
 
 ---
 
-## 7) Coverage policy (quality over vanity)
+## 8) Test data and fixtures
 
 ### ✅ DO
 
-- Use coverage to discover blind spots, not to game percentages.
-- Ensure critical paths have explicit tests: error handling, edge cases, retries, fallbacks.
+- Create explicit test data builders/factories.
+- Keep fixtures minimal and scenario-specific.
+- Reset state between tests.
 
 ### ❌ DON'T
 
-- Treat line coverage alone as proof of correctness.
-- Block pragmatic refactors because of brittle coverage coupling.
+- Share mutable fixtures across suites.
+- Depend on execution order.
 
 ---
 
-## 8) CI gates and local workflow
+## 9) CI quality gates
 
-Use repository scripts consistently:
+Before merge, require:
 
 ```bash
 pnpm lint
@@ -156,32 +188,43 @@ pnpm typecheck
 pnpm test
 ```
 
-Before merging:
+And additionally:
 
-- Lint/typecheck pass
-- Relevant Vitest tests pass
-- Relevant Playwright tests pass for touched critical paths
-- Flakes investigated (not blindly retried until green)
+- relevant Playwright suites for touched critical flows
+- no unresolved flaky failures
+- traces attached for E2E failures
 
 ---
 
-## Common Mistakes
+## 10) Coverage policy
 
-- Test pyramid inversion (too many E2E tests, too few unit tests).
-- Flaky tests due to real network/time/race assumptions.
-- Assertions too weak (`toBeTruthy`) for critical logic.
-- Cross-test pollution from shared mutable fixtures.
-- Using retries to mask nondeterminism instead of fixing root causes.
+### ✅ DO
+
+- Use coverage to identify blind spots.
+- Ensure critical risk paths are tested: validation, authz/authn checks, retries/fallbacks, error mapping.
+
+### ❌ DON'T
+
+- Treat coverage percentage alone as quality proof.
+
+---
+
+## Common anti-patterns
+
+- Test pyramid inversion (too much E2E).
+- Assertions that are too weak to catch regressions.
+- Mock-heavy tests coupled to internals.
+- State leakage between tests.
 
 ---
 
 ## PR Checklist (Testing Standards)
 
-- [ ] Are tests added at the right layer (unit/integration/E2E)?
+- [ ] Are tests added at the correct layer (unit/integration/E2E)?
 - [ ] Are tests deterministic (time/random/network controlled)?
-- [ ] Do assertions verify meaningful behavior?
-- [ ] Are mocks minimal and reset properly?
-- [ ] Are edge cases and failure paths covered?
+- [ ] Do assertions verify user-visible or contract-visible behavior?
+- [ ] Are failure/edge cases covered?
+- [ ] Are mocks minimal, reset, and justified?
 - [ ] Are E2E tests scoped to critical journeys only?
 - [ ] Do lint/typecheck/test commands pass locally?
 
@@ -190,7 +233,8 @@ Before merging:
 ## References (Web)
 
 - Martin Fowler — Test Pyramid: https://martinfowler.com/bliki/TestPyramid.html
-- Martin Fowler/Thoughtworks — Practical Test Pyramid: https://martinfowler.com/articles/practical-test-pyramid.html
-- Google Testing Blog — “Just Say No to More End-to-End Tests”: https://testing.googleblog.com/2015/04/just-say-no-to-more-end-to-end-tests.html
+- Martin Fowler — The Practical Test Pyramid: https://martinfowler.com/articles/practical-test-pyramid.html
+- Google Testing Blog — Just Say No to More End-to-End Tests: https://testing.googleblog.com/2015/04/just-say-no-to-more-end-to-end-tests.html
 - Playwright Best Practices: https://playwright.dev/docs/best-practices
-- Vitest Guide (Mocking): https://vitest.dev/guide/mocking.html
+- Vitest Mocking Guide: https://vitest.dev/guide/mocking.html
+- Testing Library Guiding Principles: https://testing-library.com/docs/guiding-principles/
