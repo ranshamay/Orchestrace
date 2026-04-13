@@ -273,7 +273,7 @@ describe('tester gate UI policy', () => {
     expect(result.verdict.suggestedFixes?.join('\n') ?? '').toContain('avoid .orchestrace');
   });
 
-  it('does not accept failed playwright_run as successful UI test evidence', async () => {
+    it('does not accept failed playwright_run as successful UI test evidence', async () => {
     const workspacePath = await mkdtemp(join(tmpdir(), 'orchestrace-tester-gate-playwright-fail-'));
     tempDirs.push(workspacePath);
 
@@ -324,4 +324,62 @@ describe('tester gate UI policy', () => {
     expect(result.verdict.uiTestsRun).toBe(false);
     expect(result.verdict.rejectionReason).toContain('no successful UI test command execution evidence');
   });
+
+  it('uses default tester model/system prompt when optional fields are omitted', async () => {
+    const workspacePath = await mkdtemp(join(tmpdir(), 'orchestrace-tester-gate-defaults-'));
+    tempDirs.push(workspacePath);
+
+    const verdict = {
+      approved: true,
+      testPlan: ['VERIFY-ONLY: Run focused tester-gate regression check'],
+      testedAreas: ['unit'],
+      executedTestCommands: ['pnpm --filter @orchestrace/core test -- tester-gate'],
+      testsPassed: 1,
+      testsFailed: 0,
+      coverageAssessment: 'Covers tester role fallback behavior for omitted optional config.',
+      qualityAssessment: 'Fallback behavior remains backward-compatible and deterministic.',
+      uiChangesDetected: false,
+      uiTestsRequired: false,
+      uiTestsRun: false,
+      screenshotPaths: [],
+      rejectionReason: '',
+      suggestedFixes: [],
+    };
+
+    const emittedEvents: Array<{ type: string; provider?: string; model?: string; systemPrompt?: string }> = [];
+
+    const result = await executeTesterRole({
+      task: makeTask(),
+      approvedPlan: 'No-op',
+      implementationOutput: makeImplementationOutput(),
+      testerAgent: makeTesterAgent({
+        verdict,
+        commands: [{ command: 'pnpm --filter @orchestrace/core test -- tester-gate' }],
+      }),
+      attempt: 1,
+      emit: (event) => {
+        emittedEvents.push({
+          type: event.type,
+          provider: event.type === 'task:llm-context' ? event.provider : undefined,
+          model: event.type === 'task:llm-context' ? event.model : undefined,
+          systemPrompt: event.type === 'task:llm-context' ? event.systemPrompt : undefined,
+        });
+      },
+      requireRunTests: true,
+      requireUiTests: false,
+      requireUiScreenshots: false,
+      minUiScreenshotCount: 1,
+      uiChangesDetected: false,
+      uiTestCommandPatterns: [],
+      workspacePath,
+    });
+
+    const llmContextEvent = emittedEvents.find((event) => event.type === 'task:llm-context');
+
+    expect(result.verdict.approved).toBe(true);
+    expect(llmContextEvent?.provider).toBe('github-copilot');
+    expect(llmContextEvent?.model).toBe('gpt-5');
+    expect(llmContextEvent?.systemPrompt ?? '').toBe('');
+  });
 });
+
