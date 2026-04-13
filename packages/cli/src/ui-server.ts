@@ -3943,6 +3943,9 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         uiStatePersistence.schedule();
         broadcastSessionStatusUpsert(session);
 
+        // Emit an immediate assistant placeholder so the UI reflects active response startup
+        ensureV2AssistantMessage(session.id, chatStartedAt, continuationPhase);
+
         // Dual-write: session status + llm status change for chat follow-up
         emitSessionEvent(id, {
 
@@ -4453,6 +4456,9 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         });
         uiStatePersistence.schedule();
         broadcastSessionStatusUpsert(session);
+
+        // Emit an immediate assistant placeholder so the UI reflects active response startup
+        ensureV2AssistantMessage(session.id, chatStartedAt, continuationPhase);
 
         // Dual-write: sync chat user message + status
         emitSessionEvent(id, { time: chatStartedAt, type: 'session:chat-message', payload: { message: userMessage } });

@@ -5,7 +5,7 @@ import {
   deleteWork,
   fetchWorkAgent,
   respondWorkPlanApproval,
-  sendChatMessage,
+  sendChatMessageStream,
   startWork,
 } from '../../lib/api';
 import type { ComposerImageAttachment } from '../types';
@@ -124,13 +124,10 @@ export function useSessionActions(params: SessionActionsParams) {
             : session)),
         );
 
-        await sendChatMessage(selectedSessionId, {
+        await sendChatMessageStream(selectedSessionId, {
           message: payload,
           messageParts: hasImages ? contentParts : undefined,
         });
-        await refreshSessionsOnly({ setSessions });
-        const agentState = await fetchWorkAgent(selectedSessionId);
-        setTodos(agentState.todos);
       }
     } catch (error) {
       setComposerText(draftText);
@@ -146,7 +143,6 @@ export function useSessionActions(params: SessionActionsParams) {
     autoApprove,
     batchConcurrency,
     batchMinConcurrency,
-    chatMessages,
     composerImages,
     composerText,
     adaptiveConcurrency,

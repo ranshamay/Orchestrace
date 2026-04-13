@@ -123,6 +123,9 @@ export function useChatStream({ enabled = true, selectedSessionId, setSessions, 
             status: 'streaming',
             parts: [],
           };
+          if (event.role === 'assistant') {
+            streamingMsgRef.current = event.messageId;
+          }
           setMessages((prev) => [...prev, msg]);
           setActiveMessageId(event.messageId);
           setIsStreaming(true);
