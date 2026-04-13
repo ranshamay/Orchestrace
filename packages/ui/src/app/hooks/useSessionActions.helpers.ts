@@ -3,7 +3,6 @@ import {
   fetchWorkAgent,
   retryWork,
   type AgentTodo,
-  type ChatMessage,
   type WorkSession,
 } from '../../lib/api';
 import type { SessionLlmControls } from '../types';
@@ -14,7 +13,6 @@ type CommonStateSetters = {
   setErrorMessage: (message: string) => void;
   setSessions: (sessions: WorkSession[]) => void;
   setSelectedSessionId: (id: string) => void;
-  setChatMessages: (messages: ChatMessage[]) => void;
   setTodos: (items: AgentTodo[]) => void;
 };
 
@@ -42,7 +40,6 @@ export async function retryAndSyncSession(
 
   try {
     const agentState = await fetchWorkAgent(result.id);
-    setters.setChatMessages(agentState.messages);
     setters.setTodos(agentState.todos);
   } catch {
     // Polling syncs shortly.

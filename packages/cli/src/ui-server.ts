@@ -83,8 +83,9 @@ import {
   validateWorkspaceRuntime,
 } from './workspace-runtime.js';
 import { FileEventStore } from '@orchestrace/store';
-import { materializeSession as materializeFromEvents } from '@orchestrace/store';
+import { materializeSession as materializeFromEvents, convertLegacyEvents } from '@orchestrace/store';
 import type {
+  ChatMessage as StoreChatMessage,
   SessionCheckpointPayload,
   SessionConfig,
   SessionEvent,
@@ -344,6 +345,10 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
   const worktreePathLocks = new Map<string, string>();
   const sessionObservers = new Map<string, SessionObserver>();
   const chatStreams = new Map<string, ChatTokenStream>();
+  // Accumulates streaming text per session so late-joining v2 clients see current assistant output
+  const sessionStreamBuffers = new Map<string, { parts: Array<{ type: 'text' | 'reasoning'; text: string }>; phase: string; updatedAt: string }>();
+  // Tracks the active v2 ChatMessage ID per session for streaming tool-call attachment
+  const sessionActiveV2MsgId = new Map<string, string>();
   let uiPreferences = resolveUiPreferencesDefaults();
   const hmrClients = new Set<ServerResponse>();
   const workStreamClients = new Map<string, Set<ServerResponse>>();
@@ -351,6 +356,57 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
   const sessionStatusStreamClients = new Set<ServerResponse>();
   const logStreamClients = new Set<ServerResponse>();
     const uiStatePath = join(workspaceManager.getRootDir(), '.orchestrace', 'ui-state.json');
+
+  /** Ensure a v2 streaming assistant message exists for a session, emitting message-start if needed. */
+  function ensureV2AssistantMessage(sessionId: string, time: string, phase?: string): string {
+    let msgId = sessionActiveV2MsgId.get(sessionId);
+    if (!msgId) {
+      msgId = `v2-${sessionId}-${Date.now()}`;
+      sessionActiveV2MsgId.set(sessionId, msgId);
+      broadcastWorkStream(workStreamClients, sessionId, 'chat', {
+        type: 'message-start',
+        messageId: msgId,
+        role: 'assistant',
+        phase: phase || undefined,
+        timestamp: time,
+      });
+    }
+    return msgId;
+  }
+
+  /** Broadcast a DAG tool-call event as v2 chat events for useChatStream. */
+  function broadcastToolCallAsV2Chat(sessionId: string, uiEvent: UiDagEvent): void {
+    if (!uiEvent.toolName) return;
+    const msgId = ensureV2AssistantMessage(sessionId, uiEvent.time);
+    if (uiEvent.toolStatus === 'started') {
+      broadcastWorkStream(workStreamClients, sessionId, 'chat', {
+        type: 'tool-call-start',
+        messageId: msgId,
+        partId: uiEvent.toolCallId || `tc-${Date.now()}`,
+        toolName: uiEvent.toolName,
+        input: uiEvent.toolInput,
+        inputSummary: uiEvent.toolInput
+          ? (typeof uiEvent.toolInput === 'string' && uiEvent.toolInput.length > 80
+            ? uiEvent.toolInput.slice(0, 80) + '…'
+            : String(uiEvent.toolInput))
+          : '',
+      });
+    } else if (uiEvent.toolStatus === 'result') {
+      broadcastWorkStream(workStreamClients, sessionId, 'chat', {
+        type: 'tool-call-end',
+        messageId: msgId,
+        partId: uiEvent.toolCallId || `tc-${Date.now()}`,
+        status: uiEvent.toolIsError ? 'error' : 'success',
+        output: uiEvent.toolOutput,
+        outputSummary: uiEvent.toolOutput
+          ? (typeof uiEvent.toolOutput === 'string' && uiEvent.toolOutput.length > 60
+            ? `${uiEvent.toolOutput.split('\n').length} lines, ${uiEvent.toolOutput.length} chars`
+            : String(uiEvent.toolOutput))
+          : undefined,
+        error: uiEvent.toolIsError ? String(uiEvent.toolOutput ?? 'Tool error') : undefined,
+      });
+    }
+  }
 
   function collectReservedSessionTestingPorts(excludeSessionId?: string): Set<number> {
     const used = new Set<number>();
@@ -696,6 +752,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                   const newStatus = event.payload.status as WorkState;
                   session.status = newStatus;
                   if (newStatus === 'completed' || newStatus === 'failed' || newStatus === 'cancelled') {
+                    sessionStreamBuffers.delete(sessionId);
+                    sessionActiveV2MsgId.delete(sessionId);
                     broadcastWorkStream(workStreamClients, sessionId, newStatus === 'completed' ? 'end' : 'error', {
                       id: sessionId, status: session.status, llmStatus: session.llmStatus, error: session.error, time: event.time,
                     });
@@ -713,12 +771,34 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                   const uiEvent = event.payload.event as UiDagEvent;
                   session.events.push(uiEvent);
                   if (session.events.length > SESSION_EVENT_HISTORY_LIMIT) session.events.shift();
+                  broadcastToolCallAsV2Chat(sessionId, uiEvent);
                   break;
                 }
                 case 'session:stream-delta': {
-                  const p = event.payload as { taskId: string; phase: string; delta: string };
+                  const p = event.payload as { taskId: string; phase: string; delta: string; isReasoning?: boolean };
+                  // Accumulate into session stream buffer for late-joining v2 clients
+                  const isReasoning = p.isReasoning ?? false;
+                  const buf = sessionStreamBuffers.get(sessionId);
+                  if (buf) {
+                    const lastPart = buf.parts[buf.parts.length - 1];
+                    const partType = isReasoning ? 'reasoning' : 'text';
+                    if (lastPart && lastPart.type === partType) {
+                      lastPart.text += p.delta;
+                    } else {
+                      buf.parts.push({ type: partType, text: p.delta });
+                    }
+                    buf.phase = p.phase;
+                    buf.updatedAt = event.time;
+                  } else {
+                    sessionStreamBuffers.set(sessionId, {
+                      parts: [{ type: isReasoning ? 'reasoning' : 'text', text: p.delta }],
+                      phase: p.phase,
+                      updatedAt: event.time,
+                    });
+                  }
+                  const streamMsgId = ensureV2AssistantMessage(sessionId, event.time, p.phase);
                   broadcastWorkStream(workStreamClients, sessionId, 'token', {
-                    id: sessionId, taskId: p.taskId, phase: p.phase, delta: p.delta, llmStatus: session.llmStatus, time: event.time,
+                    id: sessionId, messageId: streamMsgId, taskId: p.taskId, phase: p.phase, delta: p.delta, isReasoning: p.isReasoning ?? false, llmStatus: session.llmStatus, time: event.time,
                   });
                   break;
                 }
@@ -776,6 +856,20 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                     thread.messages.push(msg);
                     trimThreadMessages(thread);
                     thread.updatedAt = event.time;
+                  }
+                  // Broadcast complete message to v2 chat stream clients
+                  if (msg.role !== 'system') {
+                    // Clear stream buffer — the final message replaces accumulated streaming text
+                    if (msg.role === 'assistant') {
+                      sessionStreamBuffers.delete(sessionId);
+                      sessionActiveV2MsgId.delete(sessionId);
+                    }
+                    const converted = convertSessionChatMessagesToChatMessages([msg]);
+                    if (converted.length > 0) {
+                      broadcastWorkStream(workStreamClients, sessionId, 'chat', {
+                        type: 'message-complete', message: converted[0],
+                      });
+                    }
                   }
                   break;
                 }
@@ -870,6 +964,39 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         // Restore todos
         if (materialized.todos.length > 0) {
           sessionTodos.set(sessionId, materialized.todos);
+        }
+
+        // Pre-fill stream buffer for running sessions so late-joining clients
+        // see assistant text accumulated before this server (re)start.
+        if (session.status === 'running') {
+          const bufParts: Array<{ type: 'text' | 'reasoning'; text: string }> = [];
+          let bufPhase = '';
+          let bufUpdated = '';
+          for (const event of events) {
+            if (event.type === 'session:stream-delta') {
+              const p = event.payload as { phase: string; delta: string; isReasoning?: boolean };
+              const pt = p.isReasoning ? 'reasoning' as const : 'text' as const;
+              const last = bufParts[bufParts.length - 1];
+              if (last && last.type === pt) {
+                last.text += p.delta;
+              } else {
+                bufParts.push({ type: pt, text: p.delta });
+              }
+              bufPhase = p.phase;
+              bufUpdated = event.time;
+            } else if (event.type === 'session:chat-message') {
+              // Assistant message replaces accumulated streaming text
+              const msg = (event.payload as { message: { role: string } }).message;
+              if (msg.role === 'assistant') {
+                bufParts.length = 0;
+                bufPhase = '';
+                bufUpdated = '';
+              }
+            }
+          }
+          if (bufParts.length > 0 && bufUpdated) {
+            sessionStreamBuffers.set(sessionId, { parts: bufParts, phase: bufPhase, updatedAt: bufUpdated });
+          }
         }
 
         restored++;
@@ -1459,6 +1586,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           session.status = newStatus;
           if (newStatus === 'completed' || newStatus === 'failed' || newStatus === 'cancelled') {
             // Terminal state — broadcast end event, stop watching, and stop observer.
+            sessionStreamBuffers.delete(id);
+            sessionActiveV2MsgId.delete(id);
             const obs = sessionObservers.get(id);
             if (obs) {
               obs.stop();
@@ -1490,16 +1619,40 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           const uiEvent = event.payload.event as UiDagEvent;
           session.events.push(uiEvent);
           if (session.events.length > SESSION_EVENT_HISTORY_LIMIT) session.events.shift();
+          broadcastToolCallAsV2Chat(id, uiEvent);
           break;
         }
 
         case 'session:stream-delta': {
-          const p = event.payload as { taskId: string; phase: string; delta: string };
+          const p = event.payload as { taskId: string; phase: string; delta: string; isReasoning?: boolean };
+          // Accumulate into session stream buffer for late-joining v2 clients
+          const isReasoningDelta = p.isReasoning ?? false;
+          const buf2 = sessionStreamBuffers.get(id);
+          if (buf2) {
+            const lastPart2 = buf2.parts[buf2.parts.length - 1];
+            const partType2 = isReasoningDelta ? 'reasoning' : 'text';
+            if (lastPart2 && lastPart2.type === partType2) {
+              lastPart2.text += p.delta;
+            } else {
+              buf2.parts.push({ type: partType2, text: p.delta });
+            }
+            buf2.phase = p.phase;
+            buf2.updatedAt = event.time;
+          } else {
+            sessionStreamBuffers.set(id, {
+              parts: [{ type: isReasoningDelta ? 'reasoning' : 'text', text: p.delta }],
+              phase: p.phase,
+              updatedAt: event.time,
+            });
+          }
+          const streamMsgId2 = ensureV2AssistantMessage(id, event.time, p.phase);
           broadcastWorkStream(workStreamClients, id, 'token', {
             id,
+            messageId: streamMsgId2,
             taskId: p.taskId,
             phase: p.phase,
             delta: p.delta,
+            isReasoning: p.isReasoning ?? false,
             llmStatus: session.llmStatus,
             time: event.time,
           });
@@ -1581,6 +1734,20 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
             thread.messages.push(msg);
             trimThreadMessages(thread);
             thread.updatedAt = event.time;
+          }
+          // Broadcast complete message to v2 chat stream clients
+          if (msg.role !== 'system') {
+            // Clear stream buffer — the final message replaces accumulated streaming text
+            if (msg.role === 'assistant') {
+              sessionStreamBuffers.delete(id);
+              sessionActiveV2MsgId.delete(id);
+            }
+            const converted = convertSessionChatMessagesToChatMessages([msg]);
+            if (converted.length > 0) {
+              broadcastWorkStream(workStreamClients, id, 'chat', {
+                type: 'message-complete', message: converted[0],
+              });
+            }
           }
           break;
         }
@@ -2524,19 +2691,88 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         clients.add(res);
 
         const todos = (sessionTodos.get(id) ?? []).map((item) => ({ ...item }));
-        const thread = sessionChats.get(id) ?? createSessionChatThread(session);
-        sessionChats.set(id, thread);
+        let thread = sessionChats.get(id);
+        if (!thread) {
+          thread = createSessionChatThread(session);
+          sessionChats.set(id, thread);
+        }
+        // Ensure thread has at least the user prompt message (may be missing for
+        // sessions restored from persisted UI state that had no chat-message events)
+        const hasUserMessage = thread.messages.some((m) => m.role === 'user');
+        if (!hasUserMessage && session.prompt) {
+          const userMsg = createSessionChatMessage('user', `Initial task prompt:\n${compactInlineImageMarkdown(session.prompt)}`);
+          userMsg.time = session.createdAt;
+          thread.messages.unshift(userMsg);
+        }
+        const legacyMessages = thread.messages.filter((message) => message.role !== 'system');
+        const isV2 = url.searchParams.get('v') === '2';
 
         sendSse(res, 'ready', {
           id,
           session: serializeWorkSession(session, sessionTodos.get(id) ?? []),
-          messages: thread.messages.filter((message) => message.role !== 'system'),
+          messages: legacyMessages,
           todos,
           status: session.status,
           llmStatus: session.llmStatus,
           observer: sessionObservers.get(id)?.getState() ?? null,
           time: now(),
         });
+
+        // v2 also sends chat-ready with ChatMessage[] format for useChatStream
+        if (isV2) {
+          const chatMessages = convertLegacyEvents({
+            config: { prompt: session.prompt } as SessionConfig,
+            createdAt: session.createdAt,
+            events: session.events,
+            chatThread: thread.messages.length > 0 ? {
+              provider: thread.provider,
+              model: thread.model,
+              workspacePath: thread.workspacePath,
+              taskPrompt: thread.taskPrompt,
+              createdAt: thread.createdAt,
+              updatedAt: thread.updatedAt,
+              // Exclude user messages — convertLegacyEvents injects the prompt from config.prompt
+              messages: legacyMessages.filter((m) => m.role !== 'user'),
+            } : undefined,
+            status: session.status,
+            llmStatus: session.llmStatus ?? { state: 'idle', label: '', updatedAt: now() },
+            taskStatus: session.taskStatus ?? {},
+            agentGraph: [],
+            todos: [],
+            contextFacts: [],
+            contextCompaction: { turnsSinceLastCompaction: 0 },
+            lastSeq: 0,
+            updatedAt: session.updatedAt,
+          });
+
+          // Include buffered streaming text for running sessions so late-joiners see current output
+          const streamBuf = sessionStreamBuffers.get(id);
+          if (streamBuf && streamBuf.parts.length > 0 && session.status === 'running') {
+            chatMessages.push({
+              id: `stream-buffer-${id}`,
+              role: 'assistant',
+              phase: streamBuf.phase as 'planning' | 'implementation' | undefined,
+              timestamp: streamBuf.updatedAt,
+              status: 'streaming',
+              parts: streamBuf.parts.map((p, i) => ({
+                type: p.type,
+                id: `buf-${p.type}-${i}`,
+                text: p.text,
+                isStreaming: true,
+              })),
+            });
+          }
+
+          sendSse(res, 'chat-ready', {
+            id,
+            messages: chatMessages,
+            status: session.status,
+            llmStatus: session.llmStatus,
+            todos,
+            observer: sessionObservers.get(id)?.getState() ?? null,
+            time: now(),
+          });
+        }
 
         req.on('close', () => {
           const group = workStreamClients.get(id);
@@ -3684,6 +3920,15 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           payload: { message: userMessage },
         });
 
+        // Direct v2 chat broadcast for immediate UI feedback on follow-up prompt
+        const convertedUserMessage = convertSessionChatMessagesToChatMessages([userMessage]);
+        if (convertedUserMessage.length > 0) {
+          broadcastWorkStream(workStreamClients, id, 'chat', {
+            type: 'message-complete',
+            message: convertedUserMessage[0],
+          });
+        }
+
         const continuationPhase = resolveChatContinuationPhase(session);
         const previousSessionStatus = session.status;
         const chatStartedAt = now();
@@ -4052,6 +4297,15 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
               type: 'session:chat-message',
               payload: { message: assistantMessage },
             });
+
+            // Direct v2 chat broadcast for immediate UI feedback on follow-up reply
+            const convertedAssistantMessage = convertSessionChatMessagesToChatMessages([assistantMessage]);
+            if (convertedAssistantMessage.length > 0) {
+              broadcastWorkStream(workStreamClients, session.id, 'chat', {
+                type: 'message-complete',
+                message: convertedAssistantMessage[0],
+              });
+            }
             emitSessionEvent(session.id, {
               time: completedAt,
               type: 'session:status-change',
@@ -4068,6 +4322,34 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
             streamState.usage = response.usage;
             streamState.usageEstimated = false;
             streamState.updatedAt = now();
+
+            // Semantic commit + push for chat follow-up changes
+            try {
+              const gitResult = await commitAndPushChatChanges({
+                workspacePath: session.workspacePath,
+                chatMessage: message,
+                sessionPrompt: session.prompt ?? '',
+                provider: session.provider,
+                model: session.model,
+                llm,
+                resolveApiKey: () => resolveProviderApiKey(session.provider),
+              });
+              if (gitResult.committed) {
+                emitSessionEvent(session.id, {
+                  time: now(),
+                  type: 'session:checkpoint',
+                  payload: {
+                    status: 'committed',
+                    reason: 'chat-follow-up',
+                    message: 'Semantic commit after chat follow-up',
+                    trigger: { threshold: 0, editCountSinceLast: 0 },
+                    commit: { summary: gitResult.pushed ? 'committed & pushed' : 'committed (push pending)' },
+                  },
+                });
+              }
+            } catch (gitErr) {
+              console.warn(`[ui-server] Chat semantic commit failed: ${toErrorMessage(gitErr)}`);
+            }
 
             broadcastWorkStream(chatStreamClients, streamId, 'end', {
               streamId,
@@ -4174,6 +4456,14 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
 
         // Dual-write: sync chat user message + status
         emitSessionEvent(id, { time: chatStartedAt, type: 'session:chat-message', payload: { message: userMessage } });
+        // Direct v2 chat broadcast for immediate UI feedback on follow-up prompt
+        const convertedUserMessage = convertSessionChatMessagesToChatMessages([userMessage]);
+        if (convertedUserMessage.length > 0) {
+          broadcastWorkStream(workStreamClients, id, 'chat', {
+            type: 'message-complete',
+            message: convertedUserMessage[0],
+          });
+        }
         emitSessionEvent(id, { time: chatStartedAt, type: 'session:status-change', payload: { status: 'running' } });
         emitSessionEvent(id, { time: chatStartedAt, type: 'session:llm-status-change', payload: { llmStatus: session.llmStatus } });
 
@@ -4424,8 +4714,44 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
 
           // Dual-write: sync chat assistant message + follow-up state
           emitSessionEvent(session.id, { time: completedAt, type: 'session:chat-message', payload: { message: assistantMessage } });
+          // Direct v2 chat broadcast for immediate UI feedback on follow-up reply
+          const convertedAssistantMessage = convertSessionChatMessagesToChatMessages([assistantMessage]);
+          if (convertedAssistantMessage.length > 0) {
+            broadcastWorkStream(workStreamClients, session.id, 'chat', {
+              type: 'message-complete',
+              message: convertedAssistantMessage[0],
+            });
+          }
           emitSessionEvent(session.id, { time: completedAt, type: 'session:status-change', payload: { status: session.status } });
           emitSessionEvent(session.id, { time: completedAt, type: 'session:llm-status-change', payload: { llmStatus: session.llmStatus } });
+
+          // Semantic commit + push for chat follow-up changes
+          try {
+            const gitResult = await commitAndPushChatChanges({
+              workspacePath: session.workspacePath,
+              chatMessage: message,
+              sessionPrompt: session.prompt ?? '',
+              provider: session.provider,
+              model: session.model,
+              llm,
+              resolveApiKey: () => resolveProviderApiKey(session.provider),
+            });
+            if (gitResult.committed) {
+              emitSessionEvent(session.id, {
+                time: now(),
+                type: 'session:checkpoint',
+                payload: {
+                  status: 'committed',
+                  reason: 'chat-follow-up',
+                  message: 'Semantic commit after chat follow-up',
+                  trigger: { threshold: 0, editCountSinceLast: 0 },
+                  commit: { summary: gitResult.pushed ? 'committed & pushed' : 'committed (push pending)' },
+                },
+              });
+            }
+          } catch (gitErr) {
+            console.warn(`[ui-server] Chat semantic commit failed: ${toErrorMessage(gitErr)}`);
+          }
 
           sendJson(res, 200, {
             ok: true,
@@ -6363,6 +6689,8 @@ function resolveUiPreferencesDefaults(): UiPreferences {
     adaptiveConcurrency: resolveAdaptiveConcurrencyDefault(),
     batchConcurrency,
     batchMinConcurrency,
+    quickStartMode: parseBooleanSetting(process.env.ORCHESTRACE_QUICK_START_MODE) ?? false,
+    quickStartMaxPreDelegationToolCalls: parsePositiveSetting(process.env.ORCHESTRACE_QUICK_START_MAX_PRE_DELEGATION_TOOL_CALLS) ?? 3,
     enableTrivialTaskGate: resolveTrivialTaskGateDefault(),
     trivialTaskMaxPromptLength: resolveTrivialTaskMaxPromptLengthDefault(),
   };
@@ -6442,6 +6770,11 @@ function normalizeUiPreferences(value: unknown, fallback: UiPreferences): UiPref
     adaptiveConcurrency: parseBooleanSetting(value.adaptiveConcurrency) ?? fallback.adaptiveConcurrency,
     batchConcurrency,
     batchMinConcurrency,
+    quickStartMode: parseBooleanSetting(value.quickStartMode) ?? fallback.quickStartMode,
+    quickStartMaxPreDelegationToolCalls: normalizePositiveSetting(
+      value.quickStartMaxPreDelegationToolCalls,
+      fallback.quickStartMaxPreDelegationToolCalls,
+    ),
     enableTrivialTaskGate: parseBooleanSetting(value.enableTrivialTaskGate) ?? fallback.enableTrivialTaskGate,
     trivialTaskMaxPromptLength: normalizePositiveSetting(
       value.trivialTaskMaxPromptLength,
@@ -8196,6 +8529,126 @@ async function gitExec(repoRoot: string, args: string[]): Promise<string> {
     maxBuffer: 1024 * 1024,
   });
   return stdout;
+}
+
+/**
+ * After a chat follow-up completes, commit any changes and push to the
+ * session branch – keeping the incremental semantic-commit flow.
+ */
+async function commitAndPushChatChanges(params: {
+  workspacePath: string;
+  chatMessage: string;
+  sessionPrompt: string;
+  provider: string;
+  model: string;
+  llm: PiAiAdapter;
+  resolveApiKey: () => Promise<string | undefined>;
+}): Promise<{ committed: boolean; pushed: boolean; error?: string }> {
+  const git = async (args: string[]): Promise<{ ok: boolean; stdout: string; stderr: string }> => {
+    try {
+      const { stdout, stderr } = await execFileAsync('git', args, {
+        cwd: params.workspacePath,
+        timeout: 30_000,
+        maxBuffer: 1024 * 1024,
+      });
+      return { ok: true, stdout, stderr };
+    } catch {
+      return { ok: false, stdout: '', stderr: '' };
+    }
+  };
+
+  // Stage everything
+  const add = await git(['add', '-A']);
+  if (!add.ok) return { committed: false, pushed: false, error: 'git add failed' };
+
+  // Check if there are staged changes
+  const hasStaged = await git(['diff', '--cached', '--quiet']);
+  if (hasStaged.ok) return { committed: false, pushed: false }; // nothing to commit
+
+  // Get diff context for semantic message
+  const diffStatRes = await git(['diff', '--cached', '--stat']);
+  const filesRes = await git(['diff', '--cached', '--name-only']);
+  const changedFiles = filesRes.ok ? filesRes.stdout.trim().split('\n').filter(Boolean) : [];
+  const diffStat = diffStatRes.ok ? diffStatRes.stdout.trim() : '';
+  const fileList = changedFiles.slice(0, 20).join(', ');
+
+  // Generate semantic commit message via LLM
+  let commitMessage: string;
+  try {
+    const prompt = [
+      'Generate a single conventional-commit message (max 72 chars) for the following change.',
+      'Respond with ONLY the commit message line, no explanation.',
+      '',
+      `Chat follow-up: ${params.chatMessage.slice(0, 200)}`,
+      `Original session: ${params.sessionPrompt.slice(0, 200)}`,
+      `Files changed (${changedFiles.length}): ${fileList}`,
+      diffStat ? `\nDiff stats:\n${diffStat}` : '',
+    ].join('\n');
+
+    const agent = await params.llm.spawnAgent({
+      provider: params.provider,
+      model: params.model,
+      systemPrompt: 'You generate conventional-commit messages. Output only the single commit message line. Use prefixes like feat:, fix:, refactor:, docs:, chore:, test: as appropriate.',
+      timeoutMs: 15_000,
+      apiKey: await params.resolveApiKey(),
+      refreshApiKey: params.resolveApiKey,
+      allowAuthRefreshRetry: true,
+    });
+    const result = await agent.complete(prompt);
+    const msg = result.text.trim().split('\n')[0].trim();
+    commitMessage = (msg && msg.length <= 120) ? msg : params.chatMessage.slice(0, 72);
+  } catch {
+    commitMessage = `fix: ${params.chatMessage.slice(0, 65)}`;
+  }
+
+  // Commit
+  const commit = await git(['commit', '-m', commitMessage]);
+  if (!commit.ok) return { committed: false, pushed: false, error: 'git commit failed' };
+
+  // Push
+  const branchRes = await git(['rev-parse', '--abbrev-ref', 'HEAD']);
+  if (!branchRes.ok) return { committed: true, pushed: false, error: 'cannot resolve branch' };
+  const branch = branchRes.stdout.trim();
+
+  const push = await git(['push', '--set-upstream', 'origin', branch]);
+  return { committed: true, pushed: push.ok, error: push.ok ? undefined : 'git push failed' };
+}
+
+// ---------------------------------------------------------------------------
+// Legacy SessionChatMessage → ChatMessage converter for SSE v2 stream
+// ---------------------------------------------------------------------------
+let _chatMsgCounter = 0;
+function nextChatId(prefix: string): string {
+  return `${prefix}-${++_chatMsgCounter}`;
+}
+
+function convertSessionChatMessagesToChatMessages(
+  messages: Array<{ role: string; content?: string; time?: string; usage?: { input?: number; output?: number; cost?: number }; parts?: Array<{ type: string; text?: string }>; }>,
+): StoreChatMessage[] {
+  return messages.map((m) => {
+    const role = (m.role === 'user' || m.role === 'assistant' || m.role === 'system') ? m.role : 'assistant';
+    const parts: StoreChatMessage['parts'] = [];
+    if (m.parts && Array.isArray(m.parts)) {
+      for (const p of m.parts) {
+        if (p.type === 'text' && p.text) {
+          parts.push({ type: 'text', id: nextChatId('lp'), text: p.text, isStreaming: false });
+        }
+      }
+    }
+    if (parts.length === 0 && m.content) {
+      parts.push({ type: 'text', id: nextChatId('lp'), text: m.content, isStreaming: false });
+    }
+    return {
+      id: nextChatId('lm'),
+      role,
+      timestamp: m.time ?? new Date().toISOString(),
+      status: 'complete' as const,
+      parts,
+      metadata: m.usage ? {
+        tokenUsage: { prompt: m.usage.input ?? 0, completion: m.usage.output ?? 0 },
+      } : undefined,
+    };
+  });
 }
 
 type SessionIdWorkspacePathRelation = {

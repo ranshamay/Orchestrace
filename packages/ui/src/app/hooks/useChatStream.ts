@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
-import { API_BASE, buildAuthedSseUrl, type AgentTodo, type SessionObserverState, type WorkSession } from '../../lib/api';
+import { API_BASE, buildAuthedSseUrl, type AgentTodo, type SessionObserverFinding, type SessionObserverState, type WorkSession } from '../../lib/api';
 import type {
   ChatMessage,
   ChatSessionPhase,
@@ -7,6 +7,7 @@ import type {
   TextMessagePart,
   ToolCallMessagePart,
 } from '../chat-types';
+import type { NodeTokenStream } from '../types';
 import { upsertSessionWithActivityTransition } from '../utils/sessionSort';
 
 export interface ChatStreamSessionMeta {
@@ -20,21 +21,25 @@ type Params = {
   setSessions: (updater: WorkSession[] | ((current: WorkSession[]) => WorkSession[])) => void;
   setTodos: (updater: AgentTodo[] | ((current: AgentTodo[]) => AgentTodo[])) => void;
   setObserverState: (updater: SessionObserverState | null | ((current: SessionObserverState | null) => SessionObserverState | null)) => void;
+  setNodeTokenStreams: (updater: Record<string, NodeTokenStream> | ((current: Record<string, NodeTokenStream>) => Record<string, NodeTokenStream>)) => void;
 };
 
-export function useChatStream({ enabled = true, selectedSessionId, setSessions, setTodos, setObserverState }: Params) {
+export function useChatStream({ enabled = true, selectedSessionId, setSessions, setTodos, setObserverState, setNodeTokenStreams }: Params) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [sessionMeta, setSessionMeta] = useState<ChatStreamSessionMeta>({ status: '', llmStatus: null });
   const [isStreaming, setIsStreaming] = useState(false);
   const [activeMessageId, setActiveMessageId] = useState<string | null>(null);
   const connectedIdRef = useRef<string>('');
+  const streamingMsgRef = useRef<string | null>(null);
 
   const resetState = useCallback(() => {
     setMessages([]);
     setSessionMeta({ status: '', llmStatus: null });
     setIsStreaming(false);
     setActiveMessageId(null);
-  }, []);
+    streamingMsgRef.current = null;
+    setNodeTokenStreams({});
+  }, [setNodeTokenStreams]);
 
   useEffect(() => {
     if (!enabled || !selectedSessionId) {
@@ -59,9 +64,18 @@ export function useChatStream({ enabled = true, selectedSessionId, setSessions, 
           todos?: AgentTodo[];
           observer?: SessionObserverState | null;
         };
-        setMessages(data.messages ?? []);
+        const msgs = data.messages ?? [];
+        setMessages(msgs);
         setSessionMeta({ status: data.status, llmStatus: data.llmStatus });
-        setIsStreaming(data.status === 'running');
+        // Detect a buffered streaming message from the server (late-join snapshot)
+        const streamingMsg = msgs.find((m) => m.status === 'streaming');
+        if (streamingMsg) {
+          streamingMsgRef.current = streamingMsg.id;
+          setActiveMessageId(streamingMsg.id);
+          setIsStreaming(true);
+        } else {
+          setIsStreaming(data.status === 'running');
+        }
         if (data.todos) setTodos(data.todos);
         setObserverState(data.observer ?? null);
       } catch { /* ignore */ }
@@ -93,7 +107,8 @@ export function useChatStream({ enabled = true, selectedSessionId, setSessions, 
       | { type: 'observer-finding'; messageId: string; partId: string; findingId: string; severity: string; title: string; detail?: string }
       | { type: 'error-part'; messageId: string; partId: string; message: string; detail?: string }
       | { type: 'status-update'; sessionId: string; status: string; llmStatus?: WorkSession['llmStatus'] }
-      | { type: 'todo-update'; sessionId: string; todos: AgentTodo[] };
+      | { type: 'todo-update'; sessionId: string; todos: AgentTodo[] }
+      | { type: 'message-complete'; message: ChatMessage };
 
     function applyEvent(event: ChatSseEvent) {
       switch (event.type) {
@@ -228,9 +243,24 @@ export function useChatStream({ enabled = true, selectedSessionId, setSessions, 
             status: 'calling',
             startTime: new Date().toISOString(),
           };
-          setMessages((prev) =>
-            prev.map((m) => (m.id === event.messageId ? { ...m, parts: [...m.parts, part] } : m)),
-          );
+          setMessages((prev) => {
+            const existing = prev.find((m) => m.id === event.messageId);
+            if (existing) {
+              return prev.map((m) => (m.id === event.messageId ? { ...m, parts: [...m.parts, part] } : m));
+            }
+            // Tool call arrived before any token — create the assistant message
+            const msg: ChatMessage = {
+              id: event.messageId,
+              role: 'assistant',
+              timestamp: new Date().toISOString(),
+              status: 'streaming',
+              parts: [part],
+            };
+            streamingMsgRef.current = event.messageId;
+            setActiveMessageId(event.messageId);
+            setIsStreaming(true);
+            return [...prev, msg];
+          });
           break;
         }
 
@@ -393,14 +423,240 @@ export function useChatStream({ enabled = true, selectedSessionId, setSessions, 
           setTodos(event.todos);
           break;
         }
+
+        case 'message-complete': {
+          const newMsg = event.message;
+          if (streamingMsgRef.current && newMsg.role === 'assistant') {
+            // Replace the transient streaming message with the final version
+            setMessages((prev) => prev.map((m) => (m.id === streamingMsgRef.current ? newMsg : m)));
+            streamingMsgRef.current = null;
+            setActiveMessageId(null);
+          } else {
+            // New message (e.g. user chat follow-up, or assistant with no preceding tokens)
+            setMessages((prev) => {
+              const duplicate = prev.some((m) => m.role === newMsg.role && m.timestamp === newMsg.timestamp);
+              if (duplicate) {
+                return prev;
+              }
+              return [...prev, newMsg];
+            });
+          }
+          break;
+        }
       }
     }
 
+    // ---- Legacy event handlers for live streaming -------------------------
+
+    const finalizeStreaming = () => {
+      if (streamingMsgRef.current) {
+        const id = streamingMsgRef.current;
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === id
+              ? {
+                  ...m,
+                  status: 'complete' as const,
+                  parts: m.parts.map((p) =>
+                    (p.type === 'text' || p.type === 'reasoning') && 'isStreaming' in p
+                      ? { ...p, isStreaming: false }
+                      : p,
+                  ),
+                }
+              : m,
+          ),
+        );
+        streamingMsgRef.current = null;
+        setActiveMessageId(null);
+      }
+      setIsStreaming(false);
+    };
+
+    const handleToken = (ev: MessageEvent) => {
+      try {
+        const data = JSON.parse(ev.data) as {
+          id: string;
+          messageId?: string;
+          taskId?: string;
+          phase?: string;
+          delta?: string;
+          isReasoning?: boolean;
+          llmStatus?: WorkSession['llmStatus'];
+          time?: string;
+        };
+        if (!data.delta) return;
+        const isReasoning = data.isReasoning ?? false;
+
+        if (!streamingMsgRef.current) {
+          // Start a new streaming assistant message using the server-provided messageId
+          const msgId = data.messageId || `stream-${Date.now()}`;
+          streamingMsgRef.current = msgId;
+          const partId = isReasoning ? `reasoning-${msgId}` : `text-${msgId}`;
+          const part: ChatMessage['parts'][number] = isReasoning
+            ? { type: 'reasoning', id: partId, text: data.delta, isStreaming: true }
+            : { type: 'text', id: partId, text: data.delta, isStreaming: true };
+          setMessages((prev) => [
+            ...prev,
+            {
+              id: msgId,
+              role: 'assistant',
+              phase: (data.phase as ChatSessionPhase) ?? undefined,
+              timestamp: data.time ?? new Date().toISOString(),
+              status: 'streaming',
+              parts: [part],
+            },
+          ]);
+          setActiveMessageId(msgId);
+          setIsStreaming(true);
+        } else {
+          // Append to existing streaming message
+          const currentMsgId = streamingMsgRef.current;
+          setMessages((prev) =>
+            prev.map((m) => {
+              if (m.id !== currentMsgId) return m;
+              const lastPart = m.parts[m.parts.length - 1];
+              if (isReasoning) {
+                if (lastPart && lastPart.type === 'reasoning' && 'isStreaming' in lastPart && lastPart.isStreaming) {
+                  return { ...m, parts: m.parts.map((p, i) => (i === m.parts.length - 1 && p.type === 'reasoning' ? { ...p, text: p.text + data.delta } : p)) };
+                }
+                // Start a new reasoning part
+                const partId = `reasoning-${Date.now()}`;
+                return { ...m, parts: [...m.parts, { type: 'reasoning' as const, id: partId, text: data.delta!, isStreaming: true }] };
+              } else {
+                if (lastPart && lastPart.type === 'text' && 'isStreaming' in lastPart && lastPart.isStreaming) {
+                  return { ...m, parts: m.parts.map((p, i) => (i === m.parts.length - 1 && p.type === 'text' ? { ...p, text: p.text + data.delta } : p)) };
+                }
+                // Start a new text part (e.g. after reasoning ended)
+                const partId = `text-${Date.now()}`;
+                return { ...m, parts: [...m.parts, { type: 'text' as const, id: partId, text: data.delta!, isStreaming: true }] };
+              }
+            }),
+          );
+        }
+        if (data.llmStatus) {
+          setSessionMeta((prev) => ({ ...prev, llmStatus: data.llmStatus! }));
+        }
+        // Update nodeTokenStreams for graph node live text display
+        if (data.taskId && data.delta) {
+          const taskId = data.taskId;
+          const phase: 'planning' | 'implementation' = data.phase === 'planning' ? 'planning' : 'implementation';
+          const updatedAt = data.time ?? new Date().toISOString();
+          setNodeTokenStreams((current) => {
+            const previous = current[taskId];
+            const nextText = `${previous?.text ?? ''}${data.delta}`;
+            return {
+              ...current,
+              [taskId]: {
+                phase,
+                text: nextText.length > 420 ? nextText.slice(-420) : nextText,
+                updatedAt,
+              },
+            };
+          });
+        }
+      } catch {
+        /* ignore */
+      }
+    };
+
+    const handleEnd = (ev: MessageEvent) => {
+      try {
+        const data = JSON.parse(ev.data) as { id: string; status: string; llmStatus?: WorkSession['llmStatus'] };
+        finalizeStreaming();
+        setSessionMeta({ status: data.status, llmStatus: data.llmStatus ?? null });
+        setSessions((prev) => {
+          const existing = prev.find((s) => s.id === data.id);
+          if (!existing) return prev;
+          return upsertSessionWithActivityTransition(prev, { ...existing, status: data.status, llmStatus: data.llmStatus ?? existing.llmStatus });
+        });
+      } catch {
+        /* ignore */
+      }
+    };
+
+    const handleError = (ev: MessageEvent) => {
+      try {
+        const data = JSON.parse(ev.data) as { id: string; error?: string; llmStatus?: WorkSession['llmStatus'] };
+        finalizeStreaming();
+        setSessionMeta({ status: 'failed', llmStatus: data.llmStatus ?? null });
+        setSessions((prev) => {
+          const existing = prev.find((s) => s.id === data.id);
+          if (!existing) return prev;
+          return upsertSessionWithActivityTransition(prev, { ...existing, status: 'failed', error: data.error, llmStatus: data.llmStatus ?? existing.llmStatus });
+        });
+      } catch {
+        /* ignore */
+      }
+    };
+
+    const handleTodoUpdate = (ev: MessageEvent) => {
+      try {
+        const data = JSON.parse(ev.data) as { id: string; todos: AgentTodo[] };
+        if (data.todos) setTodos(data.todos);
+      } catch {
+        /* ignore */
+      }
+    };
+
+    const handleSessionUpdate = (ev: MessageEvent) => {
+      try {
+        const data = JSON.parse(ev.data) as { id: string; session: WorkSession };
+        if (!data.session) return;
+        setSessions((prev) => upsertSessionWithActivityTransition(prev, data.session));
+        setSessionMeta({ status: data.session.status, llmStatus: data.session.llmStatus });
+      } catch {
+        /* ignore */
+      }
+    };
+
+    const handleObserverStatus = (ev: MessageEvent) => {
+      try {
+        const data = JSON.parse(ev.data) as {
+          id: string;
+          observer: { status: string; findings: number; analyzedSteps: number; lastAnalyzedAt: string | null };
+        };
+        if (data.id === selectedSessionId) {
+          setObserverState((prev) => ({
+            status: data.observer.status as SessionObserverState['status'],
+            findings: (prev as SessionObserverState | null)?.findings ?? [],
+            analyzedSteps: data.observer.analyzedSteps,
+            lastAnalyzedAt: data.observer.lastAnalyzedAt,
+          }));
+        }
+      } catch {
+        /* ignore */
+      }
+    };
+
+    const handleObserverFinding = (ev: MessageEvent) => {
+      try {
+        const data = JSON.parse(ev.data) as { id: string; finding: SessionObserverFinding };
+        if (data.id === selectedSessionId && data.finding) {
+          setObserverState((prev) => {
+            const p = prev as SessionObserverState | null;
+            if (!p) return { status: 'watching' as const, findings: [data.finding], analyzedSteps: 0, lastAnalyzedAt: null };
+            if (p.findings.some((f) => f.id === data.finding.id)) return p;
+            return { ...p, findings: [...p.findings, data.finding] };
+          });
+        }
+      } catch {
+        /* ignore */
+      }
+    };
+
     es.addEventListener('chat-ready', handleChatReady);
     es.addEventListener('chat', handleChat);
+    es.addEventListener('token', handleToken);
+    es.addEventListener('end', handleEnd);
+    es.addEventListener('error', handleError);
+    es.addEventListener('todo-update', handleTodoUpdate);
+    es.addEventListener('session-update', handleSessionUpdate);
+    es.addEventListener('observer-status', handleObserverStatus);
+    es.addEventListener('observer-finding', handleObserverFinding);
 
     return () => {
       connectedIdRef.current = '';
+      streamingMsgRef.current = null;
       resetState();
       setObserverState(null);
       es.close();

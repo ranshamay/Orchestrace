@@ -39,7 +39,6 @@ export function useSessionActions(params: SessionActionsParams) {
     setErrorMessage,
     setSessions,
     setSelectedSessionId,
-    setChatMessages,
     setTodos,
     setComposerText,
     setComposerImages,
@@ -56,7 +55,6 @@ export function useSessionActions(params: SessionActionsParams) {
 
     const draftText = composerText;
     const draftImages = composerImages;
-    const previousChatMessages = chatMessages;
     const previousSessions = sessions;
 
     try {
@@ -110,15 +108,6 @@ export function useSessionActions(params: SessionActionsParams) {
         setSelectedSessionId(result.id);
       } else {
         const optimisticAt = new Date().toISOString();
-        setChatMessages([
-          ...chatMessages,
-          {
-            role: 'user',
-            content: payload,
-            contentParts: hasImages ? contentParts : undefined,
-            time: optimisticAt,
-          },
-        ]);
         setSessions(
           sessions.map((session) => (session.id === selectedSessionId
             ? {
@@ -141,14 +130,12 @@ export function useSessionActions(params: SessionActionsParams) {
         });
         await refreshSessionsOnly({ setSessions });
         const agentState = await fetchWorkAgent(selectedSessionId);
-        setChatMessages(agentState.messages);
         setTodos(agentState.todos);
       }
     } catch (error) {
       setComposerText(draftText);
       setComposerImages(draftImages);
       if (selectedSessionId) {
-        setChatMessages(previousChatMessages);
         setSessions(previousSessions);
       }
       setErrorMessage(toErrorMessage(error));
@@ -167,7 +154,6 @@ export function useSessionActions(params: SessionActionsParams) {
     selectedSession,
     selectedSessionId,
     sessions,
-    setChatMessages,
     setComposerImages,
     setComposerText,
     setErrorMessage,
@@ -225,22 +211,22 @@ export function useSessionActions(params: SessionActionsParams) {
     if (!selectedSession) return;
     setErrorMessage('');
     try {
-      await retryAndSyncSession(selectedSession, { setErrorMessage, setSessions, setSelectedSessionId, setChatMessages, setTodos });
+      await retryAndSyncSession(selectedSession, { setErrorMessage, setSessions, setSelectedSessionId, setTodos });
     } catch (error) {
       setErrorMessage(toErrorMessage(error));
     }
-  }, [selectedSession, setChatMessages, setErrorMessage, setSelectedSessionId, setSessions, setTodos]);
+  }, [selectedSession, setErrorMessage, setSelectedSessionId, setSessions, setTodos]);
 
   const handleRetrySession = useCallback(async (targetSessionId: string) => {
     const session = sessions.find((entry) => entry.id === targetSessionId);
     if (!session) return;
     setErrorMessage('');
     try {
-      await retryAndSyncSession(session, { setErrorMessage, setSessions, setSelectedSessionId, setChatMessages, setTodos });
+      await retryAndSyncSession(session, { setErrorMessage, setSessions, setSelectedSessionId, setTodos });
     } catch (error) {
       setErrorMessage(toErrorMessage(error));
     }
-  }, [sessions, setChatMessages, setErrorMessage, setSelectedSessionId, setSessions, setTodos]);
+  }, [sessions, setErrorMessage, setSelectedSessionId, setSessions, setTodos]);
 
   const handleCopyTrace = useCallback(async () => {
     if (!selectedSession) return 'idle' as const;
