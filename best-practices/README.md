@@ -40,6 +40,9 @@ Use these guides as implementation standards for design, coding, testing, deploy
 
 - [Linting & Formatting (ESLint, typescript-eslint, Prettier)](./linting-formatting.md) — Rule architecture, flat config patterns, formatter boundaries, and CI gating.
 - [Type Tooling (TypeScript, tsx, @types/*)](./type-tooling.md) — TS config strictness, script execution, declaration hygiene, and advanced typing patterns.
+- [Coding Standards (Modular & Testable Code)](./coding-standards.md) — Architectural boundaries, dependency injection, side-effect isolation, and maintainable code design rules.
+- [Testing Standards (Unit/Integration/E2E)](./testing-standards.md) — Test pyramid policy, deterministic testing rules, and CI-quality testing standards.
+
 
 ## AI & Token Tooling
 
