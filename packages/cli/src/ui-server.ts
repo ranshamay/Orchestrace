@@ -9861,7 +9861,8 @@ export function buildSessionSystemPrompt(session: WorkSession, phase: SessionPro
       : phase === 'implementation'
                 ? [
             'Implement requested changes with verifiable outcomes and adapt your approach from tool feedback.',
-            'Always apply relevant guidance from best-practices/ when implementing (read matching guide(s) before edits when needed).',
+                        'Always apply relevant guidance from best-practices/ when implementing (you must consult matching guide(s) before edits when relevant).',
+            'Before making edits, read best-practices/README.md and the relevant guide file(s) under best-practices/*.md for the technologies you touch.',
           ]
         : [
             'Infer user intent from conversation context and continue naturally.',

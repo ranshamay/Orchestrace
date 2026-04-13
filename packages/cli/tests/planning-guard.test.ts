@@ -116,7 +116,7 @@ describe('planning guard behavior', () => {
 
   });
 
-  it('includes simple-task policy and planning budget language in planning prompt', () => {
+    it('includes simple-task policy and planning budget language in planning prompt', () => {
     const session = createSession();
     const prompt = buildSessionSystemPrompt(session, 'planning');
 
@@ -124,5 +124,13 @@ describe('planning guard behavior', () => {
     expect(prompt).toContain('For simple single-file tasks, skip sub-agent delegation');
     expect(prompt).toContain('Planning is budgeted: keep planning activity under 25%');
     expect(prompt).toContain('If session guard thresholds are exceeded');
+  });
+
+  it('requires mandatory best-practices consultation in implementation prompt', () => {
+    const session = createSession();
+    const prompt = buildSessionSystemPrompt(session, 'implementation');
+
+    expect(prompt).toContain('Always apply relevant guidance from best-practices/ when implementing');
+    expect(prompt).toContain('you must consult matching guide(s) before edits when relevant');
   });
 });

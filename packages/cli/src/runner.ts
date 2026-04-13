@@ -3371,7 +3371,8 @@ function buildSystemPrompt(config: SessionConfig, phase: 'planning' | 'implement
     : [
             'Execute approved work with minimal, scoped edits and verify outcomes.',
       'Read before editing, and use tool output to adapt after failures.',
-      'Always apply relevant guidance from best-practices/ when implementing (read matching guide(s) before edits when needed).',
+            'Always apply relevant guidance from best-practices/ when implementing (you must consult matching guide(s) before edits when relevant).',
+      'Before making edits, read best-practices/README.md and the relevant guide file(s) under best-practices/*.md for the technologies you touch.',
       'While thinking, stream concise rationale updates explaining what you are doing and why.',
       'Rationale updates must be user-facing, factual, and short.',
       ...(isLowEffort
