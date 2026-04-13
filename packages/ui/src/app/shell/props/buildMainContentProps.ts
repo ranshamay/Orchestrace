@@ -32,6 +32,9 @@ type Params = {
   chatMessages: AppMainContentProps['chatMessages'];
   chatIsStreaming: AppMainContentProps['chatIsStreaming'];
   chatActiveMessageId: AppMainContentProps['chatActiveMessageId'];
+  chatFirstTokenLatencyMs: AppMainContentProps['chatFirstTokenLatencyMs'];
+  chatWaitingForFirstToken: AppMainContentProps['chatWaitingForFirstToken'];
+  chatActiveToolCalls: AppMainContentProps['chatActiveToolCalls'];
   composerMode: AppMainContentProps['composerMode'];
   workspaces: AppMainContentProps['workspaces'];
   workWorkspaceId: string;
@@ -118,6 +121,9 @@ export function buildMainContentProps(params: Params): AppMainContentProps {
     chatMessages: params.chatMessages,
     chatIsStreaming: params.chatIsStreaming,
     chatActiveMessageId: params.chatActiveMessageId,
+    chatFirstTokenLatencyMs: params.chatFirstTokenLatencyMs,
+    chatWaitingForFirstToken: params.chatWaitingForFirstToken,
+    chatActiveToolCalls: params.chatActiveToolCalls,
     composerMode: params.composerMode,
     workspaces: params.workspaces,
     workWorkspaceId: params.workWorkspaceId,

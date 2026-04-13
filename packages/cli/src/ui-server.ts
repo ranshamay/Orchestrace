@@ -7467,6 +7467,14 @@ function handleChatToolCallEvent(
     session.updatedAt = now();
     uiStatePersistence.schedule();
   }
+
+  if (uiEvent || checklistChanged || graphChanged || graphProgressChanged) {
+    broadcastSessionUpdate(
+      workStreamClients,
+      session.id,
+      serializeWorkSession(session, sessionTodos.get(session.id) ?? []),
+    );
+  }
 }
 
 function toChatToolDagEvent(toolEvent: LlmToolCallEvent): Extract<DagEvent, { type: 'task:tool-call' }> {

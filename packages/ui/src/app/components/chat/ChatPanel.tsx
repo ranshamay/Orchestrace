@@ -11,6 +11,9 @@ type Props = {
   messages: ChatMessage[];
   isStreaming: boolean;
   activeMessageId: string | null;
+  firstTokenLatencyMs: number | null;
+  waitingForFirstToken: boolean;
+  activeToolCalls: number;
   composer: ReactNode;
   onApprovePlan: () => Promise<void>;
   onRejectPlan: () => Promise<void>;
@@ -29,7 +32,17 @@ type Props = {
   planningModel: string;
 };
 
-export function ChatPanel({ messages, isStreaming, activeMessageId: _activeMessageId, composer, onApprovePlan, onRejectPlan, isDark, sessionId, sessionPrompt, sessionStatus, sessionModel, sessionProvider, composerMode, workspaces, workWorkspaceId, planningNoToolGuardMode, autoApprove, planningProvider, planningModel }: Props) {
+function formatLatency(ms: number): string {
+  if (ms < 1000) {
+    return `${ms}ms`;
+  }
+  if (ms < 10_000) {
+    return `${(ms / 1000).toFixed(1)}s`;
+  }
+  return `${Math.round(ms / 1000)}s`;
+}
+
+export function ChatPanel({ messages, isStreaming, activeMessageId: _activeMessageId, firstTokenLatencyMs, waitingForFirstToken, activeToolCalls, composer, onApprovePlan, onRejectPlan, isDark, sessionId, sessionPrompt, sessionStatus, sessionModel, sessionProvider, composerMode, workspaces, workWorkspaceId, planningNoToolGuardMode, autoApprove, planningProvider, planningModel }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const isAutoScrollingRef = useRef(true);
   const [showJump, setShowJump] = useState(false);
@@ -83,6 +96,17 @@ export function ChatPanel({ messages, isStreaming, activeMessageId: _activeMessa
             {displayModel || 'no model'}
           </span>
           {isStreaming && <span className="text-[10px] text-violet-500 animate-pulse shrink-0">streaming</span>}
+          {waitingForFirstToken && (
+            <span className="text-[10px] text-amber-500 animate-pulse shrink-0">first token...</span>
+          )}
+          {activeToolCalls > 0 && (
+            <span className="text-[10px] text-sky-500 shrink-0">using tools ({activeToolCalls})</span>
+          )}
+          {firstTokenLatencyMs !== null && (
+            <span className="text-[10px] text-slate-500 dark:text-slate-400 shrink-0" title="Time to first token">
+              ttft {formatLatency(firstTokenLatencyMs)}
+            </span>
+          )}
           <span className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${composerModeBadgeClass(composerMode)}`}>
             {composerMode}
           </span>
@@ -212,14 +236,14 @@ function buildStreamEntries(messages: ChatMessage[]): StreamEntryData[] {
     const flushTools = () => {
       if (pendingTools.length === 0) return;
       if (pendingTools.length === 1) {
-        entries.push({ kind: 'tool-call', key: pendingTools[0].id, part: pendingTools[0] });
+        entries.push({ kind: 'tool-call', key: `tool-${msg.id}-${pendingTools[0].id}`, part: pendingTools[0] });
       } else {
-        entries.push({ kind: 'tool-group', key: `tg-${pendingTools[0].id}`, tools: [...pendingTools] });
+        entries.push({ kind: 'tool-group', key: `tg-${msg.id}-${pendingTools[0].id}-${pendingTools.length}`, tools: [...pendingTools] });
       }
       pendingTools = [];
     };
 
-    for (const part of msg.parts) {
+    for (const [partIndex, part] of msg.parts.entries()) {
       if (part.type === 'tool-call') {
         pendingTools.push(part);
         continue;
@@ -228,25 +252,25 @@ function buildStreamEntries(messages: ChatMessage[]): StreamEntryData[] {
 
       switch (part.type) {
         case 'reasoning':
-          entries.push({ kind: 'reasoning', key: part.id, text: part.text, isStreaming: part.isStreaming });
+          entries.push({ kind: 'reasoning', key: `r-${msg.id}-${part.id}-${partIndex}`, text: part.text, isStreaming: part.isStreaming });
           break;
         case 'text':
-          entries.push({ kind: 'text', key: part.id, text: part.text, isStreaming: part.isStreaming });
+          entries.push({ kind: 'text', key: `t-${msg.id}-${part.id}-${partIndex}`, text: part.text, isStreaming: part.isStreaming });
           break;
         case 'phase-transition':
-          entries.push({ kind: 'phase-divider', key: `pt-${msg.id}-${part.phase}`, phase: part.phase, label: part.label });
+          entries.push({ kind: 'phase-divider', key: `pt-${msg.id}-${part.phase}-${partIndex}`, phase: part.phase, label: part.label });
           break;
         case 'context-snapshot':
-          entries.push({ kind: 'context-snapshot', key: `ctx-${part.snapshotId}`, model: part.model, chars: part.textChars, images: part.imageCount });
+          entries.push({ kind: 'context-snapshot', key: `ctx-${msg.id}-${part.snapshotId}-${partIndex}`, model: part.model, chars: part.textChars, images: part.imageCount });
           break;
         case 'approval-request':
-          entries.push({ kind: 'approval', key: `appr-${msg.id}`, summary: part.planSummary, status: part.status });
+          entries.push({ kind: 'approval', key: `appr-${msg.id}-${partIndex}`, summary: part.planSummary, status: part.status });
           break;
         case 'observer-finding':
-          entries.push({ kind: 'observer-finding', key: `obs-${part.findingId}`, severity: part.severity, title: part.title, detail: part.detail });
+          entries.push({ kind: 'observer-finding', key: `obs-${msg.id}-${part.findingId}-${partIndex}`, severity: part.severity, title: part.title, detail: part.detail });
           break;
         case 'error':
-          entries.push({ kind: 'error', key: `err-${msg.id}`, message: part.message, detail: part.detail });
+          entries.push({ kind: 'error', key: `err-${msg.id}-${partIndex}`, message: part.message, detail: part.detail });
           break;
       }
     }

@@ -44,6 +44,9 @@ export type AppMainContentProps = {
   chatMessages: ChatMessage[];
   chatIsStreaming: boolean;
   chatActiveMessageId: string | null;
+  chatFirstTokenLatencyMs: number | null;
+  chatWaitingForFirstToken: boolean;
+  chatActiveToolCalls: number;
   composerMode: ComposerMode;
   workspaces: Workspace[];
   workWorkspaceId: string;
@@ -161,6 +164,9 @@ export function AppMainContent(props: AppMainContentProps) {
       messages={props.chatMessages}
       isStreaming={props.chatIsStreaming}
       activeMessageId={props.chatActiveMessageId}
+      firstTokenLatencyMs={props.chatFirstTokenLatencyMs}
+      waitingForFirstToken={props.chatWaitingForFirstToken}
+      activeToolCalls={props.chatActiveToolCalls}
       onApprovePlan={props.onApprovePlan}
       onRejectPlan={props.onRejectPlan}
       isDark={props.isDark}

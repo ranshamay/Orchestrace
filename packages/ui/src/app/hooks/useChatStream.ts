@@ -29,15 +29,27 @@ export function useChatStream({ enabled = true, selectedSessionId, setSessions, 
   const [sessionMeta, setSessionMeta] = useState<ChatStreamSessionMeta>({ status: '', llmStatus: null });
   const [isStreaming, setIsStreaming] = useState(false);
   const [activeMessageId, setActiveMessageId] = useState<string | null>(null);
+  const [firstTokenLatencyMs, setFirstTokenLatencyMs] = useState<number | null>(null);
+  const [waitingForFirstToken, setWaitingForFirstToken] = useState(false);
+  const [activeToolCalls, setActiveToolCalls] = useState(0);
   const connectedIdRef = useRef<string>('');
   const streamingMsgRef = useRef<string | null>(null);
+  const firstTokenStartMsRef = useRef<number | null>(null);
+  const waitingForFirstTokenRef = useRef(false);
+  const firstTokenLatencyMsRef = useRef<number | null>(null);
 
   const resetState = useCallback(() => {
     setMessages([]);
     setSessionMeta({ status: '', llmStatus: null });
     setIsStreaming(false);
     setActiveMessageId(null);
+    setFirstTokenLatencyMs(null);
+    setWaitingForFirstToken(false);
+    setActiveToolCalls(0);
     streamingMsgRef.current = null;
+    firstTokenStartMsRef.current = null;
+    waitingForFirstTokenRef.current = false;
+    firstTokenLatencyMsRef.current = null;
     setNodeTokenStreams({});
   }, [setNodeTokenStreams]);
 
@@ -125,6 +137,14 @@ export function useChatStream({ enabled = true, selectedSessionId, setSessions, 
           };
           if (event.role === 'assistant') {
             streamingMsgRef.current = event.messageId;
+            if (firstTokenStartMsRef.current === null) {
+              const startAt = Date.parse(event.timestamp);
+              firstTokenStartMsRef.current = Number.isFinite(startAt) ? startAt : Date.now();
+              firstTokenLatencyMsRef.current = null;
+              waitingForFirstTokenRef.current = true;
+              setFirstTokenLatencyMs(null);
+              setWaitingForFirstToken(true);
+            }
           }
           setMessages((prev) => [...prev, msg]);
           setActiveMessageId(event.messageId);
@@ -264,6 +284,7 @@ export function useChatStream({ enabled = true, selectedSessionId, setSessions, 
             setIsStreaming(true);
             return [...prev, msg];
           });
+          setActiveToolCalls((count) => count + 1);
           break;
         }
 
@@ -288,6 +309,7 @@ export function useChatStream({ enabled = true, selectedSessionId, setSessions, 
               };
             }),
           );
+          setActiveToolCalls((count) => Math.max(0, count - 1));
           break;
         }
 
@@ -444,6 +466,27 @@ export function useChatStream({ enabled = true, selectedSessionId, setSessions, 
               return [...prev, newMsg];
             });
           }
+
+          if (newMsg.role === 'user') {
+            const startedAt = Date.parse(newMsg.timestamp);
+            firstTokenStartMsRef.current = Number.isFinite(startedAt) ? startedAt : Date.now();
+            waitingForFirstTokenRef.current = true;
+            firstTokenLatencyMsRef.current = null;
+            setWaitingForFirstToken(true);
+            setFirstTokenLatencyMs(null);
+          }
+
+          if (newMsg.role === 'assistant') {
+            if (waitingForFirstTokenRef.current && firstTokenStartMsRef.current !== null && firstTokenLatencyMsRef.current === null) {
+              const elapsed = Math.max(0, Date.now() - firstTokenStartMsRef.current);
+              firstTokenLatencyMsRef.current = elapsed;
+              setFirstTokenLatencyMs(elapsed);
+            }
+            waitingForFirstTokenRef.current = false;
+            firstTokenStartMsRef.current = null;
+            setWaitingForFirstToken(false);
+            setActiveToolCalls(0);
+          }
           break;
         }
       }
@@ -472,6 +515,9 @@ export function useChatStream({ enabled = true, selectedSessionId, setSessions, 
         streamingMsgRef.current = null;
         setActiveMessageId(null);
       }
+      waitingForFirstTokenRef.current = false;
+      setWaitingForFirstToken(false);
+      setActiveToolCalls(0);
       setIsStreaming(false);
     };
 
@@ -489,6 +535,15 @@ export function useChatStream({ enabled = true, selectedSessionId, setSessions, 
         };
         if (!data.delta) return;
         const isReasoning = data.isReasoning ?? false;
+
+        if (waitingForFirstTokenRef.current && firstTokenStartMsRef.current !== null && firstTokenLatencyMsRef.current === null) {
+          const elapsed = Math.max(0, Date.now() - firstTokenStartMsRef.current);
+          firstTokenLatencyMsRef.current = elapsed;
+          waitingForFirstTokenRef.current = false;
+          firstTokenStartMsRef.current = null;
+          setFirstTokenLatencyMs(elapsed);
+          setWaitingForFirstToken(false);
+        }
 
         if (!streamingMsgRef.current) {
           // Start a new streaming assistant message using the server-provided messageId
@@ -666,5 +721,13 @@ export function useChatStream({ enabled = true, selectedSessionId, setSessions, 
     };
   }, [enabled, selectedSessionId, setSessions, setTodos, setObserverState, resetState]);
 
-  return { messages, sessionMeta, isStreaming, activeMessageId };
+  return {
+    messages,
+    sessionMeta,
+    isStreaming,
+    activeMessageId,
+    firstTokenLatencyMs,
+    waitingForFirstToken,
+    activeToolCalls,
+  };
 }
