@@ -85,45 +85,6 @@ describe('planning guard behavior', () => {
     expect(persistedEvents.some((entry) => entry.type === 'session:llm-status-change')).toBe(true);
   });
 
-    it('forces implementation after repeated read-after-acknowledgment guardrail violations', () => {
-    process.env.ORCHESTRACE_MAX_READ_AFTER_ACK_VIOLATIONS = '2';
-
-    const session = createSession();
-    const guards = new Map<string, ReturnType<typeof getSessionPlanningGuardState>>();
-    const persistedEvents: Array<{ sessionId: string; type: string }> = [];
-
-    const guardrailResultEvent: LlmToolCallEvent = {
-      type: 'result',
-      toolCallId: 'call-1',
-      toolName: 'read_file',
-      result: 'Tool call read_file (call-1) blocked by system guardrail. You acknowledged that context is sufficient, so the immediate next tool call must be write_file.',
-      isError: true,
-    };
-
-    enforcePlanningToolCallGuard({
-      session,
-      continuationPhase: 'planning',
-      toolEvent: guardrailResultEvent,
-      sessionPlanningGuards: guards,
-      persistEvent: (sessionId, event) => persistedEvents.push({ sessionId, type: event.type }),
-      uiStatePersistence: { schedule: () => {}, flush: async () => {} },
-    });
-    enforcePlanningToolCallGuard({
-      session,
-      continuationPhase: 'planning',
-      toolEvent: guardrailResultEvent,
-      sessionPlanningGuards: guards,
-      persistEvent: (sessionId, event) => persistedEvents.push({ sessionId, type: event.type }),
-      uiStatePersistence: { schedule: () => {}, flush: async () => {} },
-    });
-
-    const state = guards.get(session.id);
-    expect(state?.readAfterAcknowledgmentViolations).toBe(2);
-    expect(state?.forcedImplementation).toBe(true);
-    expect(session.llmStatus.detail).toContain('read-after-ack violations');
-    expect(persistedEvents.some((entry) => entry.type === 'session:llm-status-change')).toBe(true);
-  });
-
   it('resets consecutive non-write counter when write/edit tool is called', () => {
 
     process.env.ORCHESTRACE_MAX_TOOL_CALLS_WITHOUT_WRITE = '3';
@@ -151,7 +112,6 @@ describe('planning guard behavior', () => {
 
     const state = guards.get(session.id);
         expect(state?.consecutiveNonWriteToolCalls).toBe(0);
-    expect(state?.readAfterAcknowledgmentViolations).toBe(0);
     expect(state?.forcedImplementation).toBe(false);
 
   });

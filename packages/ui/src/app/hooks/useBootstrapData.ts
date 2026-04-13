@@ -141,9 +141,13 @@ export function useBootstrapData(enabled = true) {
           defaultImplementationModel: '',
           defaultDeliveryStrategy: 'pr-only',
           planningNoToolGuardMode: 'enforce',
+          quickStartMode: false,
+          quickStartMaxPreDelegationToolCalls: 3,
           adaptiveConcurrency: false,
           batchConcurrency: 8,
           batchMinConcurrency: 1,
+          enableTrivialTaskGate: false,
+          trivialTaskMaxPromptLength: 5000,
         };
         const preferences = preferencesResult.status === 'fulfilled'
           ? preferencesResult.value.preferences

@@ -47,6 +47,17 @@ import {
 } from './ui-server/chat.js';
 import { asString, toErrorMessage } from './ui-server/strings.js';
 import { broadcastSessionUpdate, broadcastTodoUpdate, broadcastWorkStream, closeWorkStream, sendSse } from './ui-server/sse.js';
+import {
+  type V2Client,
+  createChatStreamState,
+  handleV2StreamDelta,
+  handleV2DagEvent,
+  handleV2StatusChange,
+  handleV2SessionEnd,
+  handleV2TodoUpdate,
+  handleV2ObserverFinding,
+  handleV2ChatMessage,
+} from './ui-server/chat-stream-v2.js';
 import type {
   AgentTodoItem,
   AuthSession,
@@ -347,6 +358,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
   let uiPreferences = resolveUiPreferencesDefaults();
   const hmrClients = new Set<ServerResponse>();
   const workStreamClients = new Map<string, Set<ServerResponse>>();
+  const workStreamV2Clients = new Map<string, Set<V2Client>>();
   const chatStreamClients = new Map<string, Set<ServerResponse>>();
   const sessionStatusStreamClients = new Set<ServerResponse>();
   const logStreamClients = new Set<ServerResponse>();
@@ -684,12 +696,17 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
             // Runner is still alive — set up event watcher to observe its progress
             console.log(`[orchestrace][event-store] Session ${sessionId}: runner PID ${meta!.pid} is alive, reconnecting...`);
             const lastSeq = events[events.length - 1]?.seq ?? 0;
+            const reconnectV2State = createChatStreamState();
+            function getReconnectV2Clients(): Set<V2Client> {
+              return workStreamV2Clients.get(sessionId) ?? new Set();
+            }
             const unwatch = eventStore.watch(sessionId, lastSeq, (event) => {
               session.updatedAt = event.time;
               switch (event.type) {
                                 case 'session:llm-status-change':
                   if (isSessionLlmStatusChangeEvent(event)) {
                     session.llmStatus = event.payload.llmStatus;
+                    handleV2StatusChange(getReconnectV2Clients(), reconnectV2State, session.llmStatus.state, event.time);
                   }
                   break;
                 case 'session:status-change': {
@@ -699,6 +716,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                     broadcastWorkStream(workStreamClients, sessionId, newStatus === 'completed' ? 'end' : 'error', {
                       id: sessionId, status: session.status, llmStatus: session.llmStatus, error: session.error, time: event.time,
                     });
+                    handleV2SessionEnd(getReconnectV2Clients(), reconnectV2State, sessionId, session.status, session.llmStatus, session.error, event.time);
                     unwatch();
                   }
                   break;
@@ -713,13 +731,15 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                   const uiEvent = event.payload.event as UiDagEvent;
                   session.events.push(uiEvent);
                   if (session.events.length > SESSION_EVENT_HISTORY_LIMIT) session.events.shift();
+                  handleV2DagEvent(getReconnectV2Clients(), reconnectV2State, uiEvent);
                   break;
                 }
                 case 'session:stream-delta': {
-                  const p = event.payload as { taskId: string; phase: string; delta: string };
+                  const p = event.payload as { taskId: string; phase: string; delta: string; isReasoning?: boolean };
                   broadcastWorkStream(workStreamClients, sessionId, 'token', {
-                    id: sessionId, taskId: p.taskId, phase: p.phase, delta: p.delta, llmStatus: session.llmStatus, time: event.time,
+                    id: sessionId, taskId: p.taskId, phase: p.phase, delta: p.delta, isReasoning: p.isReasoning, llmStatus: session.llmStatus, time: event.time,
                   });
+                  handleV2StreamDelta(getReconnectV2Clients(), reconnectV2State, p, session.llmStatus, event.time);
                   break;
                 }
                 case 'session:task-status-change': {
@@ -731,6 +751,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                   const items = (event.payload as { items: AgentTodoItem[] }).items;
                   sessionTodos.set(sessionId, items);
                   broadcastTodoUpdate(workStreamClients, sessionId, items);
+                  handleV2TodoUpdate(getReconnectV2Clients(), sessionId, items);
                   break;
                 }
                 case 'session:todo-item-added': {
@@ -739,6 +760,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                   existing.push(item);
                   sessionTodos.set(sessionId, existing);
                   broadcastTodoUpdate(workStreamClients, sessionId, existing);
+                  handleV2TodoUpdate(getReconnectV2Clients(), sessionId, existing);
                   break;
                 }
                 case 'session:todo-item-toggled': {
@@ -748,6 +770,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                   if (idx >= 0) {
                     items[idx] = { ...items[idx], done: p.done, status: (p.status as AgentTodoItem['status']) ?? items[idx].status, updatedAt: event.time };
                     broadcastTodoUpdate(workStreamClients, sessionId, items);
+                    handleV2TodoUpdate(getReconnectV2Clients(), sessionId, items);
                   }
                   break;
                 }
@@ -777,6 +800,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                     trimThreadMessages(thread);
                     thread.updatedAt = event.time;
                   }
+                  handleV2ChatMessage(getReconnectV2Clients(), reconnectV2State, { role: msg.role, content: msg.content, time: msg.time });
                   break;
                 }
                 case 'session:llm-context': {
@@ -1443,6 +1467,12 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     const events = await eventStore.read(id);
     const watchFromSeq = events.length > 0 ? events[events.length - 1].seq : 0;
 
+    // v2 chat stream state for this session
+    const v2State = createChatStreamState();
+    function getV2Clients(): Set<V2Client> {
+      return workStreamV2Clients.get(id) ?? new Set();
+    }
+
     // Watch event store for updates from the runner.
     const unwatch = eventStore.watch(id, watchFromSeq, (event) => {
       session.updatedAt = event.time;
@@ -1451,6 +1481,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                 case 'session:llm-status-change':
           if (isSessionLlmStatusChangeEvent(event)) {
             session.llmStatus = event.payload.llmStatus;
+            handleV2StatusChange(getV2Clients(), v2State, session.llmStatus.state, event.time);
           }
           break;
 
@@ -1473,6 +1504,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
               error: session.error,
               time: event.time,
             });
+            handleV2SessionEnd(getV2Clients(), v2State, id, session.status, session.llmStatus, session.error, event.time);
             unwatch();
           }
           break;
@@ -1490,19 +1522,22 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           const uiEvent = event.payload.event as UiDagEvent;
           session.events.push(uiEvent);
           if (session.events.length > SESSION_EVENT_HISTORY_LIMIT) session.events.shift();
+          handleV2DagEvent(getV2Clients(), v2State, uiEvent);
           break;
         }
 
         case 'session:stream-delta': {
-          const p = event.payload as { taskId: string; phase: string; delta: string };
+          const p = event.payload as { taskId: string; phase: string; delta: string; isReasoning?: boolean };
           broadcastWorkStream(workStreamClients, id, 'token', {
             id,
             taskId: p.taskId,
             phase: p.phase,
             delta: p.delta,
+            isReasoning: p.isReasoning,
             llmStatus: session.llmStatus,
             time: event.time,
           });
+          handleV2StreamDelta(getV2Clients(), v2State, p, session.llmStatus, event.time);
           break;
         }
 
@@ -1516,6 +1551,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           const items = (event.payload as { items: AgentTodoItem[] }).items;
           sessionTodos.set(id, items);
           broadcastTodoUpdate(workStreamClients, id, items);
+          handleV2TodoUpdate(getV2Clients(), id, items);
           break;
         }
 
@@ -1525,6 +1561,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           existing.push(item);
           sessionTodos.set(id, existing);
           broadcastTodoUpdate(workStreamClients, id, existing);
+          handleV2TodoUpdate(getV2Clients(), id, existing);
           break;
         }
 
@@ -1540,6 +1577,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
               updatedAt: event.time,
             };
             broadcastTodoUpdate(workStreamClients, id, items);
+            handleV2TodoUpdate(getV2Clients(), id, items);
           }
           break;
         }
@@ -1582,6 +1620,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
             trimThreadMessages(thread);
             thread.updatedAt = event.time;
           }
+          handleV2ChatMessage(getV2Clients(), v2State, { role: msg.role, content: msg.content, time: msg.time });
           break;
         }
 
@@ -1607,11 +1646,13 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         }
 
         case 'session:observer-finding': {
+          const finding = (event.payload as { finding: { id: string; severity: string; title: string; description?: string } }).finding;
           broadcastWorkStream(workStreamClients, id, 'observer-finding', {
             id,
-            finding: (event.payload as { finding: unknown }).finding,
+            finding,
             time: event.time,
           });
+          handleV2ObserverFinding(getV2Clients(), v2State, finding, event.time);
           break;
         }
 
@@ -2500,6 +2541,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
 
       if (req.method === 'GET' && pathname === '/api/work/stream') {
         const id = asString(url.searchParams.get('id'));
+        const version = asString(url.searchParams.get('v'));
         if (!id) {
           sendJson(res, 400, { error: 'Missing id' });
           return;
@@ -2517,6 +2559,43 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           Connection: 'keep-alive',
         });
 
+        if (version === '2') {
+          // ── v2 chat stream ──
+          let v2Clients = workStreamV2Clients.get(id);
+          if (!v2Clients) {
+            v2Clients = new Set<V2Client>();
+            workStreamV2Clients.set(id, v2Clients);
+          }
+          const client: V2Client = { res, state: createChatStreamState() };
+          v2Clients.add(client);
+
+          // Send initial snapshot: convert legacy events to v2 chat messages
+          const { convertLegacyEvents, materializeSession } = await import('@orchestrace/store');
+          const storedEvents = await eventStore.read(id);
+          const materialized = storedEvents.length > 0 ? materializeSession(storedEvents) : null;
+          const chatMessages = materialized ? convertLegacyEvents(materialized) : [];
+          sendSse(res, 'chat-ready', {
+            id,
+            messages: chatMessages,
+            status: session.status,
+            llmStatus: session.llmStatus,
+            todos: (sessionTodos.get(id) ?? []).map((item) => ({ ...item })),
+            observer: sessionObservers.get(id)?.getState() ?? null,
+            time: now(),
+          });
+
+          req.on('close', () => {
+            const group = workStreamV2Clients.get(id);
+            if (!group) return;
+            group.delete(client);
+            if (group.size === 0) {
+              workStreamV2Clients.delete(id);
+            }
+          });
+          return;
+        }
+
+        // ── v1 (default) ──
         let clients = workStreamClients.get(id);
         if (!clients) {
           clients = new Set<ServerResponse>();
@@ -4072,6 +4151,26 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                       sessionId: session.id,
                       usage: streamState.usage,
                       estimated: true,
+                      time: now(),
+                    });
+                  },
+                  onReasoningDelta: (delta) => {
+                    if (!delta) {
+                      return;
+                    }
+
+                    // Persist reasoning deltas with flag
+                    emitSessionEvent(session.id, {
+                      time: now(),
+                      type: 'session:stream-delta',
+                      payload: { taskId: 'chat', phase: continuationPhase === 'planning' ? 'planning' : 'implementation', delta, isReasoning: true },
+                    });
+
+                    broadcastWorkStream(chatStreamClients, streamId, 'token', {
+                      streamId,
+                      sessionId: session.id,
+                      delta,
+                      isReasoning: true,
                       time: now(),
                     });
                   },
@@ -8335,7 +8434,6 @@ type SessionIdWorkspacePathRelation = {
 type SessionPlanningGuardState = {
   consecutiveNonWriteToolCalls: number;
   forcedImplementation: boolean;
-  readAfterAcknowledgmentViolations: number;
 };
 
 
@@ -8425,7 +8523,6 @@ export function getSessionPlanningGuardState(): SessionPlanningGuardState {
   return {
     consecutiveNonWriteToolCalls: 0,
     forcedImplementation: false,
-    readAfterAcknowledgmentViolations: 0,
   };
 }
 
@@ -8490,20 +8587,6 @@ function resolvePlanningBudgetPercent(): number {
   return Math.min(100, Math.max(1, parsed));
 }
 
-function resolveReadAfterAckViolationThreshold(): number {
-  return parsePositiveSetting(process.env.ORCHESTRACE_MAX_READ_AFTER_ACK_VIOLATIONS) ?? 2;
-}
-
-function isReadAfterAcknowledgmentViolationEvent(toolEvent: LlmToolCallEvent): boolean {
-  if (toolEvent.type !== 'result' || !toolEvent.isError) {
-    return false;
-  }
-
-  const result = String(toolEvent.result ?? '').toLowerCase();
-  return result.includes('blocked by system guardrail')
-    && result.includes('next tool call must be write_file');
-}
-
 
 export function enforcePlanningToolCallGuard(params: {
   session: WorkSession;
@@ -8520,32 +8603,8 @@ export function enforcePlanningToolCallGuard(params: {
     return existing;
   }
 
-  if (isReadAfterAcknowledgmentViolationEvent(params.toolEvent)) {
-    existing.readAfterAcknowledgmentViolations += 1;
-    const violationThreshold = resolveReadAfterAckViolationThreshold();
-    if (!existing.forcedImplementation && existing.readAfterAcknowledgmentViolations >= violationThreshold) {
-      existing.forcedImplementation = true;
-      params.session.llmStatus = {
-        ...params.session.llmStatus,
-        state: 'implementing',
-        label: 'Implementing',
-        detail: `Planning guard triggered after repeated read-after-ack violations (${existing.readAfterAcknowledgmentViolations}); forcing implementation/write.`,
-        phase: 'implementation',
-        updatedAt: now(),
-      };
-      void params.persistEvent(params.session.id, {
-        time: now(),
-        type: 'session:llm-status-change',
-        payload: { llmStatus: params.session.llmStatus },
-      });
-      params.uiStatePersistence.schedule();
-    }
-    return existing;
-  }
-
   if (isWriteToolCallEvent(params.toolEvent)) {
     existing.consecutiveNonWriteToolCalls = 0;
-    existing.readAfterAcknowledgmentViolations = 0;
     return existing;
   }
 

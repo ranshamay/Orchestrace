@@ -42,6 +42,8 @@ export interface LlmToolCallEvent {
   toolCallId: string;
   toolName: string;
   arguments?: string;
+  /** Full un-truncated JSON arguments for contract validation. */
+  rawArguments?: string;
   result?: string;
   isError?: boolean;
   details?: unknown;
@@ -92,6 +94,7 @@ export interface LlmRequest {
   timeoutMs?: number;
   signal?: AbortSignal;
   onTextDelta?: (delta: string) => void;
+  onReasoningDelta?: (delta: string) => void;
   onUsage?: (usage: { input: number; output: number; cost: number }) => void;
   onToolCall?: (event: LlmToolCallEvent) => void;
   toolset?: LlmToolset;
@@ -113,6 +116,7 @@ export interface LlmRequest {
 /** Stream-time callbacks for incremental completion output and usage. */
 export interface LlmCompletionOptions {
   onTextDelta?: (delta: string) => void;
+  onReasoningDelta?: (delta: string) => void;
   onUsage?: (usage: { input: number; output: number; cost: number }) => void;
   onToolCall?: (event: LlmToolCallEvent) => void;
 }

@@ -172,6 +172,16 @@ export async function executeRole(params: {
         delta,
       });
     },
+    onReasoningDelta: (delta) => {
+      emit({
+        type: 'task:stream-delta',
+        taskId,
+        phase,
+        attempt,
+        delta,
+        isReasoning: true,
+      });
+    },
     onUsage,
     onToolCall: (event) => {
       const replayRecord = toReplayToolCallRecord(event);
@@ -762,7 +772,7 @@ function toReplayToolCallRecord(event: LlmToolCallEvent): ReplayToolCallRecord {
     toolCallId: event.toolCallId,
     toolName: event.toolName,
     status: event.type,
-    input: event.arguments,
+    input: event.rawArguments ?? event.arguments,
     output: event.result,
     isError: event.isError,
     details: event.details,

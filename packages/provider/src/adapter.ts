@@ -372,6 +372,7 @@ export class PiAiAdapter implements LlmAdapter {
     });
     return agent.complete(request.prompt, request.signal, {
       onTextDelta: request.onTextDelta,
+      onReasoningDelta: request.onReasoningDelta,
       onUsage: request.onUsage,
       onToolCall: request.onToolCall,
     });

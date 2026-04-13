@@ -235,7 +235,7 @@ export type DagEvent =
       systemPrompt: string;
       prompt: string;
     }
-  | { type: 'task:stream-delta'; taskId: string; phase: 'planning' | 'implementation'; attempt: number; delta: string }
+  | { type: 'task:stream-delta'; taskId: string; phase: 'planning' | 'implementation'; attempt: number; delta: string; isReasoning?: boolean }
   | {
       type: 'task:replay-attempt';
       taskId: string;

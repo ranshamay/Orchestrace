@@ -2154,7 +2154,7 @@ async function main(): Promise<void> {
 
         // Stream deltas
         if (event.type === 'task:stream-delta') {
-          void emit({ time: t, type: 'session:stream-delta', payload: { taskId: event.taskId, phase: event.phase, delta: event.delta } });
+          void emit({ time: t, type: 'session:stream-delta', payload: { taskId: event.taskId, phase: event.phase, delta: event.delta, isReasoning: event.isReasoning } });
           return;
         }
 

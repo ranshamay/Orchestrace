@@ -27,7 +27,11 @@ export function handleStreamEvent(event: AssistantMessageEvent, completionOption
   }
 
   if (event.type === 'thinking_delta') {
-    completionOptions?.onTextDelta?.(event.delta);
+    if (completionOptions?.onReasoningDelta) {
+      completionOptions.onReasoningDelta(event.delta);
+    } else {
+      completionOptions?.onTextDelta?.(event.delta);
+    }
   }
 
   const partial = 'partial' in event ? event.partial : undefined;

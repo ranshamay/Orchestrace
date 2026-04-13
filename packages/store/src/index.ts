@@ -1,5 +1,40 @@
 export { FileEventStore } from './event-store.js';
 export { materializeSession, applyEvent } from './materializer.js';
+export {
+  startMessage,
+  appendPart,
+  updatePartDelta,
+  completePart,
+  completeMessage,
+  convertLegacyEvents,
+} from './chat-builder.js';
+export {
+  TOOL_ICON,
+  ROLE_ICON,
+  PHASE_ICON,
+  STATUS_ICON,
+  REASONING_ICON,
+  OBSERVER_ICON,
+  APPROVAL_ICON,
+  CONTEXT_ICON,
+  resolveToolIcon,
+} from './chat-types.js';
+export type {
+  ChatMessage,
+  ChatMessageMetadata,
+  ChatSessionPhase,
+  MessagePart,
+  MessagePartType,
+  ReasoningMessagePart,
+  TextMessagePart,
+  ToolCallMessagePart,
+  PhaseTransitionMessagePart,
+  ContextSnapshotMessagePart,
+  ApprovalRequestMessagePart,
+  ObserverFindingMessagePart,
+  ErrorMessagePart,
+  ChatSseEvent,
+} from './chat-types.js';
 export type {
   // Event types
   EventStore,

@@ -19,6 +19,8 @@ type Params = {
     handleComposerPaste: AppMainContentProps['onComposerPaste'];
     handleSendChat: AppMainContentProps['onSendChat'];
     handleStop: AppMainContentProps['onStop'];
+    handleApprovePlan: AppMainContentProps['onApprovePlan'];
+    handleRejectPlan: AppMainContentProps['onRejectPlan'];
   };
   openLlmControlsModal: () => void;
   showToolsPanel: boolean;
@@ -26,6 +28,10 @@ type Params = {
   toolsPanel: Pick<AppMainContentProps, 'toolsMode' | 'availableTools' | 'isToolsLoading' | 'toolsLoadError'>;
   timelineFollow: Pick<AppMainContentProps, 'timelineContainerRef' | 'followTimelineTail' | 'jumpToLatest' | 'onTimelineScroll'>;
   timelineItems: AppMainContentProps['timelineItems'];
+  liveReasoning: AppMainContentProps['liveReasoning'];
+  chatMessages: AppMainContentProps['chatMessages'];
+  chatIsStreaming: AppMainContentProps['chatIsStreaming'];
+  chatActiveMessageId: AppMainContentProps['chatActiveMessageId'];
   composerMode: AppMainContentProps['composerMode'];
   workspaces: AppMainContentProps['workspaces'];
   workWorkspaceId: string;
@@ -59,6 +65,20 @@ type Params = {
   onSetDefaultInvestigatorProvider: AppMainContentProps['onSetDefaultInvestigatorProvider'];
   onSetDefaultInvestigatorModel: AppMainContentProps['onSetDefaultInvestigatorModel'];
   onSetDefaultPlanningNoToolGuardMode: AppMainContentProps['onSetDefaultPlanningNoToolGuardMode'];
+  quickStartMode: boolean;
+  onSetQuickStartMode: AppMainContentProps['onSetQuickStartMode'];
+  quickStartMaxPreDelegationToolCalls: number;
+  onSetQuickStartMaxPreDelegationToolCalls: AppMainContentProps['onSetQuickStartMaxPreDelegationToolCalls'];
+  adaptiveConcurrency: boolean;
+  onSetAdaptiveConcurrency: AppMainContentProps['onSetAdaptiveConcurrency'];
+  batchConcurrency: number;
+  onSetBatchConcurrency: AppMainContentProps['onSetBatchConcurrency'];
+  batchMinConcurrency: number;
+  onSetBatchMinConcurrency: AppMainContentProps['onSetBatchMinConcurrency'];
+  enableTrivialTaskGate: boolean;
+  onSetEnableTrivialTaskGate: AppMainContentProps['onSetEnableTrivialTaskGate'];
+  trivialTaskMaxPromptLength: number;
+  onSetTrivialTaskMaxPromptLength: AppMainContentProps['onSetTrivialTaskMaxPromptLength'];
   observerShowFindings: boolean;
   onSetObserverShowFindings: (next: boolean) => void;
   onSettingsSaveStatus: AppMainContentProps['onSettingsSaveStatus'];
@@ -94,6 +114,10 @@ export function buildMainContentProps(params: Params): AppMainContentProps {
     jumpToLatest: params.timelineFollow.jumpToLatest,
     onTimelineScroll: params.timelineFollow.onTimelineScroll,
     timelineItems: params.timelineItems,
+    liveReasoning: params.liveReasoning,
+    chatMessages: params.chatMessages,
+    chatIsStreaming: params.chatIsStreaming,
+    chatActiveMessageId: params.chatActiveMessageId,
     composerMode: params.composerMode,
     workspaces: params.workspaces,
     workWorkspaceId: params.workWorkspaceId,
@@ -111,6 +135,8 @@ export function buildMainContentProps(params: Params): AppMainContentProps {
     onComposerPaste: params.actions.handleComposerPaste,
     onSendChat: params.actions.handleSendChat,
     onStop: params.actions.handleStop,
+    onApprovePlan: params.actions.handleApprovePlan,
+    onRejectPlan: params.actions.handleRejectPlan,
     providers: params.providers,
     providerStatuses: params.providerStatuses,
     activeWorkspaceId: params.activeWorkspaceId,
@@ -131,6 +157,20 @@ export function buildMainContentProps(params: Params): AppMainContentProps {
     onSetDefaultInvestigatorProvider: params.onSetDefaultInvestigatorProvider,
     onSetDefaultInvestigatorModel: params.onSetDefaultInvestigatorModel,
     onSetDefaultPlanningNoToolGuardMode: params.onSetDefaultPlanningNoToolGuardMode,
+    quickStartMode: params.quickStartMode,
+    onSetQuickStartMode: params.onSetQuickStartMode,
+    quickStartMaxPreDelegationToolCalls: params.quickStartMaxPreDelegationToolCalls,
+    onSetQuickStartMaxPreDelegationToolCalls: params.onSetQuickStartMaxPreDelegationToolCalls,
+    adaptiveConcurrency: params.adaptiveConcurrency,
+    onSetAdaptiveConcurrency: params.onSetAdaptiveConcurrency,
+    batchConcurrency: params.batchConcurrency,
+    onSetBatchConcurrency: params.onSetBatchConcurrency,
+    batchMinConcurrency: params.batchMinConcurrency,
+    onSetBatchMinConcurrency: params.onSetBatchMinConcurrency,
+    enableTrivialTaskGate: params.enableTrivialTaskGate,
+    onSetEnableTrivialTaskGate: params.onSetEnableTrivialTaskGate,
+    trivialTaskMaxPromptLength: params.trivialTaskMaxPromptLength,
+    onSetTrivialTaskMaxPromptLength: params.onSetTrivialTaskMaxPromptLength,
     observerShowFindings: params.observerShowFindings,
     onSetObserverShowFindings: params.onSetObserverShowFindings,
     onSettingsSaveStatus: params.onSettingsSaveStatus,

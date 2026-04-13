@@ -382,6 +382,7 @@ export interface SessionStreamDeltaPayload {
   taskId: string;
   phase: 'planning' | 'implementation' | 'testing';
   delta: string;
+  isReasoning?: boolean;
 }
 
 export type ObserverSessionStatus = 'idle' | 'watching' | 'analyzing' | 'done';

@@ -1,12 +1,12 @@
 import type { AgentModels, AgentTodo, ProviderInfo, SessionObserverState, WorkSession, Workspace } from '../../lib/api';
 import type { ComposerImageAttachment, ComposerMode, FailureType, LlmSessionStatus, NodeTokenStream, TimelineItem } from '../types';
+import type { ChatMessage } from '../chat-types';
 import type { SettingsSaveToastState } from './overlays/SettingsSaveToast';
 import { GraphTabView } from './graph/GraphTabView';
-import { TimelinePanel } from './work/TimelinePanel';
+import { ChatPanel } from './chat/ChatPanel';
 import { ComposerPanel } from './work/ComposerPanel';
 import { LogsTabView } from './work/LogsTabView';
 import { SettingsTabView } from './settings/SettingsTabView';
-import { FloatingChatOverlay } from './layout/FloatingChatOverlay';
 
 type LiveReasoning = {
   taskId: string;
@@ -41,6 +41,9 @@ export type AppMainContentProps = {
   onTimelineScroll: () => void;
   timelineItems: TimelineItem[];
   liveReasoning: LiveReasoning | null;
+  chatMessages: ChatMessage[];
+  chatIsStreaming: boolean;
+  chatActiveMessageId: string | null;
   composerMode: ComposerMode;
   workspaces: Workspace[];
   workWorkspaceId: string;
@@ -153,80 +156,78 @@ export function AppMainContent(props: AppMainContentProps) {
     );
   }
 
-  const chatOverlay = (
-    <FloatingChatOverlay hasSession={Boolean(props.selectedSessionId)}>
-      <TimelinePanel
-        selectedSessionId={props.selectedSessionId}
-        selectedSession={props.selectedSession}
-        selectedSessionRunning={props.selectedSessionRunning}
-        showToolsPanel={props.showToolsPanel}
-        setShowToolsPanel={props.setShowToolsPanel}
-        toolsMode={props.toolsMode}
-        availableTools={props.availableTools}
-        isToolsLoading={props.isToolsLoading}
-        toolsLoadError={props.toolsLoadError}
-        timelineContainerRef={props.timelineContainerRef}
-        followTimelineTail={props.followTimelineTail}
-        jumpToLatest={props.jumpToLatest}
-        onTimelineScroll={props.onTimelineScroll}
-        timelineItems={props.timelineItems}
-        liveReasoning={props.liveReasoning}
-        composer={(
-          <ComposerPanel
-            selectedSession={props.selectedSession}
-            selectedSessionId={props.selectedSessionId}
-            selectedSessionRunning={props.selectedSessionRunning}
-            selectedLlmStatus={props.selectedLlmStatus}
-            composerMode={props.composerMode}
-            workspaces={props.workspaces}
-            workWorkspaceId={props.workWorkspaceId}
-            workProvider={props.workProvider}
-            workModel={props.workModel}
-            autoApprove={props.autoApprove}
-            composerText={props.composerText}
-            setComposerText={props.setComposerText}
-            composerImages={props.composerImages}
-            removeComposerAttachment={props.removeComposerAttachment}
-            hasComposerContent={props.hasComposerContent}
-            onComposerPaste={props.onComposerPaste}
-            onStop={props.onStop}
-            onApprovePlan={props.onApprovePlan}
-            onRejectPlan={props.onRejectPlan}
-            onSendChat={props.onSendChat}
-          />
-        )}
-        isDark={props.isDark}
-        copyTraceState={props.copyTraceState}
-        onCopyTrace={props.onCopyTrace}
-      />
-    </FloatingChatOverlay>
+  const chatPanel = (
+    <ChatPanel
+      messages={props.chatMessages}
+      isStreaming={props.chatIsStreaming}
+      activeMessageId={props.chatActiveMessageId}
+      onApprovePlan={props.onApprovePlan}
+      onRejectPlan={props.onRejectPlan}
+      isDark={props.isDark}
+      sessionId={props.selectedSessionId}
+      sessionPrompt={props.selectedSession?.prompt}
+      sessionStatus={props.selectedSession?.status}
+      sessionModel={props.workModel}
+      sessionProvider={props.workProvider}
+      composer={(
+        <ComposerPanel
+          selectedSession={props.selectedSession}
+          selectedSessionId={props.selectedSessionId}
+          selectedSessionRunning={props.selectedSessionRunning}
+          selectedLlmStatus={props.selectedLlmStatus}
+          composerMode={props.composerMode}
+          workspaces={props.workspaces}
+          workWorkspaceId={props.workWorkspaceId}
+          workProvider={props.workProvider}
+          workModel={props.workModel}
+          autoApprove={props.autoApprove}
+          composerText={props.composerText}
+          setComposerText={props.setComposerText}
+          composerImages={props.composerImages}
+          removeComposerAttachment={props.removeComposerAttachment}
+          hasComposerContent={props.hasComposerContent}
+          onComposerPaste={props.onComposerPaste}
+          onStop={props.onStop}
+          onApprovePlan={props.onApprovePlan}
+          onRejectPlan={props.onRejectPlan}
+          onSendChat={props.onSendChat}
+        />
+      )}
+    />
   );
 
   return (
-    <GraphTabView
-      selectedSession={props.selectedSession}
-      selectedSessionRunning={props.selectedSessionRunning}
-      selectedFailureType={props.selectedFailureType}
-      selectedLlmStatus={props.selectedLlmStatus}
-      nodeTokenStreams={props.nodeTokenStreams}
-      isDark={props.isDark}
-      selectedSessionId={props.selectedSessionId}
-      todos={props.todos}
-      todoInput={props.todoInput}
-      setTodoInput={props.setTodoInput}
-      onAddTodo={props.onAddTodo}
-      onToggleTodo={props.onToggleTodo}
-      chatOverlay={chatOverlay}
-      observerState={props.observerState}
-      workspaces={props.workspaces}
-      workWorkspaceId={props.workWorkspaceId}
-      workPlanningProvider={props.workPlanningProvider}
-      workPlanningModel={props.workPlanningModel}
-      workProvider={props.workProvider}
-      workModel={props.workModel}
-      planningNoToolGuardMode={props.planningNoToolGuardMode}
-      autoApprove={props.autoApprove}
-      composerMode={props.composerMode}
-    />
+    <div className="flex h-full flex-1">
+      <div className="flex flex-1 min-w-0 flex-col overflow-hidden">
+        <GraphTabView
+          selectedSession={props.selectedSession}
+          selectedSessionRunning={props.selectedSessionRunning}
+          selectedFailureType={props.selectedFailureType}
+          selectedLlmStatus={props.selectedLlmStatus}
+          nodeTokenStreams={props.nodeTokenStreams}
+          isDark={props.isDark}
+          selectedSessionId={props.selectedSessionId}
+          todos={props.todos}
+          todoInput={props.todoInput}
+          setTodoInput={props.setTodoInput}
+          onAddTodo={props.onAddTodo}
+          onToggleTodo={props.onToggleTodo}
+          chatOverlay={null}
+          observerState={props.observerState}
+          workspaces={props.workspaces}
+          workWorkspaceId={props.workWorkspaceId}
+          workPlanningProvider={props.workPlanningProvider}
+          workPlanningModel={props.workPlanningModel}
+          workProvider={props.workProvider}
+          workModel={props.workModel}
+          planningNoToolGuardMode={props.planningNoToolGuardMode}
+          autoApprove={props.autoApprove}
+          composerMode={props.composerMode}
+        />
+      </div>
+      <div className="flex w-[420px] shrink-0 flex-col border-l border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900">
+        {chatPanel}
+      </div>
+    </div>
   );
 }

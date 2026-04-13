@@ -437,7 +437,7 @@ async function runGraph(
         console.log(`  [${ts}] ✎ planning:             ${event.taskId}`);
         break;
       case 'task:stream-delta':
-        console.log(`  [${ts}] · stream (${event.phase}):      ${previewStreamDelta(event.delta)}`);
+        console.log(`  [${ts}] ${event.isReasoning ? '🧠 reasoning' : '· stream'} (${event.phase}):      ${previewStreamDelta(event.delta)}`);
         break;
       case 'task:tool-call':
         if (event.status === 'started') {

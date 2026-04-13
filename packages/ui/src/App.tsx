@@ -21,6 +21,7 @@ import { useBootstrapData } from './app/hooks/useBootstrapData';
 import { useProviderModels } from './app/hooks/useProviderModels';
 import { useSessionPolling } from './app/hooks/useSessionPolling';
 import { useSessionStream } from './app/hooks/useSessionStream';
+import { useChatStream } from './app/hooks/useChatStream';
 import { useSessionsStatusStream } from './app/hooks/useSessionsStatusStream';
 import { useRunUrlSync } from './app/hooks/useRunUrlSync';
 import { useTimelineFollow } from './app/hooks/useTimelineFollow';
@@ -185,6 +186,7 @@ export default function App() {
   useSessionsStatusStream({ enabled: canUseRealtimeApis, selectedSessionId, setSelectedSessionId: setSessionSelection, setSessions });
   useSessionPolling({ enabled: canUseRealtimeApis, selectedSessionId, setSelectedSessionId: setSessionSelection, setSessions, setChatMessages, setTodos });
   useSessionStream({ enabled: canUseRealtimeApis, selectedSessionId, setSessions, setChatMessages, setTodos, setNodeTokenStreams, setObserverState });
+  const chatStream = useChatStream({ enabled: canUseRealtimeApis, selectedSessionId, setSessions, setTodos, setObserverState });
   useRunUrlSync(selectedSessionId, setSessionSelection);
 
   useEffect(() => {
@@ -932,6 +934,9 @@ export default function App() {
     onTimelineScroll: timelineFollow.handleTimelineScroll,
     timelineItems,
     liveReasoning,
+    chatMessages: chatStream.messages,
+    chatIsStreaming: chatStream.isStreaming,
+    chatActiveMessageId: chatStream.activeMessageId,
     composerMode,
     workspaces,
     workWorkspaceId,
