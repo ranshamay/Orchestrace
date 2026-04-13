@@ -308,8 +308,12 @@ export function buildImplementationPrompt(params: {
           'Previous attempt response:',
           truncateForRetry(previousResponse) || '(no response)',
           '',
-          'Validation failures to fix:',
+          'Validation failures detected:',
           truncateForRetry(previousValidationError) || '(missing validation details)',
+          '',
+          'SCOPE GUARD: Only fix failures that YOUR changes could have caused.',
+          'If a test or typecheck failure exists in code you did not modify, it is pre-existing — note it and continue your original task.',
+          'Do NOT modify production source code to satisfy pre-existing test failures.',
           '',
           PLANNING_FIRST_TOOL_RETRY_DIRECTIVE,
         ].join('\n')

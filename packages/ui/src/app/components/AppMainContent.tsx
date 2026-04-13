@@ -169,6 +169,13 @@ export function AppMainContent(props: AppMainContentProps) {
       sessionStatus={props.selectedSession?.status}
       sessionModel={props.workModel}
       sessionProvider={props.workProvider}
+      composerMode={props.composerMode}
+      workspaces={props.workspaces}
+      workWorkspaceId={props.workWorkspaceId}
+      planningNoToolGuardMode={props.planningNoToolGuardMode}
+      autoApprove={props.autoApprove}
+      planningProvider={props.workPlanningProvider}
+      planningModel={props.workPlanningModel}
       composer={(
         <ComposerPanel
           selectedSession={props.selectedSession}
@@ -214,15 +221,6 @@ export function AppMainContent(props: AppMainContentProps) {
           onToggleTodo={props.onToggleTodo}
           chatOverlay={null}
           observerState={props.observerState}
-          workspaces={props.workspaces}
-          workWorkspaceId={props.workWorkspaceId}
-          workPlanningProvider={props.workPlanningProvider}
-          workPlanningModel={props.workPlanningModel}
-          workProvider={props.workProvider}
-          workModel={props.workModel}
-          planningNoToolGuardMode={props.planningNoToolGuardMode}
-          autoApprove={props.autoApprove}
-          composerMode={props.composerMode}
         />
       </div>
       <div className="flex w-[420px] shrink-0 flex-col border-l border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900">

@@ -12,7 +12,7 @@ import type {
   TaskReplayRecord,
   TaskNode,
 } from '../dag/types.js';
-import { validate } from '../validation/validator.js';
+import { validate, isContentOnlyFileSet } from '../validation/validator.js';
 import type {
   LlmAdapter,
   LlmAgent,
@@ -195,6 +195,7 @@ export async function executeRole(params: {
         toolName: event.toolName,
         status: event.type,
         input: event.arguments,
+        rawInput: event.rawArguments,
         output: event.result,
         isError: event.isError,
         details: event.details,
@@ -431,6 +432,18 @@ export async function executeImplementerRole(params: {
         durationMs: result.durationMs,
       })),
     };
+
+    // Content-only changes (e.g. markdown docs) cannot cause test/typecheck
+    // failures. Skip validation failures to prevent the agent from drifting
+    // into fixing pre-existing, unrelated test breakage.
+    if (!allPassed && isContentOnlyFileSet(output.filesChanged)) {
+      completedImplementationAttempt.validation.passed = true;
+      emit({
+        type: 'task:validating',
+        taskId: task.id,
+      });
+      return output;
+    }
 
     if (allPassed) {
       if (!postValidationGate) {

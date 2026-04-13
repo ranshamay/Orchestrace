@@ -2418,10 +2418,11 @@ async function main(): Promise<void> {
   function handleToolCallChecklist(event: Extract<DagEvent, { type: 'task:tool-call' }>): void {
     const toolName = event.toolName;
     if (toolName !== 'todo_set' && toolName !== 'todo_add' && toolName !== 'todo_update') return;
-    if (!event.input) return;
+    const rawPayload = event.rawInput ?? event.input;
+    if (!rawPayload) return;
 
     try {
-      const args = JSON.parse(event.input) as Record<string, unknown>;
+      const args = JSON.parse(rawPayload) as Record<string, unknown>;
       if (!args || typeof args !== 'object') return;
 
       // For set/add, emit todos-set with the parsed items
@@ -2472,9 +2473,9 @@ async function main(): Promise<void> {
   }
 
   function handleToolCallAgentGraph(event: Extract<DagEvent, { type: 'task:tool-call' }>): void {
-    if (event.toolName !== 'agent_graph_set' || !event.input) return;
+    if (event.toolName !== 'agent_graph_set' || (!event.rawInput && !event.input)) return;
     try {
-      const args = JSON.parse(event.input) as Record<string, unknown>;
+      const args = JSON.parse(event.rawInput ?? event.input!) as Record<string, unknown>;
       if (!args || typeof args !== 'object') return;
       const nodes = normalizeGraphNodes(args.nodes);
       if (nodes.length === 0) return;

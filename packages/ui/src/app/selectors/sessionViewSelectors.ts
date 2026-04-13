@@ -25,7 +25,10 @@ export function selectSessionViewState(selectedSession?: WorkSession) {
   };
 }
 
-function fallbackComposerModeFromLlmStatus(status: { state: string; phase?: 'planning' | 'implementation' | 'testing' }): ComposerMode {
+function fallbackComposerModeFromLlmStatus(status: { state: string; phase?: 'chat' | 'planning' | 'implementation' | 'testing' }): ComposerMode {
+  if (status.phase === 'chat') {
+    return 'chat';
+  }
   if (status.phase === 'planning' || status.phase === 'implementation' || status.phase === 'testing') {
     return status.phase;
   }

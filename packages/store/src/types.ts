@@ -48,7 +48,7 @@ export interface SessionLlmStatus {
   detail?: string;
   failureType?: string;
   taskId?: string;
-  phase?: 'planning' | 'implementation' | 'testing';
+  phase?: 'chat' | 'planning' | 'implementation' | 'testing';
   updatedAt: string;
 }
 

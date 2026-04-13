@@ -19,7 +19,7 @@ export type {
 export { PromptSectionName, renderPromptSections } from './prompt/sections.js';
 export type { OrchestratorConfig, PlanApprovalRequest } from './orchestrator/orchestrator.js';
 export type { PromptSection, PromptSectionNameType } from './prompt/sections.js';
-export { validate } from './validation/validator.js';
+export { validate, isContentOnlyFileSet } from './validation/validator.js';
 export {
   DEFAULT_TASK_PROMPT_MAX_LENGTH,
   validateTaskPromptInput,

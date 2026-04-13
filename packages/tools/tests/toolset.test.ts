@@ -53,18 +53,22 @@ describe('createAgentToolset phase policy', () => {
     ]);
   });
 
-  it('exposes read-only required tools for chat', async () => {
+  it('exposes full tools for chat including write and run_command', async () => {
     const cwd = await makeWorkspace();
     const toolset = createAgentToolset({ cwd, phase: 'chat', taskType: 'code' });
 
     expect(toolNames(toolset)).toEqual([
       'agent_graph_get',
       'agent_graph_set',
+      'edit_file',
+      'edit_files',
       'git_diff',
       'git_status',
       'list_directory',
       'read_file',
       'read_files',
+      'run_command',
+      'run_command_batch',
       'search_files',
       'subagent_list',
             'todo_add',
@@ -74,6 +78,8 @@ describe('createAgentToolset phase policy', () => {
       'todo_update',
 
       'url_fetch',
+      'write_file',
+      'write_files',
     ]);
   });
 

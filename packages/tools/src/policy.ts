@@ -19,7 +19,7 @@ export function resolveAgentToolPermissions(options: AgentToolsetOptions): Agent
 }
 
 function getDefaultPermissions(phase: string, taskType: string): AgentToolPermissions {
-  if (phase === 'planning' || phase === 'chat') {
+  if (phase === 'planning') {
     return {
       allowWriteTools: false,
       allowRunCommand: false,
@@ -30,6 +30,41 @@ function getDefaultPermissions(phase: string, taskType: string): AgentToolPermis
         'search_files',
         'git_diff',
         'git_status',
+        'url_fetch',
+        'todo_get',
+                'todo_set',
+        'todo_replan',
+        'todo_add',
+        'todo_update',
+
+        'mode_get',
+        'mode_set',
+        'agent_graph_get',
+        'agent_graph_set',
+        'subagent_list',
+        'subagent_spawn',
+        'subagent_spawn_batch',
+      ],
+    };
+  }
+
+  if (phase === 'chat') {
+    return {
+      allowWriteTools: true,
+      allowRunCommand: true,
+      toolAllowlist: [
+        'list_directory',
+        'read_file',
+        'read_files',
+        'search_files',
+        'git_diff',
+        'git_status',
+        'write_file',
+        'write_files',
+        'edit_file',
+        'edit_files',
+        'run_command',
+        'run_command_batch',
         'url_fetch',
         'todo_get',
                 'todo_set',

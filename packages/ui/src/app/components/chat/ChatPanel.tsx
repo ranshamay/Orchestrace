@@ -2,7 +2,10 @@ import { useRef, useEffect, useCallback, useState, type ReactNode } from 'react'
 import type { ChatMessage, ToolCallMessagePart } from '../../chat-types';
 import { PHASE_ICON, resolveToolIcon } from '../../chat-types';
 import { MarkdownMessage } from '../MarkdownMessage';
-import { ChevronDown, ChevronRight, Brain, AlertTriangle, Eye, Zap, ClipboardCopy, Check } from 'lucide-react';
+import { ChevronDown, ChevronRight, Brain, AlertTriangle, Eye, Zap, ClipboardCopy, Check, Info, X } from 'lucide-react';
+import { composerModeBadgeClass } from '../../utils/composer';
+import type { ComposerMode } from '../../types';
+import type { Workspace } from '../../../lib/api';
 
 type Props = {
   messages: ChatMessage[];
@@ -17,13 +20,21 @@ type Props = {
   sessionStatus?: string;
   sessionModel?: string;
   sessionProvider?: string;
+  composerMode: ComposerMode;
+  workspaces: Workspace[];
+  workWorkspaceId: string;
+  planningNoToolGuardMode: 'enforce' | 'warn';
+  autoApprove: boolean;
+  planningProvider: string;
+  planningModel: string;
 };
 
-export function ChatPanel({ messages, isStreaming, activeMessageId: _activeMessageId, composer, onApprovePlan, onRejectPlan, isDark, sessionId, sessionPrompt, sessionStatus, sessionModel, sessionProvider }: Props) {
+export function ChatPanel({ messages, isStreaming, activeMessageId: _activeMessageId, composer, onApprovePlan, onRejectPlan, isDark, sessionId, sessionPrompt, sessionStatus, sessionModel, sessionProvider, composerMode, workspaces, workWorkspaceId, planningNoToolGuardMode, autoApprove, planningProvider, planningModel }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const isAutoScrollingRef = useRef(true);
   const [showJump, setShowJump] = useState(false);
   const [copyState, setCopyState] = useState<'idle' | 'copied'>('idle');
+  const [showInfo, setShowInfo] = useState(false);
 
   const handleCopyInvestigation = useCallback(async () => {
     const prompt = buildInvestigationPrompt(messages, { sessionId, prompt: sessionPrompt, status: sessionStatus, model: sessionModel, provider: sessionProvider });
@@ -55,24 +66,64 @@ export function ChatPanel({ messages, isStreaming, activeMessageId: _activeMessa
 
   const entries = buildStreamEntries(messages);
 
+  const livePhase = (composerMode === 'planning' || composerMode === 'implementation' || composerMode === 'chat')
+    ? composerMode
+    : undefined;
+  const displayModel = livePhase === 'planning' ? (planningModel || sessionModel) : (sessionModel || planningModel);
+  const displayProvider = livePhase === 'planning' ? (planningProvider || sessionProvider) : (sessionProvider || planningProvider);
+  const effectivePlanningGuard = planningNoToolGuardMode;
+  const workspaceName = workspaces.find((w) => w.id === workWorkspaceId)?.name ?? 'none';
+
   return (
     <div className="relative flex min-h-0 flex-1 flex-col">
-      {/* Header bar with copy button */}
-      {messages.length > 0 && (
-        <div className="flex items-center justify-between border-b border-slate-200/60 dark:border-slate-700/60 px-3 py-1.5 shrink-0">
-          <span className="text-[11px] font-medium text-slate-500 dark:text-slate-400">
-            Chat {isStreaming && <span className="text-violet-500 animate-pulse">· streaming</span>}
+      {/* Top bar: model + mode + info + copy trace */}
+      <div className="flex items-center justify-between border-b border-slate-200/60 dark:border-slate-700/60 px-3 py-1.5 shrink-0 gap-2">
+        <div className="flex items-center gap-2 min-w-0">
+          <span className="text-[11px] font-mono text-slate-600 dark:text-slate-300 truncate" title={`${displayProvider || ''}/${displayModel || ''}`}>
+            {displayModel || 'no model'}
           </span>
-          <button
-            onClick={handleCopyInvestigation}
-            className="flex items-center gap-1 rounded px-2 py-1 text-[11px] text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
-            title="Copy session trace as LLM investigation prompt"
-          >
-            {copyState === 'copied' ? <Check className="h-3 w-3 text-emerald-500" /> : <ClipboardCopy className="h-3 w-3" />}
-            <span>{copyState === 'copied' ? 'Copied' : 'Copy trace'}</span>
-          </button>
+          {isStreaming && <span className="text-[10px] text-violet-500 animate-pulse shrink-0">streaming</span>}
+          <span className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${composerModeBadgeClass(composerMode)}`}>
+            {composerMode}
+          </span>
         </div>
-      )}
+        <div className="flex items-center gap-1 shrink-0">
+          <div className="relative">
+            <button
+              onClick={() => setShowInfo(!showInfo)}
+              className="flex items-center rounded p-1 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+              title="Session info"
+            >
+              <Info className="h-3.5 w-3.5" />
+            </button>
+            {showInfo && (
+              <div className="absolute right-0 top-full mt-1 z-50 w-64 rounded-lg border border-slate-200 bg-white shadow-lg dark:border-slate-700 dark:bg-slate-800 p-3 text-xs text-slate-600 dark:text-slate-300 space-y-1.5">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="font-medium text-slate-700 dark:text-slate-200">Session Info</span>
+                  <button onClick={() => setShowInfo(false)} className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-200">
+                    <X className="h-3 w-3" />
+                  </button>
+                </div>
+                <div className="truncate">Workspace: <span className="font-mono">{workspaceName}</span></div>
+                <div className="truncate">Provider: <span className="font-mono">{displayProvider || 'none'}</span></div>
+                <div className="truncate">Model: <span className="font-mono">{displayModel || 'none'}</span></div>
+                <div>Auto-approve: <span className="font-mono">{autoApprove ? 'on' : 'off'}</span></div>
+                <div>Planning guard: <span className={`rounded px-1 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${effectivePlanningGuard === 'warn' ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300' : 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300'}`}>{effectivePlanningGuard}</span></div>
+              </div>
+            )}
+          </div>
+          {messages.length > 0 && (
+            <button
+              onClick={handleCopyInvestigation}
+              className="flex items-center gap-1 rounded px-2 py-1 text-[11px] text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+              title="Copy session trace as LLM investigation prompt"
+            >
+              {copyState === 'copied' ? <Check className="h-3 w-3 text-emerald-500" /> : <ClipboardCopy className="h-3 w-3" />}
+              <span>{copyState === 'copied' ? 'Copied' : 'Copy trace'}</span>
+            </button>
+          )}
+        </div>
+      </div>
       <div
         ref={containerRef}
         onScroll={handleScroll}
@@ -317,8 +368,8 @@ function ReasoningBlock({ text, isStreaming }: { text: string; isStreaming: bool
             : <ChevronDown className="h-2.5 w-2.5" />
         )}
       </button>
-      <div className="pl-4 border-l-2 border-slate-200 dark:border-slate-700 text-[12px] text-slate-500 dark:text-slate-400 italic leading-relaxed whitespace-pre-wrap font-mono max-h-60 overflow-y-auto">
-        {preview}
+      <div className="pl-4 border-l-2 border-slate-200 dark:border-slate-700 text-[12px] text-slate-500 dark:text-slate-400 italic leading-relaxed max-h-60 overflow-y-auto">
+        <MarkdownMessage content={preview} dark={false} />
         {collapsed && '…'}
         {isStreaming && <span className="not-italic animate-pulse text-violet-400">▍</span>}
       </div>

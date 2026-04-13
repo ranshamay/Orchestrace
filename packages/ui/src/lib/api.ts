@@ -99,9 +99,9 @@ function withAuthHeaders(init?: RequestInit): RequestInit {
   };
 }
 
-async function authedFetch(path: string, init?: RequestInit): Promise<Response> {
+async function authedFetch(path: string, init?: RequestInit, options?: { timeoutMs?: number }): Promise<Response> {
   const method = (init?.method ?? 'GET').toUpperCase();
-  const timeoutMs = method === 'GET' ? 15_000 : 30_000;
+  const timeoutMs = options?.timeoutMs ?? (method === 'GET' ? 15_000 : 30_000);
   const debugEnabled = isUiApiDebugEnabled();
   const startedAt = Date.now();
 
@@ -376,7 +376,7 @@ export interface WorkSession {
     detail?: string;
     failureType?: string;
     taskId?: string;
-    phase?: 'planning' | 'implementation' | 'testing';
+    phase?: 'chat' | 'planning' | 'implementation' | 'testing';
     updatedAt: string;
   };
   taskStatus: Record<string, string>;
@@ -744,7 +744,7 @@ export async function sendChatMessage(
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ id, message: payload.message, messageParts: payload.messageParts }),
-  });
+  }, { timeoutMs: 600_000 });
   return readJson(res);
 }
 

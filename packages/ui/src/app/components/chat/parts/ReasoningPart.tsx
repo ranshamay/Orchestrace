@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import type { ReasoningMessagePart } from '../../../chat-types';
+import { MarkdownMessage } from '../../MarkdownMessage';
 
 type Props = { part: ReasoningMessagePart };
 
@@ -35,8 +36,8 @@ export function ReasoningPart({ part }: Props) {
         <span>🧠</span>
         <span>{part.isStreaming ? 'Thinking…' : `(${charCount.toLocaleString()} chars) ▾`}</span>
       </button>
-      <div className="pl-5 text-[11px] italic text-slate-500 dark:text-slate-400 leading-relaxed whitespace-pre-wrap max-h-40 overflow-y-auto font-mono">
-        {part.text}
+      <div className="pl-5 text-[11px] italic text-slate-500 dark:text-slate-400 leading-relaxed max-h-40 overflow-y-auto">
+        <MarkdownMessage content={part.text} dark={false} />
         {part.isStreaming && <span className="animate-pulse">█</span>}
       </div>
     </div>

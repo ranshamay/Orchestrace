@@ -3,6 +3,29 @@ import { access } from 'node:fs/promises';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type { TaskOutput, ValidationConfig, ValidationResult } from '../dag/types.js';
 
+const CONTENT_ONLY_EXTENSIONS = new Set([
+  '.md', '.mdx', '.txt', '.rst', '.adoc',
+  '.png', '.jpg', '.jpeg', '.gif', '.svg', '.ico', '.webp', '.avif',
+  '.pdf', '.doc', '.docx',
+  '.csv',
+]);
+
+/**
+ * Returns true when every file in the change set is a documentation or content
+ * file that cannot affect code-level validation (typecheck, tests).
+ * Returns false when the change set is empty or undefined (unknown scope).
+ */
+export function isContentOnlyFileSet(filesChanged: string[] | undefined): boolean {
+  if (!filesChanged || filesChanged.length === 0) {
+    return false;
+  }
+  return filesChanged.every((file) => {
+    const dot = file.lastIndexOf('.');
+    if (dot === -1) return false;
+    return CONTENT_ONLY_EXTENSIONS.has(file.slice(dot).toLowerCase());
+  });
+}
+
 /**
  * Run validation commands against a task's output.
  * Returns individual results for each check.

@@ -252,6 +252,8 @@ export type DagEvent =
       toolName: string;
       status: 'started' | 'result';
       input?: string;
+      /** Full un-truncated tool arguments for coordination tools. */
+      rawInput?: string;
             output?: string;
       isError?: boolean;
       details?: unknown;
