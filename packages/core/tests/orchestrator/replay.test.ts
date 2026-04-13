@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { describe, expect, it } from 'vitest';
 import type { LlmAdapter, LlmAgent, LlmCompletionOptions, LlmPromptInput, LlmRequest, SpawnAgentRequest } from '@orchestrace/provider';
 import { orchestrate } from '../../src/orchestrator/orchestrator.js';
-import { buildRoleSystemPrompt } from '../../src/orchestrator/role-config.js';
+import { buildImplementationPrompt, buildRoleSystemPrompt } from '../../src/orchestrator/role-config.js';
 
 import type { DagEvent, TaskGraph } from '../../src/dag/types.js';
 
@@ -579,7 +579,7 @@ describe('orchestrate replay capture', () => {
     }
   });
 
-      it('includes write-after-acknowledgment commitment rule in implementation system prompt', () => {
+            it('includes write-after-acknowledgment commitment rule in implementation system prompt', () => {
     const prompt = buildRoleSystemPrompt({
       role: 'implementer',
       task: {
@@ -599,8 +599,50 @@ describe('orchestrate replay capture', () => {
     expect(prompt).toContain('Do not perform additional read/search/list tool calls');
   });
 
+  it('requires mandatory best-practices consultation in implementation prompt', () => {
+    const prompt = buildImplementationPrompt({
+      node: {
+        id: 'task-1',
+        name: 'Task 1',
+        type: 'code',
+        prompt: 'Apply update',
+        dependencies: [],
+      },
+      depOutputs: new Map(),
+      approvedPlan: 'Apply update in a focused way',
+      attempt: 1,
+      previousResponse: '',
+      previousValidationError: '',
+    });
+
+        expect(prompt).toContain('Always apply relevant guidance from best-practices/ when implementing');
+    expect(prompt).toContain('you must consult matching guide(s) before code edits when relevant');
+    expect(prompt).toContain('Before making edits, read best-practices/README.md');
+  });
+
+  it('requires mandatory best-practices consultation in implementer system prompt', () => {
+    const prompt = buildRoleSystemPrompt({
+      role: 'implementer',
+      task: {
+        id: 'task-1',
+        name: 'Task 1',
+        type: 'code',
+        prompt: 'Apply update',
+        dependencies: [],
+      },
+      graphId: 'graph-1',
+      cwd: '/tmp/workspace',
+      provider: 'github-copilot',
+      model: 'gpt-5',
+    });
+
+        expect(prompt).toContain('Always apply relevant guidance from best-practices/ when implementing');
+    expect(prompt).toContain('you must consult matching guide(s) before edits when relevant');
+    expect(prompt).toContain('Before making edits, read best-practices/README.md');
+  });
 
   it('aborts repeated identical planning-contract failures as stagnation', async () => {
+
 
     const cwd = await mkdtemp(join(tmpdir(), 'orchestrace-replay-planning-contract-stagnation-'));
 
