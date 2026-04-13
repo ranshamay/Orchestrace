@@ -26,6 +26,10 @@ export function handleStreamEvent(event: AssistantMessageEvent, completionOption
     completionOptions?.onTextDelta?.(event.delta);
   }
 
+  if (event.type === 'thinking_delta') {
+    completionOptions?.onTextDelta?.(event.delta);
+  }
+
   const partial = 'partial' in event ? event.partial : undefined;
   const usage = partial?.usage;
   if (!usage) {

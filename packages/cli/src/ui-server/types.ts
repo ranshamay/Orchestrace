@@ -335,6 +335,8 @@ export interface UiPreferences {
   defaultImplementationModel: string;
   defaultDeliveryStrategy: SessionDeliveryStrategy;
   planningNoToolGuardMode: 'enforce' | 'warn';
+  quickStartMode: boolean;
+  quickStartMaxPreDelegationToolCalls: number;
   executionContext: ExecutionContext;
   selectedWorktreePath?: string;
   useWorktree: boolean;
@@ -357,6 +359,8 @@ export interface PersistedUiPreferences {
   defaultImplementationModel?: string;
   defaultDeliveryStrategy?: SessionDeliveryStrategy;
   planningNoToolGuardMode?: 'enforce' | 'warn';
+  quickStartMode?: boolean;
+  quickStartMaxPreDelegationToolCalls?: number;
   executionContext?: ExecutionContext;
   selectedWorktreePath?: string;
   useWorktree?: boolean;

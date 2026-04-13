@@ -2045,11 +2045,10 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       batchConcurrency,
       normalizePositiveSetting(request.batchMinConcurrency, uiPreferences.batchMinConcurrency),
     );
-    const quickStartMode = request.quickStartMode
-      ?? (parseBooleanSetting(process.env.ORCHESTRACE_QUICK_START_MODE) ?? false);
+    const quickStartMode = request.quickStartMode ?? uiPreferences.quickStartMode;
     const quickStartMaxPreDelegationToolCalls = normalizePositiveSetting(
       request.quickStartMaxPreDelegationToolCalls,
-      parsePositiveSetting(process.env.ORCHESTRACE_QUICK_START_MAX_PRE_DELEGATION_TOOL_CALLS) ?? 3,
+      uiPreferences.quickStartMaxPreDelegationToolCalls,
     );
     const planningNoToolGuardMode = normalizePlanningNoToolGuardMode(request.planningNoToolGuardMode)
       ?? uiPreferences.planningNoToolGuardMode;
@@ -6474,6 +6473,8 @@ function resolveUiPreferencesDefaults(): UiPreferences {
     planningNoToolGuardMode,
     executionContext,
     useWorktree,
+    quickStartMode: parseBooleanSetting(process.env.ORCHESTRACE_QUICK_START_MODE) ?? false,
+    quickStartMaxPreDelegationToolCalls: parsePositiveSetting(process.env.ORCHESTRACE_QUICK_START_MAX_PRE_DELEGATION_TOOL_CALLS) ?? 3,
     adaptiveConcurrency: resolveAdaptiveConcurrencyDefault(),
     batchConcurrency,
     batchMinConcurrency,
@@ -6553,6 +6554,11 @@ function normalizeUiPreferences(value: unknown, fallback: UiPreferences): UiPref
     planningNoToolGuardMode,
     executionContext,
     useWorktree,
+    quickStartMode: parseBooleanSetting(value.quickStartMode) ?? fallback.quickStartMode,
+    quickStartMaxPreDelegationToolCalls: normalizePositiveSetting(
+      value.quickStartMaxPreDelegationToolCalls,
+      fallback.quickStartMaxPreDelegationToolCalls,
+    ),
     adaptiveConcurrency: parseBooleanSetting(value.adaptiveConcurrency) ?? fallback.adaptiveConcurrency,
     batchConcurrency,
     batchMinConcurrency,

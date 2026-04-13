@@ -167,6 +167,20 @@ type Props = {
   setDefaultInvestigatorProvider: (next: string) => void;
   setDefaultInvestigatorModel: (next: string) => void;
   setDefaultPlanningNoToolGuardMode: (next: 'enforce' | 'warn') => void;
+  quickStartMode: boolean;
+  setQuickStartMode: (next: boolean) => void;
+  quickStartMaxPreDelegationToolCalls: number;
+  setQuickStartMaxPreDelegationToolCalls: (next: number) => void;
+  adaptiveConcurrency: boolean;
+  setAdaptiveConcurrency: (next: boolean) => void;
+  batchConcurrency: number;
+  setBatchConcurrency: (next: number) => void;
+  batchMinConcurrency: number;
+  setBatchMinConcurrency: (next: number) => void;
+  enableTrivialTaskGate: boolean;
+  setEnableTrivialTaskGate: (next: boolean) => void;
+  trivialTaskMaxPromptLength: number;
+  setTrivialTaskMaxPromptLength: (next: number) => void;
   observerShowFindings: boolean;
   setObserverShowFindings: (next: boolean) => void;
   onSettingsSaveStatus: (state: Exclude<SettingsSaveToastState, 'idle'>, message: string) => void;
@@ -194,6 +208,20 @@ export function SettingsTabView({
   setDefaultInvestigatorProvider,
   setDefaultInvestigatorModel,
   setDefaultPlanningNoToolGuardMode,
+  quickStartMode,
+  setQuickStartMode,
+  quickStartMaxPreDelegationToolCalls,
+  setQuickStartMaxPreDelegationToolCalls,
+  adaptiveConcurrency,
+  setAdaptiveConcurrency,
+  batchConcurrency,
+  setBatchConcurrency,
+  batchMinConcurrency,
+  setBatchMinConcurrency,
+  enableTrivialTaskGate,
+  setEnableTrivialTaskGate,
+  trivialTaskMaxPromptLength,
+  setTrivialTaskMaxPromptLength,
   observerShowFindings,
   setObserverShowFindings,
   onSettingsSaveStatus,
@@ -623,24 +651,146 @@ export function SettingsTabView({
         )}
 
         <div className="mt-4 rounded border border-slate-200 p-3 dark:border-slate-700">
-          <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">Planning Guard</div>
-          <div className="mb-2 text-xs text-slate-600 dark:text-slate-300">
-            Choose whether no-tool planning guardrails should abort attempts or only emit warnings.
+          <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+            <Zap className="mr-1 inline h-3.5 w-3.5" />
+            Budget &amp; Optimization Guardrails
           </div>
-          <label className="flex flex-col gap-1 text-sm text-slate-700 dark:text-slate-200">
-            <span className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">No-tool guard mode</span>
-            <select
-              className="rounded border border-slate-200 px-2 py-1.5 text-sm dark:border-slate-700 dark:bg-slate-900"
-              value={defaultPlanningNoToolGuardMode}
-              onChange={(event) => {
-                const next = event.target.value === 'warn' ? 'warn' : 'enforce';
-                setDefaultPlanningNoToolGuardMode(next);
-              }}
-            >
-              <option value="enforce">Enforce (abort stalled planning attempts)</option>
-              <option value="warn">Warn only (never abort from no-tool guards)</option>
-            </select>
-          </label>
+          <div className="mb-3 text-xs text-slate-600 dark:text-slate-300">
+            Control how aggressively the agent uses resources during planning and implementation.
+          </div>
+
+          <div className="space-y-3">
+            {/* Planning No-Tool Guard */}
+            <label className="flex flex-col gap-1 text-sm text-slate-700 dark:text-slate-200">
+              <span className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">Planning no-tool guard</span>
+              <select
+                className="rounded border border-slate-200 px-2 py-1.5 text-sm dark:border-slate-700 dark:bg-slate-900"
+                value={defaultPlanningNoToolGuardMode}
+                onChange={(event) => {
+                  const next = event.target.value === 'warn' ? 'warn' : 'enforce';
+                  setDefaultPlanningNoToolGuardMode(next);
+                }}
+              >
+                <option value="enforce">Enforce (abort stalled planning attempts)</option>
+                <option value="warn">Warn only (never abort from no-tool guards)</option>
+              </select>
+            </label>
+
+            {/* Quick Start Mode */}
+            <div className="rounded border border-slate-100 bg-slate-50 p-2.5 dark:border-slate-700 dark:bg-slate-950">
+              <label className="flex items-center gap-2 text-sm text-slate-700 dark:text-slate-200">
+                <input
+                  type="checkbox"
+                  checked={quickStartMode}
+                  onChange={(event) => setQuickStartMode(event.target.checked)}
+                  className="h-4 w-4 rounded border-slate-300 accent-blue-600"
+                />
+                <span className="font-medium">Quick Start Mode</span>
+              </label>
+              <div className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                Enforce early delegation in planning — limits tool calls before the first sub-agent spawn.
+              </div>
+              {quickStartMode && (
+                <label className="mt-2 flex flex-col gap-1 text-sm text-slate-700 dark:text-slate-200">
+                  <span className="text-xs text-slate-500 dark:text-slate-400">Max pre-delegation tool calls</span>
+                  <input
+                    type="number"
+                    min={1}
+                    max={20}
+                    value={quickStartMaxPreDelegationToolCalls}
+                    onChange={(event) => {
+                      const val = Math.max(1, Math.min(20, Number(event.target.value) || 3));
+                      setQuickStartMaxPreDelegationToolCalls(val);
+                    }}
+                    className="w-24 rounded border border-slate-200 px-2 py-1.5 text-sm dark:border-slate-700 dark:bg-slate-900"
+                  />
+                </label>
+              )}
+            </div>
+
+            {/* Trivial Task Gate */}
+            <div className="rounded border border-slate-100 bg-slate-50 p-2.5 dark:border-slate-700 dark:bg-slate-950">
+              <label className="flex items-center gap-2 text-sm text-slate-700 dark:text-slate-200">
+                <input
+                  type="checkbox"
+                  checked={enableTrivialTaskGate}
+                  onChange={(event) => setEnableTrivialTaskGate(event.target.checked)}
+                  className="h-4 w-4 rounded border-slate-300 accent-blue-600"
+                />
+                <span className="font-medium">Trivial Task Gate</span>
+              </label>
+              <div className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                Detect trivial tasks and optimize execution strategy based on prompt complexity.
+              </div>
+              {enableTrivialTaskGate && (
+                <label className="mt-2 flex flex-col gap-1 text-sm text-slate-700 dark:text-slate-200">
+                  <span className="text-xs text-slate-500 dark:text-slate-400">Max prompt length for trivial classification (chars)</span>
+                  <input
+                    type="number"
+                    min={20}
+                    max={500}
+                    value={trivialTaskMaxPromptLength}
+                    onChange={(event) => {
+                      const val = Math.max(20, Math.min(500, Number(event.target.value) || 120));
+                      setTrivialTaskMaxPromptLength(val);
+                    }}
+                    className="w-24 rounded border border-slate-200 px-2 py-1.5 text-sm dark:border-slate-700 dark:bg-slate-900"
+                  />
+                </label>
+              )}
+            </div>
+
+            {/* Adaptive Concurrency */}
+            <div className="rounded border border-slate-100 bg-slate-50 p-2.5 dark:border-slate-700 dark:bg-slate-950">
+              <label className="flex items-center gap-2 text-sm text-slate-700 dark:text-slate-200">
+                <input
+                  type="checkbox"
+                  checked={adaptiveConcurrency}
+                  onChange={(event) => setAdaptiveConcurrency(event.target.checked)}
+                  className="h-4 w-4 rounded border-slate-300 accent-blue-600"
+                />
+                <span className="font-medium">Adaptive Concurrency</span>
+              </label>
+              <div className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                Dynamically adjust tool execution concurrency based on workload.
+              </div>
+            </div>
+
+            {/* Batch Concurrency */}
+            <div className="flex gap-4">
+              <label className="flex flex-col gap-1 text-sm text-slate-700 dark:text-slate-200">
+                <span className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">Batch concurrency</span>
+                <input
+                  type="number"
+                  min={1}
+                  max={32}
+                  value={batchConcurrency}
+                  onChange={(event) => {
+                    const val = Math.max(1, Math.min(32, Number(event.target.value) || 8));
+                    setBatchConcurrency(val);
+                    if (batchMinConcurrency > val) {
+                      setBatchMinConcurrency(val);
+                    }
+                  }}
+                  className="w-24 rounded border border-slate-200 px-2 py-1.5 text-sm dark:border-slate-700 dark:bg-slate-900"
+                />
+              </label>
+              <label className="flex flex-col gap-1 text-sm text-slate-700 dark:text-slate-200">
+                <span className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">Min concurrency</span>
+                <input
+                  type="number"
+                  min={1}
+                  max={batchConcurrency}
+                  value={batchMinConcurrency}
+                  onChange={(event) => {
+                    const val = Math.max(1, Math.min(batchConcurrency, Number(event.target.value) || 1));
+                    setBatchMinConcurrency(val);
+                  }}
+                  className="w-24 rounded border border-slate-200 px-2 py-1.5 text-sm dark:border-slate-700 dark:bg-slate-900"
+                />
+              </label>
+            </div>
+          </div>
         </div>
       </div>
 

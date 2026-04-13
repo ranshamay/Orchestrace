@@ -80,6 +80,20 @@ export type AppMainContentProps = {
   onSetDefaultInvestigatorProvider: (next: string) => void;
   onSetDefaultInvestigatorModel: (next: string) => void;
   onSetDefaultPlanningNoToolGuardMode: (next: 'enforce' | 'warn') => void;
+  quickStartMode: boolean;
+  onSetQuickStartMode: (next: boolean) => void;
+  quickStartMaxPreDelegationToolCalls: number;
+  onSetQuickStartMaxPreDelegationToolCalls: (next: number) => void;
+  adaptiveConcurrency: boolean;
+  onSetAdaptiveConcurrency: (next: boolean) => void;
+  batchConcurrency: number;
+  onSetBatchConcurrency: (next: number) => void;
+  batchMinConcurrency: number;
+  onSetBatchMinConcurrency: (next: number) => void;
+  enableTrivialTaskGate: boolean;
+  onSetEnableTrivialTaskGate: (next: boolean) => void;
+  trivialTaskMaxPromptLength: number;
+  onSetTrivialTaskMaxPromptLength: (next: number) => void;
   observerShowFindings: boolean;
   onSetObserverShowFindings: (next: boolean) => void;
   onSettingsSaveStatus: (state: Exclude<SettingsSaveToastState, 'idle'>, message: string) => void;
@@ -118,6 +132,20 @@ export function AppMainContent(props: AppMainContentProps) {
         setDefaultInvestigatorProvider={props.onSetDefaultInvestigatorProvider}
         setDefaultInvestigatorModel={props.onSetDefaultInvestigatorModel}
         setDefaultPlanningNoToolGuardMode={props.onSetDefaultPlanningNoToolGuardMode}
+        quickStartMode={props.quickStartMode}
+        setQuickStartMode={props.onSetQuickStartMode}
+        quickStartMaxPreDelegationToolCalls={props.quickStartMaxPreDelegationToolCalls}
+        setQuickStartMaxPreDelegationToolCalls={props.onSetQuickStartMaxPreDelegationToolCalls}
+        adaptiveConcurrency={props.adaptiveConcurrency}
+        setAdaptiveConcurrency={props.onSetAdaptiveConcurrency}
+        batchConcurrency={props.batchConcurrency}
+        setBatchConcurrency={props.onSetBatchConcurrency}
+        batchMinConcurrency={props.batchMinConcurrency}
+        setBatchMinConcurrency={props.onSetBatchMinConcurrency}
+        enableTrivialTaskGate={props.enableTrivialTaskGate}
+        setEnableTrivialTaskGate={props.onSetEnableTrivialTaskGate}
+        trivialTaskMaxPromptLength={props.trivialTaskMaxPromptLength}
+        setTrivialTaskMaxPromptLength={props.onSetTrivialTaskMaxPromptLength}
         observerShowFindings={props.observerShowFindings}
         setObserverShowFindings={props.onSetObserverShowFindings}
         onSettingsSaveStatus={props.onSettingsSaveStatus}

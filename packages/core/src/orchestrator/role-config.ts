@@ -75,6 +75,7 @@ export function buildPlanningPrompt(
         'After identifying key files and contract shape, emit a concrete plan with explicit TODO items and defer edge-case discovery to implementation.',
         'Prefer a plan-then-validate cadence over exhaustive pre-plan investigation.',
         'Before each tool call and after each tool result, narrate your reasoning briefly: what you learned, what you plan to do next, and why.',
+        'IMPORTANT: You MUST produce visible text output explaining your reasoning before every single tool call. Never issue consecutive tool calls without reasoning text between them.',
       ],
 
     },
@@ -324,6 +325,7 @@ export function buildImplementationPrompt(params: {
         'You must satisfy validation criteria before considering the task complete.',
         'Scale your execution depth to match the task - simple tasks should be completed quickly, complex tasks may need sub-agents.',
         'Before each tool call and after each tool result, narrate your reasoning briefly.',
+        'IMPORTANT: You MUST produce visible text output explaining your reasoning before every single tool call. Never issue consecutive tool calls without reasoning text between them.',
       ],
     },
     {
@@ -473,6 +475,7 @@ export function buildRoleSystemPrompt(params: {
         'Operate safely, truthfully, and with high execution reliability.',
         'Think out loud: before every action, explain your reasoning, what you observed, what you plan to do next, and why.',
         'Narrate your thought process continuously so the user can follow your chain of thought in real time.',
+        'CRITICAL: You MUST emit visible text reasoning before every tool call. The pattern is always: reasoning text → tool call → reasoning text → tool call. Never issue back-to-back tool calls without explanatory text between them.',
         'When making decisions (e.g., choosing a tool, splitting tasks, picking an approach), explain the tradeoffs you considered.',
       ],
     },

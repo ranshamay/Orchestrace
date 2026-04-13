@@ -43,9 +43,13 @@ export function useBootstrapData(enabled = true) {
     planningNoToolGuardMode: 'enforce',
     workspaceId: '',
     autoApprove: true,
+    quickStartMode: false,
+    quickStartMaxPreDelegationToolCalls: 3,
     adaptiveConcurrency: false,
     batchConcurrency: 8,
     batchMinConcurrency: 1,
+    enableTrivialTaskGate: false,
+    trivialTaskMaxPromptLength: 120,
   });
 
   const [workPlanningProvider, setWorkPlanningProvider] = useState('');
@@ -56,9 +60,13 @@ export function useBootstrapData(enabled = true) {
   const [workWorkspaceId, setWorkWorkspaceId] = useState('');
   const [planningNoToolGuardMode, setPlanningNoToolGuardMode] = useState<'enforce' | 'warn'>('enforce');
   const [autoApprove, setAutoApprove] = useState(true);
+  const [quickStartMode, setQuickStartMode] = useState(false);
+  const [quickStartMaxPreDelegationToolCalls, setQuickStartMaxPreDelegationToolCalls] = useState(3);
   const [adaptiveConcurrency, setAdaptiveConcurrency] = useState(false);
   const [batchConcurrency, setBatchConcurrency] = useState(8);
   const [batchMinConcurrency, setBatchMinConcurrency] = useState(1);
+  const [enableTrivialTaskGate, setEnableTrivialTaskGate] = useState(false);
+  const [trivialTaskMaxPromptLength, setTrivialTaskMaxPromptLength] = useState(120);
   const [activeTabPreference, setActiveTabPreference] = useState<'graph' | 'settings' | 'logs'>(() => readTabFromUrl());
   const [observerShowFindings, setObserverShowFindings] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
@@ -207,9 +215,13 @@ export function useBootstrapData(enabled = true) {
           planningNoToolGuardMode: preferences.planningNoToolGuardMode === 'warn' ? 'warn' : 'enforce',
           workspaceId: defaultWorkspace,
           autoApprove: true,
+          quickStartMode: preferences.quickStartMode ?? false,
+          quickStartMaxPreDelegationToolCalls: preferences.quickStartMaxPreDelegationToolCalls ?? 3,
           adaptiveConcurrency: preferences.adaptiveConcurrency,
           batchConcurrency: preferences.batchConcurrency,
           batchMinConcurrency: preferences.batchMinConcurrency,
+          enableTrivialTaskGate: preferences.enableTrivialTaskGate ?? false,
+          trivialTaskMaxPromptLength: preferences.trivialTaskMaxPromptLength ?? 120,
         };
 
         setDefaultLlmControls(initialControls);
@@ -221,9 +233,13 @@ export function useBootstrapData(enabled = true) {
         setPlanningNoToolGuardMode(initialControls.planningNoToolGuardMode);
         setWorkWorkspaceId(initialControls.workspaceId);
         setAutoApprove(initialControls.autoApprove);
+        setQuickStartMode(initialControls.quickStartMode);
+        setQuickStartMaxPreDelegationToolCalls(initialControls.quickStartMaxPreDelegationToolCalls);
         setAdaptiveConcurrency(initialControls.adaptiveConcurrency);
         setBatchConcurrency(initialControls.batchConcurrency);
         setBatchMinConcurrency(initialControls.batchMinConcurrency);
+        setEnableTrivialTaskGate(initialControls.enableTrivialTaskGate);
+        setTrivialTaskMaxPromptLength(initialControls.trivialTaskMaxPromptLength);
         setActiveTabPreference(preferences.activeTab ?? 'graph');
         setObserverShowFindings(preferences.observerShowFindings ?? false);
 
@@ -269,12 +285,20 @@ export function useBootstrapData(enabled = true) {
     setPlanningNoToolGuardMode,
     autoApprove,
     setAutoApprove,
+    quickStartMode,
+    setQuickStartMode,
+    quickStartMaxPreDelegationToolCalls,
+    setQuickStartMaxPreDelegationToolCalls,
     adaptiveConcurrency,
     setAdaptiveConcurrency,
     batchConcurrency,
     setBatchConcurrency,
     batchMinConcurrency,
     setBatchMinConcurrency,
+    enableTrivialTaskGate,
+    setEnableTrivialTaskGate,
+    trivialTaskMaxPromptLength,
+    setTrivialTaskMaxPromptLength,
     activeTabPreference,
     observerShowFindings,
     setObserverShowFindings,

@@ -113,9 +113,13 @@ export function useLlmControls(params: Params) {
       planningNoToolGuardMode: patch.planningNoToolGuardMode ?? planningNoToolGuardMode,
       workspaceId: patch.workspaceId ?? workWorkspaceId,
       autoApprove: patch.autoApprove ?? autoApprove,
+      quickStartMode: patch.quickStartMode ?? defaultLlmControls.quickStartMode,
+      quickStartMaxPreDelegationToolCalls: patch.quickStartMaxPreDelegationToolCalls ?? defaultLlmControls.quickStartMaxPreDelegationToolCalls,
       adaptiveConcurrency: patch.adaptiveConcurrency ?? adaptiveConcurrency,
       batchConcurrency: patch.batchConcurrency ?? batchConcurrency,
       batchMinConcurrency: patch.batchMinConcurrency ?? batchMinConcurrency,
+      enableTrivialTaskGate: patch.enableTrivialTaskGate ?? defaultLlmControls.enableTrivialTaskGate,
+      trivialTaskMaxPromptLength: patch.trivialTaskMaxPromptLength ?? defaultLlmControls.trivialTaskMaxPromptLength,
     };
 
     applyWorkingControls(next);
@@ -174,9 +178,13 @@ export function useLlmControls(params: Params) {
       planningNoToolGuardMode: selectedSession.planningNoToolGuardMode ?? defaultLlmControls.planningNoToolGuardMode,
       workspaceId: selectedSession.workspaceId || defaultLlmControls.workspaceId,
       autoApprove: selectedSession.autoApprove,
+      quickStartMode: selectedSession.quickStartMode ?? defaultLlmControls.quickStartMode,
+      quickStartMaxPreDelegationToolCalls: selectedSession.quickStartMaxPreDelegationToolCalls ?? defaultLlmControls.quickStartMaxPreDelegationToolCalls,
       adaptiveConcurrency: selectedSession.adaptiveConcurrency ?? defaultLlmControls.adaptiveConcurrency,
       batchConcurrency: selectedSession.batchConcurrency ?? defaultLlmControls.batchConcurrency,
       batchMinConcurrency: selectedSession.batchMinConcurrency ?? defaultLlmControls.batchMinConcurrency,
+      enableTrivialTaskGate: selectedSession.enableTrivialTaskGate ?? defaultLlmControls.enableTrivialTaskGate,
+      trivialTaskMaxPromptLength: selectedSession.trivialTaskMaxPromptLength ?? defaultLlmControls.trivialTaskMaxPromptLength,
     };
 
     applyWorkingControls(sessionControls);

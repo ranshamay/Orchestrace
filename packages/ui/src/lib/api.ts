@@ -287,9 +287,13 @@ export interface UiPreferences {
   defaultImplementationModel: string;
   defaultDeliveryStrategy: SessionDeliveryStrategy;
   planningNoToolGuardMode: 'enforce' | 'warn';
+  quickStartMode: boolean;
+  quickStartMaxPreDelegationToolCalls: number;
   adaptiveConcurrency: boolean;
   batchConcurrency: number;
   batchMinConcurrency: number;
+  enableTrivialTaskGate: boolean;
+  trivialTaskMaxPromptLength: number;
 }
 
 export interface WorkspacesResponse {
@@ -345,9 +349,13 @@ export interface WorkSession {
   deliveryStrategy?: SessionDeliveryStrategy;
   autoApprove: boolean;
   planningNoToolGuardMode?: 'enforce' | 'warn';
+  quickStartMode?: boolean;
+  quickStartMaxPreDelegationToolCalls?: number;
   adaptiveConcurrency?: boolean;
   batchConcurrency?: number;
   batchMinConcurrency?: number;
+  enableTrivialTaskGate?: boolean;
+  trivialTaskMaxPromptLength?: number;
   testingPorts?: {
     basePort: number;
     apiPort: number;

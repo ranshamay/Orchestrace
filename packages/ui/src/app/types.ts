@@ -62,9 +62,13 @@ export type SessionLlmControls = {
   planningNoToolGuardMode: 'enforce' | 'warn';
   workspaceId: string;
   autoApprove: boolean;
+  quickStartMode: boolean;
+  quickStartMaxPreDelegationToolCalls: number;
   adaptiveConcurrency: boolean;
   batchConcurrency: number;
   batchMinConcurrency: number;
+  enableTrivialTaskGate: boolean;
+  trivialTaskMaxPromptLength: number;
 };
 
 export type SessionStatus = 'running' | 'idle' | 'completed' | 'failed' | 'cancelled' | 'merged' | 'pending' | 'unknown';

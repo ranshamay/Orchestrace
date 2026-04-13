@@ -142,10 +142,14 @@ export default function App() {
     workWorkspaceId, setWorkWorkspaceId, autoApprove, setAutoApprove,
     planningNoToolGuardMode, setPlanningNoToolGuardMode,
     errorMessage, setErrorMessage,
+    quickStartMode, setQuickStartMode,
+    quickStartMaxPreDelegationToolCalls, setQuickStartMaxPreDelegationToolCalls,
     adaptiveConcurrency, setAdaptiveConcurrency,
     bootstrapComplete,
     batchConcurrency, setBatchConcurrency,
     batchMinConcurrency, setBatchMinConcurrency,
+    enableTrivialTaskGate, setEnableTrivialTaskGate,
+    trivialTaskMaxPromptLength, setTrivialTaskMaxPromptLength,
     activeTabPreference,
     observerShowFindings, setObserverShowFindings,
   } = bootstrap;
@@ -783,9 +787,13 @@ export default function App() {
       defaultDeliveryStrategy: defaultLlmControls.deliveryStrategy,
       defaultAgentModels: defaultLlmControls.agentModels,
       planningNoToolGuardMode,
+      quickStartMode,
+      quickStartMaxPreDelegationToolCalls,
       adaptiveConcurrency,
       batchConcurrency,
       batchMinConcurrency,
+      enableTrivialTaskGate,
+      trivialTaskMaxPromptLength,
     };
 
     preferenceSaveQueueRef.current = preferenceSaveQueueRef.current
@@ -812,9 +820,13 @@ export default function App() {
     bootstrapComplete,
     defaultLlmControls.deliveryStrategy,
     defaultLlmControls.agentModels,
+    enableTrivialTaskGate,
+    trivialTaskMaxPromptLength,
     onSettingsSaveStatus,
     observerShowFindings,
     planningNoToolGuardMode,
+    quickStartMode,
+    quickStartMaxPreDelegationToolCalls,
     setErrorMessage,
   ]);
 
@@ -835,6 +847,41 @@ export default function App() {
     });
     updateActiveLlmControls({ planningNoToolGuardMode: normalized });
   }, [setDefaultLlmControls, setLlmControlsBySessionId, setPlanningNoToolGuardMode, updateActiveLlmControls]);
+
+  const handleSetQuickStartMode = useCallback((next: boolean) => {
+    setQuickStartMode(next);
+    setDefaultLlmControls((current) => ({ ...current, quickStartMode: next }));
+  }, [setDefaultLlmControls, setQuickStartMode]);
+
+  const handleSetQuickStartMaxPreDelegationToolCalls = useCallback((next: number) => {
+    setQuickStartMaxPreDelegationToolCalls(next);
+    setDefaultLlmControls((current) => ({ ...current, quickStartMaxPreDelegationToolCalls: next }));
+  }, [setDefaultLlmControls, setQuickStartMaxPreDelegationToolCalls]);
+
+  const handleSetAdaptiveConcurrency = useCallback((next: boolean) => {
+    setAdaptiveConcurrency(next);
+    setDefaultLlmControls((current) => ({ ...current, adaptiveConcurrency: next }));
+  }, [setDefaultLlmControls, setAdaptiveConcurrency]);
+
+  const handleSetBatchConcurrency = useCallback((next: number) => {
+    setBatchConcurrency(next);
+    setDefaultLlmControls((current) => ({ ...current, batchConcurrency: next }));
+  }, [setDefaultLlmControls, setBatchConcurrency]);
+
+  const handleSetBatchMinConcurrency = useCallback((next: number) => {
+    setBatchMinConcurrency(next);
+    setDefaultLlmControls((current) => ({ ...current, batchMinConcurrency: next }));
+  }, [setDefaultLlmControls, setBatchMinConcurrency]);
+
+  const handleSetEnableTrivialTaskGate = useCallback((next: boolean) => {
+    setEnableTrivialTaskGate(next);
+    setDefaultLlmControls((current) => ({ ...current, enableTrivialTaskGate: next }));
+  }, [setDefaultLlmControls, setEnableTrivialTaskGate]);
+
+  const handleSetTrivialTaskMaxPromptLength = useCallback((next: number) => {
+    setTrivialTaskMaxPromptLength(next);
+    setDefaultLlmControls((current) => ({ ...current, trivialTaskMaxPromptLength: next }));
+  }, [setDefaultLlmControls, setTrivialTaskMaxPromptLength]);
 
   const sessionSidebarProps = useMemo(() => ({
     activeTab,
@@ -926,6 +973,20 @@ export default function App() {
     onSetDefaultInvestigatorProvider: setDefaultInvestigatorProvider,
     onSetDefaultInvestigatorModel: setDefaultInvestigatorModel,
     onSetDefaultPlanningNoToolGuardMode: setDefaultPlanningNoToolGuardMode,
+    quickStartMode,
+    onSetQuickStartMode: handleSetQuickStartMode,
+    quickStartMaxPreDelegationToolCalls,
+    onSetQuickStartMaxPreDelegationToolCalls: handleSetQuickStartMaxPreDelegationToolCalls,
+    adaptiveConcurrency,
+    onSetAdaptiveConcurrency: handleSetAdaptiveConcurrency,
+    batchConcurrency,
+    onSetBatchConcurrency: handleSetBatchConcurrency,
+    batchMinConcurrency,
+    onSetBatchMinConcurrency: handleSetBatchMinConcurrency,
+    enableTrivialTaskGate,
+    onSetEnableTrivialTaskGate: handleSetEnableTrivialTaskGate,
+    trivialTaskMaxPromptLength,
+    onSetTrivialTaskMaxPromptLength: handleSetTrivialTaskMaxPromptLength,
     observerShowFindings,
     onSetObserverShowFindings: setObserverShowFindings,
     onSettingsSaveStatus,
