@@ -116,7 +116,7 @@ describe('planning guard behavior', () => {
 
   });
 
-  it('includes simple-task policy and planning budget language in planning prompt', () => {
+    it('includes simple-task policy and planning budget language in planning prompt', () => {
     const session = createSession();
     const prompt = buildSessionSystemPrompt(session, 'planning');
 
@@ -124,5 +124,17 @@ describe('planning guard behavior', () => {
     expect(prompt).toContain('For simple single-file tasks, skip sub-agent delegation');
     expect(prompt).toContain('Planning is budgeted: keep planning activity under 25%');
     expect(prompt).toContain('If session guard thresholds are exceeded');
+  });
+
+  it('keeps planning-only policy language out of implementation and chat prompts', () => {
+    const session = createSession();
+    const implementationPrompt = buildSessionSystemPrompt(session, 'implementation');
+    const chatPrompt = buildSessionSystemPrompt(session, 'chat');
+
+    for (const prompt of [implementationPrompt, chatPrompt]) {
+      expect(prompt).not.toContain('For simple single-file tasks, skip sub-agent delegation');
+      expect(prompt).not.toContain('Planning is budgeted: keep planning activity under 25%');
+      expect(prompt).not.toContain('If session guard thresholds are exceeded');
+    }
   });
 });

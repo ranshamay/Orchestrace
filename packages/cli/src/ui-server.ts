@@ -9586,12 +9586,16 @@ function resolveSessionPhaseModel(
 }
 
 export function buildSessionSystemPrompt(session: WorkSession, phase: SessionPromptPhase): string {
-  const phaseGuidance =
+    const phaseGuidance =
     phase === 'planning'
       ? [
           'Plan the work clearly before implementation, but adapt to user intent and new evidence.',
+          'For simple single-file tasks, skip sub-agent delegation.',
+          'Planning is budgeted: keep planning activity under 25%.',
+          'If session guard thresholds are exceeded, immediately transition from planning to implementation.',
         ]
       : phase === 'implementation'
+
         ? [
             'Implement requested changes with verifiable outcomes and adapt your approach from tool feedback.',
           ]
