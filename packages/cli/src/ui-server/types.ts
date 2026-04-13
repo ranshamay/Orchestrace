@@ -6,7 +6,7 @@ export interface UiServerOptions {
   hmr?: boolean;
 }
 
-export type WorkState = 'running' | 'completed' | 'failed' | 'cancelled' | 'merged';
+export type WorkState = 'running' | 'idle' | 'completed' | 'failed' | 'cancelled' | 'merged';
 export type SessionCreationReason = 'start' | 'retry';
 export type SessionDeliveryStrategy = 'pr-only' | 'merge-after-ci';
 export type ExecutionContext = 'workspace' | 'git-worktree';
@@ -43,6 +43,7 @@ export type LlmSessionState =
   | 'thinking'
   | 'planning'
   | 'awaiting-approval'
+  | 'idle'
   | 'implementing'
   | 'using-tools'
   | 'validating'

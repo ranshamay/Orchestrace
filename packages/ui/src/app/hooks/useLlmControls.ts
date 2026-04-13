@@ -157,17 +157,17 @@ export function useLlmControls(params: Params) {
     if (!selectedSession) return;
 
     const sessionControls: SessionLlmControls = {
-      planningProvider: defaultLlmControls.planningProvider
-        || selectedSession.planningProvider
+      planningProvider: selectedSession.planningProvider
+        || defaultLlmControls.planningProvider
         || selectedSession.provider,
-      planningModel: defaultLlmControls.planningModel
-        || selectedSession.planningModel
+      planningModel: selectedSession.planningModel
+        || defaultLlmControls.planningModel
         || selectedSession.model,
-      implementationProvider: defaultLlmControls.implementationProvider
-        || selectedSession.implementationProvider
+      implementationProvider: selectedSession.implementationProvider
+        || defaultLlmControls.implementationProvider
         || selectedSession.provider,
-      implementationModel: defaultLlmControls.implementationModel
-        || selectedSession.implementationModel
+      implementationModel: selectedSession.implementationModel
+        || defaultLlmControls.implementationModel
         || selectedSession.model,
       agentModels: selectedSession.agentModels ?? defaultLlmControls.agentModels,
       deliveryStrategy: selectedSession.deliveryStrategy ?? defaultLlmControls.deliveryStrategy,

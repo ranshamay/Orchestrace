@@ -13,6 +13,8 @@ type Params = {
   setObserverState: (updater: SessionObserverState | null | ((current: SessionObserverState | null) => SessionObserverState | null)) => void;
 };
 
+const LIVE_STREAM_TEXT_MAX_CHARS = 4_000;
+
 /**
  * Connects to the SSE work stream for the selected session and applies
  * real-time incremental updates to sessions, chat messages, and todos.
@@ -117,7 +119,9 @@ export function useSessionStream({ enabled = true, selectedSessionId, setSession
             ...current,
             [taskId]: {
               phase,
-              text: nextText.length > 420 ? nextText.slice(-420) : nextText,
+              text: nextText.length > LIVE_STREAM_TEXT_MAX_CHARS
+                ? nextText.slice(-LIVE_STREAM_TEXT_MAX_CHARS)
+                : nextText,
               updatedAt,
             },
           };

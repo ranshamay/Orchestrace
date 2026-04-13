@@ -700,6 +700,25 @@ export async function cancelWork(id: string): Promise<{ ok: boolean }> {
   return readJson(res);
 }
 
+export async function respondWorkPlanApproval(
+  id: string,
+  approved: boolean,
+  options?: { taskId?: string; planPath?: string; note?: string },
+): Promise<{ ok: boolean; id: string; approved: boolean }> {
+  const res = await authedFetch(`${API_BASE}/work/plan-approval`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      id,
+      approved,
+      taskId: options?.taskId,
+      planPath: options?.planPath,
+      note: options?.note,
+    }),
+  });
+  return readJson(res);
+}
+
 export async function retryWork(id: string): Promise<{ id: string; sourceId: string }> {
   const res = await authedFetch(`${API_BASE}/work/retry`, {
     method: 'POST',

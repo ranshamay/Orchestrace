@@ -67,7 +67,7 @@ export type SessionLlmControls = {
   batchMinConcurrency: number;
 };
 
-export type SessionStatus = 'running' | 'completed' | 'failed' | 'cancelled' | 'merged' | 'pending' | 'unknown';
+export type SessionStatus = 'running' | 'idle' | 'completed' | 'failed' | 'cancelled' | 'merged' | 'pending' | 'unknown';
 export type LlmSessionPhase = 'planning' | 'implementation' | 'testing';
 export type ComposerMode = 'run' | 'chat' | 'planning' | 'implementation' | 'testing';
 
@@ -77,6 +77,7 @@ export type LlmSessionState =
   | 'thinking'
   | 'planning'
   | 'awaiting-approval'
+  | 'idle'
   | 'implementing'
   | 'using-tools'
   | 'validating'

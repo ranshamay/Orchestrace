@@ -8,7 +8,7 @@
 // ---- Shared value types (mirrored from @orchestrace/cli ui-server/types) ----
 // Intentionally duplicated here so the store package has zero workspace deps.
 
-export type WorkState = 'running' | 'completed' | 'failed' | 'cancelled' | 'merged';
+export type WorkState = 'running' | 'idle' | 'completed' | 'failed' | 'cancelled' | 'merged';
 export type SessionCreationReason = 'start' | 'retry';
 export type ReasoningLevel = 'minimal' | 'low' | 'medium' | 'high';
 export type SessionAgentRole = 'router' | 'planner' | 'implementer' | 'reviewer' | 'investigator';
@@ -33,6 +33,7 @@ export type LlmSessionState =
   | 'thinking'
   | 'planning'
   | 'awaiting-approval'
+  | 'idle'
   | 'implementing'
   | 'using-tools'
   | 'validating'
@@ -215,6 +216,7 @@ export type SessionEventType =
   // DAG events (forwarded from orchestrator)
   | 'session:dag-event'
   | 'session:task-status-change'
+  | 'session:plan-approval-response'
   // Agent graph
   | 'session:agent-graph-set'
   | 'session:agent-graph-node-status'
@@ -274,6 +276,13 @@ export interface SessionDagEventPayload {
 export interface SessionTaskStatusChangePayload {
   taskId: string;
   taskStatus: string;
+}
+
+export interface SessionPlanApprovalResponsePayload {
+  taskId?: string;
+  planPath?: string;
+  approved: boolean;
+  note?: string;
 }
 
 export interface SessionAgentGraphSetPayload {
@@ -423,6 +432,7 @@ export type SessionEvent =
   | { seq: number; time: string; type: 'session:output-set'; payload: SessionOutputSetPayload }
   | { seq: number; time: string; type: 'session:dag-event'; payload: SessionDagEventPayload }
   | { seq: number; time: string; type: 'session:task-status-change'; payload: SessionTaskStatusChangePayload }
+  | { seq: number; time: string; type: 'session:plan-approval-response'; payload: SessionPlanApprovalResponsePayload }
   | { seq: number; time: string; type: 'session:agent-graph-set'; payload: SessionAgentGraphSetPayload }
   | { seq: number; time: string; type: 'session:agent-graph-node-status'; payload: SessionAgentGraphNodeStatusPayload }
   | { seq: number; time: string; type: 'session:chat-thread-created'; payload: SessionChatThreadCreatedPayload }

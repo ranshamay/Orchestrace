@@ -1,5 +1,5 @@
-import { Play, Square } from 'lucide-react';
-import type { ComposerImageAttachment, ComposerMode } from '../../types';
+import { Check, Play, Square, X } from 'lucide-react';
+import type { ComposerImageAttachment, ComposerMode, LlmSessionStatus } from '../../types';
 import type { WorkSession, Workspace } from '../../../lib/api';
 import { normalizeSessionStatus } from '../../utils/status';
 
@@ -7,6 +7,7 @@ type Props = {
   selectedSession?: WorkSession;
   selectedSessionId: string;
   selectedSessionRunning: boolean;
+  selectedLlmStatus: LlmSessionStatus;
   composerMode: ComposerMode;
   workspaces: Workspace[];
   workWorkspaceId: string;
@@ -20,6 +21,8 @@ type Props = {
   hasComposerContent: boolean;
   onComposerPaste: (event: React.ClipboardEvent<HTMLTextAreaElement>) => Promise<void>;
   onStop: () => Promise<void>;
+  onApprovePlan: () => Promise<void>;
+  onRejectPlan: () => Promise<void>;
   onSendChat: () => Promise<void>;
 };
 
@@ -27,6 +30,7 @@ export function ComposerPanel(props: Props) {
   const {
     selectedSession,
     selectedSessionId,
+    selectedLlmStatus,
     workWorkspaceId,
     workProvider,
     workModel,
@@ -37,8 +41,21 @@ export function ComposerPanel(props: Props) {
     hasComposerContent,
     onComposerPaste,
     onStop,
+    onApprovePlan,
+    onRejectPlan,
     onSendChat,
   } = props;
+
+  const normalizedSessionStatus = selectedSession ? normalizeSessionStatus(selectedSession.status) : 'unknown';
+  const awaitingPlanApproval = Boolean(
+    selectedSessionId
+      && selectedSession
+      && (
+        selectedLlmStatus.state === 'idle'
+        || selectedLlmStatus.state === 'awaiting-approval'
+        || normalizedSessionStatus === 'idle'
+      ),
+  );
 
   return (
     <div className="border-t border-slate-200 p-3 dark:border-slate-800">
@@ -63,7 +80,7 @@ export function ComposerPanel(props: Props) {
             <button
               aria-label="Run"
               className="inline-flex items-center rounded bg-blue-600 p-2 text-white disabled:opacity-50"
-              disabled={!hasComposerContent || !workWorkspaceId || !workProvider || !workModel}
+              disabled={!hasComposerContent || !workWorkspaceId || !workProvider || !workModel || awaitingPlanApproval}
               onClick={() => {
                 void onSendChat();
               }}
@@ -75,7 +92,7 @@ export function ComposerPanel(props: Props) {
             <button
               aria-label="Stop"
               className="inline-flex items-center rounded bg-red-600 p-2 text-white disabled:opacity-50"
-              disabled={!selectedSessionId || !selectedSession || normalizeSessionStatus(selectedSession.status) !== 'running'}
+              disabled={!selectedSessionId || !selectedSession || (normalizedSessionStatus !== 'running' && normalizedSessionStatus !== 'idle')}
               onClick={() => {
                 void onStop();
               }}
@@ -85,6 +102,34 @@ export function ComposerPanel(props: Props) {
               <Square className="h-4 w-4" />
             </button>
           </div>
+          {awaitingPlanApproval && (
+            <div className="flex gap-2">
+              <button
+                aria-label="Approve plan"
+                className="inline-flex items-center rounded bg-emerald-600 p-2 text-white disabled:opacity-50"
+                disabled={!selectedSessionId}
+                onClick={() => {
+                  void onApprovePlan();
+                }}
+                title="Approve plan"
+                type="button"
+              >
+                <Check className="h-4 w-4" />
+              </button>
+              <button
+                aria-label="Reject plan"
+                className="inline-flex items-center rounded bg-amber-600 p-2 text-white disabled:opacity-50"
+                disabled={!selectedSessionId}
+                onClick={() => {
+                  void onRejectPlan();
+                }}
+                title="Reject plan"
+                type="button"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+          )}
         </div>
       </div>
       {composerImages.length > 0 && (

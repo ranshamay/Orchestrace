@@ -20,6 +20,8 @@ export function normalizeLlmSessionState(raw?: string): LlmSessionState {
     case 'awaiting_approval':
     case 'awaiting-approval':
       return 'awaiting-approval';
+    case 'idle':
+      return 'idle';
     case 'using_tools':
     case 'using-tools':
       return 'using-tools';
@@ -35,15 +37,17 @@ export function llmStatusLabel(state: LlmSessionState): string {
     case 'analyzing':
       return 'Analyzing';
     case 'thinking':
-      return 'Thinking';
+      return 'Waiting for LLM';
     case 'planning':
       return 'Planning';
     case 'awaiting-approval':
       return 'Awaiting Approval';
+    case 'idle':
+      return 'Idle';
     case 'implementing':
       return 'Implementing';
     case 'using-tools':
-      return 'Using Tools';
+      return 'Waiting for Tool';
     case 'validating':
       return 'Validating';
     case 'retrying':
@@ -63,6 +67,8 @@ function fallbackLlmState(sessionStatus?: string): LlmSessionState {
   switch (normalizeSessionStatus(sessionStatus)) {
     case 'running':
       return 'analyzing';
+    case 'idle':
+      return 'idle';
     case 'completed':
       return 'completed';
     case 'failed':
@@ -92,6 +98,8 @@ export function fallbackLlmPhase(state: LlmSessionState): LlmSessionPhase | unde
   switch (state) {
     case 'planning':
     case 'awaiting-approval':
+      return 'planning';
+    case 'idle':
       return 'planning';
     case 'implementing':
     case 'using-tools':
@@ -165,6 +173,8 @@ export function llmStatusBadgeClass(status: LlmSessionStatus, selected = false):
       return 'bg-cyan-100 text-cyan-700 dark:bg-cyan-900/40 dark:text-cyan-300';
     case 'awaiting-approval':
       return 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300';
+    case 'idle':
+      return 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300';
     case 'implementing':
     case 'using-tools':
       return 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300';
@@ -183,5 +193,5 @@ export function llmStatusBadgeClass(status: LlmSessionStatus, selected = false):
 }
 
 export function isLlmStatusBusy(status: LlmSessionStatus): boolean {
-  return ['queued', 'analyzing', 'thinking', 'planning', 'awaiting-approval', 'implementing', 'using-tools', 'validating', 'retrying'].includes(status.state);
+  return ['queued', 'analyzing', 'thinking', 'planning', 'implementing', 'using-tools', 'validating', 'retrying'].includes(status.state);
 }

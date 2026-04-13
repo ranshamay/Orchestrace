@@ -48,6 +48,9 @@ export function normalizeSessionStatus(raw?: string): SessionStatus {
   if (value.includes('run') || value.includes('progress') || value.includes('start') || value.includes('stream')) {
     return 'running';
   }
+  if (value.includes('idle') || value.includes('awaiting input')) {
+    return 'idle';
+  }
   if (value.includes('pending') || value.includes('queue') || value.includes('wait')) {
     return 'pending';
   }
@@ -71,6 +74,8 @@ export function sessionStatusBadgeClass(raw?: string, selected = false): string 
   switch (normalizeSessionStatus(raw)) {
     case 'running':
       return 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300';
+    case 'idle':
+      return 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300';
         case 'completed':
       return 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300';
     case 'merged':

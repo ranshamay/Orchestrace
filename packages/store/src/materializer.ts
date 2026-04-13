@@ -108,6 +108,11 @@ export function applyEvent(state: MaterializedSession, event: SessionEvent): voi
       state.taskStatus[event.payload.taskId] = event.payload.taskStatus;
       break;
 
+    case 'session:plan-approval-response':
+      // Approval response events are consumed by the runner wait loop.
+      // They do not directly mutate materialized session envelope state.
+      break;
+
     case 'session:agent-graph-set':
       state.agentGraph = event.payload.graph;
       break;

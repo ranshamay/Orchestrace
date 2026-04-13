@@ -1849,8 +1849,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
     session.creationReason = 'retry';
     session.updatedAt = retryStartedAt;
     session.status = 'running';
-    session.llmStatus = createLlmStatus('queued', retryStartedAt, {
-      detail: 'Queued for orchestration.',
+    session.llmStatus = createLlmStatus('thinking', retryStartedAt, {
+      detail: 'Waiting for LLM response.',
     });
     session.taskStatus = {};
     session.agentGraph = [];
@@ -1877,6 +1877,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       const runnerPhase: SessionPromptPhase = resolveSessionToolMode(session) === 'implementation'
         ? 'implementation'
         : 'planning';
+      const runnerPhaseModel = resolveSessionPhaseModel(session, runnerPhase);
       const runnerPromptInput: LlmPromptInput = session.promptParts && session.promptParts.length > 0
         ? session.promptParts.map((part) => {
           if (part.type === 'text') {
@@ -1890,8 +1891,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       appendLlmContextSnapshot({
         session,
         phase: runnerPhase,
-        provider: session.provider,
-        model: session.model,
+        provider: runnerPhaseModel.provider,
+        model: runnerPhaseModel.model,
         systemPrompt: runnerPhase === 'implementation'
           ? buildImplementationSystemPrompt(session)
           : buildPlanningSystemPrompt(session),
@@ -2107,8 +2108,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       createdAt,
       updatedAt: createdAt,
       status: 'running',
-      llmStatus: createLlmStatus('queued', createdAt, {
-        detail: 'Queued for orchestration.',
+      llmStatus: createLlmStatus('thinking', createdAt, {
+        detail: 'Waiting for LLM response.',
       }),
       taskStatus: {},
       events: [],
@@ -2167,6 +2168,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       const runnerPhase: SessionPromptPhase = resolveSessionToolMode(session) === 'implementation'
         ? 'implementation'
         : 'planning';
+      const runnerPhaseModel = resolveSessionPhaseModel(session, runnerPhase);
       const runnerPromptInput: LlmPromptInput = session.promptParts && session.promptParts.length > 0
         ? session.promptParts.map((part) => {
           if (part.type === 'text') {
@@ -2180,8 +2182,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       appendLlmContextSnapshot({
         session,
         phase: runnerPhase,
-        provider: session.provider,
-        model: session.model,
+        provider: runnerPhaseModel.provider,
+        model: runnerPhaseModel.model,
         systemPrompt: runnerPhase === 'implementation'
           ? buildImplementationSystemPrompt(session)
           : buildPlanningSystemPrompt(session),
@@ -3184,6 +3186,78 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
         return;
       }
 
+      if (req.method === 'POST' && pathname === '/api/work/plan-approval') {
+        const body = await readJsonBody(req);
+        const id = asString(body.id);
+        const approved = body.approved;
+        const taskId = asString(body.taskId) || undefined;
+        const planPath = asString(body.planPath) || undefined;
+        const note = asString(body.note) || undefined;
+
+        if (!id) {
+          sendJson(res, 400, { error: 'Missing id' });
+          return;
+        }
+
+        if (typeof approved !== 'boolean') {
+          sendJson(res, 400, { error: 'Missing approved boolean' });
+          return;
+        }
+
+        const session = workSessions.get(id);
+        if (!session) {
+          sendJson(res, 404, { error: 'Unknown work session' });
+          return;
+        }
+
+        const awaitingInput = session.status === 'idle'
+          || session.llmStatus.state === 'idle'
+          || session.llmStatus.state === 'awaiting-approval';
+        if (!awaitingInput) {
+          sendJson(res, 409, { error: 'Session is not waiting for approval input.' });
+          return;
+        }
+
+        const respondedAt = now();
+        emitSessionEvent(id, {
+          time: respondedAt,
+          type: 'session:plan-approval-response',
+          payload: {
+            taskId,
+            planPath,
+            approved,
+            note,
+          },
+        });
+
+        if (approved) {
+          session.status = 'running';
+          session.updatedAt = respondedAt;
+          session.llmStatus = createLlmStatus('thinking', respondedAt, {
+            taskId,
+            phase: 'planning',
+            detail: 'Plan approved. Waiting for LLM response.',
+          });
+
+          emitSessionEvent(id, {
+            time: respondedAt,
+            type: 'session:status-change',
+            payload: { status: 'running' },
+          });
+          emitSessionEvent(id, {
+            time: respondedAt,
+            type: 'session:llm-status-change',
+            payload: { llmStatus: session.llmStatus },
+          });
+
+          broadcastSessionStatusUpsert(session);
+          uiStatePersistence.schedule();
+        }
+
+        sendJson(res, 200, { ok: true, id, approved });
+        return;
+      }
+
       if (req.method === 'POST' && pathname === '/api/work/delete') {
         const body = await readJsonBody(req);
         const id = asString(body.id);
@@ -3769,13 +3843,14 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
               : continuationPhase === 'implementation'
                 ? buildImplementationSystemPrompt(session)
                 : buildChatSystemPrompt(session);
+            const continuationPhaseModel = resolveSessionPhaseModel(session, continuationPhase);
             const sharedContextStore = sessionSharedContextStores.get(session.id)
               ?? new InMemorySharedContextStore();
             sessionSharedContextStores.set(session.id, sharedContextStore);
             const fileReadCache = sessionFileReadCaches.get(session.id) ?? createFileReadCache();
             sessionFileReadCaches.set(session.id, fileReadCache);
             const contextEngine = sessionContextEngines.get(session.id)
-              ?? createSessionContextEngine(session.provider, session.model);
+              ?? createSessionContextEngine(continuationPhaseModel.provider, continuationPhaseModel.model);
             sessionContextEngines.set(session.id, contextEngine);
             const contextState = sessionContextStates.get(session.id) ?? { turnsSinceLastCompaction: 0 };
 
@@ -3793,8 +3868,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
             appendLlmContextSnapshot({
               session,
               phase: continuationPhase,
-              provider: session.provider,
-              model: session.model,
+              provider: continuationPhaseModel.provider,
+              model: continuationPhaseModel.model,
               systemPrompt,
               prompt: managedContext.prompt,
               sessionLlmContextSnapshots,
@@ -3810,8 +3885,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
             const sessionCommandEnv = buildSessionCommandEnvFromTestingPorts(session.testingPorts);
 
             const chatAgent = await llm.spawnAgent({
-              provider: session.provider,
-              model: session.model,
+              provider: continuationPhaseModel.provider,
+              model: continuationPhaseModel.model,
               timeoutMs: resolveLongTurnTimeoutMs(),
               systemPrompt,
               toolset: createAgentToolset({
@@ -3827,8 +3902,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                 fileReadCache,
                 agentId: `chat::${session.id}`,
                 runSubAgent: async (runSubAgentRequest, _signal) => {
-                  const subProvider = runSubAgentRequest.provider ?? session.provider;
-                  const subModel = runSubAgentRequest.model ?? session.model;
+                  const subProvider = runSubAgentRequest.provider ?? continuationPhaseModel.provider;
+                  const subModel = runSubAgentRequest.model ?? continuationPhaseModel.model;
                   const subAgentSignal = session.controller.signal;
                   const toolCallId = `subagent-worker-${randomUUID()}`;
                   const subAgentTaskId = `chat::subagent::${runSubAgentRequest.nodeId ?? toolCallId}`;
@@ -4201,8 +4276,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
                 thread.updatedAt = chatStartedAt;
         session.status = 'running';
         session.updatedAt = chatStartedAt;
-        session.llmStatus = createLlmStatus('analyzing', chatStartedAt, {
-          detail: 'Processing follow-up prompt.',
+        session.llmStatus = createLlmStatus('thinking', chatStartedAt, {
+          detail: 'Waiting for LLM response.',
           phase: continuationPhase === 'planning' || continuationPhase === 'implementation'
             ? continuationPhase
             : undefined,
@@ -4222,13 +4297,14 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
             : continuationPhase === 'implementation'
               ? buildImplementationSystemPrompt(session)
               : buildChatSystemPrompt(session);
+          const continuationPhaseModel = resolveSessionPhaseModel(session, continuationPhase);
           const sharedContextStore = sessionSharedContextStores.get(session.id)
             ?? new InMemorySharedContextStore();
           sessionSharedContextStores.set(session.id, sharedContextStore);
           const fileReadCache = sessionFileReadCaches.get(session.id) ?? createFileReadCache();
           sessionFileReadCaches.set(session.id, fileReadCache);
           const contextEngine = sessionContextEngines.get(session.id)
-            ?? createSessionContextEngine(session.provider, session.model);
+            ?? createSessionContextEngine(continuationPhaseModel.provider, continuationPhaseModel.model);
           sessionContextEngines.set(session.id, contextEngine);
           const contextState = sessionContextStates.get(session.id) ?? { turnsSinceLastCompaction: 0 };
 
@@ -4246,8 +4322,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           appendLlmContextSnapshot({
             session,
             phase: continuationPhase,
-            provider: session.provider,
-            model: session.model,
+            provider: continuationPhaseModel.provider,
+            model: continuationPhaseModel.model,
             systemPrompt,
             prompt: managedContext.prompt,
             sessionLlmContextSnapshots,
@@ -4263,8 +4339,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           const sessionCommandEnv = buildSessionCommandEnvFromTestingPorts(session.testingPorts);
 
           const chatAgent = await llm.spawnAgent({
-            provider: session.provider,
-            model: session.model,
+            provider: continuationPhaseModel.provider,
+            model: continuationPhaseModel.model,
             timeoutMs: resolveLongTurnTimeoutMs(),
             systemPrompt,
             toolset: createAgentToolset({
@@ -4280,8 +4356,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
               fileReadCache,
               agentId: `chat::${session.id}`,
               runSubAgent: async (runSubAgentRequest, _signal) => {
-                const subProvider = runSubAgentRequest.provider ?? session.provider;
-                const subModel = runSubAgentRequest.model ?? session.model;
+                const subProvider = runSubAgentRequest.provider ?? continuationPhaseModel.provider;
+                const subModel = runSubAgentRequest.model ?? continuationPhaseModel.model;
                 const subAgentSignal = session.controller.signal;
                 const toolCallId = `subagent-worker-${randomUUID()}`;
                 const subAgentTaskId = `chat::subagent::${runSubAgentRequest.nodeId ?? toolCallId}`;
@@ -5550,7 +5626,7 @@ function asPositiveInt(value: unknown): number | undefined {
 }
 
 function resolveAppAuthConfig(): AppAuthConfig {
-  const authRequired = parseBooleanSetting(process.env.ORCHESTRACE_APP_AUTH_REQUIRED) ?? true;
+  const authRequired = parseBooleanSetting(process.env.ORCHESTRACE_APP_AUTH_REQUIRED) ?? false;
   const googleClientId = asString(process.env.ORCHESTRACE_GOOGLE_CLIENT_ID)?.trim() ?? '';
   const jwtSecret = asString(process.env.ORCHESTRACE_APP_JWT_SECRET)?.trim() ?? '';
   const tokenTtlSeconds = parsePositiveSetting(process.env.ORCHESTRACE_APP_JWT_TTL_SECONDS) ?? 60 * 60 * 8;
@@ -6659,6 +6735,8 @@ function normalizeLlmSessionState(raw: unknown): LlmSessionState {
     case 'awaiting_approval':
     case 'awaiting-approval':
       return 'awaiting-approval';
+    case 'idle':
+      return 'idle';
     case 'implementing':
       return 'implementing';
     case 'using_tools':
@@ -6704,6 +6782,7 @@ function resolveSessionToolMode(session: WorkSession): AgentToolPhase {
     case 'queued':
     case 'planning':
     case 'awaiting-approval':
+    case 'idle':
     case 'analyzing':
     case 'thinking':
       return 'planning';
@@ -6728,15 +6807,17 @@ function llmStatusLabel(state: LlmSessionState): string {
     case 'analyzing':
       return 'Analyzing';
     case 'thinking':
-      return 'Thinking';
+      return 'Waiting for LLM';
     case 'planning':
       return 'Planning';
     case 'awaiting-approval':
       return 'Awaiting Approval';
+    case 'idle':
+      return 'Idle';
     case 'implementing':
       return 'Implementing';
     case 'using-tools':
-      return 'Using Tools';
+      return 'Waiting for Tool';
     case 'validating':
       return 'Validating';
     case 'retrying':
@@ -6785,6 +6866,10 @@ function normalizeLlmStatus(raw: SessionLlmStatus, fallbackUpdatedAt: string): S
 }
 
 function deriveLlmStatusFromWorkState(status: WorkState, updatedAt: string, error?: string): SessionLlmStatus {
+  if (status === 'idle') {
+    return createLlmStatus('idle', updatedAt, { detail: 'Waiting for user input.' });
+  }
+
   if (status === 'completed') {
     return createLlmStatus('completed', updatedAt, { detail: 'Run completed successfully.' });
   }
@@ -6797,7 +6882,7 @@ function deriveLlmStatusFromWorkState(status: WorkState, updatedAt: string, erro
     return createLlmStatus('cancelled', updatedAt, { detail: 'Cancelled by user.' });
   }
 
-  return createLlmStatus('queued', updatedAt, { detail: 'Queued for orchestration.' });
+  return createLlmStatus('thinking', updatedAt, { detail: 'Waiting for LLM response.' });
 }
 
 function toUiEvent(runId: string, event: DagEvent): UiDagEvent | undefined {
@@ -9411,6 +9496,30 @@ export function resolveRunnerTaskRouteEnvValue(
   return parseTaskRouteOverride(routeOverrideRaw) ?? 'code_change';
 }
 
+function resolveSessionPhaseModel(
+  session: WorkSession,
+  phase: SessionPromptPhase,
+): { provider: string; model: string } {
+  if (phase === 'planning') {
+    return {
+      provider: session.planningProvider || session.provider,
+      model: session.planningModel || session.model,
+    };
+  }
+
+  if (phase === 'implementation') {
+    return {
+      provider: session.implementationProvider || session.provider,
+      model: session.implementationModel || session.model,
+    };
+  }
+
+  return {
+    provider: session.provider,
+    model: session.model,
+  };
+}
+
 export function buildSessionSystemPrompt(session: WorkSession, phase: SessionPromptPhase): string {
   const phaseGuidance =
     phase === 'planning'
@@ -9438,6 +9547,8 @@ export function buildSessionSystemPrompt(session: WorkSession, phase: SessionPro
       lines: [
         'Never claim actions completed unless confirmed by tool output.',
         'If context is missing, gather it with available tools before deciding what to do next.',
+        'While thinking, stream concise rationale updates explaining what you are deciding and why.',
+        'Rationale updates must be user-facing, factual, and short.',
         ...phaseGuidance,
       ],
     },

@@ -8,6 +8,13 @@ import { LogsTabView } from './work/LogsTabView';
 import { SettingsTabView } from './settings/SettingsTabView';
 import { FloatingChatOverlay } from './layout/FloatingChatOverlay';
 
+type LiveReasoning = {
+  taskId: string;
+  phase: 'planning' | 'implementation';
+  text: string;
+  updatedAt: string;
+};
+
 export type AppMainContentProps = {
   activeTab: 'graph' | 'settings' | 'logs';
   selectedSessionId: string;
@@ -33,6 +40,7 @@ export type AppMainContentProps = {
   jumpToLatest: () => void;
   onTimelineScroll: () => void;
   timelineItems: TimelineItem[];
+  liveReasoning: LiveReasoning | null;
   composerMode: ComposerMode;
   workspaces: Workspace[];
   workWorkspaceId: string;
@@ -50,6 +58,8 @@ export type AppMainContentProps = {
   onComposerPaste: (event: React.ClipboardEvent<HTMLTextAreaElement>) => Promise<void>;
   onSendChat: () => Promise<void>;
   onStop: () => Promise<void>;
+  onApprovePlan: () => Promise<void>;
+  onRejectPlan: () => Promise<void>;
   providers: ProviderInfo[];
   providerStatuses: Array<{ provider: string; source: string }>;
   activeWorkspaceId: string;
@@ -132,11 +142,13 @@ export function AppMainContent(props: AppMainContentProps) {
         jumpToLatest={props.jumpToLatest}
         onTimelineScroll={props.onTimelineScroll}
         timelineItems={props.timelineItems}
+        liveReasoning={props.liveReasoning}
         composer={(
           <ComposerPanel
             selectedSession={props.selectedSession}
             selectedSessionId={props.selectedSessionId}
             selectedSessionRunning={props.selectedSessionRunning}
+            selectedLlmStatus={props.selectedLlmStatus}
             composerMode={props.composerMode}
             workspaces={props.workspaces}
             workWorkspaceId={props.workWorkspaceId}
@@ -150,6 +162,8 @@ export function AppMainContent(props: AppMainContentProps) {
             hasComposerContent={props.hasComposerContent}
             onComposerPaste={props.onComposerPaste}
             onStop={props.onStop}
+            onApprovePlan={props.onApprovePlan}
+            onRejectPlan={props.onRejectPlan}
             onSendChat={props.onSendChat}
           />
         )}

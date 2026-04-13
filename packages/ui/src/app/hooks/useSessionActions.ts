@@ -4,6 +4,7 @@ import {
   cancelWork,
   deleteWork,
   fetchWorkAgent,
+  respondWorkPlanApproval,
   sendChatMessage,
   startWork,
 } from '../../lib/api';
@@ -209,6 +210,17 @@ export function useSessionActions(params: SessionActionsParams) {
     }
   }, [selectedSessionId, setErrorMessage, setSessions]);
 
+  const handlePlanApproval = useCallback(async (approved: boolean) => {
+    if (!selectedSessionId) return;
+    setErrorMessage('');
+    try {
+      await respondWorkPlanApproval(selectedSessionId, approved);
+      await refreshSessionsOnly({ setSessions });
+    } catch (error) {
+      setErrorMessage(toErrorMessage(error));
+    }
+  }, [selectedSessionId, setErrorMessage, setSessions]);
+
   const handleRetry = useCallback(async () => {
     if (!selectedSession) return;
     setErrorMessage('');
@@ -286,6 +298,7 @@ export function useSessionActions(params: SessionActionsParams) {
     handleSendChat,
     handleDelete,
     handleStop,
+    handlePlanApproval,
     handleRetry,
     handleRetrySession,
     handleCopyTrace,

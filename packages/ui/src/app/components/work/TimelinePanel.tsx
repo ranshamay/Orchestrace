@@ -21,6 +21,12 @@ type Props = {
   jumpToLatest: () => void;
   onTimelineScroll: () => void;
   timelineItems: TimelineItem[];
+  liveReasoning: {
+    taskId: string;
+    phase: 'planning' | 'implementation';
+    text: string;
+    updatedAt: string;
+  } | null;
   composer: React.ReactNode;
   isDark: boolean;
   copyTraceState: 'idle' | 'copied' | 'failed';
@@ -45,6 +51,7 @@ export function TimelinePanel(props: Props) {
     jumpToLatest,
     onTimelineScroll,
     timelineItems,
+    liveReasoning,
     composer,
     isDark,
     copyTraceState,
@@ -101,6 +108,20 @@ export function TimelinePanel(props: Props) {
         </div>
 
         {showToolsPanel && <ToolsPanel availableTools={availableTools} isToolsLoading={isToolsLoading} selectedSessionMode={selectedSession?.mode} toolsLoadError={toolsLoadError} toolsMode={toolsMode} />}
+
+        {selectedSessionRunning && liveReasoning?.text && (
+          <div className="mt-2 rounded border border-cyan-200/80 bg-cyan-50/80 px-2.5 py-2 text-[11px] text-cyan-900 dark:border-cyan-800/70 dark:bg-cyan-950/30 dark:text-cyan-100">
+            <div className="mb-1 flex items-center justify-between gap-2">
+              <span className="font-semibold uppercase tracking-wide">Live Reasoning</span>
+              <span className="rounded bg-cyan-100 px-1.5 py-0.5 font-mono text-[10px] uppercase dark:bg-cyan-900/60">
+                {liveReasoning.phase}
+              </span>
+            </div>
+            <pre className="max-h-24 overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-4">
+              {liveReasoning.text}
+            </pre>
+          </div>
+        )}
       </header>
 
       <div ref={timelineContainerRef} className="min-h-0 flex-1 space-y-1.5 overflow-auto bg-slate-50/50 p-3 dark:bg-slate-950/50" onScroll={onTimelineScroll}>

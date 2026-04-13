@@ -35,6 +35,7 @@ function fallbackComposerModeFromLlmStatus(status: { state: string; phase?: 'pla
   if (
     normalized === 'planning'
     || normalized === 'awaiting-approval'
+    || normalized === 'idle'
     || normalized === 'analyzing'
     || normalized === 'thinking'
     || normalized === 'queued'

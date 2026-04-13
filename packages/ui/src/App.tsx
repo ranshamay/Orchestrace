@@ -718,6 +718,33 @@ export default function App() {
   );
 
   const timelineItems = useMemo(() => buildTimelineItems(selectedSession, chatMessages), [chatMessages, selectedSession]);
+  const liveReasoning = useMemo(() => {
+    if (!selectedSessionRunning) {
+      return null;
+    }
+
+    if (selectedLlmStatus.state === 'using-tools' || selectedLlmStatus.state === 'idle') {
+      return null;
+    }
+
+    let latest: { taskId: string; phase: 'planning' | 'implementation'; text: string; updatedAt: string } | null = null;
+    for (const [taskId, stream] of Object.entries(nodeTokenStreams)) {
+      if (!stream.text.trim()) {
+        continue;
+      }
+
+      if (!latest || Date.parse(stream.updatedAt) > Date.parse(latest.updatedAt)) {
+        latest = {
+          taskId,
+          phase: stream.phase,
+          text: stream.text,
+          updatedAt: stream.updatedAt,
+        };
+      }
+    }
+
+    return latest;
+  }, [nodeTokenStreams, selectedLlmStatus.state, selectedSessionRunning]);
   const latestTimelineKey = timelineItems[timelineItems.length - 1]?.key ?? '';
   const timelineFollow = useTimelineFollow(latestTimelineKey, selectedSessionId);
   const toolsPanel = useToolsPanel(showToolsPanel, selectedSessionId, composerMode, selectedSession?.mode);
@@ -857,6 +884,7 @@ export default function App() {
     jumpToLatest: timelineFollow.jumpToLatest,
     onTimelineScroll: timelineFollow.handleTimelineScroll,
     timelineItems,
+    liveReasoning,
     composerMode,
     workspaces,
     workWorkspaceId,
@@ -876,6 +904,8 @@ export default function App() {
     onComposerPaste: actions.handleComposerPaste,
     onSendChat: actions.handleSendChat,
     onStop: actions.handleStop,
+    onApprovePlan: () => actions.handlePlanApproval(true),
+    onRejectPlan: () => actions.handlePlanApproval(false),
     providers,
     providerStatuses,
     activeWorkspaceId,

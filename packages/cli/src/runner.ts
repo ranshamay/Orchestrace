@@ -36,7 +36,14 @@ import {
 } from '@orchestrace/tools';
 import { InMemorySharedContextStore } from '@orchestrace/context';
 import { FileEventStore, materializeSession } from '@orchestrace/store';
-import type { SessionEventInput, SessionConfig, SessionLlmStatus, LlmSessionState, SessionAgentGraphNode } from '@orchestrace/store';
+import type {
+  SessionEvent,
+  SessionEventInput,
+  SessionConfig,
+  SessionLlmStatus,
+  LlmSessionState,
+  SessionAgentGraphNode,
+} from '@orchestrace/store';
 import {
   llmStatusIdentityKey,
   parseTimestamp,
@@ -368,6 +375,103 @@ async function main(): Promise<void> {
     }
   }
 
+  function matchPlanApprovalDecision(
+    event: SessionEvent,
+    request: { taskId: string; path: string },
+  ): { approved: boolean; note?: string } | undefined {
+    if (event.type !== 'session:plan-approval-response') {
+      return undefined;
+    }
+
+    const payload = event.payload as {
+      taskId?: string;
+      planPath?: string;
+      approved?: unknown;
+      note?: string;
+    };
+
+    if (typeof payload.approved !== 'boolean') {
+      return undefined;
+    }
+
+    const eventTaskId = typeof payload.taskId === 'string' ? payload.taskId.trim() : '';
+    if (eventTaskId && eventTaskId !== request.taskId) {
+      return undefined;
+    }
+
+    const eventPlanPath = typeof payload.planPath === 'string' ? payload.planPath.trim() : '';
+    if (eventPlanPath && eventPlanPath !== request.path) {
+      return undefined;
+    }
+
+    const note = typeof payload.note === 'string' ? payload.note.trim() : '';
+    return {
+      approved: payload.approved,
+      note: note.length > 0 ? note : undefined,
+    };
+  }
+
+  async function waitForPlanApprovalDecision(
+    request: { taskId: string; path: string },
+  ): Promise<{ approved: boolean; note?: string }> {
+    const recentEvents = await eventStore.read(sessionId);
+    for (let index = recentEvents.length - 1; index >= 0; index -= 1) {
+      const matched = matchPlanApprovalDecision(recentEvents[index], request);
+      if (matched) {
+        return matched;
+      }
+    }
+
+    const fromSeq = recentEvents[recentEvents.length - 1]?.seq ?? 0;
+    const approvalTimeoutMs = resolvePositiveIntEnv(process.env.ORCHESTRACE_PLAN_APPROVAL_TIMEOUT_MS, 0);
+
+    return new Promise<{ approved: boolean; note?: string }>((resolve, reject) => {
+      let settled = false;
+      let timeoutHandle: NodeJS.Timeout | undefined;
+      let unwatch: (() => void) | undefined;
+
+      const finalize = (callback: () => void) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        if (timeoutHandle) {
+          clearTimeout(timeoutHandle);
+        }
+        if (unwatch) {
+          unwatch();
+        }
+        controller.signal.removeEventListener('abort', onAbort);
+        callback();
+      };
+
+      const onAbort = () => {
+        finalize(() => reject(new Error('Cancelled while waiting for plan approval input.')));
+      };
+
+      if (controller.signal.aborted) {
+        reject(new Error('Cancelled while waiting for plan approval input.'));
+        return;
+      }
+
+      controller.signal.addEventListener('abort', onAbort, { once: true });
+
+      unwatch = eventStore.watch(sessionId, fromSeq, (event) => {
+        const matched = matchPlanApprovalDecision(event, request);
+        if (!matched) {
+          return;
+        }
+        finalize(() => resolve(matched));
+      });
+
+      if (approvalTimeoutMs > 0) {
+        timeoutHandle = setTimeout(() => {
+          finalize(() => reject(new Error(`Timed out waiting for plan approval after ${approvalTimeoutMs}ms.`)));
+        }, approvalTimeoutMs);
+      }
+    });
+  }
+
   function emitRoutingCoercionAudit(input: RoutingCoercionAudit & {
     source?: 'user' | 'observer';
   }): void {
@@ -412,11 +516,7 @@ async function main(): Promise<void> {
         ? 'cancelled'
         : phase === 'COMPLETED'
           ? 'completed'
-          : phase === 'VALIDATING'
-            ? 'analyzing'
-            : phase === 'COMPLETING'
-              ? 'validating'
-              : 'implementing';
+          : 'thinking';
 
     const llmStatus = makeLlmStatus(state, detail, undefined, 'task', 'implementation');
     lastLlmStatusEmission = {
@@ -1792,7 +1892,53 @@ async function main(): Promise<void> {
       taskEffort,
       maxParallel: 1,
       requirePlanApproval: !config.autoApprove,
-      onPlanApproval: async () => config.autoApprove,
+      onPlanApproval: async (request) => {
+        if (config.autoApprove) {
+          return true;
+        }
+
+        const decision = await waitForPlanApprovalDecision({
+          taskId: request.task.id,
+          path: request.planPath,
+        });
+
+        const decisionAt = iso();
+        if (decision.approved) {
+          const resumedStatus = makeLlmStatus(
+            'thinking',
+            'Plan approved. Waiting for LLM response.',
+            undefined,
+            request.task.id,
+            'planning',
+          );
+          if (shouldEmitLlmStatus(resumedStatus, lastLlmStatusEmission, decisionAt)) {
+            lastLlmStatusEmission = {
+              key: llmStatusIdentityKey(resumedStatus),
+              emittedAt: parseTimestamp(decisionAt),
+            };
+            await emit({ time: decisionAt, type: 'session:llm-status-change', payload: { llmStatus: resumedStatus } });
+          }
+          await emit({ time: decisionAt, type: 'session:status-change', payload: { status: 'running' } });
+          return true;
+        }
+
+        const rejectedStatus = makeLlmStatus(
+          'idle',
+          decision.note ?? 'Plan rejected. Waiting for user input.',
+          'validation',
+          request.task.id,
+          'planning',
+        );
+        if (shouldEmitLlmStatus(rejectedStatus, lastLlmStatusEmission, decisionAt)) {
+          lastLlmStatusEmission = {
+            key: llmStatusIdentityKey(rejectedStatus),
+            emittedAt: parseTimestamp(decisionAt),
+          };
+          await emit({ time: decisionAt, type: 'session:llm-status-change', payload: { llmStatus: rejectedStatus } });
+        }
+        await emit({ time: decisionAt, type: 'session:status-change', payload: { status: 'idle' } });
+        return false;
+      },
       signal: controller.signal,
       resolveApiKey: async (providerId) => authManager.resolveApiKey(providerId),
 
@@ -2064,6 +2210,12 @@ async function main(): Promise<void> {
         // Task status
         if ('taskId' in event && event.type !== 'task:tool-call' && event.type !== 'task:llm-context') {
           void emit({ time: t, type: 'session:task-status-change', payload: { taskId: event.taskId, taskStatus: event.type } });
+        }
+
+        if (event.type === 'task:approval-requested') {
+          void emit({ time: t, type: 'session:status-change', payload: { status: 'idle' } });
+        } else if (event.type === 'task:approved') {
+          void emit({ time: t, type: 'session:status-change', payload: { status: 'running' } });
         }
             },
     });
@@ -2699,46 +2851,56 @@ function makeLlmStatus(
   phase?: 'planning' | 'implementation' | 'testing',
 ): SessionLlmStatus {
   const labels: Record<string, string> = {
-    queued: 'Queued', analyzing: 'Analyzing', thinking: 'Thinking', planning: 'Planning',
-    'awaiting-approval': 'Awaiting Approval', implementing: 'Implementing',
-    'using-tools': 'Using Tools', validating: 'Validating', retrying: 'Retrying',
+    queued: 'Queued', analyzing: 'Analyzing', thinking: 'Waiting for LLM', planning: 'Planning',
+    'awaiting-approval': 'Awaiting Approval', idle: 'Idle', implementing: 'Implementing',
+    'using-tools': 'Waiting for Tool', validating: 'Validating', retrying: 'Retrying',
     completed: 'Completed', failed: 'Failed', cancelled: 'Cancelled',
   };
   return { state, label: labels[state] ?? 'Queued', detail, failureType, taskId, phase, updatedAt: iso() };
 }
 
 function deriveLlmStatus(event: DagEvent, t: string): SessionLlmStatus | undefined {
+  const waitingForLlm = (
+    taskId: string,
+    phase: 'planning' | 'implementation' | 'testing',
+    detail = 'Waiting for LLM response.',
+  ) => makeLlmStatus('thinking', detail, undefined, taskId, phase);
+
   switch (event.type) {
     case 'task:ready':
     case 'task:started':
     case 'task:planning':
-      return makeLlmStatus('analyzing', 'Reviewing prompt and dependencies.', undefined, event.taskId, 'planning');
+      return waitingForLlm(event.taskId, 'planning');
     case 'task:stream-delta':
-      return makeLlmStatus('thinking', event.phase === 'planning' ? 'Generating plan...' : 'Generating implementation...', undefined, event.taskId, event.phase);
+      return waitingForLlm(event.taskId, event.phase);
     case 'task:plan-persisted':
-      return makeLlmStatus('planning', 'Plan drafted and saved.', undefined, event.taskId, 'planning');
+      return waitingForLlm(event.taskId, 'planning');
     case 'task:approval-requested':
-      return makeLlmStatus('awaiting-approval', 'Waiting for plan approval.', undefined, event.taskId, 'planning');
+      return makeLlmStatus('idle', 'Waiting for your input: approve or reject the plan.', undefined, event.taskId, 'planning');
     case 'task:approved':
-      return makeLlmStatus('implementing', 'Plan approved. Starting implementation.', undefined, event.taskId, 'implementation');
+      return waitingForLlm(event.taskId, 'implementation', 'Plan approved. Waiting for LLM response.');
     case 'task:implementation-attempt':
-      return makeLlmStatus('implementing', `Implementation attempt ${event.attempt}/${event.maxAttempts}.`, undefined, event.taskId, 'implementation');
+      return waitingForLlm(event.taskId, 'implementation');
     case 'task:testing':
-      return makeLlmStatus('validating', `Tester gate attempt ${event.attempt}: generating and running tests.`, undefined, event.taskId, 'testing');
+      return waitingForLlm(event.taskId, 'testing');
     case 'task:tester-verdict':
       return event.approved
-        ? makeLlmStatus('validating', `Tester approved (passed=${event.testsPassed}, failed=${event.testsFailed}).`, undefined, event.taskId, 'testing')
-        : makeLlmStatus('retrying', `Tester rejected (passed=${event.testsPassed}, failed=${event.testsFailed}).`, 'validation', event.taskId, 'testing');
+        ? waitingForLlm(event.taskId, 'testing')
+        : waitingForLlm(
+          event.taskId,
+          'testing',
+          `Tester rejected (passed=${event.testsPassed}, failed=${event.testsFailed}). Waiting for LLM response.`,
+        );
     case 'task:tool-call':
       return event.status === 'started'
-        ? makeLlmStatus('using-tools', `Running tool ${event.toolName}.`, undefined, event.taskId, event.phase)
+        ? makeLlmStatus('using-tools', `Waiting for tool execution: ${event.toolName}.`, undefined, event.taskId, event.phase)
         : undefined;
     case 'task:validating':
-      return makeLlmStatus('validating', 'Running verification checks.', undefined, event.taskId, 'implementation');
+      return waitingForLlm(event.taskId, 'implementation');
     case 'task:verification-failed':
-      return makeLlmStatus('retrying', `Verification failed on attempt ${event.attempt}.`, undefined, event.taskId, 'implementation');
+      return waitingForLlm(event.taskId, 'implementation', `Verification failed on attempt ${event.attempt}. Waiting for LLM response.`);
     case 'task:retrying':
-      return makeLlmStatus('retrying', `Retrying (${event.attempt}/${event.maxRetries}).`, undefined, event.taskId, 'implementation');
+      return waitingForLlm(event.taskId, 'implementation', `Retrying (${event.attempt}/${event.maxRetries}). Waiting for LLM response.`);
     case 'task:completed':
     case 'graph:completed':
       return makeLlmStatus('completed', 'Run completed successfully.', undefined, 'taskId' in event ? event.taskId : undefined, 'implementation');
@@ -3161,6 +3323,8 @@ function buildSystemPrompt(config: SessionConfig, phase: 'planning' | 'implement
     ? [
       'Create an implementation plan scaled to the task complexity.',
       'Do not perform direct code edits in planning mode.',
+      'While thinking, stream concise rationale updates explaining what you are deciding and why.',
+      'Rationale updates must be user-facing, factual, and short.',
       'Each planned task must include explicit done criteria and a verification command.',
       'Planning must produce todo_set and agent_graph_set state.',
       'todo_set items must include numeric weight values and the total todo weight must sum to 100.',
@@ -3183,6 +3347,8 @@ function buildSystemPrompt(config: SessionConfig, phase: 'planning' | 'implement
     : [
       'Execute approved work with minimal, scoped edits and verify outcomes.',
       'Read before editing, and use tool output to adapt after failures.',
+      'While thinking, stream concise rationale updates explaining what you are doing and why.',
+      'Rationale updates must be user-facing, factual, and short.',
       ...(isLowEffort
         ? []
         : [
