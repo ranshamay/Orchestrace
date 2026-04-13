@@ -2,7 +2,7 @@
 
 This guide focuses on token-aware agent/tooling workflows for Orchestrace-style systems (multi-step planning, tool calls, retries, and validation loops).
 
-## Why this matters
+## Overview
 
 Token spend is not just a cost problem. It also affects:
 
@@ -13,7 +13,17 @@ Token spend is not just a cost problem. It also affects:
 
 ---
 
-## 1) Design around budgets first
+## Key Principles
+
+- Design around budgets first
+- Instrument token flow at every step
+- Enforce early tool-use guardrails
+- Compact context safely
+- Use accurate token counting with fallback
+
+## Best Practices
+
+### 1) Design around budgets first
 
 Treat token policy as part of runtime policy, not an afterthought.
 
@@ -147,7 +157,7 @@ DON'T: Retry with the original giant prompt plus all prior logs.
 
 ---
 
-## Common mistakes
+## Common Mistakes
 
 1. **No output reserve:** consuming full context window for input.
 2. **Single global budget:** ignoring planning/implementation/tester phase differences.
@@ -158,7 +168,7 @@ DON'T: Retry with the original giant prompt plus all prior logs.
 
 ---
 
-## Token tooling checklist
+## Checklist
 
 ### Implementation checklist
 

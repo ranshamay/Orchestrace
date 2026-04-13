@@ -1,6 +1,26 @@
 # Tailwind CSS + PostCSS + Autoprefixer Best Practices
 
-## 1) Scope and baseline
+## Overview
+
+These practices target Tailwind + PostCSS pipelines with:
+
+- `tailwindcss`
+- `postcss`
+- `autoprefixer`
+
+Goal: keep styles maintainable, predictable, and production-safe as the codebase grows.
+
+## Key Principles
+
+- Keep content scanning accurate and explicit
+- Prefer semantic design tokens over one-off values
+- Compose reusable styling patterns
+- Let PostCSS/Autoprefixer handle browser compatibility
+- Optimize for maintainability and output size
+
+## Best Practices
+
+### 1) Scope and baseline
 
 These practices target Tailwind + PostCSS pipelines with:
 
@@ -175,6 +195,13 @@ function cn(...inputs) {
 
 ---
 
+## Common Mistakes
+
+- Generating classes dynamically in ways Tailwind cannot detect.
+- Scattering hardcoded utility values instead of shared tokens.
+- Manually applying vendor prefixes.
+- Overusing safelists or broad content globs.
+
 ## 9) DO / DON'T quick reference
 
 ### ✅ DO
@@ -194,7 +221,7 @@ function cn(...inputs) {
 
 ---
 
-## 10) PR review checklist
+## Checklist
 
 - [ ] `content` globs still cover all relevant files.
 - [ ] Dynamic class use is map-based or safelisted.

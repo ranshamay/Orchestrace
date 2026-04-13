@@ -24,7 +24,7 @@ Use Playwright for end-to-end and cross-page integration behavior that unit test
 
 ---
 
-## DO / DON'T Code Samples
+## Best Practices
 
 ### 1) Prefer semantic locators over CSS implementation details
 

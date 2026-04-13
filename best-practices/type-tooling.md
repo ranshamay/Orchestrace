@@ -1,10 +1,10 @@
 # TypeScript, tsx, and @types Tooling Best Practices
 
-## Purpose
+## Overview
 
 Preserve strict type safety and predictable runtime behavior while keeping local developer workflows fast.
 
-## Required Structure
+## Key Principles
 
 - Use a **shared root base config** (`tsconfig.base.json`) for language/runtime defaults.
 - Each package `tsconfig.json` must:
@@ -16,7 +16,9 @@ Preserve strict type safety and predictable runtime behavior while keeping local
   - `pnpm typecheck`
 - Use `tsx` for local TS entrypoints and tooling scripts (e.g., CLI dev/start scripts), not as a replacement for package build artifacts.
 
-## TypeScript Practices
+## Best Practices
+
+### TypeScript Practices
 
 ### DO
 
@@ -90,7 +92,14 @@ pnpm --filter @orchestrace/cli add -D @types/some-legacy-lib
 - Don’t add duplicate `@types/*` at root and package level without reason.
 - Don’t leave stale `@types/*` after dependency removal.
 
-## Validation Checklist
+## Common Mistakes
+
+- Relaxing strict compiler settings per package without temporary exception rationale.
+- Using `any` in core paths instead of narrowing `unknown`.
+- Relying on `tsx` for production runtime execution.
+- Keeping stale `@types/*` packages after dependency changes.
+
+## Checklist
 
 - `pnpm build` passes.
 - `pnpm typecheck` passes.

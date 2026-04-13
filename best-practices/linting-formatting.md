@@ -1,10 +1,10 @@
 # ESLint & Prettier Best Practices
 
-## Purpose
+## Overview
 
 Keep code quality and style consistent across all packages with fast feedback locally and deterministic checks in CI.
 
-## Required Structure
+## Key Principles
 
 - Keep a **single root ESLint flat config** (`eslint.config.js`) for monorepo-wide defaults.
 - Run lint through the root script:
@@ -14,7 +14,9 @@ Keep code quality and style consistent across all packages with fast feedback lo
   - `pnpm format:check` → CI-safe formatting validation
 - Scope formatting targets intentionally (current repo target: `packages/*/src/**/*.ts`).
 
-## ESLint Practices
+## Best Practices
+
+### ESLint Practices
 
 ### DO
 
@@ -74,6 +76,20 @@ pnpm format:check
 # DON'T: ad-hoc one-off formatting paths that drift from team scripts
 prettier --write "some/random/path/**/*.ts"
 ```
+
+## Common Mistakes
+
+- Disabling rules globally instead of addressing local issues.
+- Using `any` where `unknown` or proper typing should be used.
+- Letting ESLint and Prettier compete over formatting concerns.
+- Skipping `format:check` in CI.
+
+## Checklist
+
+- [ ] Lint config is centralized and intentional.
+- [ ] Prettier owns formatting decisions.
+- [ ] CI runs lint and format checks.
+- [ ] Rule exceptions are documented and scoped.
 
 ## Recommended Workflow
 

@@ -1,6 +1,27 @@
 # Vite + `@vitejs/plugin-react` Best Practices
 
-## 1) Scope and baseline
+## Overview
+
+These practices target modern React + TypeScript apps using:
+
+- `vite` (current major)
+- `@vitejs/plugin-react`
+- ESM-first tooling
+- Monorepo-friendly setups
+
+Use this as a production baseline, not just a scaffold default.
+
+## Key Principles
+
+- Keep configuration explicit and environment-aware
+- Separate public client config from secrets
+- Optimize bundle behavior based on measurements
+- Keep plugin usage minimal and intentional
+- Validate production build behavior in CI
+
+## Best Practices
+
+### 1) Scope and baseline
 
 These practices target modern React + TypeScript apps using:
 
@@ -167,6 +188,13 @@ export function App() {
 
 ---
 
+## Common Mistakes
+
+- Exposing secrets through `VITE_*` variables.
+- Relying on dev proxy behavior as production networking.
+- Adding transforms/plugins without measurable need.
+- Diverging alias settings between TypeScript and Vite.
+
 ## 9) DO / DON'T quick reference
 
 ### ✅ DO
@@ -186,7 +214,7 @@ export function App() {
 
 ---
 
-## 10) PR review checklist
+## Checklist
 
 - [ ] New env vars follow `VITE_` exposure rules.
 - [ ] No secret leaked into client-accessible code.

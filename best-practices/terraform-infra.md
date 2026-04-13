@@ -1,8 +1,19 @@
 # Terraform Infrastructure Best Practices
 
+## Overview
+
 This guide is tuned for the current Orchestrace infra shape (`infra/terraform`): AWS EC2 compute + Cloudflare Pages + GitHub Actions deploy.
 
-## 1) Keep Terraform deterministic and reviewable
+## Key Principles
+
+- Keep Terraform deterministic and reviewable.
+- Secure infrastructure by default.
+- Protect secrets and state.
+- Ensure bootstrap/deploy paths are idempotent.
+
+## Best Practices
+
+### 1) Keep Terraform deterministic and reviewable
 
 ### DO
 
@@ -87,4 +98,20 @@ Recommended flow:
 
 1. Open infra PR.
 2. Run `terraform fmt -check` and `terraform validate`.
-3. Generate and review plan artifact
+3. Generate and review plan artifact.
+4. Apply only from reviewed, trusted pipelines/environments.
+
+## Common Mistakes
+
+- Leaving broad ingress (`0.0.0.0/0`) in place beyond bootstrap.
+- Committing secret values in tfvars.
+- Using local state for collaborative production operations.
+- Embedding large mutable deploy logic directly in `user_data`.
+
+## Checklist
+
+- [ ] Provider and Terraform versions are pinned.
+- [ ] Secrets are externalized and marked sensitive.
+- [ ] State backend and locking are configured for team usage.
+- [ ] Ingress rules are restricted to necessary ranges.
+- [ ] Deploy scripts are idempotent and fail fast.

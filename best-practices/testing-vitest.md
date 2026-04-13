@@ -24,7 +24,7 @@ Use Vitest primarily for unit and small integration tests; reserve browser workf
 
 ---
 
-## DO / DON'T Code Samples
+## Best Practices
 
 ### 1) Deterministic time handling
 
