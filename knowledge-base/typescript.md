@@ -2,7 +2,7 @@
 
 ## Overview
 
-Orchestrace uses strict TypeScript with ESM-oriented settings from `tsconfig.base.json`:
+Orchestrace uses strict TypeScript with ESM defaults (`type: module`) and `tsconfig.base.json` settings such as:
 
 - `target: ES2023`
 - `module: ESNext`
@@ -11,86 +11,78 @@ Orchestrace uses strict TypeScript with ESM-oriented settings from `tsconfig.bas
 - `isolatedModules: true`
 - `verbatimModuleSyntax: true`
 
-The baseline strategy is: maximize static guarantees, minimize implicit behavior, and keep emitted JS predictable.
+Goal: catch bugs at compile time and keep runtime behavior explicit.
 
 ## Configuration Best Practices
 
-### Prefer a single base config + package-level extension
-
-Use `tsconfig.base.json` as source of truth and keep package-level overrides minimal.
-
-```json
-{
-  "extends": "../../tsconfig.base.json",
-  "compilerOptions": {
-    "outDir": "dist",
-    "rootDir": "src"
-  },
-  "include": ["src"]
-}
-```
-
-### Keep `strict: true` and treat relaxations as explicit tradeoffs
-
-If a package needs temporary exceptions, isolate them locally with comments and TODOs.
-
-### Use `verbatimModuleSyntax` correctly
-
-When importing types, always use `import type`.
+- Extend `tsconfig.base.json` from package-level `tsconfig.json` files.
+- Keep strict mode enabled; do not relax globally.
+- Use `import type` for type-only imports.
+- Keep emitted code ESM-friendly.
 
 ```ts
-import type { Session } from './types.js';
-import { createSession } from './session.js';
+import type { RunRecord } from './types.js';
+import { loadRun } from './load-run.js';
 ```
 
-## Type Safety Patterns
+## Best Practices
 
-### Prefer `unknown` over `any`
+### 1) Prefer `unknown` over `any`
 
 ```ts
-function parseJson(input: string): unknown {
+function parse(input: string): unknown {
   return JSON.parse(input);
 }
-
-function isUser(value: unknown): value is { id: string } {
-  return typeof value === 'object' && value !== null && 'id' in value;
-}
 ```
 
-### Use discriminated unions for state machines
+Narrow before use with type guards.
+
+### 2) Use discriminated unions for workflow states
 
 ```ts
-type RunState =
+type Status =
   | { kind: 'idle' }
   | { kind: 'running'; startedAt: number }
-  | { kind: 'failed'; error: string }
-  | { kind: 'done'; resultPath: string };
+  | { kind: 'failed'; reason: string };
+```
 
-function renderState(state: RunState): string {
-  switch (state.kind) {
-    case 'idle':
-      return 'Idle';
-    case 'running':
-      return `Running since ${state.startedAt}`;
-    case 'failed':
-      return `Failed: ${state.error}`;
-    case 'done':
-      return `Done: ${state.resultPath}`;
-    default: {
-      const _exhaustive: never = state;
-      return _exhaustive;
-    }
-  }
+### 3) Enforce exhaustiveness
+
+```ts
+function assertNever(x: never): never {
+  throw new Error(`Unexpected: ${JSON.stringify(x)}`);
 }
 ```
 
-### Use `as const` to preserve literals
+### 4) Encode invariants in types
+
+Use branded IDs, readonly arrays, and literal unions instead of free-form strings.
+
+## Do and Don’t
+
+### Do
 
 ```ts
-const ALLOWED = ['plan', 'code', 'test'] as const;
-type NodeType = (typeof ALLOWED)[number];
+const nodeTypes = ['plan', 'code', 'review'] as const;
+type NodeType = (typeof nodeTypes)[number];
 ```
 
-## Module System (ESM-first)
+### Don’t
 
-- Keep package `
+```ts
+// bad: no guardrails
+function execute(kind: string, data: any) {}
+```
+
+## Common Pitfalls
+
+- Using `as` casts to silence real type mismatches.
+- Mixing runtime imports and type imports under `verbatimModuleSyntax`.
+- Skipping narrowing for parsed JSON.
+- Ignoring `undefined`/`null` in API response types.
+
+## Repo-Specific Notes
+
+- Keep `.ts` source in `src/`, emit to `dist/`.
+- Prefer package-local types exported from stable boundaries (`index.ts`).
+- Run `pnpm typecheck` before finalizing large refactors.
