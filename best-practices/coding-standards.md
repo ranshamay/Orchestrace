@@ -64,51 +64,10 @@ try {
 }
 ```
 
-### 5) Use modular file design (explicit file boundaries)
-
-Modular code means splitting by **responsibility** and **change frequency**, not by arbitrary file count.
-
-#### File/module boundary rules
-- Keep one primary responsibility per file.
-- Keep feature/domain code grouped together.
-- Keep side effects in boundary modules (`api.ts`, `repository.ts`, `cli.ts`) and pure logic in separate modules.
-- Prefer many small cohesive modules over one “god file”.
-
-#### Recommended feature-oriented structure
-```txt
-packages/app/src/features/runs/
-  index.ts              # public exports for this feature
-  types.ts              # feature-local types/contracts
-  constants.ts          # stable constants only
-  run-label.ts          # pure domain logic
-  run-service.ts        # orchestration/use-case logic
-  run-repository.ts     # I/O layer (DB/API/fs)
-  run-service.test.ts   # tests close to implementation
-```
-
-#### Export/import standards
-- Use `index.ts` as the **public API** of a folder/package.
-- Keep internals unexported unless required by another module.
-- Import from stable boundaries (`features/runs`) rather than deep internals (`features/runs/run-repository/internal-x`).
-- Avoid circular imports by separating shared types/constants into neutral modules.
-
-```ts
-// Good: stable public import
-import { createRun, type RunInput } from '@/features/runs';
-
-// Avoid: deep coupling to implementation details
-import { persistRunRecord } from '@/features/runs/run-repository';
-```
-
-#### What to split into separate files
-- Split when code has different reasons to change (e.g., parsing vs rendering vs I/O).
-- Split when a file exceeds readability (roughly >200-300 LOC or multiple conceptual sections).
-- Split when parts need different test styles (unit vs integration).
-
-#### What not to split
-- Don’t fragment tiny, tightly-coupled logic across many files “for purity”.
-- Don’t create generic `utils.ts` buckets with unrelated helpers.
-- Don’t create abstraction layers until at least 2-3 real call sites need them.
+### 5) Keep modules cohesive
+- Group files by feature/domain over technical layer when practical.
+- Avoid giant utility files with unrelated helpers.
+- Export stable public APIs from package boundaries.
 
 ### 6) Write code for diffs and reviews
 - Prefer smaller PR-sized changes over massive rewrites.
@@ -135,8 +94,6 @@ import { persistRunRecord } from '@/features/runs/run-repository';
 - Don’t write clever one-liners that reduce readability.
 - Don’t hardcode environment-specific paths, URLs, or credentials.
 - Don’t mutate inputs unless mutation is explicit and intentional.
-- Don’t create “god modules” that own unrelated responsibilities.
-- Don’t import deeply into another module’s internals unless there is no stable public API.
 
 ```ts
 // Avoid: unclear behavior, mutates input, weak typing
@@ -179,7 +136,6 @@ pnpm --filter <package-name> typecheck
 - Favor shared utilities in dedicated packages only when reuse is real; avoid premature abstraction.
 - For agent/tooling code, keep policy logic explicit and auditable (clear naming, minimal magic behavior).
 - For frontend code, align with existing React/Tailwind patterns and avoid introducing parallel styling/state patterns without agreement.
-- Prefer `feature/index.ts` exports to make agent-generated code consume stable module boundaries.
 
 ---
 
@@ -198,23 +154,7 @@ export async function logRunLabel(logger: { info: (msg: string) => void }, id: s
 }
 ```
 
-### DO: modular feature boundary
-```ts
-// features/runs/index.ts
-export { createRun } from './run-service';
-export type { RunInput, RunResult } from './types';
-
-// features/runs/run-service.ts
-import type { RunInput, RunResult } from './types';
-import { saveRun } from './run-repository';
-
-export async function createRun(input: RunInput): Promise<RunResult> {
-  // orchestrate; keep logic readable
-  return saveRun(input);
-}
-```
-
-### DON'T: mixed concerns / god module
+### DON'T: mixed concerns
 ```ts
 // Avoid: fetch + parse + mutate + log + return random shape in one place
 async function process(input: any) {
