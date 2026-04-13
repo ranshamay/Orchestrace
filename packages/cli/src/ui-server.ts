@@ -2211,13 +2211,12 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
       batchConcurrency,
       normalizePositiveSetting(request.batchMinConcurrency, uiPreferences.batchMinConcurrency),
     );
-        const quickStartMode = request.quickStartMode
-      ?? uiPreferences.quickStartMode;
+    const quickStartMode = request.quickStartMode
+      ?? (parseBooleanSetting(process.env.ORCHESTRACE_QUICK_START_MODE) ?? false);
     const quickStartMaxPreDelegationToolCalls = normalizePositiveSetting(
       request.quickStartMaxPreDelegationToolCalls,
-      uiPreferences.quickStartMaxPreDelegationToolCalls,
+      parsePositiveSetting(process.env.ORCHESTRACE_QUICK_START_MAX_PRE_DELEGATION_TOOL_CALLS) ?? 3,
     );
-
     const planningNoToolGuardMode = normalizePlanningNoToolGuardMode(request.planningNoToolGuardMode)
       ?? uiPreferences.planningNoToolGuardMode;
     const enableTrivialTaskGate = request.enableTrivialTaskGate ?? uiPreferences.enableTrivialTaskGate;
@@ -5591,15 +5590,14 @@ function hydratePersistedSession(session: PersistedWorkSession): WorkSession {
     model: resolvedAgentModels.implementationModel,
     agentModels: resolvedAgentModels.agentModels,
     promptParts: promptParts.length > 0 ? promptParts : undefined,
-        planningNoToolGuardMode: normalizePlanningNoToolGuardMode(session.planningNoToolGuardMode)
+    planningNoToolGuardMode: normalizePlanningNoToolGuardMode(session.planningNoToolGuardMode)
       ?? resolvePlanningNoToolGuardModeDefault(),
     quickStartMode: parseBooleanSetting(session.quickStartMode)
-      ?? resolveQuickStartModeDefault(),
+      ?? (parseBooleanSetting(process.env.ORCHESTRACE_QUICK_START_MODE) ?? false),
     quickStartMaxPreDelegationToolCalls: normalizePositiveSetting(
       session.quickStartMaxPreDelegationToolCalls,
-      resolveQuickStartMaxPreDelegationToolCallsDefault(),
+      parsePositiveSetting(process.env.ORCHESTRACE_QUICK_START_MAX_PRE_DELEGATION_TOOL_CALLS) ?? 3,
     ),
-
     adaptiveConcurrency: parseBooleanSetting(session.adaptiveConcurrency) ?? resolveAdaptiveConcurrencyDefault(),
     batchConcurrency: normalizePositiveSetting(session.batchConcurrency, resolveBatchConcurrencyDefault()),
     batchMinConcurrency: Math.min(
@@ -6791,7 +6789,6 @@ function normalizeUiPreferences(value: unknown, fallback: UiPreferences): UiPref
   };
 }
 
-
 function resolveUiTabDefault(): 'graph' | 'settings' {
   return normalizeUiTab(process.env.ORCHESTRACE_UI_ACTIVE_TAB) ?? 'graph';
 }
@@ -6937,20 +6934,7 @@ function resolveBatchMinConcurrencyDefault(): number {
     ?? DEFAULT_UI_BATCH_MIN_CONCURRENCY;
 }
 
-function resolveQuickStartModeDefault(): boolean {
-  const raw = process.env.ORCHESTRACE_UI_QUICK_START_MODE
-    ?? process.env.ORCHESTRACE_QUICK_START_MODE;
-  return parseBooleanSetting(raw) ?? false;
-}
-
-function resolveQuickStartMaxPreDelegationToolCallsDefault(): number {
-  return parsePositiveInt(process.env.ORCHESTRACE_UI_QUICK_START_MAX_PRE_DELEGATION_TOOL_CALLS)
-    ?? parsePositiveInt(process.env.ORCHESTRACE_QUICK_START_MAX_PRE_DELEGATION_TOOL_CALLS)
-    ?? 3;
-}
-
 function resolveTrivialTaskGateDefault(): boolean {
-
   const raw = process.env.ORCHESTRACE_UI_TRIVIAL_TASK_GATE_ENABLED
     ?? process.env.ORCHESTRACE_TRIVIAL_TASK_GATE_ENABLED;
   return parseBooleanSetting(raw) ?? false;
@@ -9849,8 +9833,8 @@ export function resolveRunnerTaskRouteEnvValue(
 }
 
 export function buildSessionSystemPrompt(session: WorkSession, phase: SessionPromptPhase): string {
-  const phaseGuidance =
-        phase === 'planning'
+    const phaseGuidance =
+    phase === 'planning'
       ? [
           'Plan the work clearly before implementation, but adapt to user intent and new evidence.',
           'For simple single-file tasks, skip sub-agent delegation and proceed with direct implementation.',
