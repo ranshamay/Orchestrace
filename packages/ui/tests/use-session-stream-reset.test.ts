@@ -9,11 +9,13 @@ function setupHookTest() {
 
   let capturedCleanup: void | (() => void);
 
-  const reactMock = {
+    const reactMock = {
     useEffect: vi.fn((effect: () => void | (() => void)) => {
       capturedCleanup = effect();
     }),
     useRef: vi.fn(() => ({ current: '' })),
+    useState: vi.fn((initial: unknown) => [typeof initial === 'function' ? (initial as () => unknown)() : initial, vi.fn()]),
+    useCallback: vi.fn((fn: unknown) => fn),
   };
 
   return {
@@ -27,7 +29,7 @@ function setupHookTest() {
   };
 }
 
-describe('useSessionStream reset behavior', () => {
+describe('useChatStream reset behavior', () => {
   afterEach(() => {
     vi.restoreAllMocks();
     vi.resetModules();
@@ -39,12 +41,12 @@ describe('useSessionStream reset behavior', () => {
     const ctx = setupHookTest();
     vi.doMock('react', () => ctx.reactMock);
 
-    const { useSessionStream } = await import('../src/app/hooks/useSessionStream');
+    const { useChatStream } = await import('../src/app/hooks/useChatStream');
 
     const eventSourceCtor = vi.fn();
     (globalThis as { EventSource: unknown }).EventSource = eventSourceCtor;
 
-    useSessionStream({
+    useChatStream({
       enabled: true,
       selectedSessionId: '',
       setSessions: ctx.setSessions,
@@ -63,12 +65,12 @@ describe('useSessionStream reset behavior', () => {
     const ctx = setupHookTest();
     vi.doMock('react', () => ctx.reactMock);
 
-    const { useSessionStream } = await import('../src/app/hooks/useSessionStream');
+    const { useChatStream } = await import('../src/app/hooks/useChatStream');
 
     const eventSourceCtor = vi.fn();
     (globalThis as { EventSource: unknown }).EventSource = eventSourceCtor;
 
-    useSessionStream({
+    useChatStream({
       enabled: false,
       selectedSessionId: 'session-1',
       setSessions: ctx.setSessions,
@@ -87,14 +89,14 @@ describe('useSessionStream reset behavior', () => {
     const ctx = setupHookTest();
     vi.doMock('react', () => ctx.reactMock);
 
-    const { useSessionStream } = await import('../src/app/hooks/useSessionStream');
+    const { useChatStream } = await import('../src/app/hooks/useChatStream');
 
     const close = vi.fn();
     const addEventListener = vi.fn();
     const eventSourceCtor = vi.fn(() => ({ close, addEventListener }));
     (globalThis as { EventSource: unknown }).EventSource = eventSourceCtor;
 
-    useSessionStream({
+    useChatStream({
       enabled: true,
       selectedSessionId: 'session-123',
       setSessions: ctx.setSessions,
@@ -104,7 +106,7 @@ describe('useSessionStream reset behavior', () => {
       setObserverState: ctx.setObserverState,
     });
 
-    expect(eventSourceCtor).toHaveBeenCalledWith('/api/work/stream?id=session-123');
+    expect(eventSourceCtor).toHaveBeenCalledWith(expect.stringContaining('/api/work/stream?id=session-123&v=2'));
     expect(addEventListener).toHaveBeenCalled();
 
     ctx.getCleanup()?.();

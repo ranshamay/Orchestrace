@@ -6,9 +6,12 @@ import {
   type AppAuthStatusResponse,
   fetchAppAuthConfig,
   fetchAppAuthStatus,
-  logoutAppAuth,
+    logoutAppAuth,
   setStoredAuthToken,
+  startWork,
+  fetchSessions,
   type AgentModels,
+
   type AgentTodo,
   type ChatMessage,
   type SessionObserverState,
@@ -34,7 +37,9 @@ import { selectCurrentSession, selectSessionViewState } from './app/selectors/se
 import { buildLlmModalProps } from './app/shell/props/buildLlmModalProps';
 import { AppShell } from './app/shell/AppShell';
 import { LoginGate } from './app/components/auth/LoginGate';
+import { NewPromptModal } from './app/components/overlays/NewPromptModal';
 import type { SettingsSaveToastState } from './app/components/overlays/SettingsSaveToast';
+
 import { readTabFromUrl, updateTabInUrl } from './app/utils/viewRoute';
 
 const LOGIN_PATH = '/login';
@@ -115,7 +120,10 @@ export default function App() {
   const [settingsSaveToastState, setSettingsSaveToastState] = useState<SettingsSaveToastState>('idle');
   const [settingsSaveToastMessage, setSettingsSaveToastMessage] = useState('');
   const [nodeTokenStreams, setNodeTokenStreams] = useState<Record<string, NodeTokenStream>>({});
-  const [observerState, setObserverState] = useState<SessionObserverState | null>(null);
+    const [observerState, setObserverState] = useState<SessionObserverState | null>(null);
+  const [isNewPromptModalOpen, setIsNewPromptModalOpen] = useState(false);
+  const [isCreatingSessionFromModal, setIsCreatingSessionFromModal] = useState(false);
+
   const settingsSaveToastTimerRef = useRef<number | undefined>(undefined);
   const providerReauthNoticeAtRef = useRef(0);
   const [isDocumentVisible, setIsDocumentVisible] = useState(() => (
@@ -878,12 +886,121 @@ export default function App() {
     setDefaultLlmControls((current) => ({ ...current, enableTrivialTaskGate: next }));
   }, [setDefaultLlmControls, setEnableTrivialTaskGate]);
 
-  const handleSetTrivialTaskMaxPromptLength = useCallback((next: number) => {
+    const handleSetTrivialTaskMaxPromptLength = useCallback((next: number) => {
     setTrivialTaskMaxPromptLength(next);
     setDefaultLlmControls((current) => ({ ...current, trivialTaskMaxPromptLength: next }));
   }, [setDefaultLlmControls, setTrivialTaskMaxPromptLength]);
 
+  const handleCreateSessionFromPrompt = useCallback(async (prompt: string) => {
+    const trimmedPrompt = prompt.trim();
+    if (!trimmedPrompt || isCreatingSessionFromModal) {
+      return;
+    }
+
+    if (!workWorkspaceId || !workProvider || !workModel) {
+      setErrorMessage('Select workspace, provider, and model before starting a new prompt.');
+      return;
+    }
+
+    setIsCreatingSessionFromModal(true);
+    setErrorMessage('');
+    try {
+      const result = await startWork({
+        workspaceId: workWorkspaceId,
+        prompt: trimmedPrompt,
+        provider: workProvider,
+        model: workModel,
+        agentModels: {
+          ...defaultLlmControls.agentModels,
+          planner: {
+            ...(defaultLlmControls.agentModels?.planner ?? {}),
+            provider: workPlanningProvider,
+            model: workPlanningModel,
+          },
+          implementer: {
+            ...(defaultLlmControls.agentModels?.implementer ?? {}),
+            provider: workProvider,
+            model: workModel,
+          },
+        },
+        planningProvider: workPlanningProvider,
+        planningModel: workPlanningModel,
+        implementationProvider: workProvider,
+        implementationModel: workModel,
+        deliveryStrategy,
+        planningNoToolGuardMode,
+        autoApprove,
+        adaptiveConcurrency,
+        batchConcurrency,
+        batchMinConcurrency,
+      });
+
+      const latestSessions = await fetchSessions();
+      setSessions(latestSessions.sessions);
+      setActiveTab('graph');
+      setSessionSelection(result.id);
+      setComposerText('');
+      setComposerImages([]);
+      setIsNewPromptModalOpen(false);
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setIsCreatingSessionFromModal(false);
+    }
+  }, [
+    adaptiveConcurrency,
+    autoApprove,
+    batchConcurrency,
+    batchMinConcurrency,
+    defaultLlmControls.agentModels,
+    deliveryStrategy,
+    isCreatingSessionFromModal,
+    planningNoToolGuardMode,
+    setActiveTab,
+    setComposerImages,
+    setComposerText,
+    setErrorMessage,
+    setSessionSelection,
+    setSessions,
+    workPlanningModel,
+    workPlanningProvider,
+    workModel,
+    workProvider,
+    workWorkspaceId,
+  ]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.defaultPrevented) {
+        return;
+      }
+
+      const target = event.target;
+      if (
+        target instanceof HTMLElement
+        && (target.isContentEditable || target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT')
+      ) {
+        return;
+      }
+
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
+        event.preventDefault();
+        setIsNewPromptModalOpen(true);
+      }
+    };
+
+    window.addEventListener('keydown', onKeyDown);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+    };
+  }, []);
+
   const sessionSidebarProps = useMemo(() => ({
+
     activeTab,
     setActiveTab,
     theme,
@@ -1127,9 +1244,11 @@ export default function App() {
     );
   }
 
-  return (
+    return (
 
-    <AppShell
+    <>
+      <AppShell
+
       sessionSidebarProps={sessionSidebarProps}
       mainContentProps={mainContentProps}
       llmModalProps={llmModalProps}
@@ -1146,8 +1265,19 @@ export default function App() {
       warningActionLabel={warningActionLabel}
       onWarningConfirm={confirmMissingModelSwitch}
       onWarningDismiss={dismissMissingModelWarning}
-      settingsSaveToastState={settingsSaveToastState}
+            settingsSaveToastState={settingsSaveToastState}
       settingsSaveToastMessage={settingsSaveToastMessage}
-    />
+      />
+      <NewPromptModal
+        isOpen={isNewPromptModalOpen}
+        isSubmitting={isCreatingSessionFromModal}
+        onClose={() => {
+          if (!isCreatingSessionFromModal) {
+            setIsNewPromptModalOpen(false);
+          }
+        }}
+        onSubmit={handleCreateSessionFromPrompt}
+      />
+    </>
   );
 }
