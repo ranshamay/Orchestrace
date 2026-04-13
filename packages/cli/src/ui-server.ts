@@ -6692,15 +6692,13 @@ function resolveUiPreferencesDefaults(): UiPreferences {
     defaultImplementationModel,
     defaultDeliveryStrategy,
     planningNoToolGuardMode,
-    quickStartMode: resolveQuickStartModeDefault(),
+        quickStartMode: resolveQuickStartModeDefault(),
     quickStartMaxPreDelegationToolCalls: resolveQuickStartMaxPreDelegationToolCallsDefault(),
     executionContext,
     useWorktree,
     adaptiveConcurrency: resolveAdaptiveConcurrencyDefault(),
     batchConcurrency,
     batchMinConcurrency,
-    quickStartMode: parseBooleanSetting(process.env.ORCHESTRACE_QUICK_START_MODE) ?? false,
-    quickStartMaxPreDelegationToolCalls: parsePositiveSetting(process.env.ORCHESTRACE_QUICK_START_MAX_PRE_DELEGATION_TOOL_CALLS) ?? 3,
     enableTrivialTaskGate: resolveTrivialTaskGateDefault(),
     trivialTaskMaxPromptLength: resolveTrivialTaskMaxPromptLengthDefault(),
   };
@@ -6787,15 +6785,9 @@ function normalizeUiPreferences(value: unknown, fallback: UiPreferences): UiPref
     quickStartMaxPreDelegationToolCalls,
     executionContext,
     useWorktree,
-    adaptiveConcurrency: parseBooleanSetting(value.adaptiveConcurrency) ?? fallback.adaptiveConcurrency,
-
+        adaptiveConcurrency: parseBooleanSetting(value.adaptiveConcurrency) ?? fallback.adaptiveConcurrency,
     batchConcurrency,
     batchMinConcurrency,
-    quickStartMode: parseBooleanSetting(value.quickStartMode) ?? fallback.quickStartMode,
-    quickStartMaxPreDelegationToolCalls: normalizePositiveSetting(
-      value.quickStartMaxPreDelegationToolCalls,
-      fallback.quickStartMaxPreDelegationToolCalls,
-    ),
     enableTrivialTaskGate: parseBooleanSetting(value.enableTrivialTaskGate) ?? fallback.enableTrivialTaskGate,
     trivialTaskMaxPromptLength: normalizePositiveSetting(
       value.trivialTaskMaxPromptLength,
