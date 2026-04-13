@@ -6680,7 +6680,7 @@ function resolveUiPreferencesDefaults(): UiPreferences {
       model: defaultInvestigatorModel,
     },
   });
-    return {
+  return {
     activeTab: resolveUiTabDefault(),
     observerShowFindings: resolveObserverShowFindingsDefault(),
     defaultProvider: defaultImplementationProvider,
@@ -6692,17 +6692,16 @@ function resolveUiPreferencesDefaults(): UiPreferences {
     defaultImplementationModel,
     defaultDeliveryStrategy,
     planningNoToolGuardMode,
-        quickStartMode: resolveQuickStartModeDefault(),
-    quickStartMaxPreDelegationToolCalls: resolveQuickStartMaxPreDelegationToolCallsDefault(),
     executionContext,
     useWorktree,
     adaptiveConcurrency: resolveAdaptiveConcurrencyDefault(),
     batchConcurrency,
     batchMinConcurrency,
+    quickStartMode: parseBooleanSetting(process.env.ORCHESTRACE_QUICK_START_MODE) ?? false,
+    quickStartMaxPreDelegationToolCalls: parsePositiveSetting(process.env.ORCHESTRACE_QUICK_START_MAX_PRE_DELEGATION_TOOL_CALLS) ?? 3,
     enableTrivialTaskGate: resolveTrivialTaskGateDefault(),
     trivialTaskMaxPromptLength: resolveTrivialTaskMaxPromptLengthDefault(),
   };
-
 }
 
 function normalizeUiPreferences(value: unknown, fallback: UiPreferences): UiPreferences {
@@ -6741,19 +6740,12 @@ function normalizeUiPreferences(value: unknown, fallback: UiPreferences): UiPref
   const defaultDeliveryStrategy = normalizeSessionDeliveryStrategy(
     value.defaultDeliveryStrategy ?? value.deliveryStrategy,
   );
-    const planningNoToolGuardMode = normalizePlanningNoToolGuardMode(value.planningNoToolGuardMode)
+  const planningNoToolGuardMode = normalizePlanningNoToolGuardMode(value.planningNoToolGuardMode)
     ?? (parseBooleanSetting(value.planningNoToolWarnOnly) ? 'warn' : undefined)
     ?? fallback.planningNoToolGuardMode;
-  const quickStartMode = parseBooleanSetting(value.quickStartMode)
-    ?? fallback.quickStartMode;
-  const quickStartMaxPreDelegationToolCalls = normalizePositiveSetting(
-    value.quickStartMaxPreDelegationToolCalls,
-    fallback.quickStartMaxPreDelegationToolCalls,
-  );
   const executionContext = value.executionContext === 'git-worktree' || value.executionContext === 'workspace'
     ? value.executionContext
     : fallback.executionContext;
-
   const useWorktree = parseBooleanSetting(value.useWorktree)
     ?? (executionContext === 'git-worktree');
 
@@ -6779,15 +6771,18 @@ function normalizeUiPreferences(value: unknown, fallback: UiPreferences): UiPref
     defaultPlanningModel: resolvedPlanningModel,
     defaultImplementationProvider: resolvedImplementationProvider,
     defaultImplementationModel: resolvedImplementationModel,
-        defaultDeliveryStrategy,
+    defaultDeliveryStrategy,
     planningNoToolGuardMode,
-    quickStartMode,
-    quickStartMaxPreDelegationToolCalls,
     executionContext,
     useWorktree,
-        adaptiveConcurrency: parseBooleanSetting(value.adaptiveConcurrency) ?? fallback.adaptiveConcurrency,
+    adaptiveConcurrency: parseBooleanSetting(value.adaptiveConcurrency) ?? fallback.adaptiveConcurrency,
     batchConcurrency,
     batchMinConcurrency,
+    quickStartMode: parseBooleanSetting(value.quickStartMode) ?? fallback.quickStartMode,
+    quickStartMaxPreDelegationToolCalls: normalizePositiveSetting(
+      value.quickStartMaxPreDelegationToolCalls,
+      fallback.quickStartMaxPreDelegationToolCalls,
+    ),
     enableTrivialTaskGate: parseBooleanSetting(value.enableTrivialTaskGate) ?? fallback.enableTrivialTaskGate,
     trivialTaskMaxPromptLength: normalizePositiveSetting(
       value.trivialTaskMaxPromptLength,
@@ -6795,6 +6790,7 @@ function normalizeUiPreferences(value: unknown, fallback: UiPreferences): UiPref
     ),
   };
 }
+
 
 function resolveUiTabDefault(): 'graph' | 'settings' {
   return normalizeUiTab(process.env.ORCHESTRACE_UI_ACTIVE_TAB) ?? 'graph';
