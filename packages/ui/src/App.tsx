@@ -114,9 +114,13 @@ export default function App() {
   const [showToolsPanel, setShowToolsPanel] = useState(false);
   const [todoInput, setTodoInput] = useState('');
   const [copyTraceState, setCopyTraceState] = useState<{ sessionId: string; state: 'idle' | 'copied' | 'failed' }>({ sessionId: '', state: 'idle' });
-  const [settingsSaveToastState, setSettingsSaveToastState] = useState<SettingsSaveToastState>('idle');
+    const [settingsSaveToastState, setSettingsSaveToastState] = useState<SettingsSaveToastState>('idle');
   const [settingsSaveToastMessage, setSettingsSaveToastMessage] = useState('');
+  const [newPromptModalOpen, setNewPromptModalOpen] = useState(false);
+  const [newPromptModalText, setNewPromptModalText] = useState('');
+  const [newPromptModalSubmitting, setNewPromptModalSubmitting] = useState(false);
   const [nodeTokenStreams, setNodeTokenStreams] = useState<Record<string, NodeTokenStream>>({});
+
   const [observerState, setObserverState] = useState<SessionObserverState | null>(null);
   const settingsSaveToastTimerRef = useRef<number | undefined>(undefined);
   const providerReauthNoticeAtRef = useRef(0);
@@ -703,7 +707,30 @@ export default function App() {
     updateActiveLlmControls,
   ]);
 
+    const openNewPromptModal = useCallback(() => {
+    setNewPromptModalOpen(true);
+  }, []);
+
+  const handleSubmitNewPromptModal = useCallback(async () => {
+    const prompt = newPromptModalText.trim();
+    if (!prompt || newPromptModalSubmitting) {
+      return;
+    }
+
+    setNewPromptModalSubmitting(true);
+    handleStartNewSessionDraft();
+
+    const started = await actions.handleStartNewSessionPrompt(prompt);
+    if (started) {
+      setNewPromptModalText('');
+      setNewPromptModalOpen(false);
+    }
+
+    setNewPromptModalSubmitting(false);
+  }, [actions, handleStartNewSessionDraft, newPromptModalSubmitting, newPromptModalText]);
+
   const modalTargetsPlanningPhase = composerMode === 'planning';
+
   const modalWorkProvider = modalTargetsPlanningPhase ? workPlanningProvider : workProvider;
   const modalWorkModel = modalTargetsPlanningPhase ? workPlanningModel : workModel;
   const modalSetWorkModel = modalTargetsPlanningPhase ? setWorkPlanningModel : setWorkModel;
@@ -755,7 +782,7 @@ export default function App() {
   const timelineFollow = useTimelineFollow(latestTimelineKey, selectedSessionId);
   const toolsPanel = useToolsPanel(showToolsPanel, selectedSessionId, composerMode, selectedSession?.mode);
 
-  const actions = useSessionActions({
+    const actions = useSessionActions({
     selectedSessionId, selectedSession, sessions, chatMessages, todos, composerText, composerImages,
     workWorkspaceId,
     workPlanningProvider,
@@ -770,6 +797,65 @@ export default function App() {
     setErrorMessage, setSessions, setSelectedSessionId, setTodos,
     setComposerText, setComposerImages, setLlmControlsBySessionId,
   });
+
+  const openNewPromptModal = useCallback(() => {
+    setNewPromptModalOpen(true);
+  }, []);
+
+  const handleSubmitNewPromptModal = useCallback(async () => {
+    const prompt = newPromptModalText.trim();
+    if (!prompt || newPromptModalSubmitting) {
+      return;
+    }
+
+    setNewPromptModalSubmitting(true);
+    handleStartNewSessionDraft();
+
+    const started = await actions.handleStartNewSessionPrompt(prompt);
+    if (started) {
+      setNewPromptModalText('');
+      setNewPromptModalOpen(false);
+    }
+
+    setNewPromptModalSubmitting(false);
+  }, [actions, handleStartNewSessionDraft, newPromptModalSubmitting, newPromptModalText]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    const isEditableTarget = (target: EventTarget | null): boolean => {
+      if (!(target instanceof HTMLElement)) {
+        return false;
+      }
+
+      if (target.isContentEditable) {
+        return true;
+      }
+
+      const tagName = target.tagName.toLowerCase();
+      return tagName === 'input' || tagName === 'textarea' || tagName === 'select';
+    };
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || isEditableTarget(event.target)) {
+        return;
+      }
+
+      if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.key.toLowerCase() === 'n') {
+        event.preventDefault();
+        setNewPromptModalOpen(true);
+      }
+    };
+
+    window.addEventListener('keydown', onKeyDown);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+    };
+  }, []);
+
+
 
   useEffect(() => {
     if (!bootstrapComplete) {
