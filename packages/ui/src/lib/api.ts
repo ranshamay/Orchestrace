@@ -392,6 +392,7 @@ export interface WorkSession {
     testsPassed?: number;
     testsFailed?: number;
     rejectionReason?: string;
+    planPath?: string;
     testPlan?: string[];
     coverageAssessment?: string;
     qualityAssessment?: string;
@@ -457,6 +458,12 @@ export interface WorkSessionDiffResponse {
   diff: string;
   generatedAt: string;
   truncated: boolean;
+}
+
+export interface WorkPlanResponse {
+  id: string;
+  planPath: string;
+  content: string;
 }
 
 export interface SessionLlmContextSnapshotSummary {
@@ -662,6 +669,15 @@ export async function fetchWorkTools(
 
 export async function fetchWorkDiff(id: string): Promise<WorkSessionDiffResponse> {
   return readJson(await authedFetch(`${API_BASE}/work/diff?id=${encodeURIComponent(id)}`));
+}
+
+export async function fetchWorkPlan(id: string, path?: string): Promise<WorkPlanResponse> {
+  const params = new URLSearchParams({ id });
+  if (path && path.trim().length > 0) {
+    params.set('path', path.trim());
+  }
+
+  return readJson(await authedFetch(`${API_BASE}/work/plan?${params.toString()}`));
 }
 
 export async function startWork(payload: {

@@ -175,17 +175,23 @@ export function useBootstrapData(enabled = true) {
           || providersState?.defaults.provider
           || providersState?.providers[0]?.id
           || '';
-        const defaultModel = typeof preferences.defaultModel === 'string'
+        const providerDefaultModel = typeof providersState?.defaults.model === 'string'
+          ? providersState.defaults.model.trim()
+          : '';
+        const preferredDefaultModel = typeof preferences.defaultModel === 'string'
           ? preferences.defaultModel.trim()
           : '';
+        const defaultModel = preferredDefaultModel || providerDefaultModel;
         const defaultPlanningProvider = resolvePreferredConnectedProvider(preferences.defaultPlanningProvider) || defaultProvider;
-        const defaultPlanningModel = typeof preferences.defaultPlanningModel === 'string'
+        const preferredPlanningModel = typeof preferences.defaultPlanningModel === 'string'
           ? preferences.defaultPlanningModel.trim()
-          : defaultModel;
+          : '';
+        const defaultPlanningModel = preferredPlanningModel || defaultModel;
         const defaultImplementationProvider = resolvePreferredConnectedProvider(preferences.defaultImplementationProvider) || defaultProvider;
-        const defaultImplementationModel = typeof preferences.defaultImplementationModel === 'string'
+        const preferredImplementationModel = typeof preferences.defaultImplementationModel === 'string'
           ? preferences.defaultImplementationModel.trim()
-          : defaultModel;
+          : '';
+        const defaultImplementationModel = preferredImplementationModel || defaultModel;
         const defaultAgentModels: AgentModels = {
           ...(preferences.defaultAgentModels ?? {}),
           planner: {

@@ -97,6 +97,7 @@ export interface UiDagEvent {
   testsPassed?: number;
   testsFailed?: number;
   rejectionReason?: string;
+  planPath?: string;
   testPlan?: string[];
   coverageAssessment?: string;
   qualityAssessment?: string;

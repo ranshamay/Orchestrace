@@ -1,11 +1,11 @@
-import { useRef, useEffect, useCallback, useState, type ReactNode } from 'react';
+import { useRef, useEffect, useCallback, useMemo, useState, type ReactNode } from 'react';
 import type { ChatMessage, ToolCallMessagePart } from '../../chat-types';
 import { PHASE_ICON, resolveToolIcon } from '../../chat-types';
 import { MarkdownMessage } from '../MarkdownMessage';
-import { ChevronDown, ChevronRight, Brain, AlertTriangle, Eye, Zap, ClipboardCopy, Check, Info, X } from 'lucide-react';
+import { ChevronDown, ChevronRight, Brain, AlertTriangle, Eye, Zap, ClipboardCopy, Check, Info, FileText, X } from 'lucide-react';
 import { composerModeBadgeClass } from '../../utils/composer';
 import type { ComposerMode } from '../../types';
-import type { Workspace } from '../../../lib/api';
+import { fetchWorkPlan, type WorkSession, type Workspace } from '../../../lib/api';
 
 type Props = {
   messages: ChatMessage[];
@@ -19,6 +19,7 @@ type Props = {
   onRejectPlan: () => Promise<void>;
   isDark: boolean;
   sessionId?: string;
+  selectedSession?: WorkSession;
   sessionPrompt?: string;
   sessionStatus?: string;
   sessionModel?: string;
@@ -42,12 +43,41 @@ function formatLatency(ms: number): string {
   return `${Math.round(ms / 1000)}s`;
 }
 
-export function ChatPanel({ messages, isStreaming, activeMessageId: _activeMessageId, firstTokenLatencyMs, waitingForFirstToken, activeToolCalls, composer, onApprovePlan, onRejectPlan, isDark, sessionId, sessionPrompt, sessionStatus, sessionModel, sessionProvider, composerMode, workspaces, workWorkspaceId, planningNoToolGuardMode, autoApprove, planningProvider, planningModel }: Props) {
+export function ChatPanel({ messages, isStreaming, activeMessageId: _activeMessageId, firstTokenLatencyMs, waitingForFirstToken, activeToolCalls, composer, onApprovePlan, onRejectPlan, isDark, sessionId, selectedSession, sessionPrompt, sessionStatus, sessionModel, sessionProvider, composerMode, workspaces, workWorkspaceId, planningNoToolGuardMode, autoApprove, planningProvider, planningModel }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const isAutoScrollingRef = useRef(true);
   const [showJump, setShowJump] = useState(false);
   const [copyState, setCopyState] = useState<'idle' | 'copied'>('idle');
   const [showInfo, setShowInfo] = useState(false);
+  const [isPlanModalOpen, setIsPlanModalOpen] = useState(false);
+  const [isPlanLoading, setIsPlanLoading] = useState(false);
+  const [loadedPlanKey, setLoadedPlanKey] = useState('');
+  const [loadedPlanPath, setLoadedPlanPath] = useState('');
+  const [planContent, setPlanContent] = useState('');
+  const [planError, setPlanError] = useState('');
+
+  const latestPlanPathFromEvents = useMemo(() => {
+    if (!selectedSession) {
+      return '';
+    }
+
+    for (let index = selectedSession.events.length - 1; index >= 0; index -= 1) {
+      const event = selectedSession.events[index];
+      if (event.type !== 'task:plan-persisted') {
+        continue;
+      }
+
+      const planPath = event.planPath?.trim();
+      if (planPath) {
+        return planPath;
+      }
+    }
+
+    return '';
+  }, [selectedSession]);
+
+  const availablePlanPath = selectedSession?.output?.planPath?.trim() || latestPlanPathFromEvents;
+  const canViewPlan = Boolean(selectedSession?.id && availablePlanPath);
 
   const handleCopyInvestigation = useCallback(async () => {
     const prompt = buildInvestigationPrompt(messages, { sessionId, prompt: sessionPrompt, status: sessionStatus, model: sessionModel, provider: sessionProvider });
@@ -57,6 +87,51 @@ export function ChatPanel({ messages, isStreaming, activeMessageId: _activeMessa
       setTimeout(() => setCopyState('idle'), 2000);
     } catch { /* ignore */ }
   }, [messages, sessionId, sessionPrompt, sessionStatus, sessionModel, sessionProvider]);
+
+  const handleOpenPlanModal = useCallback(async () => {
+    if (!selectedSession?.id || !availablePlanPath) {
+      return;
+    }
+
+    setIsPlanModalOpen(true);
+    const planKey = `${selectedSession.id}:${availablePlanPath}`;
+    if (loadedPlanKey === planKey && planContent.length > 0) {
+      return;
+    }
+
+    setIsPlanLoading(true);
+    setPlanError('');
+
+    try {
+      const response = await fetchWorkPlan(selectedSession.id, availablePlanPath);
+      setLoadedPlanKey(planKey);
+      setLoadedPlanPath(response.planPath);
+      setPlanContent(response.content);
+    } catch (error) {
+      setLoadedPlanPath(availablePlanPath);
+      setPlanContent('');
+      setPlanError(error instanceof Error ? error.message : 'Failed to load plan.');
+    } finally {
+      setIsPlanLoading(false);
+    }
+  }, [availablePlanPath, loadedPlanKey, planContent.length, selectedSession?.id]);
+
+  useEffect(() => {
+    if (!isPlanModalOpen || typeof window === 'undefined') {
+      return;
+    }
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setIsPlanModalOpen(false);
+      }
+    };
+
+    window.addEventListener('keydown', onKeyDown);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+    };
+  }, [isPlanModalOpen]);
 
   useEffect(() => {
     if (!isAutoScrollingRef.current) return;
@@ -88,7 +163,8 @@ export function ChatPanel({ messages, isStreaming, activeMessageId: _activeMessa
   const workspaceName = workspaces.find((w) => w.id === workWorkspaceId)?.name ?? 'none';
 
   return (
-    <div className="relative flex min-h-0 flex-1 flex-col">
+    <>
+      <div className="relative flex min-h-0 flex-1 flex-col">
       {/* Top bar: model + mode + info + copy trace */}
       <div className="flex items-center justify-between border-b border-slate-200/60 dark:border-slate-700/60 px-3 py-1.5 shrink-0 gap-2">
         <div className="flex items-center gap-2 min-w-0">
@@ -112,6 +188,16 @@ export function ChatPanel({ messages, isStreaming, activeMessageId: _activeMessa
           </span>
         </div>
         <div className="flex items-center gap-1 shrink-0">
+          {canViewPlan && (
+            <button
+              onClick={handleOpenPlanModal}
+              className="flex items-center rounded p-1 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+              title="View plan"
+              type="button"
+            >
+              <FileText className="h-3.5 w-3.5" />
+            </button>
+          )}
           <div className="relative">
             <button
               onClick={() => setShowInfo(!showInfo)}
@@ -187,7 +273,55 @@ export function ChatPanel({ messages, isStreaming, activeMessageId: _activeMessa
           {composer}
         </div>
       </div>
-    </div>
+      </div>
+
+      {isPlanModalOpen && (
+        <div
+          aria-modal="true"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4"
+          role="dialog"
+          onClick={(event) => {
+            if (event.target === event.currentTarget) {
+              setIsPlanModalOpen(false);
+            }
+          }}
+        >
+          <div className="flex max-h-[85vh] w-full max-w-4xl flex-col overflow-hidden rounded-lg border border-slate-200 bg-white shadow-xl dark:border-slate-700 dark:bg-slate-900">
+            <div className="flex items-center justify-between border-b border-slate-200 px-4 py-2 dark:border-slate-700">
+              <div>
+                <h2 className="text-sm font-semibold text-slate-800 dark:text-slate-100">Execution Plan</h2>
+                {loadedPlanPath && (
+                  <p className="max-w-[70vw] truncate text-[11px] text-slate-500 dark:text-slate-400" title={loadedPlanPath}>
+                    {loadedPlanPath}
+                  </p>
+                )}
+              </div>
+              <button
+                className="rounded border border-slate-200 px-2 py-1 text-xs text-slate-600 hover:bg-slate-100 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
+                onClick={() => setIsPlanModalOpen(false)}
+                type="button"
+              >
+                Close
+              </button>
+            </div>
+
+            <div className="min-h-0 flex-1 overflow-auto p-4">
+              {isPlanLoading ? (
+                <div className="text-sm text-slate-500 dark:text-slate-400">Loading plan...</div>
+              ) : planError ? (
+                <div className="rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700 dark:border-red-800 dark:bg-red-950/40 dark:text-red-300">
+                  {planError}
+                </div>
+              ) : (
+                <pre className="whitespace-pre-wrap break-words rounded border border-slate-200 bg-slate-50 p-3 text-[12px] leading-5 text-slate-800 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100">
+                  {planContent || 'Plan file is empty.'}
+                </pre>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+    </>
   );
 }
 

@@ -171,6 +171,7 @@ export function AppMainContent(props: AppMainContentProps) {
       onRejectPlan={props.onRejectPlan}
       isDark={props.isDark}
       sessionId={props.selectedSessionId}
+      selectedSession={props.selectedSession}
       sessionPrompt={props.selectedSession?.prompt}
       sessionStatus={props.selectedSession?.status}
       sessionModel={props.workModel}

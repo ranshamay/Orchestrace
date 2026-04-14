@@ -76,6 +76,7 @@ export interface UiDagEvent {
   testsPassed?: number;
   testsFailed?: number;
   rejectionReason?: string;
+  planPath?: string;
   plannerTestPlan?: string[];
   changedFiles?: string[];
   testPlan?: string[];

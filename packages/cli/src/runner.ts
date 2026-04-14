@@ -3028,6 +3028,7 @@ function toUiEvent(
   testsPassed?: number;
   testsFailed?: number;
   rejectionReason?: string;
+  planPath?: string;
   plannerTestPlan?: string[];
   changedFiles?: string[];
   testPlan?: string[];
@@ -3068,6 +3069,7 @@ function toUiEvent(
     testsPassed: event.type === 'task:tester-verdict' ? event.testsPassed : undefined,
     testsFailed: event.type === 'task:tester-verdict' ? event.testsFailed : undefined,
     rejectionReason: event.type === 'task:tester-verdict' ? event.rejectionReason : undefined,
+    planPath: event.type === 'task:plan-persisted' ? event.path : undefined,
     plannerTestPlan: event.type === 'task:testing' ? event.plannerTestPlan : undefined,
     changedFiles: event.type === 'task:testing' ? event.changedFiles : undefined,
     testPlan: event.type === 'task:tester-verdict' ? event.testPlan : undefined,

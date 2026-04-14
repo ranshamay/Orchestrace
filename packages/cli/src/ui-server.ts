@@ -5,7 +5,7 @@ import { createServer as createNetServer } from 'node:net';
 import { existsSync, watch, type FSWatcher } from 'node:fs';
 import { homedir } from 'node:os';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import {
@@ -3523,6 +3523,39 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
           messages: thread.messages.filter((message) => message.role !== 'system'),
           todos: (sessionTodos.get(id) ?? []).map((item) => ({ ...item })),
         });
+        return;
+      }
+
+      if (req.method === 'GET' && pathname === '/api/work/plan') {
+        const id = asString(url.searchParams.get('id'));
+        if (!id) {
+          sendJson(res, 400, { error: 'Missing id' });
+          return;
+        }
+
+        const session = workSessions.get(id);
+        if (!session) {
+          sendJson(res, 404, { error: 'Unknown work session' });
+          return;
+        }
+
+        const requestedPath = asString(url.searchParams.get('path'));
+        const resolvedPlanPath = resolveSessionPlanPath(session, requestedPath);
+        if (!resolvedPlanPath) {
+          sendJson(res, 404, { error: 'No plan is available for this session yet.' });
+          return;
+        }
+
+        try {
+          const content = await readFile(resolvedPlanPath, 'utf-8');
+          sendJson(res, 200, {
+            id,
+            planPath: resolvedPlanPath,
+            content,
+          });
+        } catch (error) {
+          sendJson(res, 404, { error: `Unable to read plan file: ${toErrorMessage(error)}` });
+        }
         return;
       }
 
@@ -7110,6 +7143,7 @@ function toUiEvent(runId: string, event: DagEvent): UiDagEvent | undefined {
     testsPassed: event.type === 'task:tester-verdict' ? event.testsPassed : undefined,
     testsFailed: event.type === 'task:tester-verdict' ? event.testsFailed : undefined,
     rejectionReason: event.type === 'task:tester-verdict' ? event.rejectionReason : undefined,
+    planPath: event.type === 'task:plan-persisted' ? event.path : undefined,
     plannerTestPlan: event.type === 'task:testing' ? event.plannerTestPlan : undefined,
     changedFiles: event.type === 'task:testing' ? event.changedFiles : undefined,
     testPlan: event.type === 'task:tester-verdict' ? event.testPlan : undefined,
@@ -8345,6 +8379,63 @@ function computeSessionProgress(session: WorkSession, todos: AgentTodoItem[]): {
       nodeWeightCompleted: graph?.completedWeight ?? 0,
     },
   };
+}
+
+function resolveSessionPlanPath(session: WorkSession, requestedPath?: string): string | undefined {
+  const requested = asString(requestedPath).trim();
+  const fromOutput = asString(session.output?.planPath).trim();
+
+  let fromEvent = '';
+  for (let index = session.events.length - 1; index >= 0; index -= 1) {
+    const event = session.events[index];
+    if (event.type !== 'task:plan-persisted') {
+      continue;
+    }
+
+    const explicit = asString(event.planPath).trim();
+    if (explicit) {
+      fromEvent = explicit;
+      break;
+    }
+
+    const parsed = parsePlanPathFromPersistedEventMessage(asString(event.message));
+    if (parsed) {
+      fromEvent = parsed;
+      break;
+    }
+  }
+
+  const candidate = requested || fromOutput || fromEvent;
+  if (!candidate) {
+    return undefined;
+  }
+
+  const absolutePath = isAbsolute(candidate)
+    ? resolve(candidate)
+    : resolve(session.workspacePath, candidate);
+  const relativeToWorkspace = relative(session.workspacePath, absolutePath);
+  if (!relativeToWorkspace || relativeToWorkspace.startsWith('..') || isAbsolute(relativeToWorkspace)) {
+    return undefined;
+  }
+
+  return absolutePath;
+}
+
+function parsePlanPathFromPersistedEventMessage(message: string): string | undefined {
+  const normalized = message.trim();
+  if (!normalized) {
+    return undefined;
+  }
+
+  const marker = 'plan persisted at ';
+  const lower = normalized.toLowerCase();
+  const index = lower.lastIndexOf(marker);
+  if (index < 0) {
+    return undefined;
+  }
+
+  const candidate = normalized.slice(index + marker.length).trim();
+  return candidate.length > 0 ? candidate : undefined;
 }
 
 function serializeWorkSession(session: WorkSession, todos: AgentTodoItem[] = []): Record<string, unknown> {

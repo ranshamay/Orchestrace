@@ -1,6 +1,24 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from 'react';
 import { fetchModels } from '../../lib/api';
 
+export function resolveModelByPriority(options: {
+  specificModel?: string;
+  defaultModel?: string;
+  providerModels: string[];
+}): string {
+  const specificModel = typeof options.specificModel === 'string' ? options.specificModel.trim() : '';
+  if (specificModel) {
+    return specificModel;
+  }
+
+  const defaultModel = typeof options.defaultModel === 'string' ? options.defaultModel.trim() : '';
+  if (defaultModel && options.providerModels.includes(defaultModel)) {
+    return defaultModel;
+  }
+
+  return options.providerModels[0] ?? '';
+}
+
 type MissingModelWarning = {
   provider: string;
   missingModel: string;
@@ -39,11 +57,13 @@ export function useProviderModels(
         }));
 
         if (response.models.length > 0 && workModel.length === 0) {
-          const preferredModel = preferredModelForProvider?.trim();
-          if (preferredModel && response.models.includes(preferredModel)) {
-            setWorkModel(preferredModel);
-          } else {
-            setWorkModel(response.models[0]);
+          const resolvedModel = resolveModelByPriority({
+            specificModel: workModel,
+            defaultModel: preferredModelForProvider,
+            providerModels: response.models,
+          });
+          if (resolvedModel) {
+            setWorkModel(resolvedModel);
           }
         }
       } catch {
@@ -100,10 +120,11 @@ export function useProviderModels(
       return null;
     }
 
-    const preferredModel = preferredModelForProvider?.trim();
-    const fallbackModel = preferredModel && currentModels.includes(preferredModel)
-      ? preferredModel
-      : (currentModels[0] ?? '');
+    const fallbackModel = resolveModelByPriority({
+      specificModel: '',
+      defaultModel: preferredModelForProvider,
+      providerModels: currentModels,
+    });
 
     return {
       provider: workProvider,

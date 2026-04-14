@@ -674,11 +674,17 @@ export default function App() {
     setNodeTokenStreams({});
     setObserverState(null);
     setShowToolsPanel(false);
+
+    const nextPlanningProvider = defaultLlmControls.planningProvider || workPlanningProvider;
+    const nextPlanningModel = defaultLlmControls.planningModel || workPlanningModel || workModel;
+    const nextImplementationProvider = defaultLlmControls.implementationProvider || workProvider || nextPlanningProvider;
+    const nextImplementationModel = defaultLlmControls.implementationModel || workModel || workPlanningModel || nextPlanningModel;
+
     updateActiveLlmControls({
-      planningProvider: defaultLlmControls.planningProvider,
-      planningModel: defaultLlmControls.planningModel,
-      implementationProvider: defaultLlmControls.implementationProvider,
-      implementationModel: defaultLlmControls.implementationModel,
+      planningProvider: nextPlanningProvider,
+      planningModel: nextPlanningModel,
+      implementationProvider: nextImplementationProvider,
+      implementationModel: nextImplementationModel,
       agentModels: defaultLlmControls.agentModels,
       deliveryStrategy: defaultLlmControls.deliveryStrategy,
       planningNoToolGuardMode: defaultLlmControls.planningNoToolGuardMode,
@@ -699,6 +705,10 @@ export default function App() {
     setShowToolsPanel,
     setTodos,
     updateActiveLlmControls,
+    workModel,
+    workPlanningModel,
+    workPlanningProvider,
+    workProvider,
   ]);
 
   const modalTargetsPlanningPhase = composerMode === 'planning';
@@ -706,8 +716,8 @@ export default function App() {
   const modalWorkModel = modalTargetsPlanningPhase ? workPlanningModel : workModel;
   const modalSetWorkModel = modalTargetsPlanningPhase ? setWorkPlanningModel : setWorkModel;
   const modalPreferredModelForProvider = modalTargetsPlanningPhase
-    ? (modalWorkProvider === defaultLlmControls.planningProvider ? defaultLlmControls.planningModel : '')
-    : (modalWorkProvider === defaultLlmControls.implementationProvider ? defaultLlmControls.implementationModel : '');
+    ? defaultLlmControls.planningModel
+    : defaultLlmControls.implementationModel;
 
   const {
     currentModels,

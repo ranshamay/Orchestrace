@@ -69,10 +69,6 @@ export function LlmControlsModal(props: LlmControlsModalProps) {
     }
 
     if (connectedProviders.length === 0) {
-      if (workProvider && lastAutoProviderRef.current !== '') {
-        lastAutoProviderRef.current = '';
-        onChangeProvider('');
-      }
       return;
     }
 
