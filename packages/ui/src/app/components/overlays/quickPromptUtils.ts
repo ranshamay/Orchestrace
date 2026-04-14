@@ -1,4 +1,4 @@
-type KeyLike = Pick<KeyboardEvent, 'key' | 'shiftKey'>;
+type KeyLike = Pick<KeyboardEvent, "key" | "shiftKey">;
 
 export function normalizeQuickPrompt(value: string): string {
   return value.trim();
@@ -9,9 +9,11 @@ export function canSubmitQuickPrompt(value: string): boolean {
 }
 
 export function shouldSubmitQuickPrompt(event: KeyLike): boolean {
-  return event.key === 'Enter' && !event.shiftKey;
+  return event.key === "Enter" && !event.shiftKey;
 }
 
-export function shouldCloseQuickPrompt(event: Pick<KeyboardEvent, 'key'>): boolean {
-  return event.key === 'Escape';
+export function shouldCloseQuickPrompt(
+  event: Pick<KeyboardEvent, "key">,
+): boolean {
+  return event.key === "Escape";
 }

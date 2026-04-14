@@ -4,7 +4,7 @@ import {
   normalizeQuickPrompt,
   shouldCloseQuickPrompt,
   shouldSubmitQuickPrompt,
-} from "../src/app/components/overlays/QuickPromptModal";
+} from "../src/app/components/overlays/quickPromptUtils";
 
 describe("QuickPromptModal helpers", () => {
   it("normalizes input before submit", () => {

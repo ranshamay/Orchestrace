@@ -12,7 +12,6 @@ type QuickPromptModalProps = {
   onSubmit: (prompt: string) => void;
 };
 
-
 export function QuickPromptModal({
   isOpen,
   onClose,
@@ -21,7 +20,7 @@ export function QuickPromptModal({
   const [value, setValue] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
-    useEffect(() => {
+  useEffect(() => {
     if (!isOpen) {
       return;
     }
@@ -33,9 +32,9 @@ export function QuickPromptModal({
     return null;
   }
 
-  const handleClose = () => {
+    const handleClose = () => {
     setValue("");
-              handleClose();
+    onClose();
   };
 
   const handleSubmit = () => {
@@ -48,7 +47,6 @@ export function QuickPromptModal({
     setValue("");
   };
 
-
   return (
     <div
       aria-modal="true"
@@ -56,7 +54,7 @@ export function QuickPromptModal({
       role="dialog"
       onClick={(event) => {
         if (event.target === event.currentTarget) {
-                    handleClose();
+          handleClose();
         }
       }}
     >
@@ -67,7 +65,7 @@ export function QuickPromptModal({
           </h2>
           <button
             className="rounded border border-slate-200 px-2 py-1 text-xs text-slate-600 hover:bg-slate-100 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
-            onClick={onClose}
+                        onClick={handleClose}
             type="button"
           >
             Close
@@ -80,7 +78,7 @@ export function QuickPromptModal({
           onChange={(event) => setValue(event.target.value)}
           onKeyDown={(event) => {
             if (shouldCloseQuickPrompt(event)) {
-                        handleClose();
+              handleClose();
               return;
             }
 
@@ -101,7 +99,7 @@ export function QuickPromptModal({
           <div className="flex items-center gap-2">
             <button
               className="rounded border border-slate-200 px-2 py-1 text-xs text-slate-600 hover:bg-slate-100 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
-              onClick={onClose}
+                          onClick={handleClose}
               type="button"
             >
               Cancel
