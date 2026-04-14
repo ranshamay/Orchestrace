@@ -17,6 +17,7 @@ type Props = {
   composer: ReactNode;
   onApprovePlan: () => Promise<void>;
   onRejectPlan: () => Promise<void>;
+  onOpenLlmControls: () => void;
   isDark: boolean;
   sessionId?: string;
   selectedSession?: WorkSession;
@@ -43,7 +44,7 @@ function formatLatency(ms: number): string {
   return `${Math.round(ms / 1000)}s`;
 }
 
-export function ChatPanel({ messages, isStreaming, activeMessageId: _activeMessageId, firstTokenLatencyMs, waitingForFirstToken, activeToolCalls, composer, onApprovePlan, onRejectPlan, isDark, sessionId, selectedSession, sessionPrompt, sessionStatus, sessionModel, sessionProvider, composerMode, workspaces, workWorkspaceId, planningNoToolGuardMode, autoApprove, planningProvider, planningModel }: Props) {
+export function ChatPanel({ messages, isStreaming, activeMessageId: _activeMessageId, firstTokenLatencyMs, waitingForFirstToken, activeToolCalls, composer, onApprovePlan, onRejectPlan, onOpenLlmControls, isDark, sessionId, selectedSession, sessionPrompt, sessionStatus, sessionModel, sessionProvider, composerMode, workspaces, workWorkspaceId, planningNoToolGuardMode, autoApprove, planningProvider, planningModel }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const isAutoScrollingRef = useRef(true);
   const [showJump, setShowJump] = useState(false);
@@ -159,30 +160,32 @@ export function ChatPanel({ messages, isStreaming, activeMessageId: _activeMessa
     : undefined;
   const displayModel = livePhase === 'planning' ? (planningModel || sessionModel) : (sessionModel || planningModel);
   const displayProvider = livePhase === 'planning' ? (planningProvider || sessionProvider) : (sessionProvider || planningProvider);
+  const modelControlTitle = [
+    `Open controls (${displayProvider || 'none'}/${displayModel || 'none'})`,
+    isStreaming ? 'streaming active' : '',
+    waitingForFirstToken ? 'waiting for first token' : '',
+    activeToolCalls > 0 ? `tool calls in flight: ${activeToolCalls}` : '',
+    firstTokenLatencyMs !== null ? `ttft ${formatLatency(firstTokenLatencyMs)}` : '',
+  ]
+    .filter((part) => part.length > 0)
+    .join(' • ');
   const effectivePlanningGuard = planningNoToolGuardMode;
   const workspaceName = workspaces.find((w) => w.id === workWorkspaceId)?.name ?? 'none';
 
   return (
     <>
       <div className="relative flex min-h-0 flex-1 flex-col">
-      {/* Top bar: model + mode + info + copy trace */}
+      {/* Top bar: model + mode + quick actions */}
       <div className="flex items-center justify-between border-b border-slate-200/60 dark:border-slate-700/60 px-3 py-1.5 shrink-0 gap-2">
         <div className="flex items-center gap-2 min-w-0">
-          <span className="text-[11px] font-mono text-slate-600 dark:text-slate-300 truncate" title={`${displayProvider || ''}/${displayModel || ''}`}>
+          <button
+            className="truncate rounded px-1 py-0.5 text-[11px] font-mono text-slate-600 transition-colors hover:bg-slate-100 hover:text-slate-800 dark:text-slate-300 dark:hover:bg-slate-800 dark:hover:text-slate-100"
+            onClick={onOpenLlmControls}
+            title={modelControlTitle}
+            type="button"
+          >
             {displayModel || 'no model'}
-          </span>
-          {isStreaming && <span className="text-[10px] text-violet-500 animate-pulse shrink-0">streaming</span>}
-          {waitingForFirstToken && (
-            <span className="text-[10px] text-amber-500 animate-pulse shrink-0">first token...</span>
-          )}
-          {activeToolCalls > 0 && (
-            <span className="text-[10px] text-sky-500 shrink-0">using tools ({activeToolCalls})</span>
-          )}
-          {firstTokenLatencyMs !== null && (
-            <span className="text-[10px] text-slate-500 dark:text-slate-400 shrink-0" title="Time to first token">
-              ttft {formatLatency(firstTokenLatencyMs)}
-            </span>
-          )}
+          </button>
           <span className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${composerModeBadgeClass(composerMode)}`}>
             {composerMode}
           </span>
@@ -225,11 +228,11 @@ export function ChatPanel({ messages, isStreaming, activeMessageId: _activeMessa
           {messages.length > 0 && (
             <button
               onClick={handleCopyInvestigation}
-              className="flex items-center gap-1 rounded px-2 py-1 text-[11px] text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
-              title="Copy session trace as LLM investigation prompt"
+              className={`inline-flex h-6 w-6 items-center justify-center rounded text-slate-500 transition-colors hover:bg-slate-100 hover:text-slate-700 dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-slate-200 ${copyState === 'copied' ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300' : ''}`}
+              title={copyState === 'copied' ? 'Trace copied' : 'Copy trace'}
+              type="button"
             >
               {copyState === 'copied' ? <Check className="h-3 w-3 text-emerald-500" /> : <ClipboardCopy className="h-3 w-3" />}
-              <span>{copyState === 'copied' ? 'Copied' : 'Copy trace'}</span>
             </button>
           )}
         </div>
@@ -313,9 +316,9 @@ export function ChatPanel({ messages, isStreaming, activeMessageId: _activeMessa
                   {planError}
                 </div>
               ) : (
-                <pre className="whitespace-pre-wrap break-words rounded border border-slate-200 bg-slate-50 p-3 text-[12px] leading-5 text-slate-800 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100">
-                  {planContent || 'Plan file is empty.'}
-                </pre>
+                <div className="rounded border border-slate-200 bg-slate-50 p-3 text-[12px] leading-5 text-slate-800 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100">
+                  <MarkdownMessage content={planContent || 'Plan file is empty.'} dark={isDark} />
+                </div>
               )}
             </div>
           </div>

@@ -1,4 +1,4 @@
-import { Activity, GitBranch, LogOut, Moon, ScrollText, Settings, SlidersHorizontal, Sun } from 'lucide-react';
+import { Activity, GitBranch, LogOut, Moon, ScrollText, Settings, Sun } from 'lucide-react';
 import type { Tab, ThemeMode } from '../../types';
 
 type Props = {
@@ -6,7 +6,6 @@ type Props = {
   onNavigate: (tab: Tab) => void;
   theme: ThemeMode;
   setTheme: (updater: (current: ThemeMode) => ThemeMode) => void;
-  onOpenLlmControls: () => void;
   authUser: {
     email: string;
     name?: string;
@@ -15,7 +14,7 @@ type Props = {
   onLogout: () => void;
 };
 
-export function TopBar({ activeTab, onNavigate, theme, setTheme, onOpenLlmControls, authUser, onLogout }: Props) {
+export function TopBar({ activeTab, onNavigate, theme, setTheme, authUser, onLogout }: Props) {
   const isDark = theme === 'dark';
   const userLabel = authUser?.name?.trim() || authUser?.email || '';
   const avatarFallback = userLabel.slice(0, 1).toUpperCase() || '?';
@@ -54,16 +53,6 @@ export function TopBar({ activeTab, onNavigate, theme, setTheme, onOpenLlmContro
         </nav>
       </div>
       <div className="flex items-center gap-1.5">
-        <button
-          aria-label="LLM Controls"
-          className="inline-flex h-8 items-center gap-1.5 rounded-md px-2 text-slate-600 hover:bg-slate-100 hover:text-slate-800 dark:text-slate-300 dark:hover:bg-slate-800 dark:hover:text-slate-100"
-          onClick={onOpenLlmControls}
-          title="LLM Controls"
-          type="button"
-        >
-          <SlidersHorizontal className="h-4 w-4" />
-          <span className="hidden text-xs font-semibold sm:inline">Controls</span>
-        </button>
         <button
           aria-label="Toggle theme"
           className="inline-flex h-8 w-8 items-center justify-center rounded-md text-slate-600 hover:bg-slate-100 hover:text-slate-800 dark:text-slate-300 dark:hover:bg-slate-800 dark:hover:text-slate-100"

@@ -1,4 +1,4 @@
-import { open, readdir, rm, watch } from 'node:fs/promises';
+import { open, readdir, rm, stat, unlink, watch } from 'node:fs/promises';
 import { existsSync, createReadStream } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { join } from 'node:path';
@@ -11,6 +11,10 @@ import type {
 
 const EVENTS_FILE = 'events.jsonl';
 const META_FILE = 'meta.json';
+const LOCK_FILE = '.events.lock';
+const LOCK_STALE_MS = 60_000;
+const LOCK_RETRY_MS = 20;
+const LOCK_ACQUIRE_TIMEOUT_MS = 30_000;
 
 /**
  * File-based event store.
@@ -56,34 +60,37 @@ export class FileEventStore implements EventStore {
       if (this.deletedSessions.has(sessionId)) return 0;
       const dir = this.sessionDir(sessionId);
       await ensureDir(dir);
-      const filePath = join(dir, EVENTS_FILE);
 
-      let seq = await this.resolveSeq(sessionId, filePath);
-      const lines: string[] = [];
-      for (const evt of events) {
-        seq++;
-        const full: SessionEvent = { ...evt, seq } as SessionEvent;
-        lines.push(JSON.stringify(full));
-      }
+      return this.withFileLock(sessionId, async () => {
+        const filePath = join(dir, EVENTS_FILE);
 
-      // Atomic append — single write call with trailing newline
-      const fd = await open(filePath, 'a');
-      try {
-        await fd.write(lines.join('\n') + '\n');
-      } finally {
-        await fd.close();
-      }
+        let seq = await this.resolveSeq(sessionId, filePath, { fresh: true });
+        const lines: string[] = [];
+        for (const evt of events) {
+          seq++;
+          const full: SessionEvent = { ...evt, seq } as SessionEvent;
+          lines.push(JSON.stringify(full));
+        }
 
-      this.seqCounters.set(sessionId, seq);
-      // Update fs watcher tail so it doesn't re-deliver these events
-      this.fsWatcherTails.set(sessionId, seq);
-      // Notify watchers
-      this.notifyWatchers(sessionId, events.map((e, i) => ({
-        ...e,
-        seq: seq - events.length + i + 1,
-      }) as SessionEvent));
+        // Atomic append — single write call with trailing newline
+        const fd = await open(filePath, 'a');
+        try {
+          await fd.write(lines.join('\n') + '\n');
+        } finally {
+          await fd.close();
+        }
 
-      return seq;
+        this.seqCounters.set(sessionId, seq);
+        // Update fs watcher tail so it doesn't re-deliver these events
+        this.fsWatcherTails.set(sessionId, seq);
+        // Notify watchers
+        this.notifyWatchers(sessionId, events.map((e, i) => ({
+          ...e,
+          seq: seq - events.length + i + 1,
+        }) as SessionEvent));
+
+        return seq;
+      });
     });
   }
 
@@ -96,6 +103,7 @@ export class FileEventStore implements EventStore {
     if (!existsSync(filePath)) return [];
 
     const events: SessionEvent[] = [];
+    let maxSeq = 0;
     const rl = createInterface({ input: createReadStream(filePath), crlfDelay: Infinity });
 
     for await (const line of rl) {
@@ -104,17 +112,15 @@ export class FileEventStore implements EventStore {
       try {
         const evt = JSON.parse(trimmed) as SessionEvent;
         if (evt.seq > fromSeq) events.push(evt);
+        if (evt.seq > maxSeq) maxSeq = evt.seq;
       } catch {
         // Skip corrupted/partial lines
       }
     }
 
     // Update seq counter from disk
-    if (events.length > 0) {
-      const maxSeq = events[events.length - 1].seq;
-      const current = this.seqCounters.get(sessionId) ?? 0;
-      if (maxSeq > current) this.seqCounters.set(sessionId, maxSeq);
-    }
+    const current = this.seqCounters.get(sessionId) ?? 0;
+    if (maxSeq > current) this.seqCounters.set(sessionId, maxSeq);
 
     return events;
   }
@@ -320,9 +326,14 @@ export class FileEventStore implements EventStore {
   }
 
   /** Resolve the current seq from in-memory cache or disk scan. */
-  private async resolveSeq(sessionId: string, filePath: string): Promise<number> {
+  private async resolveSeq(
+    sessionId: string,
+    filePath: string,
+    options?: { fresh?: boolean },
+  ): Promise<number> {
+    const fresh = options?.fresh ?? false;
     const cached = this.seqCounters.get(sessionId);
-    if (cached !== undefined) return cached;
+    if (!fresh && cached !== undefined) return cached;
 
     // Scan existing file
     if (existsSync(filePath)) {
@@ -360,6 +371,52 @@ export class FileEventStore implements EventStore {
       resolve();
     }
   }
+
+  private async withFileLock<T>(sessionId: string, fn: () => Promise<T>): Promise<T> {
+    const lockPath = join(this.sessionDir(sessionId), LOCK_FILE);
+    const startedAt = Date.now();
+
+    for (;;) {
+      let lockFd;
+      try {
+        lockFd = await open(lockPath, 'wx');
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code !== 'EEXIST') {
+          throw error;
+        }
+
+        const isStale = await this.isStaleLock(lockPath);
+        if (isStale) {
+          await unlink(lockPath).catch(() => undefined);
+          continue;
+        }
+
+        if (Date.now() - startedAt > LOCK_ACQUIRE_TIMEOUT_MS) {
+          throw new Error(`Timed out acquiring event lock for session ${sessionId}.`);
+        }
+
+        await sleep(LOCK_RETRY_MS);
+        continue;
+      }
+
+      try {
+        return await fn();
+      } finally {
+        await lockFd.close();
+        await unlink(lockPath).catch(() => undefined);
+      }
+    }
+  }
+
+  private async isStaleLock(lockPath: string): Promise<boolean> {
+    try {
+      const lockStats = await stat(lockPath);
+      return Date.now() - lockStats.mtimeMs > LOCK_STALE_MS;
+    } catch {
+      return false;
+    }
+  }
 }
 
 // ------------------------------------------------------------------
@@ -369,4 +426,8 @@ export class FileEventStore implements EventStore {
 async function ensureDir(dir: string): Promise<void> {
   const { mkdir } = await import('node:fs/promises');
   await mkdir(dir, { recursive: true });
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }

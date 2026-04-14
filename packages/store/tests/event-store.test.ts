@@ -281,6 +281,41 @@ describe('FileEventStore', () => {
     expect(events).toHaveLength(3);
     expect(events[2].seq).toBe(3);
   });
+
+  it('keeps seq unique across concurrent store instances', async () => {
+    const storeA = new FileEventStore(tmpDir);
+    const storeB = new FileEventStore(tmpDir);
+
+    const appendPromises: Array<Promise<number>> = [];
+    for (let i = 0; i < 24; i += 1) {
+      const activeStore = i % 2 === 0 ? storeA : storeB;
+      appendPromises.push(
+        activeStore.append('sess-1', {
+          time: now(),
+          type: 'session:dag-event',
+          payload: {
+            event: {
+              time: now(),
+              type: 'task:started',
+              taskId: `cross-${i}`,
+              message: `cross process append ${i}`,
+            },
+          },
+        }),
+      );
+    }
+
+    const assignedSeqs = await Promise.all(appendPromises);
+    expect(new Set(assignedSeqs).size).toBe(24);
+
+    const events = await storeA.read('sess-1');
+    expect(events).toHaveLength(24);
+    expect(new Set(events.map((event) => event.seq)).size).toBe(24);
+
+    for (let i = 1; i < events.length; i += 1) {
+      expect(events[i].seq).toBeGreaterThan(events[i - 1].seq);
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------

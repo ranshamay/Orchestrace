@@ -179,6 +179,7 @@ interface GitHubApiResponse {
   ok: boolean;
   status: number;
   body: unknown;
+  retryAfterMs?: number;
 }
 
 interface RunnerShellExecutionDependencies {
@@ -1517,6 +1518,7 @@ async function main(): Promise<void> {
     method: 'GET' | 'POST' | 'PUT',
     path: string,
     body?: Record<string, unknown>,
+    _attempt = 0,
   ): Promise<GitHubApiResponse> {
     const apiBase = buildGitHubApiBaseUrl(params.host);
     const response = await fetch(`${apiBase}${path}`, {
@@ -1531,6 +1533,38 @@ async function main(): Promise<void> {
       body: body ? JSON.stringify(body) : undefined,
       signal: AbortSignal.timeout(SESSION_DELIVERY_API_TIMEOUT_MS),
     });
+
+    // Handle primary (403 with x-ratelimit-reset) and secondary (retry-after) rate limits.
+    if ((response.status === 403 || response.status === 429) && _attempt === 0) {
+      const retryAfterSec = response.headers.get('retry-after');
+      const resetEpoch = response.headers.get('x-ratelimit-reset');
+      let waitMs: number | undefined;
+      if (retryAfterSec) {
+        waitMs = Number.parseInt(retryAfterSec, 10) * 1000;
+      } else if (resetEpoch) {
+        const resetMs = Number.parseInt(resetEpoch, 10) * 1000;
+        waitMs = Math.max(0, resetMs - Date.now());
+      }
+      // Only auto-retry if the wait is 90 s or less to stay within session timeouts.
+      if (waitMs !== undefined && waitMs >= 0 && waitMs <= 90_000) {
+        await new Promise<void>((resolve) => setTimeout(resolve, waitMs));
+        return callGitHubApi(params, method, path, body, 1);
+      }
+      // Wait is too long or unknown — surface it with the retryAfterMs hint.
+      const contentType = response.headers.get('content-type') ?? '';
+      let responseBody: unknown;
+      if (contentType.includes('application/json')) {
+        responseBody = await response.json().catch(() => undefined);
+      } else {
+        responseBody = await response.text().catch(() => undefined);
+      }
+      return {
+        ok: false,
+        status: response.status,
+        body: responseBody,
+        retryAfterMs: waitMs,
+      };
+    }
 
     const contentType = response.headers.get('content-type') ?? '';
     let responseBody: unknown;
@@ -2748,7 +2782,10 @@ function formatGitHubApiError(response: GitHubApiResponse): string {
     const body = response.body as Record<string, unknown>;
     const message = typeof body.message === 'string' ? body.message : undefined;
     if (message) {
-      return `${statusPart}: ${message}`;
+      const hint = response.retryAfterMs !== undefined
+        ? ` (rate limited; retry after ${Math.ceil(response.retryAfterMs / 1000)}s)`
+        : '';
+      return `${statusPart}: ${message}${hint}`;
     }
   }
 

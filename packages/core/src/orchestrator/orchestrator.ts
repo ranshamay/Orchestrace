@@ -257,8 +257,11 @@ export async function orchestrate(
     // Resolve effective effort: explicit config > prompt classification
     const effortClassification = classifyTaskEffort(node.prompt);
     const effort: TaskEffort = configTaskEffort ?? effortClassification.effort;
-    // Skip planning for trivial/low effort tasks
-    const shouldSkipPlanning = trivialClassification.isTrivial || effort === 'trivial' || effort === 'low';
+    // Always run planner for code tasks so the LLM can produce a full test-aware plan.
+    // Non-code tasks may still use the trivial/low effort bypass.
+    const shouldSkipPlanning =
+      node.type !== 'code'
+      && (trivialClassification.isTrivial || effort === 'trivial' || effort === 'low');
 
     let planningResult:
       | { text: string; usage?: { input: number; output: number; cost: number }; metadata?: { stopReason?: string; endpoint?: string } }
@@ -686,12 +689,24 @@ export async function orchestrate(
         };
       }
       const resolvedPlanningResult = planningResult;
+      const normalizedPlanningText = ensurePlanIncludesTestingSteps(
+        resolvedPlanningResult.text,
+        node.validation?.commands,
+        {
+          taskType: node.type,
+        },
+      );
+      planningResult = {
+        ...resolvedPlanningResult,
+        text: normalizedPlanningText,
+      };
+      const finalizedPlanningResult = planningResult;
 
       persistedPlanPath = await persistPlan({
         baseDir: planOutputDir ?? join(cwd, '.orchestrace', 'plans'),
         graphId: graph.id,
         node,
-        plan: resolvedPlanningResult.text,
+        plan: finalizedPlanningResult.text,
       });
       emit({ type: 'task:plan-persisted', taskId: node.id, path: persistedPlanPath });
 
@@ -702,7 +717,7 @@ export async function orchestrate(
           return {
             taskId: node.id,
             status: 'failed',
-            plan: resolvedPlanningResult.text,
+            plan: finalizedPlanningResult.text,
             planPath: persistedPlanPath,
             tokenDumpDir: taskTokenDumpDir,
             error: 'Plan approval is required but no approval handler was provided.',
@@ -715,7 +730,7 @@ export async function orchestrate(
 
         const approved = await onPlanApproval({
           task: node,
-          plan: resolvedPlanningResult.text,
+          plan: finalizedPlanningResult.text,
           planPath: persistedPlanPath,
         });
 
@@ -723,7 +738,7 @@ export async function orchestrate(
           return {
             taskId: node.id,
             status: 'failed',
-            plan: resolvedPlanningResult.text,
+            plan: finalizedPlanningResult.text,
             planPath: persistedPlanPath,
             tokenDumpDir: taskTokenDumpDir,
             error: 'Plan was rejected by user approval gate.',
@@ -738,13 +753,27 @@ export async function orchestrate(
       }
     } else {
       planningResult = {
-        text: [
-          effort === 'low'
-            ? `Low-effort task routed to direct implementation (effort: ${effort}, reason: ${effortClassification.reason}).`
-            : 'Trivial task gate routed this task to direct implementation.',
-          `Classification reasons: ${trivialClassification.reasons.join(', ')}`,
-        ].join('\n'),
+        text: ensurePlanIncludesTestingSteps(
+          [
+            effort === 'low'
+              ? `Low-effort task routed to direct implementation (effort: ${effort}, reason: ${effortClassification.reason}).`
+              : 'Trivial task gate routed this task to direct implementation.',
+            `Classification reasons: ${trivialClassification.reasons.join(', ')}`,
+          ].join('\n'),
+          node.validation?.commands,
+          {
+            taskType: node.type,
+          },
+        ),
       };
+
+      persistedPlanPath = await persistPlan({
+        baseDir: planOutputDir ?? join(cwd, '.orchestrace', 'plans'),
+        graphId: graph.id,
+        node,
+        plan: planningResult.text,
+      });
+      emit({ type: 'task:plan-persisted', taskId: node.id, path: persistedPlanPath });
     }
 
     const implAgent = await spawnRoleAgent({
@@ -832,15 +861,72 @@ export async function orchestrate(
             .map((path) => path.trim())
             .filter((path) => path.length > 0)
           : [];
+        const hasCodeChanges = changedFiles.length > 0;
+        const uiChangesDetected = detectUiChanges(changedFiles, resolvedTesterUiChangePatterns);
 
-        if (!resolvedTesterEnabled || changedFiles.length === 0) {
+        const reconciledPlanText = ensurePlanIncludesTestingSteps(
+          planningResult?.text ?? '',
+          node.validation?.commands,
+          {
+            taskType: node.type,
+            changedFiles,
+            uiChangesDetected,
+          },
+        );
+
+        if (planningResult?.text !== reconciledPlanText) {
+          planningResult = {
+            ...(planningResult ?? {}),
+            text: reconciledPlanText,
+          };
+          if (persistedPlanPath) {
+            persistedPlanPath = await persistPlan({
+              baseDir: planOutputDir ?? join(cwd, '.orchestrace', 'plans'),
+              graphId: graph.id,
+              node,
+              plan: reconciledPlanText,
+            });
+          }
+        }
+
+        const plannerTestPlan = extractPlannerTestingSteps(planningResult?.text);
+        const requiredTestPlanBuckets = deriveRequiredTestPlanBuckets({
+          taskType: node.type,
+          changedFiles,
+          uiChangesDetected,
+        });
+        const missingBuckets = findMissingPlannerTestPlanBuckets(plannerTestPlan, requiredTestPlanBuckets);
+
+        if (hasCodeChanges && !persistedPlanPath) {
+          return {
+            approved: false,
+            error:
+              'Implementation changed files but no persisted plan was available. A persisted plan is mandatory when code changes occur.',
+          };
+        }
+
+        if (hasCodeChanges && plannerTestPlan.length === 0) {
+          return {
+            approved: false,
+            error:
+              'Implementation changed files but the persisted plan does not include a concrete test plan. Add explicit testing steps before completion.',
+          };
+        }
+
+        if (hasCodeChanges && missingBuckets.length > 0) {
+          return {
+            approved: false,
+            error:
+              `Planner test plan is missing required coverage derived from prompt and changed files: ${missingBuckets.join(', ')}.`,
+          };
+        }
+
+        if (!resolvedTesterEnabled || !hasCodeChanges) {
           return { approved: true, output };
         }
 
-        const uiChangesDetected = detectUiChanges(changedFiles, resolvedTesterUiChangePatterns);
         const uiTestsRequired = uiChangesDetected && resolvedTesterEnforceUiTestsForUiChanges;
         const screenshotsRequired = uiTestsRequired && resolvedTesterRequireUiScreenshotsForUiChanges;
-        const plannerTestPlan = extractPlannerTestingSteps(planningResult?.text);
 
         emit({
           type: 'task:testing',
@@ -901,6 +987,14 @@ export async function orchestrate(
         });
 
         const testerVerdict = testerResult.verdict;
+        if (!testerVerdict) {
+          return {
+            approved: false,
+            error:
+              'Tester gate did not return a verdict for a code-changing task while tester mode is enabled.',
+          };
+        }
+
         emit({
           type: 'task:tester-verdict',
           taskId: node.id,
@@ -921,12 +1015,21 @@ export async function orchestrate(
         });
 
         if (testerVerdict.approved) {
+          const outputWithTesterVerdict = {
+            ...output,
+            testerVerdict,
+          };
+          if (!outputWithTesterVerdict.testerVerdict) {
+            return {
+              approved: false,
+              error:
+                'Tester gate approved but no tester verdict was attached to the implementation output.',
+            };
+          }
+
           return {
             approved: true,
-            output: {
-              ...output,
-              testerVerdict,
-            },
+            output: outputWithTesterVerdict,
           };
         }
 
@@ -1060,6 +1163,175 @@ const DEFAULT_UI_CHANGE_PATTERNS = [
 
 const PLANNER_TEST_PLAN_KEYWORD_REGEX =
   /\b(test|testing|verify|validation|unit|integration|playwright|e2e|screenshot)\b/i;
+const UNIT_TEST_STEP_REGEX = /\bunit\b/i;
+const INTEGRATION_TEST_STEP_REGEX = /\bintegration\b/i;
+const UI_E2E_TEST_STEP_REGEX = /\b(playwright|e2e|ui\s+test)\b/i;
+const API_TEST_STEP_REGEX = /\b(api|contract|schema|endpoint|route)\b/i;
+const INFRA_TEST_STEP_REGEX = /\b(terraform|infra|infrastructure|helm|k8s|deployment|rollback|plan)\b/i;
+
+type PlanCoverageBucket = 'unit' | 'integration' | 'ui-e2e' | 'api-contract' | 'infra-validation';
+
+interface PlanContextHints {
+  taskType: TaskNode['type'];
+  changedFiles?: string[];
+  uiChangesDetected?: boolean;
+}
+
+function deriveRequiredTestPlanBuckets(context: PlanContextHints): PlanCoverageBucket[] {
+  const hasCodeChanges = Array.isArray(context.changedFiles) && context.changedFiles.length > 0;
+  const isCodeTask = context.taskType === 'code';
+  const changedFiles = Array.isArray(context.changedFiles) ? context.changedFiles : [];
+  const normalizedChangedFiles = changedFiles.map((path) => normalizePathForMatching(path).toLowerCase());
+  const requiresUiCoverage =
+    context.uiChangesDetected
+    || normalizedChangedFiles.some((path) =>
+      path.startsWith('packages/ui/')
+      || path.endsWith('.tsx')
+      || path.endsWith('.jsx')
+      || path.endsWith('.css')
+      || path.endsWith('.scss')
+      || path.endsWith('.html'),
+    );
+
+  const requiresApiContractCoverage = normalizedChangedFiles.some((path) =>
+    path.includes('/api/')
+    || path.includes('/routes/')
+    || path.includes('/controller')
+    || path.includes('/server/')
+    || path.includes('/handler')
+    || path.includes('/endpoint'),
+  );
+
+  const requiresInfraValidation = normalizedChangedFiles.some((path) =>
+    path.startsWith('infra/')
+    || path.includes('/terraform/')
+    || path.includes('/k8s/')
+    || path.includes('/helm/')
+    || path.endsWith('dockerfile')
+    || path.includes('/.github/workflows/'),
+  );
+
+  const required = new Set<PlanCoverageBucket>();
+  if (isCodeTask || hasCodeChanges) {
+    required.add('unit');
+    required.add('integration');
+  }
+
+  if (requiresUiCoverage) {
+    required.add('ui-e2e');
+  }
+
+  if (requiresApiContractCoverage) {
+    required.add('api-contract');
+  }
+
+  if (requiresInfraValidation) {
+    required.add('infra-validation');
+  }
+
+  return [...required];
+}
+
+function findMissingPlannerTestPlanBuckets(
+  plannerTestPlan: string[],
+  requiredBuckets: PlanCoverageBucket[],
+): PlanCoverageBucket[] {
+  const normalizedItems = plannerTestPlan.map((line) => line.toLowerCase());
+  const hasUnit = normalizedItems.some((line) => UNIT_TEST_STEP_REGEX.test(line));
+  const hasIntegration = normalizedItems.some((line) => INTEGRATION_TEST_STEP_REGEX.test(line));
+  const hasUiE2E = normalizedItems.some((line) => UI_E2E_TEST_STEP_REGEX.test(line));
+  const hasApiContract = normalizedItems.some((line) => API_TEST_STEP_REGEX.test(line));
+  const hasInfraValidation = normalizedItems.some((line) => INFRA_TEST_STEP_REGEX.test(line));
+
+  return requiredBuckets.filter((bucket) => {
+    if (bucket === 'unit') {
+      return !hasUnit;
+    }
+    if (bucket === 'integration') {
+      return !hasIntegration;
+    }
+    if (bucket === 'ui-e2e') {
+      return !hasUiE2E;
+    }
+    if (bucket === 'api-contract') {
+      return !hasApiContract;
+    }
+    return !hasInfraValidation;
+  });
+}
+
+function ensurePlanIncludesTestingSteps(
+  planText: string,
+  validationCommands: string[] | undefined,
+  context: PlanContextHints,
+): string {
+  const normalizedPlanText = planText.trim();
+  const existingTestingSteps = extractPlannerTestingSteps(normalizedPlanText);
+  const requiredBuckets = deriveRequiredTestPlanBuckets(context);
+  const missingBuckets = findMissingPlannerTestPlanBuckets(existingTestingSteps, requiredBuckets);
+
+  if (existingTestingSteps.length > 0 && missingBuckets.length === 0) {
+    return normalizedPlanText;
+  }
+
+  const commandSteps = Array.isArray(validationCommands)
+    ? validationCommands
+      .filter((command): command is string => typeof command === 'string')
+      .map((command) => command.trim())
+      .filter((command) => command.length > 0)
+      .slice(0, 4)
+      .map((command) => `- VERIFY-ONLY: Run validation command ${command}.`)
+    : [];
+
+  const synthesizedSteps = [
+    ...existingTestingSteps.map((step) => `- ${step}`),
+    ...commandSteps,
+  ];
+
+  if (requiredBuckets.includes('unit')) {
+    synthesizedSteps.push('- ADD-CODEBASE: Add or update unit tests covering changed behavior.');
+  }
+
+  if (requiredBuckets.includes('integration')) {
+    synthesizedSteps.push('- ADD-CODEBASE: Add or update integration tests for affected workflows.');
+  }
+
+  if (requiredBuckets.includes('ui-e2e')) {
+    synthesizedSteps.push('- ADD-CODEBASE: Add or update Playwright e2e tests for the UI flow.');
+    synthesizedSteps.push('- VERIFY-ONLY: Capture Playwright screenshot evidence for the changed UI behavior.');
+  }
+
+  if (requiredBuckets.includes('api-contract')) {
+    synthesizedSteps.push('- ADD-CODEBASE: Add or update API contract and endpoint integration tests for changed server behavior.');
+  }
+
+  if (requiredBuckets.includes('infra-validation')) {
+    synthesizedSteps.push('- VERIFY-ONLY: Run infrastructure validation and plan checks (terraform/helm/deployment dry-run) and capture rollback evidence.');
+  }
+
+  if (synthesizedSteps.length === 0) {
+    synthesizedSteps.push('- VERIFY-ONLY: Run lint/typecheck/build validations for touched packages.');
+  }
+
+  const dedupedSteps: string[] = [];
+  const seen = new Set<string>();
+  for (const step of synthesizedSteps) {
+    const normalized = step.toLowerCase();
+    if (seen.has(normalized)) {
+      continue;
+    }
+    seen.add(normalized);
+    dedupedSteps.push(step);
+  }
+
+  return [
+    normalizedPlanText,
+    '',
+    '## Test Plan',
+    '',
+    ...dedupedSteps,
+  ].join('\n');
+}
 
 function extractPlannerTestingSteps(planText: string | undefined): string[] {
   if (!planText || planText.trim().length === 0) {

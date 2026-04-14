@@ -27,7 +27,6 @@ export function AppShell({
         onNavigate={sessionSidebarProps.setActiveTab}
         theme={sessionSidebarProps.theme}
         setTheme={sessionSidebarProps.setTheme}
-        onOpenLlmControls={mainContentProps.onOpenLlmControls}
         authUser={authUser}
         onLogout={onLogout}
       />

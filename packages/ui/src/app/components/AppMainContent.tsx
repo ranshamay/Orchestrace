@@ -169,6 +169,7 @@ export function AppMainContent(props: AppMainContentProps) {
       activeToolCalls={props.chatActiveToolCalls}
       onApprovePlan={props.onApprovePlan}
       onRejectPlan={props.onRejectPlan}
+      onOpenLlmControls={props.onOpenLlmControls}
       isDark={props.isDark}
       sessionId={props.selectedSessionId}
       selectedSession={props.selectedSession}

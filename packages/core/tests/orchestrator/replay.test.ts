@@ -885,7 +885,7 @@ describe('orchestrate replay capture', () => {
     }
   }, 15_000);
 
-  it('bypasses planning for trivial prompts when gate is enabled', async () => {
+  it('keeps planning flow for trivial code prompts when gate is enabled', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'orchestrace-replay-trivial-bypass-'));
     const events: DagEvent[] = [];
 
@@ -905,9 +905,8 @@ describe('orchestrate replay capture', () => {
 
       const output = outputs.get('task-1');
       expect(output?.status).toBe('completed');
-      expect(output?.plan).toContain('Trivial task gate routed this task to direct implementation.');
-      expect(events.some((event) => event.type === 'task:planning')).toBe(false);
-      expect(output?.replay?.attempts.some((attempt) => attempt.phase === 'planning')).toBe(false);
+      expect(events.some((event) => event.type === 'task:planning')).toBe(true);
+      expect(output?.replay?.attempts.some((attempt) => attempt.phase === 'planning')).toBe(true);
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }
