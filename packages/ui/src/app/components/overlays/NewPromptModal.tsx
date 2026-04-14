@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef } from "react";
 
 export type NewPromptModalProps = {
   isOpen: boolean;
@@ -48,7 +48,9 @@ export function NewPromptModal(props: NewPromptModalProps) {
     >
       <div className="w-full max-w-2xl rounded-lg border border-slate-200 bg-white p-4 shadow-xl dark:border-slate-700 dark:bg-slate-900">
         <div className="mb-3 flex items-center justify-between">
-          <h2 className="text-sm font-bold uppercase tracking-widest text-slate-500 dark:text-slate-400">Start New Prompt</h2>
+          <h2 className="text-sm font-bold uppercase tracking-widest text-slate-500 dark:text-slate-400">
+            Start New Prompt
+          </h2>
           <button
             className="rounded border border-slate-200 px-2 py-1 text-xs text-slate-600 hover:bg-slate-100 disabled:opacity-60 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
             disabled={isSubmitting}
@@ -68,14 +70,14 @@ export function NewPromptModal(props: NewPromptModalProps) {
           className="h-36 w-full resize-none rounded border border-slate-200 px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-950"
           onChange={(event) => onPromptChange(event.target.value)}
           onKeyDown={(event) => {
-            if (event.key === 'Escape') {
+            if (event.key === "Escape") {
               event.preventDefault();
               if (!isSubmitting) {
                 onClose();
               }
             }
 
-            if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
+            if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
               event.preventDefault();
               if (canStart && !isSubmitting) {
                 onStart();
@@ -101,7 +103,7 @@ export function NewPromptModal(props: NewPromptModalProps) {
             onClick={onStart}
             type="button"
           >
-            {isSubmitting ? 'Starting…' : 'Start run'}
+            {isSubmitting ? "Starting…" : "Start run"}
           </button>
         </div>
       </div>

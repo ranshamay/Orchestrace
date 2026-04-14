@@ -1,5 +1,5 @@
-import { useCallback, useRef } from 'react';
-import { useSessionTodoActions } from './useSessionTodoActions';
+import { useCallback, useRef } from "react";
+import { useSessionTodoActions } from "./useSessionTodoActions";
 import {
   cancelWork,
   deleteWork,
@@ -7,13 +7,25 @@ import {
   respondWorkPlanApproval,
   sendChatMessageStream,
   startWork,
-} from '../../lib/api';
-import type { ComposerImageAttachment } from '../types';
-import { copyTextToClipboard, readClipboardImage } from '../utils/clipboard';
-import { composePrompt, composeRunPromptWithContext, toComposerContentParts } from '../utils/composer';
-import { buildSessionTraceExport } from '../utils/traceExport';
-import { refreshSessionsOnly, removeSessionLlmControls, retryAndSyncSession, toErrorMessage } from './useSessionActions.helpers';
-import type { ComposerPasteEvent, SessionActionsParams } from './useSessionActions.types';
+} from "../../lib/api";
+import type { ComposerImageAttachment } from "../types";
+import { copyTextToClipboard, readClipboardImage } from "../utils/clipboard";
+import {
+  composePrompt,
+  composeRunPromptWithContext,
+  toComposerContentParts,
+} from "../utils/composer";
+import { buildSessionTraceExport } from "../utils/traceExport";
+import {
+  refreshSessionsOnly,
+  removeSessionLlmControls,
+  retryAndSyncSession,
+  toErrorMessage,
+} from "./useSessionActions.helpers";
+import type {
+  ComposerPasteEvent,
+  SessionActionsParams,
+} from "./useSessionActions.types";
 
 export function useSessionActions(params: SessionActionsParams) {
   const {
@@ -46,12 +58,13 @@ export function useSessionActions(params: SessionActionsParams) {
   } = params;
   const composerActionInFlightRef = useRef(false);
 
-      const hasComposerContent = composerText.trim().length > 0 || composerImages.length > 0;
+  const hasComposerContent =
+    composerText.trim().length > 0 || composerImages.length > 0;
 
   const handleSendChat = useCallback(async () => {
     if (!hasComposerContent || composerActionInFlightRef.current) return;
     composerActionInFlightRef.current = true;
-    setErrorMessage('');
+    setErrorMessage("");
 
     const draftText = composerText;
     const draftImages = composerImages;
@@ -63,7 +76,7 @@ export function useSessionActions(params: SessionActionsParams) {
       const hasImages = draftImages.length > 0;
 
       // Optimistic UI updates for instant feedback.
-      setComposerText('');
+      setComposerText("");
       setComposerImages([]);
 
       if (!selectedSessionId) {
@@ -73,7 +86,9 @@ export function useSessionActions(params: SessionActionsParams) {
           return;
         }
 
-        const runPrompt = selectedSession ? composeRunPromptWithContext(selectedSession.prompt, payload) : payload;
+        const runPrompt = selectedSession
+          ? composeRunPromptWithContext(selectedSession.prompt, payload)
+          : payload;
         const result = await startWork({
           workspaceId: workWorkspaceId,
           prompt: runPrompt,
@@ -109,19 +124,21 @@ export function useSessionActions(params: SessionActionsParams) {
       } else {
         const optimisticAt = new Date().toISOString();
         setSessions(
-          sessions.map((session) => (session.id === selectedSessionId
-            ? {
-              ...session,
-              status: 'running',
-              updatedAt: optimisticAt,
-              llmStatus: {
-                state: 'analyzing',
-                label: 'Analyzing',
-                detail: 'Processing follow-up prompt.',
-                updatedAt: optimisticAt,
-              },
-            }
-            : session)),
+          sessions.map((session) =>
+            session.id === selectedSessionId
+              ? {
+                  ...session,
+                  status: "running",
+                  updatedAt: optimisticAt,
+                  llmStatus: {
+                    state: "analyzing",
+                    label: "Analyzing",
+                    detail: "Processing follow-up prompt.",
+                    updatedAt: optimisticAt,
+                  },
+                }
+              : session,
+          ),
         );
 
         await sendChatMessageStream(selectedSessionId, {
@@ -166,24 +183,37 @@ export function useSessionActions(params: SessionActionsParams) {
     workWorkspaceId,
   ]);
 
-  const handleDelete = useCallback(async (targetSessionId?: string) => {
-    const sessionId = targetSessionId ?? selectedSessionId;
-    if (!sessionId) return;
-    setErrorMessage('');
-    try {
-      await deleteWork(sessionId);
-      removeSessionLlmControls(sessionId, setLlmControlsBySessionId);
-      const nextSessions = await refreshSessionsOnly({ setSessions });
-      const keepCurrent = nextSessions.some((session) => session.id === selectedSessionId);
-      setSelectedSessionId(keepCurrent ? selectedSessionId : (nextSessions[0]?.id ?? ''));
-    } catch (error) {
-      setErrorMessage(toErrorMessage(error));
-    }
-  }, [selectedSessionId, setErrorMessage, setLlmControlsBySessionId, setSelectedSessionId, setSessions]);
+  const handleDelete = useCallback(
+    async (targetSessionId?: string) => {
+      const sessionId = targetSessionId ?? selectedSessionId;
+      if (!sessionId) return;
+      setErrorMessage("");
+      try {
+        await deleteWork(sessionId);
+        removeSessionLlmControls(sessionId, setLlmControlsBySessionId);
+        const nextSessions = await refreshSessionsOnly({ setSessions });
+        const keepCurrent = nextSessions.some(
+          (session) => session.id === selectedSessionId,
+        );
+        setSelectedSessionId(
+          keepCurrent ? selectedSessionId : (nextSessions[0]?.id ?? ""),
+        );
+      } catch (error) {
+        setErrorMessage(toErrorMessage(error));
+      }
+    },
+    [
+      selectedSessionId,
+      setErrorMessage,
+      setLlmControlsBySessionId,
+      setSelectedSessionId,
+      setSessions,
+    ],
+  );
 
   const handleStop = useCallback(async () => {
     if (!selectedSessionId) return;
-    setErrorMessage('');
+    setErrorMessage("");
     try {
       await cancelWork(selectedSessionId);
       await refreshSessionsOnly({ setSessions });
@@ -192,150 +222,187 @@ export function useSessionActions(params: SessionActionsParams) {
     }
   }, [selectedSessionId, setErrorMessage, setSessions]);
 
-  const handlePlanApproval = useCallback(async (approved: boolean) => {
-    if (!selectedSessionId) return;
-    setErrorMessage('');
-    try {
-      await respondWorkPlanApproval(selectedSessionId, approved);
-      await refreshSessionsOnly({ setSessions });
-    } catch (error) {
-      setErrorMessage(toErrorMessage(error));
-    }
-  }, [selectedSessionId, setErrorMessage, setSessions]);
+  const handlePlanApproval = useCallback(
+    async (approved: boolean) => {
+      if (!selectedSessionId) return;
+      setErrorMessage("");
+      try {
+        await respondWorkPlanApproval(selectedSessionId, approved);
+        await refreshSessionsOnly({ setSessions });
+      } catch (error) {
+        setErrorMessage(toErrorMessage(error));
+      }
+    },
+    [selectedSessionId, setErrorMessage, setSessions],
+  );
 
   const handleRetry = useCallback(async () => {
     if (!selectedSession) return;
-    setErrorMessage('');
+    setErrorMessage("");
     try {
-      await retryAndSyncSession(selectedSession, { setErrorMessage, setSessions, setSelectedSessionId, setTodos });
-    } catch (error) {
-      setErrorMessage(toErrorMessage(error));
-    }
-  }, [selectedSession, setErrorMessage, setSelectedSessionId, setSessions, setTodos]);
-
-  const handleRetrySession = useCallback(async (targetSessionId: string) => {
-    const session = sessions.find((entry) => entry.id === targetSessionId);
-    if (!session) return;
-    setErrorMessage('');
-    try {
-      await retryAndSyncSession(session, { setErrorMessage, setSessions, setSelectedSessionId, setTodos });
-    } catch (error) {
-      setErrorMessage(toErrorMessage(error));
-    }
-  }, [sessions, setErrorMessage, setSelectedSessionId, setSessions, setTodos]);
-
-  const handleCopyTrace = useCallback(async () => {
-    if (!selectedSession) return 'idle' as const;
-    try {
-      await copyTextToClipboard(buildSessionTraceExport(selectedSession, chatMessages, todos));
-      return 'copied' as const;
-    } catch (error) {
-      setErrorMessage(toErrorMessage(error));
-      return 'failed' as const;
-    }
-  }, [chatMessages, selectedSession, setErrorMessage, todos]);
-
-  const handleCopyTraceSession = useCallback(async (targetSessionId: string) => {
-    const session = sessions.find((entry) => entry.id === targetSessionId);
-    if (!session) return 'idle' as const;
-    try {
-      let exportMessages = chatMessages;
-      let exportTodos = todos;
-      if (targetSessionId !== selectedSessionId) {
-        const agentState = await fetchWorkAgent(targetSessionId);
-        exportMessages = agentState.messages;
-        exportTodos = agentState.todos;
-      }
-      await copyTextToClipboard(buildSessionTraceExport(session, exportMessages, exportTodos));
-      return 'copied' as const;
-    } catch (error) {
-      setErrorMessage(toErrorMessage(error));
-      return 'failed' as const;
-    }
-  }, [chatMessages, selectedSessionId, sessions, setErrorMessage, todos]);
-
-    const handleComposerPaste = useCallback(async (event: ComposerPasteEvent) => {
-    const items = Array.from(event.clipboardData?.items ?? []).filter((item) => item.type.startsWith('image/'));
-    if (items.length === 0) return;
-    event.preventDefault();
-    setErrorMessage('');
-    try {
-      const attachments = (await Promise.all(items.map((item) => readClipboardImage(item)))).filter(
-        (item): item is ComposerImageAttachment => item !== null,
-      );
-      if (attachments.length > 0) setComposerImages((current) => [...current, ...attachments]);
-    } catch (error) {
-      setErrorMessage(toErrorMessage(error));
-    }
-  }, [setComposerImages, setErrorMessage]);
-
-  const handleStartNewSessionPrompt = useCallback(async (promptText: string) => {
-    const normalizedPrompt = promptText.trim();
-    if (!normalizedPrompt) {
-      return false;
-    }
-
-    setErrorMessage('');
-
-    if (!workProvider || !workModel || !workWorkspaceId) {
-      return false;
-    }
-
-    try {
-      const result = await startWork({
-        workspaceId: workWorkspaceId,
-        prompt: normalizedPrompt,
-        provider: workProvider,
-        model: workModel,
-        agentModels: {
-          ...defaultAgentModels,
-          planner: {
-            ...(defaultAgentModels.planner ?? {}),
-            provider: workPlanningProvider,
-            model: workPlanningModel,
-          },
-          implementer: {
-            ...(defaultAgentModels.implementer ?? {}),
-            provider: workProvider,
-            model: workModel,
-          },
-        },
-        planningProvider: workPlanningProvider,
-        planningModel: workPlanningModel,
-        implementationProvider: workProvider,
-        implementationModel: workModel,
-        deliveryStrategy,
-        planningNoToolGuardMode,
-        autoApprove,
-        adaptiveConcurrency,
-        batchConcurrency,
-        batchMinConcurrency,
+      await retryAndSyncSession(selectedSession, {
+        setErrorMessage,
+        setSessions,
+        setSelectedSessionId,
+        setTodos,
       });
-      await refreshSessionsOnly({ setSessions });
-      setSelectedSessionId(result.id);
-      return true;
     } catch (error) {
       setErrorMessage(toErrorMessage(error));
-      return false;
     }
   }, [
-    adaptiveConcurrency,
-    autoApprove,
-    batchConcurrency,
-    batchMinConcurrency,
-    defaultAgentModels,
-    deliveryStrategy,
-    planningNoToolGuardMode,
+    selectedSession,
     setErrorMessage,
     setSelectedSessionId,
     setSessions,
-    workPlanningModel,
-    workPlanningProvider,
-    workModel,
-    workProvider,
-    workWorkspaceId,
+    setTodos,
   ]);
 
+  const handleRetrySession = useCallback(
+    async (targetSessionId: string) => {
+      const session = sessions.find((entry) => entry.id === targetSessionId);
+      if (!session) return;
+      setErrorMessage("");
+      try {
+        await retryAndSyncSession(session, {
+          setErrorMessage,
+          setSessions,
+          setSelectedSessionId,
+          setTodos,
+        });
+      } catch (error) {
+        setErrorMessage(toErrorMessage(error));
+      }
+    },
+    [sessions, setErrorMessage, setSelectedSessionId, setSessions, setTodos],
+  );
+
+  const handleCopyTrace = useCallback(async () => {
+    if (!selectedSession) return "idle" as const;
+    try {
+      await copyTextToClipboard(
+        buildSessionTraceExport(selectedSession, chatMessages, todos),
+      );
+      return "copied" as const;
+    } catch (error) {
+      setErrorMessage(toErrorMessage(error));
+      return "failed" as const;
+    }
+  }, [chatMessages, selectedSession, setErrorMessage, todos]);
+
+  const handleCopyTraceSession = useCallback(
+    async (targetSessionId: string) => {
+      const session = sessions.find((entry) => entry.id === targetSessionId);
+      if (!session) return "idle" as const;
+      try {
+        let exportMessages = chatMessages;
+        let exportTodos = todos;
+        if (targetSessionId !== selectedSessionId) {
+          const agentState = await fetchWorkAgent(targetSessionId);
+          exportMessages = agentState.messages;
+          exportTodos = agentState.todos;
+        }
+        await copyTextToClipboard(
+          buildSessionTraceExport(session, exportMessages, exportTodos),
+        );
+        return "copied" as const;
+      } catch (error) {
+        setErrorMessage(toErrorMessage(error));
+        return "failed" as const;
+      }
+    },
+    [chatMessages, selectedSessionId, sessions, setErrorMessage, todos],
+  );
+
+  const handleComposerPaste = useCallback(
+    async (event: ComposerPasteEvent) => {
+      const items = Array.from(event.clipboardData?.items ?? []).filter(
+        (item) => item.type.startsWith("image/"),
+      );
+      if (items.length === 0) return;
+      event.preventDefault();
+      setErrorMessage("");
+      try {
+        const attachments = (
+          await Promise.all(items.map((item) => readClipboardImage(item)))
+        ).filter((item): item is ComposerImageAttachment => item !== null);
+        if (attachments.length > 0)
+          setComposerImages((current) => [...current, ...attachments]);
+      } catch (error) {
+        setErrorMessage(toErrorMessage(error));
+      }
+    },
+    [setComposerImages, setErrorMessage],
+  );
+
+  const handleStartNewSessionPrompt = useCallback(
+    async (promptText: string) => {
+      const normalizedPrompt = promptText.trim();
+      if (!normalizedPrompt) {
+        return false;
+      }
+
+      setErrorMessage("");
+
+      if (!workProvider || !workModel || !workWorkspaceId) {
+        return false;
+      }
+
+      try {
+        const result = await startWork({
+          workspaceId: workWorkspaceId,
+          prompt: normalizedPrompt,
+          provider: workProvider,
+          model: workModel,
+          agentModels: {
+            ...defaultAgentModels,
+            planner: {
+              ...(defaultAgentModels.planner ?? {}),
+              provider: workPlanningProvider,
+              model: workPlanningModel,
+            },
+            implementer: {
+              ...(defaultAgentModels.implementer ?? {}),
+              provider: workProvider,
+              model: workModel,
+            },
+          },
+          planningProvider: workPlanningProvider,
+          planningModel: workPlanningModel,
+          implementationProvider: workProvider,
+          implementationModel: workModel,
+          deliveryStrategy,
+          planningNoToolGuardMode,
+          autoApprove,
+          adaptiveConcurrency,
+          batchConcurrency,
+          batchMinConcurrency,
+        });
+        await refreshSessionsOnly({ setSessions });
+        setSelectedSessionId(result.id);
+        return true;
+      } catch (error) {
+        setErrorMessage(toErrorMessage(error));
+        return false;
+      }
+    },
+    [
+      adaptiveConcurrency,
+      autoApprove,
+      batchConcurrency,
+      batchMinConcurrency,
+      defaultAgentModels,
+      deliveryStrategy,
+      planningNoToolGuardMode,
+      setErrorMessage,
+      setSelectedSessionId,
+      setSessions,
+      workPlanningModel,
+      workPlanningProvider,
+      workModel,
+      workProvider,
+      workWorkspaceId,
+    ],
+  );
 
   const { handleAddTodo, handleToggleTodo } = useSessionTodoActions({
     selectedSessionId,
@@ -343,7 +410,7 @@ export function useSessionActions(params: SessionActionsParams) {
     setTodos,
   });
 
-    return {
+  return {
     hasComposerContent,
     handleSendChat,
     handleDelete,
