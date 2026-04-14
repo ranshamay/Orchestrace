@@ -180,8 +180,10 @@ export default function App() {
         setSettingsSaveToastMessage('');
         settingsSaveToastTimerRef.current = undefined;
       }, timeoutMs);
-    }
+        }
   }, []);
+
+
 
   const setActiveTab = useCallback((tab: Tab) => {
     setActiveTabState(tab);
@@ -819,8 +821,18 @@ export default function App() {
       return tagName === 'input' || tagName === 'textarea' || tagName === 'select';
     };
 
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.defaultPrevented || isEditableTarget(event.target)) {
+        const onKeyDown = (event: KeyboardEvent) => {
+      if (event.defaultPrevented) {
+        return;
+      }
+
+      if (event.key === 'Escape' && newPromptModalOpen && !newPromptModalSubmitting) {
+        event.preventDefault();
+        setNewPromptModalOpen(false);
+        return;
+      }
+
+      if (newPromptModalOpen || isEditableTarget(event.target)) {
         return;
       }
 
@@ -829,6 +841,7 @@ export default function App() {
         setNewPromptModalOpen(true);
       }
     };
+
 
     window.addEventListener('keydown', onKeyDown);
     return () => {
