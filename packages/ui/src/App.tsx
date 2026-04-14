@@ -705,31 +705,10 @@ export default function App() {
     setShowToolsPanel,
     setTodos,
     updateActiveLlmControls,
-  ]);
-
-    const openNewPromptModal = useCallback(() => {
-    setNewPromptModalOpen(true);
-  }, []);
-
-  const handleSubmitNewPromptModal = useCallback(async () => {
-    const prompt = newPromptModalText.trim();
-    if (!prompt || newPromptModalSubmitting) {
-      return;
-    }
-
-    setNewPromptModalSubmitting(true);
-    handleStartNewSessionDraft();
-
-    const started = await actions.handleStartNewSessionPrompt(prompt);
-    if (started) {
-      setNewPromptModalText('');
-      setNewPromptModalOpen(false);
-    }
-
-    setNewPromptModalSubmitting(false);
-  }, [actions, handleStartNewSessionDraft, newPromptModalSubmitting, newPromptModalText]);
+    ]);
 
   const modalTargetsPlanningPhase = composerMode === 'planning';
+
 
   const modalWorkProvider = modalTargetsPlanningPhase ? workPlanningProvider : workProvider;
   const modalWorkModel = modalTargetsPlanningPhase ? workPlanningModel : workModel;
@@ -1007,7 +986,9 @@ export default function App() {
     setTodoInput,
     onAddTodo: () => actions.handleAddTodo(todoInput, setTodoInput),
     onToggleTodo: actions.handleToggleTodo,
-    onOpenLlmControls: openLlmControlsModal,
+            onOpenLlmControls: openLlmControlsModal,
+
+
     showToolsPanel,
     setShowToolsPanel,
     toolsMode: toolsPanel.toolsMode,
