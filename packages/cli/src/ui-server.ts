@@ -83,7 +83,7 @@ import {
   validateWorkspaceRuntime,
 } from './workspace-runtime.js';
 import { FileEventStore } from '@orchestrace/store';
-import { materializeSession as materializeFromEvents, convertLegacyEvents } from '@orchestrace/store';
+import { materializeSession as materializeFromEvents } from '@orchestrace/store';
 import type {
   ChatMessage as StoreChatMessage,
   SessionCheckpointPayload,
@@ -2721,30 +2721,10 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<void
 
         // v2 also sends chat-ready with ChatMessage[] format for useChatStream
         if (isV2) {
-          const chatMessages = convertLegacyEvents({
-            config: { prompt: session.prompt } as SessionConfig,
-            createdAt: session.createdAt,
-            events: session.events,
-            chatThread: thread.messages.length > 0 ? {
-              provider: thread.provider,
-              model: thread.model,
-              workspacePath: thread.workspacePath,
-              taskPrompt: thread.taskPrompt,
-              createdAt: thread.createdAt,
-              updatedAt: thread.updatedAt,
-              // Exclude user messages — convertLegacyEvents injects the prompt from config.prompt
-              messages: legacyMessages.filter((m) => m.role !== 'user'),
-            } : undefined,
-            status: session.status,
-            llmStatus: session.llmStatus ?? { state: 'idle', label: '', updatedAt: now() },
-            taskStatus: session.taskStatus ?? {},
-            agentGraph: [],
-            todos: [],
-            contextFacts: [],
-            contextCompaction: { turnsSinceLastCompaction: 0 },
-            lastSeq: 0,
-            updatedAt: session.updatedAt,
-          });
+          // Keep the chat-ready baseline aligned with /api/work/chat by using
+          // the canonical chat thread directly. Rich per-token/tool-call detail
+          // still arrives incrementally via live SSE 'chat' events.
+          const chatMessages = convertSessionChatMessagesToChatMessages(legacyMessages);
 
           // Include buffered streaming text for running sessions so late-joiners see current output
           const streamBuf = sessionStreamBuffers.get(id);
@@ -7130,6 +7110,8 @@ function toUiEvent(runId: string, event: DagEvent): UiDagEvent | undefined {
     testsPassed: event.type === 'task:tester-verdict' ? event.testsPassed : undefined,
     testsFailed: event.type === 'task:tester-verdict' ? event.testsFailed : undefined,
     rejectionReason: event.type === 'task:tester-verdict' ? event.rejectionReason : undefined,
+    plannerTestPlan: event.type === 'task:testing' ? event.plannerTestPlan : undefined,
+    changedFiles: event.type === 'task:testing' ? event.changedFiles : undefined,
     testPlan: event.type === 'task:tester-verdict' ? event.testPlan : undefined,
     coverageAssessment: event.type === 'task:tester-verdict' ? event.coverageAssessment : undefined,
     qualityAssessment: event.type === 'task:tester-verdict' ? event.qualityAssessment : undefined,

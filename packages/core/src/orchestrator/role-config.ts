@@ -8,6 +8,8 @@ export const PLANNING_FIRST_TOOL_RETRY_DIRECTIVE =
   'You must now call a tool. Start by running: pwd (or an equivalent workspace-inspection tool), then continue the task.';
 
 const RETRY_CONTEXT_MAX_CHARS = 2_000;
+const TEST_PLAN_KEYWORD_REGEX =
+  /\b(test|testing|verify|validation|unit|integration|playwright|e2e|screenshot)\b/i;
 
 export function roleToPhase(role: AgentRole): 'planning' | 'implementation' {
   return role === 'planner' ? 'planning' : 'implementation';
@@ -69,6 +71,8 @@ export function buildPlanningPrompt(
       name: PromptSectionName.Goal,
             lines: [
         'Create an implementation plan for the following task.',
+        'The plan must be unified: implementation steps and testing strategy live together in the same approved plan.',
+        'The tester agent will execute your testing plan, so include concrete, executable test guidance.',
         'Scale your planning depth to match the task complexity - simple tasks need minimal plans, complex tasks need detailed multi-stage plans.',
         'Within the first 1-2 thinking cycles, make a concrete tool call to gather grounding context before extended narration.',
         'Planning has a hard tool-call budget per attempt (runtime enforced, default 12 successful calls): converge quickly after core contract discovery.',
@@ -117,9 +121,10 @@ export function buildPlanningPrompt(
         'Your plan must include (scale detail to effort level):',
         '1) what needs to change and why',
         '2) files likely to change',
-        '3) verification strategy with explicit commands',
-        '4) execution structure (stages/waves if the task warrants them)',
-        '5) Next Follow-up Suggestions section with 1-3 numbered, concrete next actions',
+        '3) testing strategy with explicit commands (unit + integration are mandatory for code changes)',
+        '4) for UI-affecting work, include Playwright/e2e coverage and screenshot evidence expectations',
+        '5) execution structure (stages/waves if the task warrants them)',
+        '6) Next Follow-up Suggestions section with 1-3 numbered, concrete next actions',
       ],
     },
     {
@@ -197,16 +202,24 @@ export function buildTesterPrompt(params: {
     /packages\/ui\/src\/(App\.tsx|app\/components\/work\/(ComposerPanel|TimelinePanel|SessionSummaryCard)\.tsx)/.test(path),
   );
 
+  const plannerTestPlanItems = extractPlannerTestPlanItems(approvedPlan);
+
   const sections: PromptSection[] = [
     {
       name: PromptSectionName.Goal,
       lines: [
         'You are the testing gate for this implementation.',
-        'Read the approved plan and implementation output, then produce a concrete test plan before writing or running tests.',
-        'Implement the test plan by creating/updating tests as needed and running verification commands.',
+        'Follow this workflow exactly:',
+        '1) Read the approved unified plan (implementation + testing) and the changed files in this prompt.',
+        '2) Execute the planner-provided testing plan first; do not replace it with a separate independent plan.',
+        '3) Run existing tests first, then execute the planner-defined test steps.',
+        '4) Add/update test coverage only when needed to close gaps left by existing tests and planner steps.',
+        '5) Provide a comprehensive testing summary (coverage + quality + commands + evidence).',
+        '6) Emit a machine-readable JSON verdict for PR and session reporting.',
         'Maintain or improve codebase quality by covering changed behavior and likely regressions.',
         'Always include explicit coverageAssessment and qualityAssessment in your verdict.',
-        'When UI changes are detected and UI tests are required, you must run UI test commands and provide screenshot evidence paths.',
+        'When UI changes are detected and UI tests are required, you must run Playwright and provide screenshot evidence paths.',
+        'If API/backend behavior changed, unit and integration tests are mandatory.',
         'You must execute at least one test command using run_command, run_command_batch, or playwright_run before producing a verdict.',
         touchesConversationUiSurface
           ? 'This changeset touches conversation/composer UI surfaces; include a VERIFY-ONLY step confirming the prompt input remains visible and usable after tester verdict emission.'
@@ -226,7 +239,14 @@ export function buildTesterPrompt(params: {
     },
     {
       name: PromptSectionName.ApprovedPlan,
-      lines: [approvedPlan ?? 'No explicit approved plan found. Infer intent conservatively from task prompt and implementation output.'],
+      lines: [
+        approvedPlan ?? 'No explicit approved plan found. Infer intent conservatively from task prompt and implementation output.',
+        '',
+        'Planner testing steps extracted from approved plan (execute these):',
+        plannerTestPlanItems.length > 0
+          ? plannerTestPlanItems.map((item) => `- ${item}`).join('\n')
+          : '- No explicit testing steps were extracted from the approved plan. Derive a minimal plan that includes unit + integration, plus Playwright/screenshot coverage when UI tests are required.',
+      ],
     },
     {
       name: PromptSectionName.DependencyContext,
@@ -255,11 +275,14 @@ export function buildTesterPrompt(params: {
       lines: [
         'After running tests, end with a JSON object (no markdown fences) using this exact shape:',
         '{"approved":boolean,"testPlan":string[],"testedAreas":string[],"executedTestCommands":string[],"testsPassed":number,"testsFailed":number,"coverageAssessment":string,"qualityAssessment":string,"uiChangesDetected":boolean,"uiTestsRequired":boolean,"uiTestsRun":boolean,"screenshotPaths":string[],"rejectionReason":string,"suggestedFixes":string[]}',
+        'testPlan must contain the planner-provided testing steps you executed (plus any necessary additions).',
         'testPlan must contain at least one concrete test item tied to changed behavior.',
+        'testPlan must include explicit unit and integration entries.',
         'Prefix each testPlan item with either "ADD-CODEBASE:" (persistent automated test to add/update) or "VERIFY-ONLY:" (one-off/manual/runtime verification).',
-        'testedAreas should reflect what was actually validated (for example: ["unit","api","ui"]).',
+        'testedAreas must include unit and integration when code changes were tested.',
         'executedTestCommands must include concrete test commands you ran (including run_command, run_command_batch, and/or playwright_run evidence).',
-        'If uiTestsRequired=true, set uiTestsRun=true only if you actually ran UI test commands.',
+        'If uiTestsRequired=true, testPlan and testedAreas must include e2e coverage and at least one executed command must contain "playwright".',
+        'If uiTestsRequired=true, set uiTestsRun=true only if you actually ran UI test commands that satisfy uiTestCommandPatterns.',
         'If screenshotEvidenceRequired=true, include at least minScreenshotCount repository-relative image paths in screenshotPaths. Use repository-tracked paths (do not use .orchestrace/).',
         'When approved=true, set rejectionReason to an empty string and suggestedFixes to an empty array.',
       ],
@@ -419,9 +442,12 @@ export function buildRoleSystemPrompt(params: {
     role === 'planner'
       ? [
           'Produce a concrete, execution-ready plan before implementation.',
+          'Planner owns both implementation and testing strategy: produce one unified plan that includes how the change will be tested.',
           'Do not edit files in planning mode.',
           'Keep todo and dependency graph state synchronized as you reason.',
           'Planning output must be atomic: each planned task should be one action, one artifact, and one verification path.',
+          'For code tasks, include explicit unit and integration test execution guidance in the plan output.',
+          'For likely UI-affecting tasks, include Playwright/e2e validation and screenshot evidence expectations in the plan output.',
           'Before finalizing, split any multi-action task into separate todo and graph nodes.',
           'Each todo and graph node must include explicit dependency ids and deterministic done criteria.',
           'todo_set must define weighted planning breakdown where item weights sum to 100.',
@@ -463,12 +489,15 @@ export function buildRoleSystemPrompt(params: {
         ]
         : [
           'Act as the mandatory testing gate between implementation and delivery.',
-          'Read the approved plan, inspect implementation output, and produce a concrete test plan for the changed behavior.',
-          'Implement the test plan by generating or updating tests, then run the planned tests.',
+          'Read the approved unified plan and execute its testing strategy against the changed behavior.',
+          'Do not replace planner intent with a separate tester-authored plan; only extend when coverage gaps are identified.',
+          'Implement the planner-directed test plan by generating or updating tests, then run the planned tests.',
           'Maintain or increase effective test coverage for changed behavior and high-risk regressions.',
           'Protect code quality by prioritizing determinism, regression safety, and meaningful assertions over superficial checks.',
-          'You must execute at least one run_command or run_command_batch invocation that runs tests.',
-          'For UI changes, run UI tests and provide screenshot evidence paths in the tester verdict.',
+          'You must execute at least one run_command, run_command_batch, or playwright_run invocation that runs tests.',
+          'Unit and integration verification are mandatory for tested code changes.',
+          'For UI changes, run Playwright e2e validation and provide screenshot evidence paths in the tester verdict.',
+          'If API/backend behavior changed, run unit and integration verification before approving.',
           'Reject the implementation if tests fail, if coverage is obviously insufficient for the changed behavior, or if no test command is executed.',
           'When rejecting, provide specific, actionable fix instructions for the implementer.',
           'Keep changes focused to test artifacts; do not rewrite product logic in tester role.',
@@ -530,4 +559,38 @@ function buildDependencyContext(depOutputs: Map<string, TaskOutput>): string {
 function truncateForRetry(text: string): string {
   if (text.length <= RETRY_CONTEXT_MAX_CHARS) return text;
   return text.slice(0, RETRY_CONTEXT_MAX_CHARS) + `\n... [truncated ${text.length - RETRY_CONTEXT_MAX_CHARS} chars]`;
+}
+
+function extractPlannerTestPlanItems(approvedPlan?: string): string[] {
+  if (!approvedPlan || approvedPlan.trim().length === 0) {
+    return [];
+  }
+
+  const lines = approvedPlan
+    .replace(/\r\n/g, '\n')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .map((line) => line.replace(/^[-*]\s+/, '').replace(/^\d+[.)]\s+/, '').trim())
+    .filter((line) => line.length > 0);
+
+  const seen = new Set<string>();
+  const extracted: string[] = [];
+
+  for (const line of lines) {
+    if (!TEST_PLAN_KEYWORD_REGEX.test(line)) {
+      continue;
+    }
+    const normalized = line.toLowerCase();
+    if (seen.has(normalized)) {
+      continue;
+    }
+    seen.add(normalized);
+    extracted.push(line);
+    if (extracted.length >= 24) {
+      break;
+    }
+  }
+
+  return extracted;
 }

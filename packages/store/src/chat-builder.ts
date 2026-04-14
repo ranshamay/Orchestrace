@@ -208,8 +208,17 @@ export function convertLegacyEvents(
         continue;
       }
       if (chatMsg.role === 'assistant') {
-        const msg = ensureMessage(chatMsg.time, 'assistant');
-        msg.parts.push({ type: 'text', id: nextId('lp'), text: chatMsg.content, isStreaming: false });
+        // Preserve assistant turn boundaries from chat history snapshots.
+        finishCurrentMessage();
+        result.push({
+          id: nextId('lm'),
+          role: 'assistant',
+          phase: currentPhase,
+          taskId: currentTaskId,
+          timestamp: chatMsg.time,
+          status: 'complete',
+          parts: [{ type: 'text', id: nextId('lp'), text: chatMsg.content, isStreaming: false }],
+        });
         continue;
       }
     }

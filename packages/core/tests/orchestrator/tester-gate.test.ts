@@ -27,6 +27,17 @@ function makeImplementationOutput(): TaskOutput {
   };
 }
 
+const APPROVED_PLAN_WITH_CORE_TESTING = [
+  'Implementation: Update feature behavior in changed modules.',
+  'Testing: run unit tests for the touched modules.',
+  'Testing: run integration tests for affected workflows.',
+].join('\n');
+
+const APPROVED_PLAN_WITH_UI_TESTING = [
+  APPROVED_PLAN_WITH_CORE_TESTING,
+  'Testing: run Playwright e2e checks for updated UI behavior and capture screenshots.',
+].join('\n');
+
 function makeTesterAgent(params: {
   verdict: Record<string, unknown>;
   commands: Array<{
@@ -88,8 +99,12 @@ describe('tester gate UI policy', () => {
 
     const verdict = {
       approved: true,
-      testPlan: ['Run existing regression suite'],
-      testedAreas: ['unit', 'ui'],
+      testPlan: [
+        'VERIFY-ONLY: Run unit suite for changed modules',
+        'VERIFY-ONLY: Run integration suite for changed workflows',
+        'VERIFY-ONLY: Run Playwright e2e smoke checks',
+      ],
+      testedAreas: ['unit', 'integration', 'ui', 'e2e'],
       executedTestCommands: ['pnpm --filter @orchestrace/cli test'],
       testsPassed: 8,
       testsFailed: 0,
@@ -105,7 +120,7 @@ describe('tester gate UI policy', () => {
 
         const result = await executeTesterRole({
       task: makeTask(),
-      approvedPlan: 'Update UI flow',
+      approvedPlan: APPROVED_PLAN_WITH_UI_TESTING,
       implementationOutput: makeImplementationOutput(),
       testerAgent: makeTesterAgent({
         verdict,
@@ -126,7 +141,7 @@ describe('tester gate UI policy', () => {
     });
 
     expect(result.verdict.approved).toBe(false);
-    expect(result.verdict.rejectionReason).toContain('no successful UI test command execution evidence');
+    expect(result.verdict.rejectionReason).toContain('Playwright e2e coverage');
     expect(result.verdict.uiTestsRequired).toBe(true);
     expect(result.verdict.uiTestsRun).toBe(false);
   });
@@ -142,8 +157,12 @@ describe('tester gate UI policy', () => {
 
     const verdict = {
       approved: true,
-      testPlan: ['Run UI smoke tests and capture screenshots'],
-      testedAreas: ['ui'],
+      testPlan: [
+        'VERIFY-ONLY: Run unit suite for changed modules',
+        'VERIFY-ONLY: Run integration suite for changed workflows',
+        'VERIFY-ONLY: Run Playwright UI smoke tests and capture screenshots',
+      ],
+      testedAreas: ['unit', 'integration', 'ui', 'e2e'],
       executedTestCommands: ['pnpm --filter @orchestrace/ui test:ui'],
       testsPassed: 3,
       testsFailed: 0,
@@ -159,7 +178,7 @@ describe('tester gate UI policy', () => {
 
     const result = await executeTesterRole({
       task: makeTask(),
-      approvedPlan: 'Update UI flow',
+      approvedPlan: APPROVED_PLAN_WITH_UI_TESTING,
       implementationOutput: makeImplementationOutput(),
             testerAgent: makeTesterAgent({
         verdict,
@@ -185,15 +204,78 @@ describe('tester gate UI policy', () => {
     expect(result.verdict.uiTestsRun).toBe(true);
   });
 
+  it('rejects when approved planner plan omits unit/integration testing guidance', async () => {
+    const workspacePath = await mkdtemp(join(tmpdir(), 'orchestrace-tester-gate-plan-missing-tests-'));
+    tempDirs.push(workspacePath);
+
+    const verdict = {
+      approved: true,
+      testPlan: [
+        'VERIFY-ONLY: Run unit suite for changed modules',
+        'VERIFY-ONLY: Run integration suite for changed workflows',
+      ],
+      testedAreas: ['unit', 'integration'],
+      executedTestCommands: [
+        'pnpm --filter @orchestrace/core test -- unit',
+        'pnpm --filter @orchestrace/core test -- integration',
+      ],
+      testsPassed: 2,
+      testsFailed: 0,
+      coverageAssessment: 'Core behavior covered by unit and integration checks.',
+      qualityAssessment: 'No regression indicators.',
+      uiChangesDetected: false,
+      uiTestsRequired: false,
+      uiTestsRun: false,
+      screenshotPaths: [],
+      rejectionReason: '',
+      suggestedFixes: [],
+    };
+
+    const result = await executeTesterRole({
+      task: makeTask(),
+      approvedPlan: 'Implementation plan only: update UI flow and command wiring.',
+      implementationOutput: makeImplementationOutput(),
+      testerAgent: makeTesterAgent({
+        verdict,
+        commands: [
+          { command: 'pnpm --filter @orchestrace/core test -- unit' },
+          { command: 'pnpm --filter @orchestrace/core test -- integration' },
+        ],
+      }),
+      testerModel: { provider: 'github-copilot', model: 'gpt-5.3-codex' },
+      testerSystemPrompt: 'You are tester.',
+      attempt: 1,
+      emit: () => undefined,
+      requireRunTests: true,
+      requireUiTests: false,
+      requireUiScreenshots: false,
+      minUiScreenshotCount: 1,
+      uiChangesDetected: false,
+      uiTestCommandPatterns: ['playwright'],
+      workspacePath,
+    });
+
+    expect(result.verdict.approved).toBe(false);
+    expect(result.verdict.rejectionReason).toContain('Approved planner plan is missing mandatory testing guidance');
+  });
+
   it('treats playwright_run execution as satisfying requireRunTests', async () => {
     const workspacePath = await mkdtemp(join(tmpdir(), 'orchestrace-tester-gate-playwright-run-'));
     tempDirs.push(workspacePath);
 
     const verdict = {
       approved: true,
-      testPlan: ['VERIFY-ONLY: Run focused UI check with Playwright'],
-      testedAreas: ['ui'],
-      executedTestCommands: ['playwright test --grep @smoke'],
+      testPlan: [
+        'VERIFY-ONLY: Run unit suite for changed modules',
+        'VERIFY-ONLY: Run integration suite for changed workflows',
+        'VERIFY-ONLY: Run focused UI check with Playwright',
+      ],
+      testedAreas: ['unit', 'integration', 'ui', 'e2e'],
+      executedTestCommands: [
+        'pnpm --filter @orchestrace/core test -- unit',
+        'pnpm --filter @orchestrace/core test -- integration',
+        'playwright test --grep @smoke',
+      ],
       testsPassed: 1,
       testsFailed: 0,
       coverageAssessment: 'Focused smoke path validated.',
@@ -208,11 +290,15 @@ describe('tester gate UI policy', () => {
 
     const result = await executeTesterRole({
       task: makeTask(),
-      approvedPlan: 'Update UI flow',
+      approvedPlan: APPROVED_PLAN_WITH_CORE_TESTING,
       implementationOutput: makeImplementationOutput(),
             testerAgent: makeTesterAgent({
         verdict,
-        commands: [{ toolName: 'playwright_run', command: 'test', args: ['--grep', '@smoke'] }],
+        commands: [
+          { command: 'pnpm --filter @orchestrace/core test -- unit' },
+          { command: 'pnpm --filter @orchestrace/core test -- integration' },
+          { toolName: 'playwright_run', command: 'test', args: ['--grep', '@smoke'] },
+        ],
       }),
       testerModel: { provider: 'github-copilot', model: 'gpt-5.3-codex' },
       testerSystemPrompt: 'You are tester.',
@@ -242,9 +328,17 @@ describe('tester gate UI policy', () => {
 
     const verdict = {
       approved: true,
-      testPlan: ['VERIFY-ONLY: Run UI smoke and capture evidence'],
-      testedAreas: ['ui'],
-      executedTestCommands: ['pnpm exec playwright test'],
+      testPlan: [
+        'VERIFY-ONLY: Run unit suite for changed modules',
+        'VERIFY-ONLY: Run integration suite for changed workflows',
+        'VERIFY-ONLY: Run UI smoke and capture evidence with Playwright',
+      ],
+      testedAreas: ['unit', 'integration', 'ui', 'e2e'],
+      executedTestCommands: [
+        'pnpm --filter @orchestrace/core test -- unit',
+        'pnpm --filter @orchestrace/core test -- integration',
+        'pnpm exec playwright test',
+      ],
       testsPassed: 1,
       testsFailed: 0,
       coverageAssessment: 'UI flow exercised.',
@@ -259,11 +353,15 @@ describe('tester gate UI policy', () => {
 
     const result = await executeTesterRole({
       task: makeTask(),
-      approvedPlan: 'Update UI flow',
+      approvedPlan: APPROVED_PLAN_WITH_UI_TESTING,
       implementationOutput: makeImplementationOutput(),
             testerAgent: makeTesterAgent({
         verdict,
-        commands: [{ command: 'pnpm exec playwright test' }],
+        commands: [
+          { command: 'pnpm --filter @orchestrace/core test -- unit' },
+          { command: 'pnpm --filter @orchestrace/core test -- integration' },
+          { command: 'pnpm exec playwright test' },
+        ],
       }),
       testerModel: { provider: 'github-copilot', model: 'gpt-5.3-codex' },
       testerSystemPrompt: 'You are tester.',
@@ -291,9 +389,17 @@ describe('tester gate UI policy', () => {
 
     const verdict = {
       approved: true,
-      testPlan: ['VERIFY-ONLY: Run Playwright smoke checks for updated UI behavior'],
-      testedAreas: ['ui'],
-      executedTestCommands: ['playwright test --grep @smoke'],
+      testPlan: [
+        'VERIFY-ONLY: Run unit suite for changed modules',
+        'VERIFY-ONLY: Run integration suite for changed workflows',
+        'VERIFY-ONLY: Run Playwright smoke checks for updated UI behavior',
+      ],
+      testedAreas: ['unit', 'integration', 'ui', 'e2e'],
+      executedTestCommands: [
+        'pnpm --filter @orchestrace/core test -- unit',
+        'pnpm --filter @orchestrace/core test -- integration',
+        'playwright test --grep @smoke',
+      ],
       testsPassed: 1,
       testsFailed: 0,
       coverageAssessment: 'Smoke path appears covered.',
@@ -308,11 +414,21 @@ describe('tester gate UI policy', () => {
 
     const result = await executeTesterRole({
       task: makeTask(),
-      approvedPlan: 'Update UI flow',
+      approvedPlan: APPROVED_PLAN_WITH_UI_TESTING,
       implementationOutput: makeImplementationOutput(),
             testerAgent: makeTesterAgent({
         verdict,
         commands: [
+          {
+            toolName: 'run_command',
+            command: 'pnpm --filter @orchestrace/core test -- unit',
+            isError: false,
+          },
+          {
+            toolName: 'run_command',
+            command: 'pnpm --filter @orchestrace/core test -- integration',
+            isError: false,
+          },
           {
             toolName: 'playwright_run',
             command: 'test',
@@ -337,6 +453,6 @@ describe('tester gate UI policy', () => {
 
     expect(result.verdict.approved).toBe(false);
     expect(result.verdict.uiTestsRun).toBe(false);
-    expect(result.verdict.rejectionReason).toContain('no successful UI test command execution evidence');
+    expect(result.verdict.rejectionReason).toContain('Playwright e2e coverage');
   });
 });

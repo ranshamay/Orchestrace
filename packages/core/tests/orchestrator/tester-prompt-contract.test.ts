@@ -16,7 +16,13 @@ describe('tester prompt contract', () => {
   it('requires explicit ADD-CODEBASE vs VERIFY-ONLY planning split', () => {
     const prompt = buildTesterPrompt({
       node: makeTask(),
-      approvedPlan: 'Implement hotkeys and modal behavior',
+      approvedPlan: [
+        'Implementation plan:',
+        '1. Update modal keyboard handling in packages/ui/src/App.tsx',
+        '2. Testing: run unit tests for keyboard reducer',
+        '3. Testing: run integration workflow coverage for modal open/close',
+        '4. Testing: run Playwright smoke checks and capture screenshots',
+      ].join('\n'),
       implementationResponse: 'Done',
       changedFiles: ['packages/ui/src/App.tsx'],
       validationResults: [],
@@ -31,6 +37,8 @@ describe('tester prompt contract', () => {
     expect(prompt).toContain('ADD-CODEBASE:');
     expect(prompt).toContain('VERIFY-ONLY:');
     expect(prompt).toContain('run_command, run_command_batch, or playwright_run');
+    expect(prompt).toContain('Execute the planner-provided testing plan first');
+    expect(prompt).toContain('Planner testing steps extracted from approved plan (execute these):');
   });
 
   it('adds conversation/composer continuity guidance when relevant UI files changed', () => {

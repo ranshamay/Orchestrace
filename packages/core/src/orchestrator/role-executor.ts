@@ -40,6 +40,28 @@ const DEFAULT_UI_TEST_COMMAND_PATTERNS = [
   '@orchestrace/ui test',
 ];
 
+const UNIT_TEST_COMMAND_REGEXES = [
+  /\bvitest\b/i,
+  /\bjest\b/i,
+  /(?:^|\s)(?:pnpm\s+(?:turbo\s+)?)?test(?:\s|$)/i,
+  /(?:^|\s)npm\s+test(?:\s|$)/i,
+  /(?:^|\s)test:unit(?:\s|$)/i,
+  /(?:^|\s)--unit(?:\s|$)/i,
+];
+
+const INTEGRATION_TEST_COMMAND_REGEXES = [
+  /\bintegration\b/i,
+  /(?:^|\s)test:integration(?:\s|$)/i,
+  /(?:^|\s)--integration(?:\s|$)/i,
+  /(?:^|\s)test:int(?:\s|$)/i,
+  /(?:^|\s)(?:pnpm\s+(?:turbo\s+)?)?test(?:\s|$)/i,
+  /(?:^|\s)npm\s+test(?:\s|$)/i,
+];
+
+const PLAYWRIGHT_E2E_COMMAND_REGEXES = [
+  /\bplaywright\b/i,
+];
+
 export interface SpawnRoleAgentParams {
   llm: LlmAdapter;
   role: AgentRole;
@@ -634,6 +656,19 @@ export async function executeTesterRole(params: {
     ? uiTestCommandPatterns
     : DEFAULT_UI_TEST_COMMAND_PATTERNS;
   const uiTestCommandRan = hasUiTestCommandEvidence(mergedSuccessfulCommands, effectiveUiPatterns);
+  const unitCommandRan = hasRegexCommandEvidence(mergedSuccessfulCommands, UNIT_TEST_COMMAND_REGEXES);
+  const integrationCommandRan = hasRegexCommandEvidence(mergedSuccessfulCommands, INTEGRATION_TEST_COMMAND_REGEXES);
+  const playwrightCommandRan = hasRegexCommandEvidence(mergedSuccessfulCommands, PLAYWRIGHT_E2E_COMMAND_REGEXES);
+
+  const plannedUnit = hasPlanCoverage(parsedVerdict?.testPlan ?? [], /\bunit\b/i);
+  const plannedIntegration = hasPlanCoverage(parsedVerdict?.testPlan ?? [], /\bintegration\b/i);
+  const plannedE2e = hasPlanCoverage(parsedVerdict?.testPlan ?? [], /\b(e2e|playwright)\b/i);
+  const coveredUnit = hasAreaCoverage(parsedVerdict?.testedAreas ?? [], /\bunit\b/i);
+  const coveredIntegration = hasAreaCoverage(parsedVerdict?.testedAreas ?? [], /\bintegration\b/i);
+  const coveredE2e = hasAreaCoverage(parsedVerdict?.testedAreas ?? [], /\b(e2e|ui)\b/i);
+  const plannerPlanHasUnit = hasApprovedPlanCoverage(approvedPlan, /\bunit\b/i);
+  const plannerPlanHasIntegration = hasApprovedPlanCoverage(approvedPlan, /\bintegration\b/i);
+  const plannerPlanHasE2e = hasApprovedPlanCoverage(approvedPlan, /\b(e2e|playwright)\b/i);
 
   const parsedScreenshotEvidence = await resolveScreenshotEvidence(
     parsedVerdict?.screenshotPaths ?? [],
@@ -654,7 +689,7 @@ export async function executeTesterRole(params: {
       qualityAssessment: 'Rejected: missing mandatory tester execution.',
       uiChangesDetected,
       uiTestsRequired: requireUiTests,
-      uiTestsRun: uiTestCommandRan,
+      uiTestsRun: uiTestCommandRan || playwrightCommandRan,
       screenshotPaths,
       rejectionReason:
         'Tester agent did not execute a test command (run_command, run_command_batch, or playwright_run).',
@@ -675,7 +710,7 @@ export async function executeTesterRole(params: {
       qualityAssessment: 'Rejected: tester verdict format invalid.',
       uiChangesDetected,
       uiTestsRequired: requireUiTests,
-      uiTestsRun: uiTestCommandRan,
+      uiTestsRun: uiTestCommandRan || playwrightCommandRan,
       screenshotPaths,
       rejectionReason: 'Tester response did not include a valid JSON verdict.',
       suggestedFixes: [
@@ -689,7 +724,7 @@ export async function executeTesterRole(params: {
       executedTestCommands: mergeStringArrays(parsedVerdict.executedTestCommands, mergedExecutedCommands),
       uiChangesDetected,
       uiTestsRequired: requireUiTests,
-      uiTestsRun: parsedVerdict.uiTestsRun || uiTestCommandRan,
+      uiTestsRun: parsedVerdict.uiTestsRun || uiTestCommandRan || playwrightCommandRan,
       screenshotPaths,
       approved: false,
       testsFailed: Math.max(1, parsedVerdict.testsFailed),
@@ -706,7 +741,7 @@ export async function executeTesterRole(params: {
       executedTestCommands: mergeStringArrays(parsedVerdict.executedTestCommands, mergedExecutedCommands),
       uiChangesDetected,
       uiTestsRequired: requireUiTests,
-      uiTestsRun: parsedVerdict.uiTestsRun || uiTestCommandRan,
+      uiTestsRun: parsedVerdict.uiTestsRun || uiTestCommandRan || playwrightCommandRan,
       screenshotPaths,
       approved: false,
       testsFailed: Math.max(1, parsedVerdict.testsFailed),
@@ -715,6 +750,112 @@ export async function executeTesterRole(params: {
       suggestedFixes: [
         'Add coverageAssessment describing changed behavior coverage.',
         'Add qualityAssessment describing regression risk and code quality impact.',
+      ],
+      testOutput: condensedOutput,
+    };
+  } else if (!plannerPlanHasUnit || !plannerPlanHasIntegration) {
+    verdict = {
+      ...parsedVerdict,
+      executedTestCommands: mergeStringArrays(parsedVerdict.executedTestCommands, mergedExecutedCommands),
+      uiChangesDetected,
+      uiTestsRequired: requireUiTests,
+      uiTestsRun: parsedVerdict.uiTestsRun || uiTestCommandRan || playwrightCommandRan,
+      screenshotPaths,
+      approved: false,
+      testsFailed: Math.max(1, parsedVerdict.testsFailed),
+      rejectionReason:
+        'Approved planner plan is missing mandatory testing guidance (unit + integration).',
+      suggestedFixes: [
+        'Planner must produce a unified implementation + testing plan containing explicit unit and integration test steps.',
+        'Re-run planning before tester execution when mandatory testing guidance is missing.',
+      ],
+      testOutput: condensedOutput,
+    };
+  } else if (requireUiTests && !plannerPlanHasE2e) {
+    verdict = {
+      ...parsedVerdict,
+      executedTestCommands: mergeStringArrays(parsedVerdict.executedTestCommands, mergedExecutedCommands),
+      uiChangesDetected,
+      uiTestsRequired: requireUiTests,
+      uiTestsRun: parsedVerdict.uiTestsRun || uiTestCommandRan || playwrightCommandRan,
+      screenshotPaths,
+      approved: false,
+      testsFailed: Math.max(1, parsedVerdict.testsFailed),
+      rejectionReason:
+        'Approved planner plan is missing required UI testing guidance (Playwright/e2e).',
+      suggestedFixes: [
+        'Planner must include Playwright/e2e execution and screenshot evidence guidance for UI-required tasks.',
+      ],
+      testOutput: condensedOutput,
+    };
+  } else if (!plannedUnit || !plannedIntegration) {
+    verdict = {
+      ...parsedVerdict,
+      executedTestCommands: mergeStringArrays(parsedVerdict.executedTestCommands, mergedExecutedCommands),
+      uiChangesDetected,
+      uiTestsRequired: requireUiTests,
+      uiTestsRun: parsedVerdict.uiTestsRun || uiTestCommandRan || playwrightCommandRan,
+      screenshotPaths,
+      approved: false,
+      testsFailed: Math.max(1, parsedVerdict.testsFailed),
+      rejectionReason:
+        'Tester plan must explicitly include both unit and integration execution steps.',
+      suggestedFixes: [
+        'Add explicit testPlan entries for unit and integration suites.',
+        'Keep plan items concrete and tied to the changed behavior.',
+      ],
+      testOutput: condensedOutput,
+    };
+  } else if (!coveredUnit || !coveredIntegration) {
+    verdict = {
+      ...parsedVerdict,
+      executedTestCommands: mergeStringArrays(parsedVerdict.executedTestCommands, mergedExecutedCommands),
+      uiChangesDetected,
+      uiTestsRequired: requireUiTests,
+      uiTestsRun: parsedVerdict.uiTestsRun || uiTestCommandRan || playwrightCommandRan,
+      screenshotPaths,
+      approved: false,
+      testsFailed: Math.max(1, parsedVerdict.testsFailed),
+      rejectionReason:
+        'testedAreas must include both unit and integration coverage for this changeset.',
+      suggestedFixes: [
+        'Report unit and integration in testedAreas after executing those suites.',
+      ],
+      testOutput: condensedOutput,
+    };
+  } else if (!unitCommandRan || !integrationCommandRan) {
+    verdict = {
+      ...parsedVerdict,
+      executedTestCommands: mergeStringArrays(parsedVerdict.executedTestCommands, mergedExecutedCommands),
+      uiChangesDetected,
+      uiTestsRequired: requireUiTests,
+      uiTestsRun: parsedVerdict.uiTestsRun || uiTestCommandRan || playwrightCommandRan,
+      screenshotPaths,
+      approved: false,
+      testsFailed: Math.max(1, parsedVerdict.testsFailed),
+      rejectionReason:
+        'Tester did not provide successful command evidence for both unit and integration execution.',
+      suggestedFixes: [
+        'Run and report explicit unit and integration test commands.',
+        'Include the executed commands in executedTestCommands.',
+      ],
+      testOutput: condensedOutput,
+    };
+  } else if (requireUiTests && (!plannedE2e || !coveredE2e || !playwrightCommandRan)) {
+    verdict = {
+      ...parsedVerdict,
+      executedTestCommands: mergeStringArrays(parsedVerdict.executedTestCommands, mergedExecutedCommands),
+      uiChangesDetected,
+      uiTestsRequired: requireUiTests,
+      uiTestsRun: false,
+      screenshotPaths,
+      approved: false,
+      testsFailed: Math.max(1, parsedVerdict.testsFailed),
+      rejectionReason:
+        'UI changes require Playwright e2e coverage (plan + testedAreas + successful playwright command evidence).',
+      suggestedFixes: [
+        'Add explicit e2e/Playwright items to testPlan and testedAreas.',
+        'Run Playwright via playwright_run or a command containing "playwright".',
       ],
       testOutput: condensedOutput,
     };
@@ -742,7 +883,7 @@ export async function executeTesterRole(params: {
       executedTestCommands: mergeStringArrays(parsedVerdict.executedTestCommands, mergedExecutedCommands),
       uiChangesDetected,
       uiTestsRequired: requireUiTests,
-      uiTestsRun: parsedVerdict.uiTestsRun || uiTestCommandRan,
+      uiTestsRun: parsedVerdict.uiTestsRun || uiTestCommandRan || playwrightCommandRan,
       screenshotPaths,
       approved: false,
       testsFailed: Math.max(1, parsedVerdict.testsFailed),
@@ -760,11 +901,20 @@ export async function executeTesterRole(params: {
       executedTestCommands: mergeStringArrays(parsedVerdict.executedTestCommands, mergedExecutedCommands),
       uiChangesDetected,
       uiTestsRequired: requireUiTests,
-      uiTestsRun: parsedVerdict.uiTestsRun || uiTestCommandRan,
+      uiTestsRun: parsedVerdict.uiTestsRun || uiTestCommandRan || playwrightCommandRan,
       screenshotPaths,
       approved:
         parsedVerdict.approved
         && parsedVerdict.testsFailed === 0
+        && plannedUnit
+        && plannedIntegration
+        && coveredUnit
+        && coveredIntegration
+        && unitCommandRan
+        && integrationCommandRan
+        && (!requireUiTests || plannedE2e)
+        && (!requireUiTests || coveredE2e)
+        && (!requireUiTests || playwrightCommandRan)
         && (!requireUiTests || uiTestCommandRan)
         && (!requireUiScreenshots || screenshotPaths.length >= minUiScreenshotCount),
       testOutput: condensedOutput,
@@ -1038,6 +1188,32 @@ function hasUiTestCommandEvidence(commands: string[], patterns: string[]): boole
     const lower = command.toLowerCase();
     return normalizedPatterns.some((pattern) => lower.includes(pattern));
   });
+}
+
+function hasRegexCommandEvidence(commands: string[], patterns: RegExp[]): boolean {
+  if (commands.length === 0 || patterns.length === 0) {
+    return false;
+  }
+
+  return commands.some((command) => patterns.some((pattern) => pattern.test(command)));
+}
+
+function hasPlanCoverage(testPlan: string[], matcher: RegExp): boolean {
+  return testPlan.some((entry) => matcher.test(entry));
+}
+
+function hasAreaCoverage(testedAreas: string[], matcher: RegExp): boolean {
+  return testedAreas.some((entry) => matcher.test(entry));
+}
+
+function hasApprovedPlanCoverage(approvedPlan: string | undefined, matcher: RegExp): boolean {
+  if (!approvedPlan || approvedPlan.trim().length === 0) {
+    return false;
+  }
+
+  return approvedPlan
+    .split(/\r?\n/)
+    .some((line) => matcher.test(line));
 }
 
 async function resolveScreenshotEvidence(

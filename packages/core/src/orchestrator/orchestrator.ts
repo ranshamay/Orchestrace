@@ -826,19 +826,28 @@ export async function orchestrate(
       maxAttempts,
       appendTokenDump,
       postValidationGate: async ({ attempt, output, signal }) => {
-        const hasExplicitNoChanges = Array.isArray(output.filesChanged) && output.filesChanged.length === 0;
-        if (!resolvedTesterEnabled || hasExplicitNoChanges) {
+        const changedFiles = Array.isArray(output.filesChanged)
+          ? output.filesChanged
+            .filter((path): path is string => typeof path === 'string')
+            .map((path) => path.trim())
+            .filter((path) => path.length > 0)
+          : [];
+
+        if (!resolvedTesterEnabled || changedFiles.length === 0) {
           return { approved: true, output };
         }
 
-        const uiChangesDetected = detectUiChanges(output.filesChanged, resolvedTesterUiChangePatterns);
+        const uiChangesDetected = detectUiChanges(changedFiles, resolvedTesterUiChangePatterns);
         const uiTestsRequired = uiChangesDetected && resolvedTesterEnforceUiTestsForUiChanges;
         const screenshotsRequired = uiTestsRequired && resolvedTesterRequireUiScreenshotsForUiChanges;
+        const plannerTestPlan = extractPlannerTestingSteps(planningResult?.text);
 
         emit({
           type: 'task:testing',
           taskId: node.id,
           attempt,
+          plannerTestPlan,
+          changedFiles,
           uiChangesDetected,
           uiTestsRequired,
           screenshotsRequired,
@@ -861,7 +870,10 @@ export async function orchestrate(
         const testerResult = await executeTesterRole({
           task: node,
           approvedPlan: planningResult?.text,
-          implementationOutput: output,
+          implementationOutput: {
+            ...output,
+            filesChanged: changedFiles,
+          },
           testerAgent,
           testerModel: resolvedTesterModel,
           testerSystemPrompt: resolvedTesterExecutionSystemPrompt,
@@ -1045,6 +1057,46 @@ const DEFAULT_UI_CHANGE_PATTERNS = [
   '**/*.scss',
   '**/*.html',
 ];
+
+const PLANNER_TEST_PLAN_KEYWORD_REGEX =
+  /\b(test|testing|verify|validation|unit|integration|playwright|e2e|screenshot)\b/i;
+
+function extractPlannerTestingSteps(planText: string | undefined): string[] {
+  if (!planText || planText.trim().length === 0) {
+    return [];
+  }
+
+  const lines = planText
+    .replace(/\r\n/g, '\n')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .map((line) => line.replace(/^[-*]\s+/, '').replace(/^\d+[.)]\s+/, '').trim())
+    .filter((line) => line.length > 0);
+
+  const extracted: string[] = [];
+  const seen = new Set<string>();
+
+  for (const line of lines) {
+    if (!PLANNER_TEST_PLAN_KEYWORD_REGEX.test(line)) {
+      continue;
+    }
+
+    const normalized = line.toLowerCase();
+    if (seen.has(normalized)) {
+      continue;
+    }
+
+    seen.add(normalized);
+    extracted.push(line);
+
+    if (extracted.length >= 16) {
+      break;
+    }
+  }
+
+  return extracted;
+}
 
 function detectUiChanges(filesChanged: string[] | undefined, configuredPatterns: string[]): boolean {
   if (!Array.isArray(filesChanged) || filesChanged.length === 0) {

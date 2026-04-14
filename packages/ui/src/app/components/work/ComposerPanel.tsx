@@ -68,7 +68,7 @@ export function ComposerPanel(props: Props) {
               void onSendChat();
             }
           }}
-          placeholder={selectedSessionId ? 'Continue autonomously from this run context and start a new execution...' : 'Describe task and start autonomous execution...'}
+          placeholder={selectedSessionId ? 'Continue chatting in this same run context...' : 'Describe task and start autonomous execution...'}
           value={composerText}
         />
         <div className="flex flex-col gap-2">

@@ -2205,6 +2205,75 @@ async function main(): Promise<void> {
           void emit({ time: t, type: 'session:dag-event', payload: { event: uiEvent } });
         }
 
+        if (event.type === 'task:testing') {
+          const requiredSuites = event.uiTestsRequired
+            ? 'unit + integration + e2e (Playwright)'
+            : 'unit + integration';
+          const plannerTestPlanPreview = (event.plannerTestPlan ?? [])
+            .slice(0, 8)
+            .map((item) => `- ${item}`);
+          const changedFilePreview = (event.changedFiles ?? [])
+            .slice(0, 8)
+            .map((path) => `- ${path}`);
+          const markerLines = [
+            'Tester started.',
+            `Task: ${event.taskId} (attempt ${event.attempt})`,
+            `Required suites: ${requiredSuites}`,
+            `UI changes detected: ${event.uiChangesDetected ? 'yes' : 'no'}`,
+            plannerTestPlanPreview.length > 0
+              ? `Planner test plan to execute:\n${plannerTestPlanPreview.join('\n')}`
+              : 'Planner test plan to execute: (not explicitly extracted from approved plan)',
+            changedFilePreview.length > 0
+              ? `Changed files under test:\n${changedFilePreview.join('\n')}`
+              : 'Changed files under test: (not provided)',
+            event.uiTestsRequired ? 'Playwright and screenshot evidence are required for this attempt.' : '',
+          ].filter((line) => line.length > 0);
+
+          void emit({
+            time: t,
+            type: 'session:chat-message',
+            payload: {
+              message: {
+                role: 'system',
+                content: markerLines.join('\n'),
+                time: t,
+              },
+            },
+          });
+        }
+
+        if (event.type === 'task:tester-verdict') {
+          const executedCommands = (event.executedTestCommands ?? [])
+            .slice(0, 8)
+            .map((command) => `- ${command}`);
+          const screenshots = (event.screenshotPaths ?? [])
+            .slice(0, 8)
+            .map((path) => `- ${path}`);
+
+          const summaryLines = [
+            `Tester ${event.approved ? 'approved' : 'rejected'} this attempt.`,
+            `Tests: passed=${event.testsPassed} failed=${event.testsFailed}`,
+            `UI policy: required=${event.uiTestsRequired ? 'yes' : 'no'} ran=${event.uiTestsRun ? 'yes' : 'no'} screenshots=${event.screenshotPaths?.length ?? 0}`,
+            event.coverageAssessment ? `Coverage: ${event.coverageAssessment}` : '',
+            event.qualityAssessment ? `Quality: ${event.qualityAssessment}` : '',
+            event.rejectionReason ? `Rejection reason: ${event.rejectionReason}` : '',
+            executedCommands.length > 0 ? `Executed test commands:\n${executedCommands.join('\n')}` : 'Executed test commands: (none reported)',
+            screenshots.length > 0 ? `Screenshot evidence:\n${screenshots.join('\n')}` : '',
+          ].filter((line) => line.length > 0);
+
+          void emit({
+            time: t,
+            type: 'session:chat-message',
+            payload: {
+              message: {
+                role: 'system',
+                content: summaryLines.join('\n'),
+                time: t,
+              },
+            },
+          });
+        }
+
         // Checklist / graph from tool events (parsed from tool input)
         if (event.type === 'task:tool-call' && event.status === 'started') {
           void ensureCheckpointForMutatingBatch(event, t);
@@ -2959,6 +3028,8 @@ function toUiEvent(
   testsPassed?: number;
   testsFailed?: number;
   rejectionReason?: string;
+  plannerTestPlan?: string[];
+  changedFiles?: string[];
   testPlan?: string[];
   coverageAssessment?: string;
   qualityAssessment?: string;
@@ -2997,6 +3068,8 @@ function toUiEvent(
     testsPassed: event.type === 'task:tester-verdict' ? event.testsPassed : undefined,
     testsFailed: event.type === 'task:tester-verdict' ? event.testsFailed : undefined,
     rejectionReason: event.type === 'task:tester-verdict' ? event.rejectionReason : undefined,
+    plannerTestPlan: event.type === 'task:testing' ? event.plannerTestPlan : undefined,
+    changedFiles: event.type === 'task:testing' ? event.changedFiles : undefined,
     testPlan: event.type === 'task:tester-verdict' ? event.testPlan : undefined,
     coverageAssessment: event.type === 'task:tester-verdict' ? event.coverageAssessment : undefined,
     qualityAssessment: event.type === 'task:tester-verdict' ? event.qualityAssessment : undefined,

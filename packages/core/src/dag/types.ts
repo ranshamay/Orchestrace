@@ -267,6 +267,8 @@ export type DagEvent =
       type: 'task:testing';
       taskId: string;
       attempt: number;
+      plannerTestPlan?: string[];
+      changedFiles?: string[];
       uiChangesDetected?: boolean;
       uiTestsRequired?: boolean;
       screenshotsRequired?: boolean;

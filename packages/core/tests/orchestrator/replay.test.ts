@@ -1281,6 +1281,8 @@ describe('orchestrate replay capture', () => {
       expect(planningPrompt).toContain('Planning has a hard tool-call budget per attempt');
       expect(planningPrompt).toContain('After identifying key files and contract shape, emit a concrete plan');
       expect(planningPrompt).toContain('Prefer a plan-then-validate cadence over exhaustive pre-plan investigation');
+            expect(planningPrompt).toContain('The plan must be unified: implementation steps and testing strategy live together in the same approved plan');
+            expect(planningPrompt).toContain('testing strategy with explicit commands (unit + integration are mandatory for code changes)');
     } finally {
 
       await rm(cwd, { recursive: true, force: true });
