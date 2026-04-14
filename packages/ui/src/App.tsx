@@ -672,7 +672,8 @@ export default function App() {
     setDefaultAgentRoleModel('investigator', nextModel);
   }, [setDefaultAgentRoleModel]);
 
-      const handleStartNewSessionDraft = useCallback(() => {
+        const handleStartNewSessionDraft = useCallback(() => {
+
     setActiveTab('graph');
     setSessionSelection('');
     setChatMessages([]);
@@ -761,7 +762,8 @@ export default function App() {
   const timelineFollow = useTimelineFollow(latestTimelineKey, selectedSessionId);
   const toolsPanel = useToolsPanel(showToolsPanel, selectedSessionId, composerMode, selectedSession?.mode);
 
-    const actions = useSessionActions({
+      const actions = useSessionActions({
+
     selectedSessionId, selectedSession, sessions, chatMessages, todos, composerText, composerImages,
     workWorkspaceId,
     workPlanningProvider,
@@ -1199,27 +1201,44 @@ export default function App() {
     );
   }
 
-  return (
-
-    <AppShell
-      sessionSidebarProps={sessionSidebarProps}
-      mainContentProps={mainContentProps}
-      llmModalProps={llmModalProps}
-      authUser={authUser ?? null}
-      onLogout={() => {
-        void logoutAppAuth();
-        clearStoredAuthToken();
-        setAuthenticated(false);
-        setAuthUser(null);
-        setAuthError('');
-      }}
-      errorMessage={errorMessage}
-      warningMessage={warningMessage}
-      warningActionLabel={warningActionLabel}
-      onWarningConfirm={confirmMissingModelSwitch}
-      onWarningDismiss={dismissMissingModelWarning}
-      settingsSaveToastState={settingsSaveToastState}
-      settingsSaveToastMessage={settingsSaveToastMessage}
-    />
+    return (
+    <>
+      <AppShell
+        sessionSidebarProps={sessionSidebarProps}
+        mainContentProps={mainContentProps}
+        llmModalProps={llmModalProps}
+        authUser={authUser ?? null}
+        onLogout={() => {
+          void logoutAppAuth();
+          clearStoredAuthToken();
+          setAuthenticated(false);
+          setAuthUser(null);
+          setAuthError('');
+        }}
+        errorMessage={errorMessage}
+        warningMessage={warningMessage}
+        warningActionLabel={warningActionLabel}
+        onWarningConfirm={confirmMissingModelSwitch}
+        onWarningDismiss={dismissMissingModelWarning}
+        settingsSaveToastState={settingsSaveToastState}
+        settingsSaveToastMessage={settingsSaveToastMessage}
+      />
+      <NewPromptModal
+        isOpen={newPromptModalOpen}
+        prompt={newPromptModalText}
+        isSubmitting={newPromptModalSubmitting}
+        canStart={Boolean(newPromptModalText.trim())}
+        onPromptChange={setNewPromptModalText}
+        onClose={() => {
+          if (newPromptModalSubmitting) {
+            return;
+          }
+          setNewPromptModalOpen(false);
+        }}
+        onStart={() => {
+          void handleSubmitNewPromptModal();
+        }}
+      />
+    </>
   );
 }
