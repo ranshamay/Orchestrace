@@ -21,7 +21,15 @@ export type AppShellProps = {
   sessionSidebarProps: ShellSidebarProps;
   mainContentProps: AppMainContentProps;
   llmModalProps: LlmControlsModalProps;
+  newPromptModalProps: {
+    isOpen: boolean;
+    prompt: string;
+    onChangePrompt: (next: string) => void;
+    onClose: () => void;
+    onSubmit: () => void;
+  };
   authUser: {
+
     email: string;
     name?: string;
     picture?: string;

@@ -107,9 +107,13 @@ export default function App() {
   const [authenticated, setAuthenticated] = useState(false);
   const [authUser, setAuthUser] = useState<AppAuthStatusResponse['user'] | null>(null);
   const [authError, setAuthError] = useState('');
-  const [composerText, setComposerText] = useState('');
+    const [composerText, setComposerText] = useState('');
   const [composerImages, setComposerImages] = useState<ComposerImageAttachment[]>([]);
+  const [isNewPromptModalOpen, setIsNewPromptModalOpen] = useState(false);
+  const [newPromptDraft, setNewPromptDraft] = useState('');
+  const [pendingNewPromptSubmit, setPendingNewPromptSubmit] = useState(false);
   const [showToolsPanel, setShowToolsPanel] = useState(false);
+
   const [todoInput, setTodoInput] = useState('');
   const [copyTraceState, setCopyTraceState] = useState<{ sessionId: string; state: 'idle' | 'copied' | 'failed' }>({ sessionId: '', state: 'idle' });
   const [settingsSaveToastState, setSettingsSaveToastState] = useState<SettingsSaveToastState>('idle');
@@ -763,9 +767,10 @@ export default function App() {
   const timelineFollow = useTimelineFollow(latestTimelineKey, selectedSessionId);
   const toolsPanel = useToolsPanel(showToolsPanel, selectedSessionId, composerMode, selectedSession?.mode);
 
-  const actions = useSessionActions({
+    const actions = useSessionActions({
     selectedSessionId, selectedSession, sessions, chatMessages, todos, composerText, composerImages,
     workWorkspaceId,
+
     workPlanningProvider,
     workPlanningModel,
     workProvider,
@@ -779,10 +784,79 @@ export default function App() {
     setComposerText, setComposerImages, setLlmControlsBySessionId,
   });
 
+    const handleSubmitNewPrompt = useCallback(() => {
+    const prompt = newPromptDraft.trim();
+    if (!prompt) {
+      return;
+    }
+
+    handleStartNewSessionDraft();
+    setComposerText(prompt);
+    setComposerImages([]);
+    setPendingNewPromptSubmit(true);
+    setIsNewPromptModalOpen(false);
+    setNewPromptDraft('');
+  }, [handleStartNewSessionDraft, newPromptDraft, setComposerImages]);
+
+  useEffect(() => {
+    if (!pendingNewPromptSubmit || !composerText.trim()) {
+      return;
+    }
+
+    setPendingNewPromptSubmit(false);
+    void actions.handleSendChat();
+  }, [actions, composerText, pendingNewPromptSubmit]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    const isEditableTarget = (target: EventTarget | null): boolean => {
+      if (!(target instanceof HTMLElement)) {
+        return false;
+      }
+
+      const tagName = target.tagName.toLowerCase();
+      if (tagName === 'input' || tagName === 'textarea' || tagName === 'select') {
+        return true;
+      }
+
+      if (target.isContentEditable) {
+        return true;
+      }
+
+      return Boolean(target.closest('[contenteditable="true"]'));
+    };
+
+    const onHotkey = (event: KeyboardEvent) => {
+      if (!(event.metaKey || event.ctrlKey) || event.shiftKey || event.altKey) {
+        return;
+      }
+
+      if (event.key.toLowerCase() !== 'k') {
+        return;
+      }
+
+      if (isEditableTarget(event.target)) {
+        return;
+      }
+
+      event.preventDefault();
+      setIsNewPromptModalOpen(true);
+    };
+
+    window.addEventListener('keydown', onHotkey);
+    return () => {
+      window.removeEventListener('keydown', onHotkey);
+    };
+  }, []);
+
   useEffect(() => {
     if (!bootstrapComplete) {
       return;
     }
+
 
     if (!preferencesSyncInitializedRef.current) {
       preferencesSyncInitializedRef.current = true;
@@ -1144,9 +1218,19 @@ export default function App() {
 
     <AppShell
       sessionSidebarProps={sessionSidebarProps}
-      mainContentProps={mainContentProps}
+            mainContentProps={mainContentProps}
       llmModalProps={llmModalProps}
+      newPromptModalProps={{
+        isOpen: isNewPromptModalOpen,
+        prompt: newPromptDraft,
+        onChangePrompt: setNewPromptDraft,
+        onClose: () => {
+          setIsNewPromptModalOpen(false);
+        },
+        onSubmit: handleSubmitNewPrompt,
+      }}
       authUser={authUser ?? null}
+
       onLogout={() => {
         void logoutAppAuth();
         clearStoredAuthToken();

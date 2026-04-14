@@ -4,13 +4,17 @@ import { TopBar } from '../components/layout/TopBar';
 import { ErrorToast } from '../components/overlays/ErrorToast';
 import { LlmControlsModal } from '../components/overlays/LlmControlsModal';
 import { SettingsSaveToast } from '../components/overlays/SettingsSaveToast';
+import { NewPromptModal } from '../components/overlays/NewPromptModal';
 import type { AppShellProps } from './types';
+
 
 export function AppShell({
   sessionSidebarProps,
   mainContentProps,
-  llmModalProps,
+    llmModalProps,
+  newPromptModalProps,
   authUser,
+
   onLogout,
   errorMessage,
   warningMessage,
@@ -56,7 +60,8 @@ export function AppShell({
         onAction={onWarningConfirm}
         onDismiss={onWarningDismiss}
       />
-      <LlmControlsModal {...llmModalProps} />
+            <LlmControlsModal {...llmModalProps} />
+      <NewPromptModal {...newPromptModalProps} />
     </div>
   );
 }
