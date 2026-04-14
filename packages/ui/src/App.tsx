@@ -34,8 +34,10 @@ import { selectCurrentSession, selectSessionViewState } from './app/selectors/se
 import { buildLlmModalProps } from './app/shell/props/buildLlmModalProps';
 import { AppShell } from './app/shell/AppShell';
 import { LoginGate } from './app/components/auth/LoginGate';
+import { NewPromptModal } from './app/components/overlays/NewPromptModal';
 import type { SettingsSaveToastState } from './app/components/overlays/SettingsSaveToast';
 import { readTabFromUrl, updateTabInUrl } from './app/utils/viewRoute';
+
 
 const LOGIN_PATH = '/login';
 

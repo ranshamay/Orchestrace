@@ -254,7 +254,7 @@ export function useSessionActions(params: SessionActionsParams) {
     }
   }, [chatMessages, selectedSessionId, sessions, setErrorMessage, todos]);
 
-  const handleComposerPaste = useCallback(async (event: ComposerPasteEvent) => {
+    const handleComposerPaste = useCallback(async (event: ComposerPasteEvent) => {
     const items = Array.from(event.clipboardData?.items ?? []).filter((item) => item.type.startsWith('image/'));
     if (items.length === 0) return;
     event.preventDefault();
@@ -269,13 +269,81 @@ export function useSessionActions(params: SessionActionsParams) {
     }
   }, [setComposerImages, setErrorMessage]);
 
+  const handleStartNewSessionPrompt = useCallback(async (promptText: string) => {
+    const normalizedPrompt = promptText.trim();
+    if (!normalizedPrompt) {
+      return false;
+    }
+
+    setErrorMessage('');
+
+    if (!workProvider || !workModel || !workWorkspaceId) {
+      return false;
+    }
+
+    try {
+      const result = await startWork({
+        workspaceId: workWorkspaceId,
+        prompt: normalizedPrompt,
+        provider: workProvider,
+        model: workModel,
+        agentModels: {
+          ...defaultAgentModels,
+          planner: {
+            ...(defaultAgentModels.planner ?? {}),
+            provider: workPlanningProvider,
+            model: workPlanningModel,
+          },
+          implementer: {
+            ...(defaultAgentModels.implementer ?? {}),
+            provider: workProvider,
+            model: workModel,
+          },
+        },
+        planningProvider: workPlanningProvider,
+        planningModel: workPlanningModel,
+        implementationProvider: workProvider,
+        implementationModel: workModel,
+        deliveryStrategy,
+        planningNoToolGuardMode,
+        autoApprove,
+        adaptiveConcurrency,
+        batchConcurrency,
+        batchMinConcurrency,
+      });
+      await refreshSessionsOnly({ setSessions });
+      setSelectedSessionId(result.id);
+      return true;
+    } catch (error) {
+      setErrorMessage(toErrorMessage(error));
+      return false;
+    }
+  }, [
+    adaptiveConcurrency,
+    autoApprove,
+    batchConcurrency,
+    batchMinConcurrency,
+    defaultAgentModels,
+    deliveryStrategy,
+    planningNoToolGuardMode,
+    setErrorMessage,
+    setSelectedSessionId,
+    setSessions,
+    workPlanningModel,
+    workPlanningProvider,
+    workModel,
+    workProvider,
+    workWorkspaceId,
+  ]);
+
+
   const { handleAddTodo, handleToggleTodo } = useSessionTodoActions({
     selectedSessionId,
     setErrorMessage,
     setTodos,
   });
 
-  return {
+    return {
     hasComposerContent,
     handleSendChat,
     handleDelete,
@@ -286,6 +354,7 @@ export function useSessionActions(params: SessionActionsParams) {
     handleCopyTrace,
     handleCopyTraceSession,
     handleComposerPaste,
+    handleStartNewSessionPrompt,
     handleAddTodo,
     handleToggleTodo,
   };
